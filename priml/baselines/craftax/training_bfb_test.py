@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 import torch
 
 from priml.baselines.craftax.testing import tiny_train_step
@@ -58,12 +59,18 @@ def _same(first: list[Tensor], second: list[Tensor]) -> bool:
     return all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
 
 
-def test_two_fresh_runs_train_identically() -> None:
-    assert _same(_train(evaluate_between=False), _train(evaluate_between=False))
+@pytest.fixture(scope="module")
+def plain_run() -> list[Tensor]:
+    """Return the masters of one run without an evaluation, for both comparisons."""
+    return _train(evaluate_between=False)
 
 
-def test_an_evaluation_between_epochs_changes_nothing() -> None:
-    assert _same(_train(evaluate_between=False), _train(evaluate_between=True))
+def test_two_fresh_runs_train_identically(plain_run: list[Tensor]) -> None:
+    assert _same(plain_run, _train(evaluate_between=False))
+
+
+def test_an_evaluation_between_epochs_changes_nothing(plain_run: list[Tensor]) -> None:
+    assert _same(plain_run, _train(evaluate_between=True))
 
 
 if __name__ == "__main__":

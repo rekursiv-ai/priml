@@ -145,6 +145,35 @@ def test_lockstep_builds_its_optimizer_from_mains_settings(tmp_path: Path) -> No
     )
 
 
+def test_a_setting_lockstep_tells_get_lr_the_setting_and_keys_under_it(
+    tmp_path: Path,
+) -> None:
+    variants = scripts(tmp_path)
+    trace = vision_upstream.trace_main(variants["constant"])
+    record, states = upstream.upstream_lockstep(
+        variants["one_cycle"],
+        "one_cycle",
+        trace,
+        setting="resnet20-cifar10",
+    )
+    prefix = "settings/resnet20-cifar10/lockstep/one_cycle/"
+    assert set(record) == {f"{prefix}{k}" for k in ("lr", "loss", "logits", "probe")}
+    assert record[f"{prefix}lr"].tolist() == [0.1, 0.2]
+    assert len(states) == reference.STEPS
+
+
+def test_each_settings_schedules_are_traced_per_variant(tmp_path: Path) -> None:
+    variants = scripts(tmp_path)
+    record = upstream.upstream_setting_schedules(variants, ["resnet20-cifar10"])
+    assert set(record) == {
+        f"settings/resnet20-cifar10/schedule/{name}" for name in variants
+    }
+    assert record["settings/resnet20-cifar10/schedule/warmup_cosine"].tolist() == (
+        [0.05] * 200
+    )
+    assert record["settings/resnet20-cifar10/schedule/constant"].dtype == torch.float64
+
+
 def test_the_record_holds_every_schedule_and_the_optimizer(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     traces = {

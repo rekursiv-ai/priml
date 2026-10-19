@@ -19,7 +19,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import SETTINGS_SCRIPT
 
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ CUSTOM_NORM: Final = (
 """The stand-in's normalization class, which the baselines' edits replace."""
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    SETTINGS_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         CUSTOM_NORM,
@@ -64,8 +64,20 @@ SCRIPT: Final = (
         "        train_epoch(model, train_loader, criterion, optimizer, None)\n"
         "        best = max(best, evaluate(model, test_loader, criterion, None)[1])\n",
     )
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = [64, "M"]
+
+
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+"""
 )
-"""A stand-in for the ``dl-normalization`` script."""
+"""A stand-in for the ``dl-normalization`` script.
+
+Its ``build_model`` builds the stand-in ResNet for every ``--arch``; the
+architecture tables exist so the shallowest-network build can patch them."""
 
 BODIES: Final = {
     "group_norm": "nn.GroupNorm(1, num_features)",
@@ -140,6 +152,23 @@ def test_lockstep_records_two_updates(tmp_path: Path) -> None:
     assert record["lockstep/g/probe"].shape == (reference.STEPS, 2, reference.CLASSES)
     assert len(states) == reference.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
+
+
+def test_the_setting_lockstep_runs_every_norm_at_every_setting(tmp_path: Path) -> None:
+    variants = scripts(tmp_path)
+    trace = vision_upstream.trace_main(variants["batch_norm"])
+    lockstep = upstream.upstream_setting_lockstep(
+        variants,
+        ["mobilenetv2-fmnist"],
+        trace,
+    )
+    assert set(lockstep) == {f"mobilenetv2-fmnist/{name}" for name in variants}
+    record, states = lockstep["mobilenetv2-fmnist/group_norm"]
+    assert set(record) == {
+        f"settings/mobilenetv2-fmnist/lockstep/group_norm/{part}"
+        for part in ("loss", "logits", "probe")
+    }
+    assert len(states) == reference.STEPS
 
 
 def test_the_record_holds_every_norm_and_the_recipe(tmp_path: Path) -> None:

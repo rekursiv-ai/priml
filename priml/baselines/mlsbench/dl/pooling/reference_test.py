@@ -14,6 +14,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.pooling import reference
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
@@ -72,6 +73,71 @@ def test_two_updates_with_each_pool_match_the_script(name: str) -> None:
         reference.lockstep_record(name, states=states),
     )
     assert len(states) == vision.STEPS
+
+
+def stored_settings() -> dict[str, torch.Tensor]:
+    """Return every captured value of the other settings."""
+    return read_tensors(_DATA / "reference_settings.pt")
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_the_captured_goldens_fit_the_size_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
+
+
+def test_the_settings_golden_holds_every_pools_fork() -> None:
+    keys = set(stored_settings())
+    assert {
+        f"settings/{setting}/{name}/{kind}"
+        for setting, forks in reference.SETTING_POOLS.items()
+        for name in forks
+        for kind in ("draws", "train", "eval")
+    } <= keys
+    assert any(k.startswith("settings/mobilenetv2-fmnist/loader/") for k in keys)
+
+
+@pytest.mark.slow
+def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
+    assert_exact(
+        {k: v for k, v in stored_settings().items() if "/lockstep/" not in k},
+        vision.task_settings_record(reference.SETTING_POOLS, tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"{setting}/{pool}"
+        for setting, forks in reference.SETTING_POOLS.items()
+        for pool in forks
+    ],
+)
+def test_two_updates_of_each_setting_fork_match_the_script(name: str) -> None:
+    setting, pool = name.split("/")
+    prefix = f"settings/{setting}/lockstep/{pool}/"
+    expected = {k: v for k, v in stored_settings().items() if k.startswith(prefix)}
+    assert set(expected) == {f"{prefix}{kind}" for kind in ("loss", "logits", "probe")}
+    assert_exact(expected, reference.setting_lockstep_record(name))
+
+
+def test_the_settings_lockstep_record_joins_every_setting_fork(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = {k: v for k, v in stored_settings().items() if "/lockstep/" in k}
+    monkeypatch.setattr(
+        reference,
+        "setting_lockstep_record",
+        StoredPart(golden, "settings/{}/lockstep/{}/"),
+    )
+    assert_exact(golden, reference.settings_lockstep_record())
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = "settings/mobilenetv2-fmnist/gem/eval"
+    expected = {key: stored_settings()[key]}
+    bumped = expected[key].clone()
+    bumped.view(-1)[3] = torch.nextafter(bumped.view(-1)[3], torch.tensor(torch.inf))
+    assert mismatches(expected, {key: bumped}) == [f"{key}: 1/{bumped.numel()} differ"]
 
 
 def test_the_golden_bites_on_one_ulp() -> None:

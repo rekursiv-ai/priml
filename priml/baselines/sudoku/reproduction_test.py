@@ -685,7 +685,14 @@ def _train_stage(
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, path)
     repro._train_segment(boundary)
-    return _segment_record(repro, stage)
+    record = _segment_record(repro, stage)
+    if boundary == first:
+        # ``train_2`` resumes from this checkpoint rebuilt from its record, so
+        # the rebuild must hold every value the real file did.
+        rebuilt = _tensors(_state(record, prefix=f"{stage}/state/"), prefix="")
+        written = _tensors(_segment_state(repro, first), prefix="")
+        assert mismatches(written, rebuilt) == []
+    return record
 
 
 def _segment_record(repro: Reproduction, stage: str) -> dict[str, Tensor]:
@@ -694,13 +701,18 @@ def _segment_record(repro: Reproduction, stage: str) -> dict[str, Tensor]:
     path = repro._checkpoint_path(boundary)
     out = weight_tensors(f"{stage}/eval", load_eval_weights(path))
     if boundary != _boundaries(repro)[-1]:
-        state = cast(
-            "dict[str, dict[str, object]]",
-            torch.load(path, weights_only=True),
-        )
-        _drop_generators(state)
-        out |= _tensors(state, prefix=f"{stage}/state/")
+        out |= _tensors(_segment_state(repro, boundary), prefix=f"{stage}/state/")
     return out
+
+
+def _segment_state(repro: Reproduction, boundary: int) -> dict[str, dict[str, object]]:
+    """Load the checkpoint a segment wrote, without the generators it never reads."""
+    state = cast(
+        "dict[str, dict[str, object]]",
+        torch.load(repro._checkpoint_path(boundary), weights_only=True),
+    )
+    _drop_generators(state)
+    return state
 
 
 def _write_boundaries(repro: Reproduction, trained: Mapping[str, Tensor]) -> None:
@@ -774,8 +786,8 @@ None of them is read by this recipe's second segment -- the segment reseeds its
 draws -- so the stage stores the training state without them and refills them
 from a fixed seed. A fixed segment schedule replays exactly, but is not one
 uninterrupted run: a resume starts the next epoch's shuffle. So
-``train_2``'s golden is what two fresh segments write, which
-``test_the_frozen_segments_are_what_two_fresh_segments_write`` pins.
+``train_2``'s golden is what two segments write: ``train_1`` checks its real
+checkpoint survives the round trip ``train_2`` resumes from.
 ``test_the_refilled_generators_are_never_read`` fails the day a segment starts
 reading one of them.
 """
@@ -937,16 +949,6 @@ def test_a_resumed_segment_needs_the_first_frozen(tmp_path: Path) -> None:
         _train_stage(repro, "train_2", {})
 
 
-def test_the_frozen_segments_are_what_two_fresh_segments_write(tmp_path: Path) -> None:
-    """``train_2`` replays ``train_1``'s real checkpoint, not only the frozen one."""
-    puzzle_data.dihedral_indices.cache_clear()
-    golden = read_tensors(_TRAINED)
-    record = replay(_fresh_segments, tmp_path, train=False)
-    for stage in ("train_1/", "train_2/"):
-        part = {k: v for k, v in golden.items() if k.startswith(stage)}
-        assert mismatches(part, {k: v for k, v in record.items() if k in part}) == []
-
-
 @pytest.mark.parametrize("seed", [1, 7])
 def test_the_refilled_generators_are_never_read(
     seed: int,
@@ -964,15 +966,6 @@ def test_the_refilled_generators_are_never_read(
     )
     part = {k: v for k, v in golden.items() if k.startswith("train_2/")}
     assert mismatches(part, record) == []
-
-
-def _fresh_segments(h: Harness) -> dict[str, Tensor]:
-    """Train both segments from empty files and record each as its stage does."""
-    inputs = Harness(h.scratch, train=True, known=read_tensors(FIXTURES))
-    repro = _RECORDERS["exp012"](inputs).make()
-    first = _train_stage(repro, "train_1", {})
-    repro._train_segment(2)
-    return first | _segment_record(repro, "train_2")
 
 
 @pytest.mark.parametrize(

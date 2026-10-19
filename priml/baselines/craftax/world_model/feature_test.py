@@ -58,6 +58,7 @@ from priml.baselines.craftax.world_model.testing import (
     random_segment,
     window_segment,
 )
+from priml.model.attention.flash4 import Flash4UnavailableError
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import RoPE
 from priml.model.transformer.block import TransformerBlock
@@ -900,6 +901,14 @@ def test_flash4_cache_attention_attends_as_the_masked_reference(
     got = Flash4CacheAttention.Config().make()(q, keys, values, seqused)
     want = MaskedCacheAttention.Config().make()(q, keys, values, seqused)
     torch.testing.assert_close(got, want)
+
+
+def test_a_missing_flash4_names_the_extra_that_installs_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", None)
+    with pytest.raises(Flash4UnavailableError, match=r"priml\[cuda\]"):
+        Flash4CacheAttention.Config().make()
 
 
 def test_a_flash4_module_without_the_varlen_function_is_refused(

@@ -30,6 +30,14 @@ from priml.baselines.mlsbench.dl.multitask.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
 from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
@@ -49,6 +57,34 @@ COMBINATIONS: Final[dict[str, Callable[[], MultiTaskTrainLoop]]] = {
     "pcgrad": exp003,
 }
 """The experiment that carries each combination, keyed as the script's variants."""
+
+SETTINGS: Final[dict[str, str]] = {
+    "resnet20-cifar100mt": "resnet20",
+    "vgg16bn-cifar100mt": "vgg16bn",
+}
+"""The task's other settings, keyed by the task's labels, and each one's ``--arch``."""
+
+SETTING_COMBINATIONS: Final[dict[str, dict[str, Callable[[], MultiTaskTrainLoop]]]] = {
+    "resnet20-cifar100mt": {
+        "sum": exp004,
+        "uncertainty": exp005,
+        "dwa": exp006,
+        "pcgrad": exp007,
+    },
+    "vgg16bn-cifar100mt": {
+        "sum": exp008,
+        "uncertainty": exp009,
+        "dwa": exp010,
+        "pcgrad": exp011,
+    },
+}
+"""Per other setting, each combination's experiment."""
+
+LOCKSTEP_SETTINGS: Final = ("vgg16bn-cifar100mt",)
+"""Settings whose shallowest network differs from ``resnet56-cifar100mt``'s.
+
+Cut to one block per stage, ResNet-20 is ResNet-56's lockstep network, which
+the ``lockstep/`` records already prove."""
 
 CALL_EPOCHS: Final = (0, 1, 1)
 """Epoch of each fixed call of a combination: one in the first epoch, two after."""
@@ -188,7 +224,7 @@ def tiny_step(
     """
     config = factory().step
     assert isinstance(config.model, TwoHeadResNet.Config)
-    config.model.trunk.blocks_per_stage = (1, 1, 1)
+    reference.tiny_model(config.model.trunk)
     config.parallelism = NoParallel.Config(device="cpu")
     config.train_budget_epochs = epochs
     step = config.make()
@@ -213,14 +249,19 @@ def full_step(factory: Callable[[], MultiTaskTrainLoop]) -> MultiTaskStep:
     return step
 
 
-def schedule_record() -> dict[str, Tensor]:
-    """Return the learning rate of each of the 200 epochs of ``exp000``.
+def schedule_record(
+    factory: Callable[[], MultiTaskTrainLoop] = exp000,
+) -> dict[str, Tensor]:
+    """Return the learning rate of each of the 200 epochs of an experiment.
+
+    Args:
+      factory: The experiment; ``exp000`` by default.
 
     Returns:
       record: The 200 rates, as float64.
 
     """
-    step = tiny_step(exp000, epochs=200)
+    step = tiny_step(factory, epochs=200)
     base_lr = from_plain(cast(object, step.optimizer.param_groups[0]["lr"]), float)
     rates = [
         step.schedule(epoch, base_lr=base_lr, total_epochs=200) for epoch in range(200)
@@ -286,9 +327,57 @@ def lockstep_record(
       record: Keyed as :func:`spy_record`.
 
     """
+    return lockstep_run(COMBINATIONS[name], name, states=states)
+
+
+def setting_lockstep_record(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train a setting's shallowest network for two updates, one per epoch.
+
+    Args:
+      name: ``<setting>/<combination>``, keys of :data:`SETTING_COMBINATIONS`.
+      states: When given, receives a copy of the network's whole state after
+        each update.
+
+    Returns:
+      record: Keyed as :func:`spy_record`, under ``settings/<setting>/``.
+
+    """
+    setting, combination = name.split("/")
+    return lockstep_run(
+        SETTING_COMBINATIONS[setting][combination],
+        combination,
+        states=states,
+        prefix=f"settings/{setting}/",
+    )
+
+
+def lockstep_run(
+    factory: Callable[[], MultiTaskTrainLoop],
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+    prefix: str = "",
+) -> dict[str, Tensor]:
+    """Train an experiment's shallowest network for two updates, one per epoch.
+
+    Args:
+      factory: The experiment; its trunk is cut as ``tiny_step`` cuts it.
+      name: Which combination, for the record's keys.
+      states: When given, receives a copy of the network's whole state after
+        each update.
+      prefix: Put before every key.
+
+    Returns:
+      record: Keyed as :func:`spy_record`.
+
+    """
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        step = tiny_step(COMBINATIONS[name], epochs=reference.EPOCHS)
+        step = tiny_step(factory, epochs=reference.EPOCHS)
         inner = step.mtl_loss
         spy = step.mtl_loss = CombinationSpy(inner, before_first=None)
         for index in range(reference.STEPS):
@@ -298,14 +387,22 @@ def lockstep_record(
                 label=reference.fixed_label(index),
                 label_coarse=coarse_label(index),
             )
-            probe = step.call_eval(media=reference.fixed_media(reference.STEPS))
-            assert isinstance(probe, tuple)
-            probes.append(torch.cat(cast(tuple[Tensor, Tensor], probe), dim=-1))
+            # Outside inference mode, as the script's own probe is: an
+            # inference tensor escapes the float64 upcast, so a 512-wide layer
+            # would round by host.
+            step.model.eval()
+            with torch.no_grad():
+                probe = cast(
+                    tuple[Tensor, Tensor],
+                    step.model(reference.fixed_media(reference.STEPS)),
+                )
+            step.model.train()
+            probes.append(torch.cat(probe, dim=-1))
             if states is not None:
                 states.append(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
-    return spy_record(name, spy, probes, inner)
+    return spy_record(name, spy, probes, inner, prefix=prefix)
 
 
 def spy_record(
@@ -313,6 +410,8 @@ def spy_record(
     spy: CombinationSpy,
     probes: list[Tensor],
     inner: nn.Module,
+    *,
+    prefix: str = "",
 ) -> dict[str, Tensor]:
     """Key a lockstep run's observations.
 
@@ -321,22 +420,96 @@ def spy_record(
       spy: The wrapper the run's combination was called through.
       probes: Both heads' probe logits after each update, joined.
       inner: The combination, for its parameters after the run.
+      prefix: Put before every key.
 
     Returns:
       record: Per update both losses, their combination, the epochs given and
         the probe; and the combination's parameters, when it has any.
 
     """
+    key = f"{prefix}lockstep/{name}/"
     record = {
-        f"lockstep/{name}/loss_fine": torch.stack(spy.losses_fine),
-        f"lockstep/{name}/loss_coarse": torch.stack(spy.losses_coarse),
-        f"lockstep/{name}/loss": torch.stack(spy.losses),
-        f"lockstep/{name}/epochs": torch.tensor(spy.epochs),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{key}loss_fine": torch.stack(spy.losses_fine),
+        f"{key}loss_coarse": torch.stack(spy.losses_coarse),
+        f"{key}loss": torch.stack(spy.losses),
+        f"{key}epochs": torch.tensor(spy.epochs),
+        f"{key}probe": torch.stack(probes),
     }
     params = list(inner.parameters())
     if params:
-        record[f"lockstep/{name}/mtl_params"] = joined(params)
+        record[f"{key}mtl_params"] = joined(params)
+    return record
+
+
+def network_forward(model: nn.Module, key: str) -> dict[str, Tensor]:
+    """Run a setting's shallowest two-head network in training, then evaluation mode.
+
+    Each forward starts from the task's seed, so a training-mode dropout draws
+    the same masks on both sides.
+
+    Args:
+      model: The setting's network, the port's or the script's.
+      key: Names the record.
+
+    Returns:
+      record: ``<key>/train`` and ``<key>/eval``, both heads' logits on
+        ``vision.fixed_media`` joined fine then coarse.
+
+    """
+    record: dict[str, Tensor] = {}
+    media = reference.fixed_media(reference.STEPS)
+    for mode in ("train", "eval"):
+        model.train(mode == "train")
+        with reference.seeded(reference.SEED), host_agnostic_numerics():
+            fine, coarse = cast(tuple[Tensor, Tensor], model(media))
+            record[f"{key}/{mode}"] = torch.cat([fine, coarse], dim=-1).detach()
+    return record
+
+
+def setting_record(setting: str) -> dict[str, Tensor]:
+    """Build every combination's network at a setting, and run the shallowest one.
+
+    Args:
+      setting: A key of :data:`SETTING_COMBINATIONS`.
+
+    Returns:
+      record: Under ``settings/<setting>/``: the 200 rates and the optimizer's
+        settings; per combination where the generator stands after the full
+        build and the size of every optimized tensor in order; the summing
+        recipe's shallowest network's forwards (the combinations draw
+        nothing, so every network is the same); and the lockstep of every
+        combination if the setting is in :data:`LOCKSTEP_SETTINGS`.
+
+    """
+    prefix = f"settings/{setting}/"
+    variants = SETTING_COMBINATIONS[setting]
+    record = {f"{prefix}{k}": v for k, v in schedule_record(variants["sum"]).items()}
+    for name, factory in variants.items():
+        with reference.seeded(reference.SEED), host_agnostic_numerics():
+            step = full_step(factory)
+            record[f"{prefix}draws/{name}"] = rng_fingerprint()
+        groups: list[Mapping[str, object]] = list(step.optimizer.param_groups)
+        record[f"{prefix}optimizer/{name}/numels"] = torch.tensor(
+            [p.numel() for g in groups for p in cast(list[Tensor], g["params"])],
+        )
+        if name == "sum":
+            record[f"{prefix}optimizer/settings"] = torch.tensor(
+                [float(cast(float, groups[0][k])) for k in reference.HYPERPARAMETERS],
+                dtype=torch.float64,
+            )
+            with reference.seeded(reference.SEED), host_agnostic_numerics():
+                tiny = tiny_step(factory, epochs=reference.EPOCHS).model
+            record |= network_forward(tiny, f"{prefix}forward")
+        if setting in LOCKSTEP_SETTINGS:
+            record |= setting_lockstep_record(f"{setting}/{name}")
+    return record
+
+
+def settings_record() -> dict[str, Tensor]:
+    """Return :func:`setting_record` of every one of :data:`SETTINGS`."""
+    record: dict[str, Tensor] = {}
+    for setting in SETTINGS:
+        record |= setting_record(setting)
     return record
 
 

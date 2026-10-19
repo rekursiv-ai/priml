@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
 import warnings
 
@@ -32,6 +32,7 @@ from priml.baselines.mlsbench.dl.vision.data import (
     Cifar100Data,
     normalize,
     pad_crop_flip,
+    resized,
 )
 from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
 from priml.baselines.mlsbench.dl.vision.experiments import (
@@ -39,22 +40,39 @@ from priml.baselines.mlsbench.dl.vision.experiments import (
     exp000,
 )
 from priml.baselines.mlsbench.dl.vision.metrics import BestAccuracy
+from priml.baselines.mlsbench.dl.vision.mobilenet import MobileNetV2
 from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.settings import (
+    mobilenetv2_fmnist,
+    resnet20_cifar10,
+    resnet110_cifar100,
+    vgg16bn_cifar100,
+)
 from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
+from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
 from priml.train.parallelism import NoParallel
+from priml.train.train_loop import TrainLoop
 
 
 if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
 
+    from configgle import Makeable
+
+type VisionLoop = TrainLoop.Config[VisionTrainStep.Config, Cifar100Data.Config]
+"""Any loop config holding the vision step and a CIFAR-style dataset.
+
+The runs here read only ``step``, ``dataset`` and ``experiment_name``, so a
+task's own loop config -- with a narrowed step or dataset -- is accepted."""
+
 SEED: Final = 42
 """Seed of every pinned run, the task's own."""
 
 CLASSES: Final = 3
-"""Logits of the tiny network; its widths are the reference's."""
+"""Logits of the tiny network; its widths are :data:`TINY_WIDTHS`."""
 
 PROBE_SHAPE: Final = (2, 3, 8, 10)
 """Batch, channels, height and width of the tiny network's inputs."""
@@ -73,6 +91,23 @@ LOADER_BATCH: Final = 2
 
 LOADER_PASSES: Final = 2
 """Training passes of a loader run, so the second follows an evaluation pass."""
+
+TINY_WIDTHS: Final = {16: 4, 32: 5, 64: 9, 320: 6, 1280: 7, 512: 8}
+"""Each width the reference hardcodes, and the tiny one for it.
+
+ResNet's 16/32/64 stages, MobileNetV2's 32-channel stem and ``320 -> 1280``
+last convolution, and VGG's 512-wide classifier are literals in the reference;
+the tiny build narrows them on both sides. Every tiny width differs from every
+other and from the classes."""
+
+TINY_ARCHS: Final = {
+    "vgg16bn": [4, "M", TINY_WIDTHS[512], "M"],
+    "mobilenetv2": [[1, 4, 1, 2], [1, TINY_WIDTHS[320], 1, 2]],
+}
+"""The reference's architecture tables for the smallest networks :func:`tiny_step` builds.
+
+``VGG.VGG16_CFG`` and ``MobileNetV2.CFG`` rows, cut to the least. Each table
+ends in the tiny width of the literal its next layer reads."""
 
 HYPERPARAMETERS: Final = (
     "lr",
@@ -100,6 +135,13 @@ class Captured:
     record: dict[str, Tensor]
     sites: dict[str, dict[str, int]]
     report: list[str]
+
+
+@runtime_checkable
+class WidthKeyed(Protocol):
+    """A block config whose behavior keys on one of the reference's widths."""
+
+    reset_width: int
 
 
 @contextmanager
@@ -177,18 +219,20 @@ def fixed_label(step: int) -> Tensor:
     return torch.tensor([step % CLASSES, (step + 1) % CLASSES])
 
 
-def fixed_images(count: int) -> Tensor:
-    """Return uint8 images of 32x32 pixels in a fixed pattern.
+def fixed_images(count: int, *, channels: int = 3, side: int = 32) -> Tensor:
+    """Return uint8 square images in a fixed pattern.
 
     Args:
       count: Images to build.
+      channels: Channels of each image.
+      side: Height and width of each image.
 
     Returns:
-      images: ``(count, 3, 32, 32)`` pixels.
+      images: ``(count, channels, side, side)`` pixels.
 
     """
-    pixels = torch.arange(count * 3 * 32 * 32) * 37 % 251
-    return pixels.reshape(count, 3, 32, 32).to(torch.uint8)
+    pixels = torch.arange(count * channels * side * side) * 37 % 251
+    return pixels.reshape(count, channels, side, side).to(torch.uint8)
 
 
 def synthetic_split() -> tuple[Tensor, Tensor]:
@@ -216,6 +260,108 @@ def synthetic_split() -> tuple[Tensor, Tensor]:
     return media, torch.arange(LOADER_IMAGES)
 
 
+def full_size_media() -> Tensor:
+    """Return a ``(2, 3, 32, 32)`` batch of multiples of one eighth.
+
+    Five 2x2 pools leave VGG-16 one position, so the full-size networks are run
+    on images of the reference's size rather than ``PROBE_SHAPE``.
+
+    Returns:
+      media: Float32 images.
+
+    """
+    return ((torch.arange(2 * 3 * 32 * 32) * 5 % 17 - 8) / 8).reshape(2, 3, 32, 32)
+
+
+def synthetic_gray_split() -> tuple[Tensor, Tensor]:
+    """Return ``LOADER_IMAGES`` grayscale 28x28 images, Fashion-MNIST's shape, and labels.
+
+    Every pixel differs from its neighbours, so a crop and a mirror of one are
+    recognizable even after the resize to 32x32 blends them.
+
+    Returns:
+      media: ``(LOADER_IMAGES, 1, 28, 28)`` uint8 images.
+      label: The index of each image.
+
+    """
+    position = torch.arange(28 * 28)
+    media = torch.stack(
+        [(position * 37 + 101 * index) % 251 for index in range(LOADER_IMAGES)],
+    )
+    return media.reshape(LOADER_IMAGES, 1, 28, 28).to(torch.uint8), torch.arange(
+        LOADER_IMAGES,
+    )
+
+
+def prepared_gray_split() -> tuple[Tensor, Tensor]:
+    """Return :func:`synthetic_gray_split` as ``prepare`` caches it: resized to 32x32."""
+    media, label = synthetic_gray_split()
+    return resized(media, size=32), label
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Setting:
+    """One of the reference script's ``--arch``/``--dataset`` settings, and the port's."""
+
+    arch: str
+    """The reference's ``--arch``."""
+
+    dataset: str
+    """The reference's ``--dataset``."""
+
+    classes: int
+    """Classes of the dataset, as the reference's loaders report them."""
+
+    apply: Callable[[VisionTrainLoop], VisionTrainLoop]
+    """Switches a recipe to this setting; see ``settings.py``."""
+
+    split: Callable[[], tuple[Tensor, Tensor]]
+    """The synthetic split as the port's loader reads it, prepared."""
+
+    def experiment(self) -> VisionTrainLoop:
+        """Return ``exp000`` switched to this setting."""
+        return self.apply(exp000())
+
+
+SETTINGS: Final = {
+    "vgg16bn-cifar100": Setting(
+        arch="vgg16bn",
+        dataset="cifar100",
+        classes=100,
+        apply=vgg16bn_cifar100,
+        split=synthetic_split,
+    ),
+    "mobilenetv2-fmnist": Setting(
+        arch="mobilenetv2",
+        dataset="fmnist",
+        classes=10,
+        apply=mobilenetv2_fmnist,
+        split=prepared_gray_split,
+    ),
+    "resnet110-cifar100": Setting(
+        arch="resnet110",
+        dataset="cifar100",
+        classes=100,
+        apply=resnet110_cifar100,
+        split=synthetic_split,
+    ),
+    "resnet20-cifar10": Setting(
+        arch="resnet20",
+        dataset="cifar10",
+        classes=10,
+        apply=resnet20_cifar10,
+        split=synthetic_split,
+    ),
+}
+"""The reference's other settings, keyed by the task's own labels."""
+
+CAPTURED: Final = ("vgg16bn-cifar100", "mobilenetv2-fmnist", "resnet20-cifar10")
+"""The settings of :data:`SETTINGS` the ``cv-classification-loss`` script runs.
+
+Its ``--arch`` has no ``resnet110``; that setting is proven by the captures of
+the tasks whose scripts run it, against those scripts."""
+
+
 def logits_of(model: nn.Module, media: Tensor) -> Tensor:
     """Run ``model`` on ``media``, typed as the images-to-logits map it is.
 
@@ -231,17 +377,17 @@ def logits_of(model: nn.Module, media: Tensor) -> Tensor:
 
 
 def tiny_step(
-    factory: Callable[[], VisionTrainLoop],
+    factory: Callable[[], VisionLoop],
     *,
     blocks: tuple[int, ...],
     classes: int,
     epochs: int,
 ) -> VisionTrainStep:
-    """Build the step of ``factory``, shrunk in depth and classes only.
+    """Build the step of ``factory``, shrunk in depth, width and classes only.
 
     Args:
       factory: The experiment whose recipe is kept.
-      blocks: Blocks per stage; the widths stay the reference's.
+      blocks: Blocks per stage of a ResNet; see :func:`tiny_model`.
       classes: Logits.
       epochs: Schedule horizon.
 
@@ -250,15 +396,60 @@ def tiny_step(
 
     """
     config = factory().step
-    assert isinstance(config.model, ResNet.Config)
-    config.model.blocks_per_stage = blocks
+    tiny_model(config.model, blocks=blocks)
+    assert isinstance(config.model, (ResNet.Config, VGG16BN.Config, MobileNetV2.Config))
     config.model.channels_out = classes
     config.parallelism = NoParallel.Config(device="cpu")
     config.train_budget_epochs = epochs
     return _built(config)
 
 
-def full_step(factory: Callable[[], VisionTrainLoop] = exp000) -> VisionTrainStep:
+def tiny_model(
+    model: Makeable[nn.Module],
+    *,
+    blocks: tuple[int, ...] = (1, 1, 1),
+) -> None:
+    """Shrink a network config in place to the shallowest the reference can build.
+
+    A ResNet takes ``blocks`` and the stage widths of :data:`TINY_WIDTHS`. A
+    VGG16BN or MobileNetV2 is cut to the stages of :data:`TINY_ARCHS`, and its
+    stem, last convolution and classifier to :data:`TINY_WIDTHS`. Every slot,
+    and the class count, is left as it was.
+
+    Args:
+      model: A ResNet, VGG16BN or MobileNetV2 config.
+      blocks: Blocks per stage of a ResNet.
+
+    Raises:
+      TypeError: ``model`` is none of the three.
+
+    """
+    if isinstance(model, VGG16BN.Config):
+        model.channels_hidden = ((4,), (TINY_WIDTHS[512],))
+        model.channels_hidden_head = TINY_WIDTHS[512]
+    elif isinstance(model, MobileNetV2.Config):
+        model.channels_stem = TINY_WIDTHS[32]
+        model.channels_hidden = (4, TINY_WIDTHS[320])
+        model.channels_last = TINY_WIDTHS[1280]
+        model.blocks_per_stage = (1, 1)
+        model.expand_ratios = (1, 1)
+        model.strides = (2, 2)
+    elif isinstance(model, ResNet.Config):
+        model.channels_hidden = tuple(TINY_WIDTHS[w] for w in model.channels_hidden)
+        model.blocks_per_stage = blocks
+        # A block that keys on a width, as stochastic depth's reset does, keys on
+        # the narrowed one; upstream's literal compares the unnarrowed arguments.
+        block = model.block
+        if isinstance(block, WidthKeyed):
+            block.reset_width = TINY_WIDTHS[block.reset_width]
+    else:
+        raise TypeError(
+            "tiny_model shrinks a ResNet, VGG16BN or MobileNetV2 config; got "
+            f"{model!r}.",
+        )
+
+
+def full_step(factory: Callable[[], VisionLoop] = exp000) -> VisionTrainStep:
     """Build an experiment's step at full size on the CPU.
 
     Args:
@@ -274,7 +465,7 @@ def full_step(factory: Callable[[], VisionTrainLoop] = exp000) -> VisionTrainSte
 
 
 def schedule_record(
-    factory: Callable[[], VisionTrainLoop] = exp000,
+    factory: Callable[[], VisionLoop] = exp000,
 ) -> dict[str, Tensor]:
     """Return the learning rate of each of the 200 epochs of an experiment.
 
@@ -294,7 +485,7 @@ def schedule_record(
 
 
 def optimizer_record(
-    factory: Callable[[], VisionTrainLoop] = exp000,
+    factory: Callable[[], VisionLoop] = exp000,
 ) -> dict[str, Tensor]:
     """Return the settings of the optimizer an experiment builds.
 
@@ -312,7 +503,7 @@ def optimizer_record(
 
 
 def network_record() -> dict[str, Tensor]:
-    """Initialize the shallowest network at the reference's widths and run it.
+    """Initialize the shallowest network at :data:`TINY_WIDTHS` and run it.
 
     Returns:
       record: Where the generator stands afterwards, and the logits of a
@@ -336,7 +527,7 @@ def network_record() -> dict[str, Tensor]:
 
 
 def draws_record(
-    factory: Callable[[], VisionTrainLoop] = exp000,
+    factory: Callable[[], VisionLoop] = exp000,
 ) -> dict[str, Tensor]:
     """Return where the generator stands after building an experiment's full network.
 
@@ -416,21 +607,7 @@ def loader_batches(
         the batches in order.
 
     """
-    media, label = synthetic_split()
-    for split in ("train", "test"):
-        torch.save({"media": media, "label": label}, directory / f"{split}.pt")
-    config = Cifar100Data.Config()
-    config.base_dir = None
-    config.working_dir = directory
-    config.batch_size = config.eval_batch_size = LOADER_BATCH
-    train: list[list[dict[str, Tensor]]] = []
-    evaluation: list[list[dict[str, Tensor]]] = []
-    with seeded(SEED):
-        data = config.make()
-        for _ in range(LOADER_PASSES):
-            train.append(list(data.train_dataloader()))
-            evaluation.append(list(data.eval_dataloader()))
-    return train, evaluation
+    return dataset_batches(Cifar100Data.Config(), directory, split=synthetic_split())
 
 
 def loader_record(directory: Path) -> dict[str, Tensor]:
@@ -445,7 +622,232 @@ def loader_record(directory: Path) -> dict[str, Tensor]:
 
     """
     train, _ = loader_batches(directory)
-    return decode_batches(train, translate_pad=Cifar100Data.Config().translate_pad)
+    return decode_batches(
+        train,
+        config=Cifar100Data.Config(),
+        source=synthetic_split()[0],
+    )
+
+
+def setting_record(
+    name: str,
+    factory: Callable[[], VisionLoop] | None = None,
+    *,
+    key: str | None = None,
+) -> dict[str, Tensor]:
+    """Build a setting's shallowest network, then run it in training and in evaluation mode.
+
+    The full-size network is compared live by the capture; the golden holds
+    the shallowest one, the same recipe at :func:`tiny_model`'s depth.
+
+    Args:
+      name: A key of :data:`SETTINGS`.
+      factory: The experiment to build; the setting's pristine one by default.
+        A task passes its own fork at the setting.
+      key: Names the record; ``name`` by default.
+
+    Returns:
+      record: Where the generator stands after the build, and the logits of
+        :func:`setting_forward`, under ``settings/<key>/``.
+
+    """
+    key = key or name
+    with seeded(SEED), host_agnostic_numerics():
+        model = tiny_step(
+            factory or SETTINGS[name].experiment,
+            blocks=(1, 1, 1),
+            classes=CLASSES,
+            epochs=EPOCHS,
+        ).model
+        draws = rng_fingerprint()
+    return {f"settings/{key}/draws": draws} | setting_forward(model, key)
+
+
+def setting_forward(model: nn.Module, key: str) -> dict[str, Tensor]:
+    """Run a setting's shallowest network on :func:`fixed_media`, training then evaluation.
+
+    Each forward starts from the task's seed: a training-mode dropout draws
+    from the global generator, and both sides must draw the same masks.
+
+    Args:
+      model: The setting's network, the port's or the reference's.
+      key: Names the record; a key of :data:`SETTINGS` or a task's own.
+
+    Returns:
+      record: ``settings/<key>/train`` and ``settings/<key>/eval`` logits.
+
+    """
+    record: dict[str, Tensor] = {}
+    media = fixed_media(STEPS)
+    for mode in ("train", "eval"):
+        model.train(mode == "train")
+        with seeded(SEED), host_agnostic_numerics():
+            record[f"settings/{key}/{mode}"] = logits_of(model, media).detach()
+    return record
+
+
+def setting_batches(
+    directory: Path,
+    name: str,
+) -> tuple[list[list[dict[str, Tensor]]], list[list[dict[str, Tensor]]]]:
+    """Run a setting's loaders over its synthetic split, alternating the splits.
+
+    Args:
+      directory: Scratch directory the split is written to.
+      name: A key of :data:`SETTINGS`.
+
+    Returns:
+      passes: Per training pass the batches in order, then per evaluation pass.
+
+    """
+    setting = SETTINGS[name]
+    return dataset_batches(
+        setting.experiment().dataset,
+        directory,
+        split=setting.split(),
+    )
+
+
+def dataset_batches(
+    config: Cifar100Data.Config,
+    directory: Path,
+    *,
+    split: tuple[Tensor, Tensor],
+) -> tuple[list[list[dict[str, Tensor]]], list[list[dict[str, Tensor]]]]:
+    """Run any dataset config's loaders over ``split``, alternating the two splits.
+
+    For a task fork whose dataset is no entry of :data:`SETTINGS`, such as a
+    changed ``augment`` or another dataset's statistics.
+
+    Args:
+      config: The dataset; its directory and batch sizes are overwritten.
+      directory: Scratch directory ``split`` is written to, as both splits.
+      split: Uint8 images and labels, as ``prepare`` caches them.
+
+    Returns:
+      passes: Per training pass the batches in order, then per evaluation pass;
+        ``LOADER_PASSES`` of each at batch ``LOADER_BATCH``, under seed ``SEED``.
+
+    """
+    media, label = split
+    for name in ("train", "test"):
+        torch.save({"media": media, "label": label}, directory / f"{name}.pt")
+    config.base_dir = None
+    config.working_dir = directory
+    config.batch_size = config.eval_batch_size = LOADER_BATCH
+    train: list[list[dict[str, Tensor]]] = []
+    evaluation: list[list[dict[str, Tensor]]] = []
+    with seeded(SEED):
+        data = config.make()
+        for _ in range(LOADER_PASSES):
+            train.append(list(data.train_dataloader()))
+            evaluation.append(list(data.eval_dataloader()))
+    return train, evaluation
+
+
+def setting_loader_record(directory: Path, name: str) -> dict[str, Tensor]:
+    """Return what a setting's training loader drew over its synthetic split.
+
+    Args:
+      directory: Scratch directory the split is written to.
+      name: A key of :data:`SETTINGS`.
+
+    Returns:
+      record: As :func:`loader_record`, keyed under ``settings/<name>/``.
+
+    """
+    setting = SETTINGS[name]
+    train, _ = setting_batches(directory, name)
+    record = decode_batches(
+        train,
+        config=setting.experiment().dataset,
+        source=setting.split()[0],
+    )
+    return {f"settings/{name}/{key}": value for key, value in record.items()}
+
+
+def fmnist_transform_record() -> dict[str, Tensor]:
+    """Run both Fashion-MNIST pipelines on two fixed 28x28 grayscale images.
+
+    Returns:
+      record: ``transform/fmnist/train`` and ``transform/fmnist/test``, each
+        ``(2, 3, 32, 32)``: resized, then cropped and mirrored for training,
+        then normalized into three channels.
+
+    """
+    config = SETTINGS["mobilenetv2-fmnist"].experiment().dataset
+    mean, std = torch.tensor(config.mean), torch.tensor(config.std)
+    images = resized(fixed_images(2, channels=1, side=28), size=32)
+    stream = torch.Generator().manual_seed(SEED)
+    return {
+        "transform/fmnist/train": normalize(
+            pad_crop_flip(images, stream, pad=config.translate_pad),
+            mean=mean,
+            std=std,
+        ),
+        "transform/fmnist/test": normalize(images, mean=mean, std=std),
+    }
+
+
+def settings_record(directory: Path) -> dict[str, Tensor]:
+    """Run every setting's comparisons and return all their values.
+
+    Args:
+      directory: Scratch directory the loader runs write their splits to.
+
+    Returns:
+      record: Each setting's network and loader records, and the Fashion-MNIST
+        pipelines.
+
+    """
+    record = fmnist_transform_record()
+    for name in CAPTURED:
+        record |= setting_record(name) | setting_loader_record(directory, name)
+    return record
+
+
+def task_settings_record(
+    experiments: Mapping[str, Mapping[str, Callable[[], VisionLoop]]],
+    directory: Path,
+) -> dict[str, Tensor]:
+    """Build every variant of a task at each setting, and run each setting's loader.
+
+    Args:
+      experiments: Per key of :data:`SETTINGS`, the task's experiment of each
+        variant (one per baseline) at that setting.
+      directory: Scratch directory the loader runs write their splits to.
+
+    Returns:
+      record: ``settings/<setting>/<variant>/{draws,train,eval}`` per
+        experiment, and ``settings/<setting>/loader/*`` for each setting whose
+        dataset is not ``exp000``'s CIFAR-100, whose loader is proven already.
+
+    """
+    record: dict[str, Tensor] = {}
+    for setting, variants in experiments.items():
+        for variant, factory in variants.items():
+            record |= setting_record(setting, factory, key=f"{setting}/{variant}")
+        if SETTINGS[setting].dataset != "cifar100":
+            record |= setting_loader_record(directory, setting)
+    return record
+
+
+def fmnist_draw_sites(directory: Path) -> dict[str, int]:
+    """Count the draws of building MobileNetV2 and of the Fashion-MNIST data path.
+
+    Args:
+      directory: Scratch directory the loader run writes its split to.
+
+    Returns:
+      counts: As :func:`draw_sites`.
+
+    """
+    with recorded_draws() as counts:
+        with seeded(SEED):
+            _ = full_step(SETTINGS["mobilenetv2-fmnist"].experiment)
+        _ = fmnist_transform_record()
+        _ = setting_loader_record(directory, "mobilenetv2-fmnist")
+    return counts
 
 
 def port_record(directory: Path) -> dict[str, Tensor]:
@@ -472,23 +874,23 @@ def port_record(directory: Path) -> dict[str, Tensor]:
 def decode_batches(
     passes: list[list[dict[str, Tensor]]],
     *,
-    translate_pad: int,
+    config: Cifar100Data.Config,
+    source: Tensor,
 ) -> dict[str, Tensor]:
     """Recover each image's crop offsets and mirror from a loader's batches.
 
     Args:
       passes: Per training pass, the batches in order.
-      translate_pad: Padding the loader added before cropping.
+      config: The loader's dataset: its padding and channel statistics.
+      source: The uint8 images the loader read, indexed by label.
 
     Returns:
       record: ``loader/label``, ``loader/top``, ``loader/left`` and
         ``loader/flip``, each of shape ``(passes, images)``.
 
     """
-    source, _ = synthetic_split()
-    config = Cifar100Data.Config()
     mean, std = torch.tensor(config.mean), torch.tensor(config.std)
-    padded = torch.nn.functional.pad(source, (translate_pad,) * 4)
+    padded = torch.nn.functional.pad(source, (config.translate_pad,) * 4)
     found: dict[str, list[list[int]]] = {"label": [], "top": [], "left": [], "flip": []}
     for batches in passes:
         for values in found.values():

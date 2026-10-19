@@ -8,14 +8,17 @@ the port: the schedule and the optimizer.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
+import functools
 import sys
 
-import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.residual import reference as residual
+from priml.baselines.mlsbench.dl.residual import (
+    reference as residual,
+    upstream as residual_upstream,
+)
 from priml.baselines.mlsbench.dl.residual.scripts import capture_reference
 from priml.baselines.mlsbench.dl.residual.upstream_test import write_clone
 from priml.baselines.mlsbench.dl.vision import reference, upstream
@@ -23,13 +26,15 @@ from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.vision.scripts import (
     capture_reference as vision_capture,
 )
-from priml.testing.golden import read_tensors
+from priml.testing.golden import mismatches, read_tensors
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from torch import Tensor
+
+    import pytest
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
     from priml.baselines.mlsbench.dl.vision.upstream import Batches
@@ -101,8 +106,19 @@ def test_capture_assembles_both_sides_into_one_report(
         "compare_full_size",
         returning(["full size differs"]),
     )
-    report = capture_reference.capture(root, scratch).report
+    # The other settings' path runs for real in the compute_training test below.
+    settings = {"settings/x": torch.zeros(2)}
+    monkeypatch.setattr(
+        capture_reference,
+        "capture_settings",
+        returning((settings, ["settings differ"])),
+    )
+    monkeypatch.setattr(residual, "settings_record", returning(settings))
+    captured = capture_reference.capture(root, scratch)
+    assert settings.items() <= captured.record.items()
+    report = captured.report
     assert report[0] == "full size differs"
+    assert "settings differ" in report
     assert {"block/basic/identity/train", "draws/basic"} <= {
         line.split(":")[0] for line in report
     }
@@ -120,20 +136,115 @@ def test_capture_assembles_both_sides_into_one_report(
     assert "block/stochastic_depth: the draws reach only one branch" not in report
 
 
-@pytest.mark.compute_training
-def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> None:
-    root = tmp_path / "clone"
-    write_clone(root)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    report = capture_reference.capture(root, scratch).report
-    keys = {line.split(":")[0] for line in report}
-    assert not {"schedule/lr", "optimizer/settings"} & keys
-    assert {"block/basic/identity/train", "draws/basic"} <= keys
-    assert any(line.startswith("state: ") for line in report)
-    assert any(line.startswith("full/stochastic_depth: ") for line in report)
-    assert any(line.startswith("lockstep/basic/1: ") for line in report)
-    assert any(line.startswith("loader/train/") for line in report)
+class Calls:
+    """Stand-ins that return fixed values and record every call's arguments."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def returning[T](self, name: str, value: T) -> Callable[..., T]:
+        """Return a stand-in named ``name`` that records its arguments."""
+
+        def call(*arguments: object, **keywords: object) -> T:
+            self.seen.append((name, arguments, keywords))
+            return value
+
+        return call
+
+    def named(self, name: str) -> list[tuple[tuple[object, ...], dict[str, object]]]:
+        """Return the arguments of every call to the stand-in ``name``, in order."""
+        return [(a, k) for n, a, k in self.seen if n == name]
+
+
+def test_capture_settings_joins_every_settings_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The runs are tested elsewhere; here they are stubbed, to test the glue."""
+    calls = Calls()
+    trace = upstream.MainTrace(
+        rates=[0.25],
+        settings=dict.fromkeys(reference.HYPERPARAMETERS, 0.5),
+    )
+    positions = torch.arange(3)
+    lockstep: upstream.Lockstep = ({"lockstep/x/loss": torch.ones(2)}, [])
+    stubs: list[tuple[object, str, object]] = [
+        (vision_capture, "compare_task_settings", ({"shared": positions}, ["shared"])),
+        (residual_upstream, "block_positions", positions),
+        (upstream, "trace_main", trace),
+        (
+            reference,
+            "schedule_record",
+            {"schedule/lr": torch.tensor([0.25], dtype=torch.float64)},
+        ),
+        (
+            reference,
+            "optimizer_record",
+            {
+                "optimizer/settings": torch.zeros(
+                    len(reference.HYPERPARAMETERS),
+                    dtype=torch.float64,
+                ),
+            },
+        ),
+        (residual_upstream, "upstream_lockstep", lockstep),
+        (vision_capture, "compare_lockstep", ["lockstep differs"]),
+    ]
+    for module, name, value in stubs:
+        monkeypatch.setattr(module, name, calls.returning(name, value))
+    scripts = {name: cast("upstream.Upstream", object()) for name in residual.VARIANTS}
+    record, report = capture_reference.capture_settings(scripts, tmp_path)
+    settings = residual.SETTINGS
+    expected = {"shared": positions, "lockstep/x/loss": torch.ones(2)} | {
+        f"settings/{s}/stochastic_depth/positions": positions for s in settings
+    }
+    assert mismatches(expected, record) == []
+    assert report == ["shared"] + [
+        line
+        for s in settings
+        for line in (
+            (
+                f"settings/{s}/optimizer/settings: "
+                f"{len(reference.HYPERPARAMETERS)}/{len(reference.HYPERPARAMETERS)} differ"
+            ),
+            f"settings/{s}/lockstep differs",
+        )
+    ]
+    ((arguments, keywords),) = calls.named("compare_task_settings")
+    assert arguments == (scripts, settings, tmp_path)
+    assert keywords == {"pristine": "basic"}
+    assert calls.named("block_positions") == [
+        ((scripts["stochastic_depth"], s), {}) for s in settings
+    ]
+    assert calls.named("trace_main") == [
+        (
+            (scripts["basic"],),
+            {
+                "arch": reference.SETTINGS[s].arch,
+                "dataset": reference.SETTINGS[s].dataset,
+                "classes": reference.SETTINGS[s].classes,
+            },
+        )
+        for s in settings
+    ]
+    assert [a for a, _ in calls.named("schedule_record")] == [
+        (settings[s]["basic"],) for s in settings
+    ]
+    assert calls.named("upstream_lockstep") == [
+        (
+            (scripts[n], n, trace),
+            {
+                "classes": reference.SETTINGS[s].classes,
+                "key": residual.lockstep_key(n, setting=s),
+            },
+        )
+        for s in settings
+        for n in residual.VARIANTS
+    ]
+    runs = [k["run"] for _, k in calls.named("compare_lockstep")]
+    assert [(r.func, r.keywords) for r in runs if isinstance(r, functools.partial)] == [
+        (residual.lockstep_record, {"setting": s}) for s in settings
+    ]
 
 
 def test_branches_are_reported_unless_the_draws_together_fall_on_both_sides() -> None:

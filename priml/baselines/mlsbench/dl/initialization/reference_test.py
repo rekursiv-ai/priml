@@ -38,6 +38,11 @@ def assert_exact(
     assert mismatches(expected, actual) == []
 
 
+def keyed(key: str) -> dict[str, torch.Tensor]:
+    """Stand in for a record function: one zero tensor under ``key``."""
+    return {key: torch.zeros(2)}
+
+
 def test_the_schedule_and_optimizer_match_the_script() -> None:
     expected = stored("schedule/") | stored("optimizer/")
     assert_exact(expected, reference.recipe_record())
@@ -75,6 +80,124 @@ def test_two_updates_after_each_initialization_match_the_script(name: str) -> No
         reference.lockstep_record(name, states=states),
     )
     assert len(states) == vision.STEPS
+
+
+def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize(
+    ("setting", "name"),
+    [
+        (setting, name)
+        for setting, inits in reference.SETTING_INITIALIZATIONS.items()
+        for name in inits
+    ],
+)
+def test_each_settings_full_network_with_each_initialization_matches_the_script(
+    setting: str,
+    name: str,
+) -> None:
+    key = f"{setting}/{name}"
+    expected = {
+        k: v
+        for k, v in stored_settings(f"settings/{key}/").items()
+        if "/lockstep/" not in k
+    }
+    assert set(expected) == {
+        f"settings/{key}/{part}" for part in ("draws", "train", "eval")
+    }
+    factory = reference.SETTING_INITIALIZATIONS[setting][name]
+    assert_exact(expected, vision.setting_record(setting, factory, key=key))
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{setting}/{name}"
+        for setting, inits in reference.SETTING_INITIALIZATIONS.items()
+        for name in inits
+    ],
+)
+def test_two_updates_at_each_setting_after_each_initialization_match_the_script(
+    key: str,
+) -> None:
+    setting, name = key.split("/")
+    assert_exact(
+        stored_settings(f"settings/{setting}/lockstep/{name}/"),
+        reference.setting_lockstep_record(key),
+    )
+
+
+def test_the_settings_record_holds_every_setting_lockstep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reference, "setting_lockstep_record", keyed)
+    assert set(reference.settings_record()) == {
+        f"{setting}/{name}"
+        for setting, inits in reference.SETTING_INITIALIZATIONS.items()
+        for name in inits
+    }
+
+
+def test_a_lockstep_hands_back_the_state_after_each_update() -> None:
+    states: list[dict[str, torch.Tensor]] = []
+    _ = reference.setting_lockstep_record(f"{reference.FMNIST}/fixup", states=states)
+    assert len(states) == vision.STEPS
+    assert not torch.equal(
+        next(iter(states[0].values())),
+        next(iter(states[1].values())),
+    )
+
+
+def test_a_network_run_hands_back_the_state_after_initialization() -> None:
+    states: list[dict[str, torch.Tensor]] = []
+    _ = reference.network_record("fixup", states=states)
+    (state,) = states
+    assert torch.equal(
+        state["stages.0.0.norm2.weight"],
+        torch.zeros_like(state["stages.0.0.norm2.weight"]),
+    )
+
+
+def test_the_setting_lockstep_golden_bites_on_one_ulp() -> None:
+    key = f"settings/{reference.FMNIST}/lockstep/fixup/probe"
+    value = stored_settings(key)[key].clone()
+    value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(torch.inf))
+    port = reference.setting_lockstep_record(f"{reference.FMNIST}/fixup")
+    assert mismatches({key: value}, {key: port[key]}) == [
+        f"{key}: 1/{value.numel()} differ",
+    ]
+
+
+def test_the_fmnist_loader_shuffles_and_augments_like_the_script(
+    tmp_path: Path,
+) -> None:
+    assert_exact(
+        stored_settings(f"settings/{reference.FMNIST}/loader/"),
+        vision.setting_loader_record(tmp_path, reference.FMNIST),
+    )
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = f"settings/{reference.FMNIST}/orthogonal/eval"
+    value = stored_settings(key)[key].clone()
+    value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(torch.inf))
+    port = vision.setting_record(
+        reference.FMNIST,
+        reference.SETTING_INITIALIZATIONS[reference.FMNIST]["orthogonal"],
+        key=f"{reference.FMNIST}/orthogonal",
+    )
+    assert mismatches({key: value}, {key: port[key]}) == [
+        f"{key}: 1/{value.numel()} differ",
+    ]
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_every_golden_fits_the_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= 32_768
 
 
 def test_the_golden_bites_on_one_ulp() -> None:

@@ -100,16 +100,16 @@ def main() -> int:
     output = validated_output_path(flags.output)
     device = torch.device("cuda")
     step = exp003().step
+    joint = _joint_world_model(flags, device=device)
     model = step.model
     assert isinstance(model, MinGRUPolicy.Config)
     proj = model.proj_feature = Linear.Config()
-    proj.channels_in = 1_152  # The world model's width.
+    proj.channels_in = joint.model.start.shape[-1]
     proj.init_weight = nn.init.zeros_
     windows = step.learner
     assert isinstance(windows, AgentWindows.Config)
     policy = model.make().to(device)
     objective = windows.objective.make()
-    joint = _joint_world_model(flags, device=device)
     optimizer = step.optimizer.make()([*policy.parameters(), *joint.parameters()])
     agents, horizon = step.env.num_envs, step.rollout.horizon
     rows = windows.minibatch_size // horizon

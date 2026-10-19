@@ -9,6 +9,17 @@ projection's normalization from it.
       +-- exp001  group norm
       +-- exp002  batch-instance norm
       +-- exp003  switchable norm
+      +-- exp004  ResNet-110 on CIFAR-100 (the hidden setting), batch norm
+      |     +-- exp005  group norm
+      |     +-- exp006  batch-instance norm
+      |     +-- exp007  switchable norm
+      +-- exp008  MobileNetV2 on Fashion-MNIST, batch norm
+            +-- exp009  group norm
+            +-- exp010  batch-instance norm
+            +-- exp011  switchable norm
+
+The task's script also has a ``vgg16bn-cifar100`` setting, but the task does
+not score it, so it is not ported.
 
 Prepare the data once, then launch::
 
@@ -27,7 +38,8 @@ from priml.baselines.mlsbench.dl.normalization.norms import (
     GroupNorm,
     SwitchableNorm,
 )
-from priml.baselines.mlsbench.dl.vision import experiments
+from priml.baselines.mlsbench.dl.vision import experiments, settings
+from priml.baselines.mlsbench.dl.vision.mobilenet import MobileNetV2
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 
 
@@ -141,5 +153,210 @@ def exp003() -> VisionTrainLoop:
     cfg = exp000()
     cfg.experiment_name = "exp003"
     assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.norm = SwitchableNorm
+    return cfg
+
+
+def exp004() -> VisionTrainLoop:
+    """exp000 at the hidden ``resnet110-cifar100`` setting: ResNet-110, batch norm.
+
+    The task scores this setting without showing it: 18 blocks per stage
+    instead of 9, everything else the ``resnet56-cifar100`` recipe.
+
+    Hypothesis:
+      A norm that holds up at 54 blocks and fails at 27 would show here;
+      batch norm is the bar at this depth.
+
+    References:
+      https://arxiv.org/abs/1512.03385
+        He et al. 2016, "Deep Residual Learning for Image Recognition."
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``resnet110-cifar100`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = settings.resnet110_cifar100(exp000())
+    cfg.experiment_name = "exp004"
+    return cfg
+
+
+def exp005() -> VisionTrainLoop:
+    """exp004 + group norm, up to 32 groups.
+
+    Hypothesis:
+      As exp001, at twice the depth, where batch statistics compound over
+      more layers.
+
+    References:
+      https://arxiv.org/abs/1803.08494
+        Wu and He 2018, "Group Normalization."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``group_norm`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp005"
+    assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.norm = GroupNorm
+    return cfg
+
+
+def exp006() -> VisionTrainLoop:
+    """exp004 + batch-instance norm.
+
+    Hypothesis:
+      As exp002, at twice the depth.
+
+    References:
+      https://arxiv.org/abs/1805.07925
+        Name and Kim 2018, "Batch-Instance Normalization for Adaptively
+        Style-Invariant Neural Networks."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``batch_instance_norm`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp006"
+    assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.norm = BatchInstanceNorm
+    return cfg
+
+
+def exp007() -> VisionTrainLoop:
+    """exp004 + switchable norm.
+
+    Hypothesis:
+      As exp003, at twice the depth: more layers to pick a mixture for.
+
+    References:
+      https://arxiv.org/abs/1806.10779
+        Luo et al. 2019, "Differentiable Learning-to-Normalize via Switchable
+        Normalization."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``switchable_norm`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp007"
+    assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.norm = SwitchableNorm
+    return cfg
+
+
+def exp008() -> VisionTrainLoop:
+    """exp000 at the ``mobilenetv2-fmnist`` setting: MobileNetV2, batch norm.
+
+    The script's MobileNetV2 builds every norm, the stem's, each inverted
+    residual block's three and the last convolution's, as a ``CustomNorm``.
+
+    Hypothesis:
+      Depthwise convolutions normalize one channel at a time, so batch norm
+      on MobileNetV2 is the bar a norm must clear on a network without
+      cross-channel mixing in half its layers.
+
+    References:
+      https://arxiv.org/abs/1801.04381
+        Sandler et al. 2018, "MobileNetV2: Inverted Residuals and Linear
+        Bottlenecks."
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``mobilenetv2-fmnist`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = settings.mobilenetv2_fmnist(exp000())
+    cfg.experiment_name = "exp008"
+    return cfg
+
+
+def exp009() -> VisionTrainLoop:
+    """exp008 + group norm, up to 32 groups.
+
+    Hypothesis:
+      As exp001; MobileNetV2's widths (16 to 1280, with 24, 96, 144 and 960)
+      exercise group counts below 32.
+
+    References:
+      https://arxiv.org/abs/1803.08494
+        Wu and He 2018, "Group Normalization."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``group_norm`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp009"
+    assert isinstance(cfg.step.model, MobileNetV2.Config)
+    cfg.step.model.norm = GroupNorm
+    return cfg
+
+
+def exp010() -> VisionTrainLoop:
+    """exp008 + batch-instance norm.
+
+    Hypothesis:
+      As exp002, on grayscale images with less style to drop.
+
+    References:
+      https://arxiv.org/abs/1805.07925
+        Name and Kim 2018, "Batch-Instance Normalization for Adaptively
+        Style-Invariant Neural Networks."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``batch_instance_norm`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp010"
+    assert isinstance(cfg.step.model, MobileNetV2.Config)
+    cfg.step.model.norm = BatchInstanceNorm
+    return cfg
+
+
+def exp011() -> VisionTrainLoop:
+    """exp008 + switchable norm.
+
+    Hypothesis:
+      As exp003, on a network whose depthwise layers may prefer other
+      statistics than its pointwise ones.
+
+    References:
+      https://arxiv.org/abs/1806.10779
+        Luo et al. 2019, "Differentiable Learning-to-Normalize via Switchable
+        Normalization."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``switchable_norm`` of ``dl-normalization`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp011"
+    assert isinstance(cfg.step.model, MobileNetV2.Config)
     cfg.step.model.norm = SwitchableNorm
     return cfg

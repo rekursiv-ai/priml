@@ -10,22 +10,23 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import torch
 
 from priml.baselines.mlsbench.dl.activation import reference, upstream
 from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.upstream_test import (
-    SCRIPT as LOSS_SCRIPT,
-    stored_record,
-)
+from priml.baselines.mlsbench.dl.vision.upstream_test import SETTINGS_SCRIPT
+from priml.testing.golden import read_tensors
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from priml.baselines.mlsbench.dl.vision.upstream import Upstream
+
+DATA: Final = _CWD / "testdata"
 
 ACTIVATION: Final = (
     "class CustomActivation(nn.Module):\n"
@@ -35,7 +36,7 @@ ACTIVATION: Final = (
 """The three lines of the stand-in's activation, which the baselines' edits replace."""
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    SETTINGS_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         "",
@@ -67,8 +68,20 @@ SCRIPT: Final = (
         "        train_epoch(model, train_loader, criterion, optimizer, None)\n"
         "        best = max(best, evaluate(model, test_loader, criterion, None)[1])\n",
     )
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = [64, "M"]
+
+
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+"""
 )
-"""A stand-in for the ``dl-activation-function`` script."""
+"""A stand-in for the ``dl-activation-function`` script.
+
+Its ``build_model`` builds the stand-in ResNet for every ``--arch``; the
+architecture tables exist so the shallowest-network build can patch them."""
 
 BODIES: Final = {
     "gelu": "F.gelu(x)",
@@ -134,6 +147,21 @@ def test_lockstep_records_two_updates(tmp_path: Path) -> None:
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
 
 
+def test_the_setting_lockstep_runs_every_activation_at_every_setting(
+    tmp_path: Path,
+) -> None:
+    variants = scripts(tmp_path)
+    trace = upstream.trace_setting(variants["relu"])
+    lockstep = upstream.upstream_setting_lockstep(variants, ["vgg16bn-cifar100"], trace)
+    assert set(lockstep) == {f"vgg16bn-cifar100/{name}" for name in variants}
+    record, states = lockstep["vgg16bn-cifar100/mish"]
+    assert set(record) == {
+        f"settings/vgg16bn-cifar100/lockstep/mish/{part}"
+        for part in ("loss", "logits", "probe")
+    }
+    assert len(states) == vision.STEPS
+
+
 def test_the_record_holds_every_key_the_golden_does(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     trace = upstream.trace_setting(variants["relu"])
@@ -142,7 +170,27 @@ def test_the_record_holds_every_key_the_golden_does(tmp_path: Path) -> None:
         for name, script in variants.items()
     }
     record = upstream.upstream_record(variants, trace, lockstep)
-    assert record.keys() == stored_record(reference).keys()
+    assert record.keys() == read_tensors(DATA / "reference.pt").keys()
+    assert torch.equal(
+        record["schedule/lr"],
+        torch.tensor(trace.rates, dtype=torch.float64),
+    )
+    assert torch.equal(
+        record["optimizer/settings"],
+        torch.tensor(
+            [trace.settings[name] for name in vision.HYPERPARAMETERS],
+            dtype=torch.float64,
+        ),
+    )
+    assert record["draws/exp000"] is trace.draws
+    assert {
+        record[key].dtype
+        for key in ("schedule/lr", "optimizer/settings", "best/accuracy")
+    } == {torch.float64}
+    assert torch.equal(
+        record["best/accuracy"],
+        torch.tensor(trace.best, dtype=torch.float64),
+    )
 
 
 if __name__ == "__main__":

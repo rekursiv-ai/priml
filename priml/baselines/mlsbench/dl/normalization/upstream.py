@@ -193,13 +193,22 @@ def upstream_groups(script: Upstream) -> dict[str, Tensor]:
     }
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    arch: str = "resnet56",
+    prefix: str = "",
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the normalization under test.
       name: Which normalization, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      arch: The setting's ``--arch``; its network is cut as ``tiny_model`` cuts it.
+      prefix: Put before every key; ``lockstep/<name>/`` by default.
 
     Returns:
       lockstep: Per update the loss, its logits and a probe's logits
@@ -211,7 +220,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = task.ResNet(task.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = upstream.tiny_model(script, arch, reference.CLASSES)
         task.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -235,12 +244,44 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
+    prefix = prefix or f"lockstep/{name}/"
     record = {
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(criterion.losses),
+        f"{prefix}logits": torch.stack(criterion.logits),
+        f"{prefix}probe": torch.stack(probes),
     }
     return record, states
+
+
+def upstream_setting_lockstep(
+    scripts: dict[str, Upstream],
+    settings: Iterable[str],
+    trace: MainTrace,
+) -> dict[str, Lockstep]:
+    """Run :func:`upstream_lockstep` per setting and normalization on its tiny network.
+
+    Args:
+      scripts: Each variant's script, keyed as :func:`variants`.
+      settings: Keys of the vision ``reference.SETTINGS``.
+      trace: Source of the optimizer settings; every setting's launch passes
+        the same.
+
+    Returns:
+      lockstep: Keyed ``<setting>/<norm>``, records under
+        ``settings/<setting>/lockstep/<norm>/``.
+
+    """
+    return {
+        f"{setting}/{name}": upstream_lockstep(
+            script,
+            name,
+            trace,
+            arch=reference.SETTINGS[setting].arch,
+            prefix=f"settings/{setting}/lockstep/{name}/",
+        )
+        for setting in settings
+        for name, script in scripts.items()
+    }
 
 
 def upstream_record(

@@ -28,10 +28,18 @@ from priml.baselines.mlsbench.dl.augmentation.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.augmentation.upstream import OPS
 from priml.baselines.mlsbench.dl.vision import reference
-from priml.baselines.mlsbench.dl.vision.data import normalize
+from priml.baselines.mlsbench.dl.vision.data import normalize, resized
 from priml.testing.bfb import host_agnostic_numerics
 
 
@@ -40,7 +48,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
-    from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
     from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 
@@ -51,6 +58,22 @@ AUGMENTS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
     "trivialaugment": exp003,
 }
 """The experiment that carries each augmentation, keyed as the script's variants."""
+
+SETTINGS: Final[dict[str, dict[str, Callable[[], VisionTrainLoop]]]] = {
+    "resnet20-cifar10": {
+        "pad_crop_flip": exp004,
+        "cutout": exp005,
+        "randaugment": exp006,
+        "trivialaugment": exp007,
+    },
+    "mobilenetv2-fmnist": {
+        "pad_crop_flip": exp008,
+        "cutout": exp009,
+        "randaugment": exp010,
+        "trivialaugment": exp011,
+    },
+}
+"""Per other setting of the task, the experiment that carries each augmentation."""
 
 PIPELINE_IMAGES: Final = 160
 """Images the capture runs each pipeline on, enough to reach every operation."""
@@ -75,19 +98,52 @@ def pipeline_images(count: int) -> Tensor:
     )
 
 
-def augmented(name: str, images: Tensor, *, seed: int) -> Tensor:
+def source_images(setting: str, count: int) -> Tensor:
+    """Return ``count`` uint8 images of random pixels as a setting's dataset ships them.
+
+    Args:
+      setting: A key of :data:`SETTINGS`.
+      count: Images to build.
+
+    Returns:
+      images: ``(count, 3, 32, 32)`` CIFAR images, or ``(count, 1, 28, 28)``
+        grayscale ones for Fashion-MNIST, before its ``Resize(32)``.
+
+    """
+    if reference.SETTINGS[setting].dataset != "fmnist":
+        return pipeline_images(count)
+    generator = torch.Generator().manual_seed(reference.SEED)
+    return torch.randint(256, (count, 1, 28, 28), generator=generator).to(torch.uint8)
+
+
+def prepared(setting: str, images: Tensor) -> Tensor:
+    """Return :func:`source_images` as the setting's prepared cache holds them."""
+    if reference.SETTINGS[setting].dataset != "fmnist":
+        return images
+    return resized(images, size=32)
+
+
+def augmented(
+    name: str,
+    images: Tensor,
+    *,
+    seed: int,
+    factory: Callable[[], VisionTrainLoop] | None = None,
+) -> Tensor:
     """Run the augmentation of ``name``'s experiment on ``images`` from one stream.
 
     Args:
       name: A key of :data:`AUGMENTS`.
-      images: ``(B, 3, H, W)`` uint8 pixels.
+      images: ``(B, C, H, W)`` uint8 pixels, three channels or one.
       seed: Seed of the stream, as a loader worker's is seeded.
+      factory: The experiment whose dataset runs; ``AUGMENTS[name]`` by
+        default, a setting's fork of it otherwise.
 
     Returns:
       media: ``(B, 3, H, W)`` float32 images, normalized.
 
     """
-    config = AUGMENTS[name]().dataset
+    config = (factory or AUGMENTS[name])().dataset
     function = config.augment.make()
     return function(
         images,
@@ -112,7 +168,12 @@ def classified(media: Tensor) -> Tensor:
 
     """
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = _tiny(exp000).model
+        model = reference.tiny_step(
+            exp000,
+            blocks=(1, 1, 1),
+            classes=reference.CLASSES,
+            epochs=reference.EPOCHS,
+        ).model
         model.eval()
         return reference.logits_of(model, media).detach()
 
@@ -147,10 +208,31 @@ def test_record() -> dict[str, Tensor]:
     return {"augment/test/logits": classified(media)}
 
 
+def lockstep_images(setting: str = "") -> Tensor:
+    """Return the two fixed images a lockstep augments, as the setting's dataset ships them.
+
+    Args:
+      setting: A key of :data:`SETTINGS`, or empty for ``exp000``'s chain.
+
+    Returns:
+      images: ``(2, 3, 32, 32)``, or ``(2, 1, 28, 28)`` for Fashion-MNIST.
+
+    """
+    if setting and reference.SETTINGS[setting].dataset == "fmnist":
+        return reference.fixed_images(2, channels=1, side=28)
+    return reference.fixed_images(2)
+
+
+def lockstep_key(name: str, *, setting: str = "") -> str:
+    """Return the prefix of a lockstep's record: ``exp000``'s chain, or a setting's."""
+    return f"settings/{setting}/lockstep/{name}" if setting else f"lockstep/{name}"
+
+
 def lockstep_record(
     name: str,
     *,
     states: list[dict[str, Tensor]] | None = None,
+    setting: str = "",
 ) -> dict[str, Tensor]:
     """Train the shallowest network for two updates on augmented fixed images.
 
@@ -160,21 +242,36 @@ def lockstep_record(
       name: A key of :data:`AUGMENTS`.
       states: When given, receives a copy of the model's whole state after
         each update.
+      setting: A key of :data:`SETTINGS` to train that setting's fork, its
+        network shrunk by ``tiny_model`` and at its class count; empty for
+        ``exp000``'s chain.
 
     Returns:
       record: Per update the augmented batch, the loss, the logits it came
-        from and the logits of a fixed probe in evaluation mode afterwards.
+        from and the logits of a fixed probe in evaluation mode afterwards,
+        under :func:`lockstep_key`.
 
     """
+    factory = SETTINGS[setting][name] if setting else AUGMENTS[name]
+    images = lockstep_images(setting)
+    if setting:
+        images = prepared(setting, images)
     media = [
-        augmented(name, reference.fixed_images(2), seed=reference.SEED + i)
+        augmented(name, images, seed=reference.SEED + i, factory=factory)
         for i in range(reference.STEPS)
     ]
     losses: list[Tensor] = []
     logits: list[Tensor] = []
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        step = _tiny(AUGMENTS[name])
+        step = reference.tiny_step(
+            factory,
+            blocks=(1, 1, 1),
+            classes=reference.SETTINGS[setting].classes
+            if setting
+            else reference.CLASSES,
+            epochs=reference.EPOCHS,
+        )
         for index, batch in enumerate(media):
             step.timer_epoch.global_count = index
             result = step.train_step(media=batch, label=reference.fixed_label(index))
@@ -187,11 +284,12 @@ def lockstep_record(
                 states.append(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
+    key = lockstep_key(name, setting=setting)
     return {
-        f"lockstep/{name}/media": torch.stack(media),
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{key}/media": torch.stack(media),
+        f"{key}/loss": torch.stack(losses),
+        f"{key}/logits": torch.stack(logits),
+        f"{key}/probe": torch.stack(probes),
     }
 
 
@@ -228,6 +326,68 @@ def stored(record: Mapping[str, Tensor]) -> dict[str, Tensor]:
 
     """
     return {k: v for k, v in record.items() if not k.endswith("/media")}
+
+
+def setting_pipeline_record(setting: str, name: str) -> dict[str, Tensor]:
+    """Return the classified augmentation of the golden images at a setting.
+
+    Args:
+      setting: A key of :data:`SETTINGS`.
+      name: A key of :data:`AUGMENTS`.
+
+    Returns:
+      record: ``settings/<setting>/<name>/augment``.
+
+    """
+    media = augmented(
+        name,
+        prepared(setting, source_images(setting, GOLDEN_IMAGES)),
+        seed=reference.SEED,
+        factory=SETTINGS[setting][name],
+    )
+    return {f"settings/{setting}/{name}/augment": classified(media)}
+
+
+def setting_loader_batches(
+    setting: str,
+    name: str,
+    directory: Path,
+) -> tuple[Batches, Batches]:
+    """Run one variant's loaders at a setting over the setting's synthetic split.
+
+    Args:
+      setting: A key of :data:`SETTINGS`.
+      name: A key of :data:`AUGMENTS`.
+      directory: Scratch directory the split is written to.
+
+    Returns:
+      passes: Per training pass the batches in order, then per evaluation pass.
+
+    """
+    return reference.dataset_batches(
+        SETTINGS[setting][name]().dataset,
+        directory,
+        split=reference.SETTINGS[setting].split(),
+    )
+
+
+def settings_record(directory: Path) -> dict[str, Tensor]:
+    """Run every other setting's comparisons the golden stores and return their values.
+
+    Args:
+      directory: Scratch directory the loader runs write their splits to.
+
+    Returns:
+      record: The shared per-variant networks and pristine loaders, and each
+        variant's classified pipeline; keyed as the settings golden is.
+
+    """
+    record = reference.task_settings_record(SETTINGS, directory)
+    for setting, variants in SETTINGS.items():
+        for name in variants:
+            record |= setting_pipeline_record(setting, name)
+            record |= stored(lockstep_record(name, setting=setting))
+    return record
 
 
 def loader_batches(name: str, directory: Path) -> tuple[Batches, Batches]:
@@ -293,13 +453,3 @@ class _Counted:
         key = f"{self.name}{'-' if magnitude < 0 else '+'}"
         self.counts[key] = self.counts.get(key, 0) + 1
         return self.original(image, magnitude)
-
-
-def _tiny(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
-    """Build ``factory``'s step at the shallowest depth and three classes."""
-    return reference.tiny_step(
-        factory,
-        blocks=(1, 1, 1),
-        classes=reference.CLASSES,
-        epochs=reference.EPOCHS,
-    )

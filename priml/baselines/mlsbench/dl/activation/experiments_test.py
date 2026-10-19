@@ -23,14 +23,27 @@ from priml.baselines.mlsbench.dl.activation.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import (
+    experiments as vision,
+    settings,
+)
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
     changed_fields,
     shrink,
     write_dataset,
 )
+from priml.baselines.mlsbench.dl.vision.mobilenet import MobileNetV2
 from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.cost import cost
 from priml.testing.golden import assert_pprint_golden
 
@@ -46,7 +59,52 @@ ALL_EXPERIMENTS: Final[list[ExperimentFactory[VisionTrainLoop]]] = [
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 ]
+
+SETTING_FORKS: Final = {
+    exp005: exp004,
+    exp006: exp004,
+    exp007: exp004,
+    exp009: exp008,
+    exp010: exp008,
+    exp011: exp008,
+}
+"""Each baseline at another setting and that setting's ReLU experiment."""
+
+
+def test_exp004_is_the_vgg16bn_cifar100_switch_alone() -> None:
+    switched = settings.vgg16bn_cifar100(exp000())
+    switched.experiment_name = "exp004"
+    assert changed_fields(switched, exp004()) == set()
+
+
+def test_exp008_is_the_mobilenetv2_fmnist_switch_with_the_scripts_relu() -> None:
+    switched = settings.mobilenetv2_fmnist(exp000())
+    switched.experiment_name = "exp008"
+    assert changed_fields(switched, exp008()) == {"step.model.activation"}
+
+
+@pytest.mark.parametrize(
+    ("factory", "parent"),
+    list(SETTING_FORKS.items()),
+    ids=[f.__name__ for f in SETTING_FORKS],
+)
+def test_a_setting_fork_changes_only_the_activation(
+    factory: ExperimentFactory[VisionTrainLoop],
+    parent: ExperimentFactory[VisionTrainLoop],
+) -> None:
+    assert changed_fields(parent(), factory()) == {
+        "experiment_name",
+        "step.model.activation",
+    }
 
 
 class Scaled(nn.Module):
@@ -99,7 +157,7 @@ def test_a_fork_changes_only_the_activation(
 def test_every_activation_costs_through_the_network() -> None:
     for factory in ALL_EXPERIMENTS:
         model = factory().step.model
-        assert isinstance(model, ResNet.Config)
+        assert isinstance(model, ResNet.Config | VGG16BN.Config | MobileNetV2.Config)
         total = cost(model.copy_tree().finalize(), batch_size=2, dtype=None)
         assert sum(total["flops"].cells.values()) > 0
 
@@ -152,8 +210,15 @@ def test_every_experiment_states_its_hypothesis_sources_and_pending_results(
 
 
 def test_each_fork_names_its_parent_in_the_first_line() -> None:
-    for child in (exp001, exp002, exp003):
-        assert (inspect.getdoc(child) or "").startswith("exp000 + "), child.__name__
+    parents = dict.fromkeys((exp001, exp002, exp003), exp000) | SETTING_FORKS
+    for child, parent in parents.items():
+        assert (inspect.getdoc(child) or "").startswith(f"{parent.__name__} + "), (
+            child.__name__
+        )
+    for setting in (exp004, exp008):
+        assert (inspect.getdoc(setting) or "").startswith("exp000 at the "), (
+            setting.__name__
+        )
 
 
 def test_exp000_matches_its_golden_config() -> None:

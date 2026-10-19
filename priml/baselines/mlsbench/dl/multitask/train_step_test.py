@@ -17,6 +17,7 @@ from priml.baselines.mlsbench.dl.multitask.losses import (
 )
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
 from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
+from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.vision.train_step import cross_entropy
 from priml.train.parallelism import NoParallel
 
@@ -30,10 +31,12 @@ def step(mtl_loss: Makeable[nn.Module] | None = None) -> MultiTaskStep:
     config = MultiTaskStep.Config()
     assert isinstance(config.model, TwoHeadResNet.Config)
     config.model.channels_out = COARSE
-    config.model.trunk.channels_in = 3
-    config.model.trunk.channels_out = CLASSES
-    config.model.trunk.channels_hidden = (2, 4, 5)
-    config.model.trunk.blocks_per_stage = (1, 1, 1)
+    trunk = config.model.trunk
+    assert isinstance(trunk, ResNet.Config)
+    trunk.channels_in = 3
+    trunk.channels_out = CLASSES
+    trunk.channels_hidden = (2, 4, 5)
+    trunk.blocks_per_stage = (1, 1, 1)
     sgd = config.optimizer = PartialConfig(torch.optim.SGD)
     sgd.lr = 0.1
     config.loss = PartialConfig(cross_entropy)
@@ -169,11 +172,13 @@ def test_pcgrad_leaves_the_coarse_head_unchanged() -> None:
     made = step(PCGrad.Config())
     assert isinstance(made.model, TwoHeadResNet)
     before = {k: v.clone() for k, v in made.model.head.state_dict().items()}
-    trunk = made.model.trunk.head.weight.detach().clone()
+    fine = made.model.trunk.get_submodule("head")
+    assert isinstance(fine, nn.Linear)
+    trunk = fine.weight.detach().clone()
     _ = made.train_step(**batch())
     for name, value in made.model.head.state_dict().items():
         assert torch.equal(value, before[name]), name
-    assert not torch.equal(made.model.trunk.head.weight, trunk)
+    assert not torch.equal(fine.weight, trunk)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,10 @@ and its gradient on fixed inputs, the rate of all 200 epochs, the optimizer,
 the initial state and forward of ResNet-20 (the setting's) and ResNet-56,
 where the generator stands after building the network, every pixel the
 CIFAR-10 loaders produce, and every parameter after each update of a short run
-per activation. Any mismatch is printed and the exit code is 1; otherwise the
+per activation. At the ``vgg16bn-cifar100`` and ``mobilenetv2-fmnist``
+settings it compares, per activation, the full network's initial state and
+where it leaves the generator, the shallowest network's forwards, and every pixel of each setting's
+loaders. Any mismatch is printed and the exit code is 1; otherwise the
 values the default test replays are written under ``--out``.
 
 The script is imported from the clone, not vendored. Nothing runs on a GPU.
@@ -62,7 +65,19 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v
+                for k, v in captured.record.items()
+                if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v for k, v in captured.record.items() if k.startswith("settings/")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -100,9 +115,39 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     )
     report += capture_reference.compare_loaders(
         batches,
-        reference.loader_batches(scratch),
+        vision.dataset_batches(
+            exp000().dataset,
+            scratch,
+            split=vision.synthetic_split(),
+        ),
     )
-    return vision.Captured(record=record, sites={}, report=report)
+    settings, settings_report = capture_reference.compare_task_settings(
+        scripts,
+        reference.SETTING_ACTIVATIONS,
+        scratch,
+        pristine="relu",
+    )
+    with vision_upstream.hidden_accelerators():
+        setting_lockstep = upstream.upstream_setting_lockstep(
+            scripts,
+            reference.SETTING_ACTIVATIONS,
+            trace,
+        )
+    for values, _ in setting_lockstep.values():
+        settings |= values
+    settings_report += mismatches(
+        {k: v for k, v in settings.items() if "/lockstep/" in k},
+        reference.settings_record(),
+    )
+    settings_report += capture_reference.compare_lockstep(
+        setting_lockstep,
+        run=reference.setting_lockstep_record,
+    )
+    return vision.Captured(
+        record=record | settings,
+        sites={},
+        report=report + settings_report,
+    )
 
 
 def compare_setting(

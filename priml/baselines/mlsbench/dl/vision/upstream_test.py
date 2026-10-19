@@ -13,11 +13,15 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 from unittest import mock
 
 import functools
 
+from torch.utils.data import DataLoader
+from torchvision.transforms.functional import pil_to_tensor
+
+import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference, upstream
@@ -34,9 +38,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from torch import Tensor
-    from torch.utils.data import DataLoader
-
-    import pytest
+    from torch.utils.data import Dataset
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
     from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
@@ -144,8 +146,59 @@ def main():
 '''
 
 
+SETTINGS_SCRIPT: Final = (
+    SCRIPT
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = []
+
+
+class MobileNetV2(nn.Module):
+    CFG = []
+
+
+def build_model(arch, num_classes):
+    return ResNet(BasicBlock, [1, 1, 1], num_classes)
+
+
+_cifar_dataloaders = get_dataloaders
+
+
+def get_dataloaders(dataset, data_root, batch_size=128, num_workers=4):
+    if dataset != "fmnist":
+        return _cifar_dataloaders(dataset, data_root, batch_size, num_workers)
+    stats = ((0.2860, 0.2860, 0.2860), (0.3530, 0.3530, 0.3530))
+    repeat = transforms.Lambda(lambda x: x.repeat(3, 1, 1))
+    train_transform = transforms.Compose([
+        transforms.Resize(32),
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        repeat,
+        transforms.Normalize(*stats),
+    ])
+    test_transform = transforms.Compose([
+        transforms.Resize(32), transforms.ToTensor(), repeat, transforms.Normalize(*stats)
+    ])
+    train = torchvision.datasets.FashionMNIST(
+        root=data_root, train=True, download=False, transform=train_transform
+    )
+    test = torchvision.datasets.FashionMNIST(
+        root=data_root, train=False, download=False, transform=test_transform
+    )
+    return (
+        torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True),
+        torch.utils.data.DataLoader(test, batch_size=batch_size),
+        10,
+    )
+"""
+)
+"""The stand-in with the reference's ``build_model`` and its Fashion-MNIST pipelines."""
+
+
 def write_clone(root: Path) -> None:
-    """Write the stand-in pristine script under ``root``.
+    """Write the stand-in pristine script, with its settings, under ``root``.
 
     Args:
       root: Directory to hold the clone.
@@ -153,7 +206,7 @@ def write_clone(root: Path) -> None:
     """
     script = root / upstream.PRISTINE
     script.parent.mkdir(parents=True)
-    script.write_text(SCRIPT)
+    script.write_text(SETTINGS_SCRIPT)
 
 
 def stored_record(port: ModuleType) -> dict[str, Tensor]:
@@ -174,7 +227,9 @@ class StoredPart:
     """A port-side run answered from a golden: its keys under one prefix.
 
     ``prefix`` is formatted with the run's positional arguments, so
-    ``"lockstep/{}/"`` answers ``lockstep_record(name)``. With ``count``, a
+    ``"lockstep/{}/"`` answers ``lockstep_record(name)``; a string argument is
+    split on ``/`` first, so ``"settings/{}/lockstep/{}/"`` answers
+    ``setting_lockstep_record("<setting>/<variant>")``. With ``count``, a
     ``states`` list the caller passes receives that many placeholder states.
     """
 
@@ -197,7 +252,8 @@ class StoredPart:
         """Return the golden's keys under the formatted prefix."""
         if states is not None:
             states += [{"stored": torch.zeros(1)} for _ in range(self.count)]
-        prefix = self.prefix.format(*args)
+        parts = [p for a in args for p in (a.split("/") if isinstance(a, str) else [a])]
+        prefix = self.prefix.format(*parts)
         return {k: v for k, v in self.golden.items() if k.startswith(prefix)}
 
 
@@ -311,7 +367,11 @@ def test_an_edit_replaces_exactly_the_lines_it_names(tmp_path: Path) -> None:
         config,
     )
     assert edited.compute_loss(logits, targets, config) == plain * 2
-    assert (scratch / "doubled.py").read_text() == SCRIPT.replace(line, doubled, 1)
+    assert (scratch / "doubled.py").read_text() == SETTINGS_SCRIPT.replace(
+        line,
+        doubled,
+        1,
+    )
 
 
 def test_the_reference_sees_a_cpu_only_machine() -> None:
@@ -448,6 +508,239 @@ def test_the_stand_in_draws_from_the_samplers_it_uses(tmp_path: Path) -> None:
     assert counts["randint@transforms/transforms.py:get_params"] == 2 * (
         reference.LOADER_PASSES * reference.LOADER_IMAGES + 2
     )
+
+
+def test_the_fmnist_loaders_serve_the_grayscale_split_resized_into_three_channels(
+    tmp_path: Path,
+) -> None:
+    train, evaluation = upstream.upstream_batches(script(tmp_path), dataset="fmnist")
+    media, label = reference.prepared_gray_split()
+    expected = normalize(
+        media,
+        mean=torch.tensor((0.2860,) * 3),
+        std=torch.tensor((0.3530,) * 3),
+    )
+    assert torch.cat([b["label"] for b in evaluation[0]]).tolist() == label.tolist()
+    assert torch.equal(torch.cat([b["media"] for b in evaluation[0]]), expected)
+    assert train[0][0]["media"].shape == (2, 3, 32, 32)
+
+
+def test_the_fmnist_pipelines_and_their_draws_are_seen(tmp_path: Path) -> None:
+    pristine = script(tmp_path)
+    record = upstream.upstream_fmnist_pipelines(pristine)
+    assert record["transform/fmnist/test"].shape == (2, 3, 32, 32)
+    counts = upstream.upstream_fmnist_sites(pristine)
+    assert counts["randint@transforms/transforms.py:get_params"] == 2 * (
+        reference.LOADER_PASSES * reference.LOADER_IMAGES + 2
+    )
+
+
+TINY_SCRIPT: Final = (
+    SETTINGS_SCRIPT
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = [64, "M", 64, "M", 64, "M"]
+
+    def __init__(self, num_classes=100):
+        super().__init__()
+        self.seen = list(self.VGG16_CFG)
+
+
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.seen = [list(row) for row in self.CFG]
+
+
+def build_model(arch, num_classes):
+    if arch == "vgg16bn":
+        return VGG(num_classes)
+    if arch == "mobilenetv2":
+        return MobileNetV2(num_classes)
+    return ResNet(BasicBlock, [9, 9, 9], num_classes)
+"""
+)
+"""The stand-in with architecture tables that record what they were built from."""
+
+
+def test_the_tiny_model_patches_the_architecture_table_only_while_building(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "script.py"
+    path.write_text(TINY_SCRIPT)
+    pristine = upstream.load_script(path)
+    vgg = upstream.tiny_model(pristine, "vgg16bn", reference.CLASSES)
+    mobilenet = upstream.tiny_model(pristine, "mobilenetv2", reference.CLASSES)
+    assert vars(vgg)["seen"] == reference.TINY_ARCHS["vgg16bn"]
+    assert vars(mobilenet)["seen"] == reference.TINY_ARCHS["mobilenetv2"]
+    assert vars(pristine.VGG)["VGG16_CFG"] == [64, "M", 64, "M", 64, "M"]
+    resnet = upstream.tiny_model(pristine, "resnet56", reference.CLASSES)
+    assert [name for name, _ in resnet.named_parameters()][:2] == [
+        "conv.weight",
+        "conv.bias",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("dataset", "fake", "split"),
+    [
+        ("cifar100", upstream.FakeCifar100, reference.synthetic_split),
+        ("cifar10", upstream.FakeCifar100, reference.synthetic_split),
+        ("fmnist", upstream.FakeFashionMNIST, reference.synthetic_gray_split),
+    ],
+)
+def test_synthetic_datasets_stand_in_for_the_scripts_torchvision_class(
+    tmp_path: Path,
+    dataset: str,
+    fake: type[upstream.FakeCifar100],
+    split: Callable[[], tuple[Tensor, Tensor]],
+) -> None:
+    pristine = script(tmp_path)
+    module = cast(dict[str, object], vars(pristine.torchvision.datasets))
+    name = upstream.DATASETS[dataset]
+    original = module[name]
+    with upstream.synthetic_datasets(pristine, dataset):
+        stand_in = module[name]
+    assert stand_in is fake
+    assert module[name] is original
+    built = fake(root="unused", train=True, download=False, transform=pil_to_tensor)
+    assert torch.equal(built.media, split()[0])
+    image, label = built[1]
+    assert torch.equal(image, split()[0][1])
+    assert label == 1
+
+
+def test_upstream_settings_traces_each_captured_setting_and_decodes_its_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The stand-in's CIFAR-10 loaders read CIFAR-100's class, so only the
+    # Fashion-MNIST setting, whose pipeline is the reference's, runs here.
+    monkeypatch.setattr(reference, "CAPTURED", ("mobilenetv2-fmnist",))
+    traces, record = upstream.upstream_settings(script(tmp_path))
+    assert list(traces) == ["mobilenetv2-fmnist"]
+    prefix = "settings/mobilenetv2-fmnist/"
+    loader = {k: v for k, v in record.items() if k.startswith(f"{prefix}loader/")}
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    assert set(loader) == {
+        f"{prefix}loader/{k}" for k in ("label", "top", "left", "flip")
+    }
+    ours = reference.setting_loader_record(scratch, "mobilenetv2-fmnist")
+    assert loader.keys() == ours.keys()
+    assert (
+        loader[f"{prefix}loader/label"].sort().values.tolist()
+        == [list(range(reference.LOADER_IMAGES))] * reference.LOADER_PASSES
+    )
+    assert set(record) - set(loader) == {
+        "transform/fmnist/train",
+        "transform/fmnist/test",
+        f"{prefix}draws",
+        f"{prefix}train",
+        f"{prefix}eval",
+    }
+
+
+def test_a_setting_is_traced_at_its_arch_dataset_and_classes(tmp_path: Path) -> None:
+    trace, record = upstream.upstream_setting(script(tmp_path), "mobilenetv2-fmnist")
+    assert trace.configs[0] == {"num_classes": 10, "epoch": 0, "total_epochs": 200}
+    assert set(record) == {
+        "settings/mobilenetv2-fmnist/draws",
+        "settings/mobilenetv2-fmnist/train",
+        "settings/mobilenetv2-fmnist/eval",
+    }
+    assert trace.state["fc.weight"].shape == (10, 4)
+    assert record["settings/mobilenetv2-fmnist/train"].shape == (
+        reference.PROBE_SHAPE[0],
+        reference.CLASSES,
+    )
+
+
+LITERAL_SCRIPT: Final = """\
+import torch.nn as nn
+
+
+class CustomNorm(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        self.width = num_features
+
+
+def build():
+    return [
+        nn.Conv2d(3, 32, 3, padding=1, bias=False),
+        nn.Conv2d(320, 1280, 1, bias=False),
+        nn.BatchNorm2d(1280),
+        nn.Linear(512, 512),
+        nn.Linear(in_features=512, out_features=10),
+        CustomNorm(32),
+        nn.Conv2d(24, 40, 3),
+    ]
+"""
+"""A stand-in whose layers carry the reference's hardcoded widths."""
+
+
+def test_narrowed_widths_shrinks_each_hardcoded_width_while_building(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "literal.py"
+    path.write_text(LITERAL_SCRIPT)
+    module = upstream.load_script(path)
+    build = cast("Callable[[], list[torch.nn.Module]]", vars(module)["build"])
+    with upstream.narrowed_widths(module):
+        built = build()
+    stem, last, norm, hidden, head, custom, kept = built
+    widths = reference.TINY_WIDTHS
+    assert isinstance(stem, torch.nn.Conv2d)
+    assert isinstance(last, torch.nn.Conv2d)
+    assert isinstance(norm, torch.nn.BatchNorm2d)
+    assert isinstance(hidden, torch.nn.Linear)
+    assert isinstance(head, torch.nn.Linear)
+    assert isinstance(kept, torch.nn.Conv2d)
+    assert stem.weight.shape == (widths[32], 3, 3, 3)
+    assert last.weight.shape == (widths[1280], widths[320], 1, 1)
+    assert norm.num_features == widths[1280]
+    assert hidden.weight.shape == (widths[512], widths[512])
+    assert head.weight.shape == (10, widths[512])
+    assert vars(custom)["width"] == widths[32]
+    assert kept.weight.shape == (40, 24, 3, 3)
+    after = build()[0]
+    assert isinstance(after, torch.nn.Conv2d)
+    assert after.out_channels == 32
+
+
+def test_a_forked_loader_forks_only_a_loader_with_workers() -> None:
+    built: list[dict[str, object]] = []
+
+    def loader(
+        dataset: Dataset[tuple[Tensor, Tensor]],
+        **kwargs: object,
+    ) -> DataLoader[tuple[Tensor, Tensor]]:
+        built.append(kwargs)
+        return DataLoader(dataset)
+
+    forked = upstream.ForkedLoader(loader)
+    _ = forked(cast("Dataset[tuple[Tensor, Tensor]]", []), batch_size=2, num_workers=4)
+    _ = forked(cast("Dataset[tuple[Tensor, Tensor]]", []), shuffle=True)
+    assert built == [
+        {
+            "batch_size": 2,
+            "shuffle": False,
+            "num_workers": 4,
+            "pin_memory": False,
+            "multiprocessing_context": "fork",
+        },
+        {
+            "batch_size": 1,
+            "shuffle": True,
+            "num_workers": 0,
+            "pin_memory": False,
+            "multiprocessing_context": None,
+        },
+    ]
 
 
 def test_the_criterion_spy_is_cross_entropy_and_keeps_what_it_saw() -> None:

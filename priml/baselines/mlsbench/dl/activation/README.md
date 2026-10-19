@@ -14,7 +14,14 @@ exp000  ReLU
   +-- exp001  GELU
   +-- exp002  SiLU
   +-- exp003  Mish
+  +-- exp004  VGG-16-BN on CIFAR-100, ReLU
+  |     +-- exp005..exp007  GELU, SiLU, Mish
+  +-- exp008  MobileNetV2 on Fashion-MNIST, ReLU
+        +-- exp009..exp011  GELU, SiLU, Mish
 ```
+
+The script builds MobileNetV2 with `CustomActivation` (ReLU), not ReLU6, so
+`exp008` sets `activation = relu` on the switched network.
 
 ## Run it
 
@@ -34,4 +41,8 @@ the clone and compares with exact equality: each activation and its gradient
 on fixed inputs, the 200 learning rates, the optimizer, ResNet-20's and
 ResNet-56's initial state and forward, the generator after the build, every
 pixel of the CIFAR-10 loaders, and every parameter after two updates per
-activation. `reference_test.py` replays `testdata/reference.pt`.
+activation. At `vgg16bn-cifar100` and `mobilenetv2-fmnist` it compares, per
+activation, the full network's state and draws, the shallowest network's forwards,
+and every pixel
+of each setting's loaders. `reference_test.py` replays `testdata/reference.pt`
+and `testdata/reference_settings.pt`.

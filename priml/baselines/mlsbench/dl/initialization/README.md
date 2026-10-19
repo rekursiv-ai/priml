@@ -11,7 +11,17 @@ exp000  normal, std 0.01 (the pristine script)
   +-- exp001  Kaiming normal         (baseline kaiming_normal)
   +-- exp002  Kaiming, then Fixup    (baseline fixup)
   +-- exp003  orthogonal, gain sqrt(2) (baseline orthogonal)
+  +-- exp004  VGG-16-BN on CIFAR-100, normal, std 0.01
+  |     +-- exp005..exp007  Kaiming, Fixup, orthogonal
+  +-- exp008  MobileNetV2 on Fashion-MNIST (hidden), normal, std 0.01
+        +-- exp009..exp011  Kaiming, Fixup, orthogonal
 ```
+
+Upstream's `fixup` edit scales residual branches only when `--arch` starts
+with `resnet`, so on VGG-16-BN and MobileNetV2 it is its Kaiming phase alone:
+exp006 and exp010 equal exp005 and exp009 apart from the name, and keep
+`init` at `keep_initialization`. `initializers.fixup` still refuses a network
+without `BasicBlock`s.
 
 The pristine script is the `cv-classification-loss` script with the loss fixed
 to `nn.CrossEntropyLoss` and the initialization editable, so `exp000` is that
@@ -36,7 +46,12 @@ compares with exact equality, per initialization: ResNet-56's state after
 `main` seeds and initializes it, and its forward; where the generator stands
 afterwards; the shallowest network's state and forward; every parameter after
 each of two updates. It also compares the learning rates, the optimizer and
-every pixel the loaders produce. `reference_test.py` replays the stored values.
+every pixel the loaders produce. At `vgg16bn-cifar100` and `mobilenetv2-fmnist`
+it compares, per initialization, the full network's state after `main`
+initializes it and its draws, the shallowest network's forwards, and every
+pixel of the Fashion-MNIST
+loaders. `reference_test.py` replays `testdata/reference.pt` and
+`testdata/reference_settings.pt`.
 
 Not compared here: the best-accuracy bookkeeping (`best/accuracy`), which the
 script shares unchanged with `cv-classification-loss` and is proven by that

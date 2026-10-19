@@ -17,6 +17,7 @@ import torch
 from priml.baselines.mlsbench.dl.regularization import reference
 from priml.baselines.mlsbench.dl.regularization.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.train_step import LossContext
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
@@ -106,6 +107,117 @@ def test_the_golden_bites_on_one_ulp() -> None:
     assert [line.split(":")[0] for line in mismatches({key: value}, port)] == [key]
 
 
+def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTING_REGULARIZERS))
+def test_each_settings_recipe_matches_its_launch_script(setting: str) -> None:
+    prefix = f"settings/{setting}/"
+    expected = {
+        k: v
+        for k, v in stored_settings(prefix).items()
+        if k.startswith(
+            (f"{prefix}schedule/", f"{prefix}optimizer/", f"{prefix}setting/"),
+        )
+    }
+    assert len(expected) == 3
+    assert_exact(expected, reference.setting_recipe_record(setting))
+
+
+def test_the_vgg_setting_warms_up_as_the_script_does() -> None:
+    rates = stored_settings("settings/vgg16bn-cifar100/schedule/lr")
+    (lr,) = rates.values()
+    assert lr[:5].tolist() == [0.1 * ((e + 1) / 5) for e in range(5)]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{setting}/{name}"
+        for setting, variants in reference.SETTING_REGULARIZERS.items()
+        for name in variants
+    ],
+)
+def test_two_updates_at_each_setting_match_the_script(key: str) -> None:
+    setting, name = key.split("/")
+    assert_exact(
+        stored_settings(f"settings/{setting}/lockstep/{name}/"),
+        reference.setting_lockstep_record(key),
+    )
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTING_REGULARIZERS))
+def test_each_regularizer_on_each_settings_network_matches_the_script(
+    setting: str,
+) -> None:
+    expected = stored_settings(f"settings/{setting}/regularizer/")
+    assert len(expected) == 2 * (len(reference.REGULARIZERS) - 1)
+    record = reference.setting_regularizer_record(
+        setting,
+        reference.tiny_network(setting),
+    )
+    assert_exact(expected, {k: v for k, v in record.items() if k in expected})
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{setting}/{name}"
+        for setting, variants in reference.SETTING_REGULARIZERS.items()
+        for name in variants
+    ],
+)
+def test_each_variants_full_network_at_each_setting_matches_the_script(
+    key: str,
+) -> None:
+    setting, name = key.split("/")
+    expected = {
+        k: v
+        for k, v in stored_settings(f"settings/{key}/").items()
+        if k.rsplit("/", 1)[-1] in {"draws", "train", "eval"}
+    }
+    assert len(expected) == 3
+    assert_exact(
+        expected,
+        vision.setting_record(
+            setting,
+            reference.SETTING_REGULARIZERS[setting][name],
+            key=key,
+        ),
+    )
+
+
+def test_the_fmnist_loader_matches_the_script(tmp_path: Path) -> None:
+    assert_exact(
+        stored_settings("settings/mobilenetv2-fmnist/loader/"),
+        vision.setting_loader_record(tmp_path, "mobilenetv2-fmnist"),
+    )
+
+
+def test_the_vgg_orthogonal_term_is_zero_as_the_script_computes_it() -> None:
+    key = "settings/vgg16bn-cifar100/regularizer/orthogonal_reg/value"
+    assert stored_settings(key)[key].tolist() == [0.0] * len(reference.PROBE_EPOCHS)
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_captured_goldens_fit_the_size_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = "vgg16bn-cifar100/confidence_penalty"
+    loss = "settings/vgg16bn-cifar100/lockstep/confidence_penalty/loss"
+    expected = stored_settings(loss)
+    bumped = expected[loss].clone()
+    bumped[1] = torch.nextafter(bumped[1], torch.tensor(torch.inf))
+    port = reference.setting_lockstep_record(key)
+    assert mismatches({loss: bumped}, {loss: port[loss]}) == [f"{loss}: 1/2 differ"]
+
+
 class _Seen:
     """A regularizer that keeps what each call handed it."""
 
@@ -137,6 +249,30 @@ def test_the_port_record_joins_every_part_the_golden_holds(
     )
     monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
     assert_exact(golden, reference.port_record())
+
+
+def test_the_settings_record_joins_each_settings_recipe_terms_and_locksteps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = {
+        k: v
+        for k, v in stored_settings("").items()
+        if k.split("/")[2] in {"schedule", "optimizer", "setting", "lockstep"}
+    }
+    monkeypatch.setattr(
+        reference,
+        "setting_lockstep_record",
+        StoredPart(golden, "settings/{}/lockstep/{}/"),
+    )
+    monkeypatch.setattr(reference, "tiny_network", nn.Identity)
+    monkeypatch.setattr(reference, "setting_regularizer_record", _no_terms)
+    assert_exact(golden, reference.settings_record())
+
+
+def _no_terms(setting: str, model: nn.Module) -> dict[str, Tensor]:
+    """Stand in for a setting's regularizer terms, tested above, with none."""
+    del setting, model
+    return {}
 
 
 if __name__ == "__main__":

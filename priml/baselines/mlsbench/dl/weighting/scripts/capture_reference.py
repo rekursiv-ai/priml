@@ -15,7 +15,12 @@ of CIFAR-100's label layout (and of the real training split, when
 epochs, the optimizer, ResNet-32's
 initial state and forward, where the generator stands after building it, every
 pixel the long-tailed loaders produce, and every parameter after each update of
-a short run per weighting. Any mismatch is printed and the exit code is 1;
+a short run per weighting. At the ``resnet32-cifar10lt`` and
+``vgg16bn-cifar100lt`` settings it compares, per weighting, the full network's
+initial state, the setting's counts, weights and kept positions, the rates,
+the optimizer, the generator's position and the forwards; every pixel of the
+long-tailed CIFAR-10 loader; and for VGG every parameter after two updates of
+the shallowest VGG the script's own table builds. Any mismatch is printed and the exit code is 1;
 otherwise the values the default test replays are written under ``--out``.
 
 The script is imported from the clone, not vendored. Nothing runs on a GPU.
@@ -29,7 +34,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import tempfile
@@ -43,7 +48,13 @@ from priml.baselines.mlsbench.dl.weighting import reference, upstream
 from priml.baselines.mlsbench.dl.weighting.data import long_tail_indices
 from priml.baselines.mlsbench.dl.weighting.experiments import exp000
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches
+from priml.testing.golden import mismatches, rng_fingerprint
+
+
+if TYPE_CHECKING:
+    from torch import Tensor
+
+    from priml.baselines.mlsbench.dl.vision.upstream import Lockstep
 
 
 def main() -> int:
@@ -66,7 +77,19 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v
+                for k, v in captured.record.items()
+                if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v for k, v in captured.record.items() if k.startswith("settings/")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -116,7 +139,88 @@ def capture(root: Path, scratch: Path, *, cifar100: Path | None) -> vision.Captu
     )
     if cifar100 is not None:
         report += compare_real(pristine, cifar100)
-    return vision.Captured(record=record, sites={}, report=report)
+    settings, settings_report = capture_settings(scripts, scratch)
+    return vision.Captured(
+        record=record | settings,
+        sites={},
+        report=report + settings_report,
+    )
+
+
+def capture_settings(
+    scripts: dict[str, upstream.Script],
+    scratch: Path,
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Compare every weighting at the task's other settings with its script.
+
+    Args:
+      scripts: Each variant's script, keyed as :func:`upstream.variants`.
+      scratch: Directory the CIFAR-10 loader's split goes to.
+
+    Returns:
+      record: The scripts' values, keyed as :func:`reference.settings_record`,
+        and each loader setting's decoded indices.
+      report: One line per mismatch.
+
+    """
+    record: dict[str, Tensor] = {}
+    report: list[str] = []
+    lockstep: dict[str, Lockstep] = {}
+    port: dict[str, Tensor] = {}
+    with vision_upstream.hidden_accelerators():
+        for name, setting in reference.SETTINGS.items():
+            traces, values, steps = upstream.upstream_setting(scripts, name)
+            record |= values
+            lockstep |= steps
+            _, indices = reference.setting_counts_record(name)
+            for variant, trace in traces.items():
+                with vision.seeded(vision.SEED), host_agnostic_numerics():
+                    ours = vision.full_step(setting.experiments[variant]).model
+                    draws = rng_fingerprint()
+                report += [
+                    f"settings/{name}/{variant}/state: {line}"
+                    for line in capture_reference.compare_states(
+                        trace.main.state,
+                        ours.state_dict(),
+                    )
+                ]
+                report += [
+                    f"settings/{name}/{variant}/{line}"
+                    for line in mismatches(
+                        {"indices": trace.indices, "full/draws": trace.main.draws},
+                        {"indices": indices, "full/draws": draws},
+                    )
+                ]
+            if setting.loader:
+                uniform = setting.experiments["uniform"]
+                theirs = upstream.upstream_batches(
+                    scripts["uniform"],
+                    setting,
+                    imbalance_ratio=reference.SPLIT_RATIO_10,
+                )
+                ours_batches = reference.loader_batches(
+                    scratch,
+                    uniform,
+                    imbalance_ratio=reference.SPLIT_RATIO_10,
+                )
+                key = f"settings/{name}/loader/index"
+                dataset = uniform().dataset
+                record[key] = reference.decode_indices(theirs[0], dataset)[
+                    "loader/index"
+                ]
+                port[key] = reference.decode_indices(ours_batches[0], dataset)[
+                    "loader/index"
+                ]
+                report += [
+                    f"settings/{name}/{line}"
+                    for line in capture_reference.compare_loaders(theirs, ours_batches)
+                ]
+    report += mismatches(record, reference.settings_record() | port)
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.setting_lockstep_record,
+    )
+    return record, report
 
 
 def compare_full_size(script: upstream.Script, trace: upstream.Trace) -> list[str]:

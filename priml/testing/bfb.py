@@ -1146,6 +1146,18 @@ def _op_name(func: OpOverload[..., object]) -> str:
     return func.name().split("::")[-1].split(".")[0]
 
 
+# An exact op that scales an operand still upcasts; :func:`_scales_operand` decides that
+# per call, since it reads the arguments.
+@cache
+def _passes_through(func: OpOverload[..., object]) -> bool:
+    """Whether ``func`` runs as called: a collective, a view, or an exact op."""
+    return (
+        func.namespace in _COLLECTIVE_NAMESPACES
+        or _is_view(func)
+        or (func.namespace == "aten" and _op_name(func) in _EXACT_F32_OPS)
+    )
+
+
 # A view moves no bytes, so it is exact, and its result must alias its input: upcast,
 # it returns a float64 copy narrowed back, and every write through it lands on that
 # copy. ``x[:, :n]`` over a whole dimension issues ``alias``, not ``slice``, so a
@@ -1438,18 +1450,7 @@ class _Float64Compute(TorchDispatchMode):
         kwargs: dict[str, object],
     ) -> object:
         """Upcast, run, and narrow one op; see the class docstring."""
-        if func.namespace in _COLLECTIVE_NAMESPACES:
-            return func(*args, **kwargs)
-        exact = _is_view(func) or (
-            func.namespace == "aten"
-            and _op_name(func) in _EXACT_F32_OPS
-            and not _scales_operand(
-                func,
-                args,
-                kwargs,
-            )
-        )
-        if exact:
+        if _passes_through(func) and not _scales_operand(func, args, kwargs):
             return func(*args, **kwargs)
         input_tensors: list[Tensor] = []
         for value in (*args, *kwargs.values()):

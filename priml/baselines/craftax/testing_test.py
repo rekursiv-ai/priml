@@ -18,7 +18,6 @@ import torch
 
 from priml.baselines.craftax import testing
 from priml.baselines.craftax.experiments import exp000, exp009
-from priml.baselines.craftax.game.jit import platform_key
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.model import (
     MinGRUPolicy,
@@ -71,36 +70,32 @@ def test_fake_env_buffers_are_as_wide_as_the_env_and_the_policy_read() -> None:
         testing.multi_hot_embedding(MinGRUPolicy.Config()).observation_size
     )
     assert env.action_mask.shape == (2, ATN_DIM)
+    assert env.action_mask.dtype == torch.uint8
 
 
-def test_assert_golden_passes_a_matching_host_golden_and_fails_a_changed_one(
+def test_assert_golden_passes_a_matching_golden_and_fails_a_changed_one(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     test_file = _golden_dir(tmp_path, minted=True)
     _set_overwrite(monkeypatch, overwrite=False)
-    _assert_golden_without_skip(test_file=test_file, lines=["value 1"])
-    with pytest.raises(AssertionError, match="probe_host changed"):
-        _assert_golden_without_skip(test_file=test_file, lines=["value 2"])
+    testing.assert_golden(test_file=test_file, name="probe", lines=["value 1"])
+    with pytest.raises(AssertionError, match="probe changed"):
+        testing.assert_golden(test_file=test_file, name="probe", lines=["value 2"])
 
 
-def test_assert_golden_skips_a_host_without_its_golden(
+def test_assert_golden_fails_without_its_golden_on_any_host(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     test_file = _golden_dir(tmp_path, minted=False)
     _set_overwrite(monkeypatch, overwrite=False)
-    with pytest.raises(pytest.skip.Exception, match="no probe_host golden"):
-        testing.assert_golden(
-            test_file=test_file,
-            name="probe",
-            lines=["value 1"],
-            host="host",
-        )
+    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+        testing.assert_golden(test_file=test_file, name="probe", lines=["value 1"])
 
 
 @pytest.mark.parametrize("minted", [False, True])
-def test_golden_overwrite_writes_the_host_golden(
+def test_golden_overwrite_writes_the_golden(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     minted: bool,
@@ -114,8 +109,12 @@ def test_golden_overwrite_writes_the_host_golden(
         else pytest.raises(AssertionError, match="Missing golden regenerated")
     )
     with outcome:
-        _assert_golden_without_skip(test_file=test_file, lines=["value 2", "value 3"])
-    golden = tmp_path / "testdata" / "probe_host.txt"
+        testing.assert_golden(
+            test_file=test_file,
+            name="probe",
+            lines=["value 2", "value 3"],
+        )
+    golden = tmp_path / "testdata" / "probe.txt"
     assert golden.read_text(encoding="utf-8") == "value 2\nvalue 3\n"
 
 
@@ -123,7 +122,7 @@ def test_a_changed_golden_fails_with_its_name_and_unified_diff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A golden with no host is read from ``<name>.txt``; the message diffs it against now."""
+    """A golden is read from ``<name>.txt``; the message diffs it against now."""
     testdata = tmp_path / "testdata"
     testdata.mkdir()
     (testdata / "probe.txt").write_text("value 1\nvalue 2\n", encoding="utf-8")
@@ -136,8 +135,6 @@ def test_a_changed_golden_fails_with_its_name_and_unified_diff(
         )
     except AssertionError as changed:
         message = str(changed)
-    except pytest.skip.Exception as skip:
-        pytest.fail(f"assert_golden skipped: {skip}")
     else:
         pytest.fail("a changed golden passed")
     assert message == (
@@ -295,32 +292,21 @@ def test_config_deltas_name_a_changed_field_and_a_swapped_slot_once() -> None:
     assert testing.config_fields(child)["embedding"] is BoardEncoder.Config
 
 
-@pytest.mark.parametrize(
-    ("host", "file_name"),
-    [("", "probe.txt"), ("h", "probe_h.txt")],
-)
-def test_a_golden_is_named_for_its_host_in_testdata_beside_its_test(
+def test_a_golden_is_named_for_itself_in_testdata_beside_its_test(
     tmp_path: Path,
-    host: str,
-    file_name: str,
 ) -> None:
     # Compared as a path, not found on disk: macOS matches `TESTDATA` to `testdata`.
-    path = _golden_path(
-        test_file=str(tmp_path / "probe_test.py"),
-        name="probe",
-        host=host,
-    )
-    assert path == tmp_path.resolve() / "testdata" / file_name
+    path = _golden_path(test_file=str(tmp_path / "probe_test.py"), name="probe")
+    assert path == tmp_path.resolve() / "testdata" / "probe.txt"
 
 
-def test_a_golden_for_another_host_does_not_satisfy_this_host(
+def test_read_golden_returns_the_golden_assert_golden_compares(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     test_file = _golden_dir(tmp_path, minted=True)
     _set_overwrite(monkeypatch, overwrite=False)
-    with pytest.raises(pytest.skip.Exception, match="no probe_other golden"):
-        testing.require_golden(test_file=test_file, name="probe", host="other")
+    assert testing.read_golden(test_file=test_file, name="probe") == ["value 1"]
 
 
 def _one_id_per_field(config: MinGRUPolicy.Config) -> MultiHotEmbedding.Config:
@@ -415,44 +401,19 @@ def test_fill_portable_overwrites_every_parameter_whatever_the_init(
         assert torch.equal(filled, twin), name
 
 
-@pytest.mark.parametrize(("minted", "overwrite"), [(True, False), (False, True)])
-def test_require_golden_runs_on_with_a_golden_or_to_mint_one(
+@pytest.mark.parametrize("available", [False, True])
+def test_require_cuda_skips_only_without_a_cuda_device(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    minted: bool,
-    overwrite: bool,
+    available: bool,
 ) -> None:
-    test_file = _golden_dir(tmp_path, minted=minted)
-    _set_overwrite(monkeypatch, overwrite=overwrite)
-    # A skip here would report this test skipped, not failed.
-    try:
-        testing.require_golden(test_file=test_file, name="probe", host="host")
-    except pytest.skip.Exception as skip:
-        pytest.fail(f"require_golden skipped: {skip}")
-
-
-def test_require_golden_skips_before_the_work_without_a_golden(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    test_file = _golden_dir(tmp_path, minted=False)
-    _set_overwrite(monkeypatch, overwrite=False)
-    with pytest.raises(pytest.skip.Exception, match="no probe_host golden"):
-        testing.require_golden(test_file=test_file, name="probe", host="host")
-
-
-def test_gpu_key_skips_without_a_cuda_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises(pytest.skip.Exception, match="needs a CUDA device"):
-        testing.gpu_key()
-
-
-def test_gpu_key_names_the_device_model_then_the_platform(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_name", lambda: " NVIDIA H200 (SXM) ")
-    assert testing.gpu_key() == f"nvidia-h200-sxm_{platform_key()}"
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+    outcome = (
+        nullcontext()
+        if available
+        else pytest.raises(pytest.skip.Exception, match="needs a CUDA device")
+    )
+    with outcome:
+        testing.require_cuda()
 
 
 @pytest.mark.parametrize(
@@ -523,11 +484,11 @@ def _on_a_thread(replay: Callable[[StepGraph], None], graph: StepGraph) -> None:
 
 
 def _golden_dir(tmp_path: Path, *, minted: bool) -> str:
-    """Return a test file's path beside ``testdata/``, holding ``probe_host`` if minted."""
+    """Return a test file's path beside ``testdata/``, holding ``probe`` if minted."""
     testdata = tmp_path / "testdata"
     testdata.mkdir()
     if minted:
-        (testdata / "probe_host.txt").write_text("value 1\n", encoding="utf-8")
+        (testdata / "probe.txt").write_text("value 1\n", encoding="utf-8")
     return str(tmp_path / "probe_test.py")
 
 
@@ -538,23 +499,6 @@ def _set_overwrite(
 ) -> None:
     """Make ``--regenerate-golden`` read as ``overwrite`` for this test."""
     regenerate.override(monkeypatch, golden=overwrite)
-
-
-def _assert_golden_without_skip(
-    *,
-    test_file: str,
-    lines: list[str],
-) -> None:
-    """Run ``assert_golden`` on ``probe_host``; a skip would hide a broken golden."""
-    try:
-        testing.assert_golden(
-            test_file=test_file,
-            name="probe",
-            lines=lines,
-            host="host",
-        )
-    except pytest.skip.Exception as skip:
-        pytest.fail(f"assert_golden skipped: {skip}")
 
 
 if __name__ == "__main__":

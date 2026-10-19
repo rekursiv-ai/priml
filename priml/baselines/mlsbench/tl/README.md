@@ -1,6 +1,6 @@
 # MLS-Bench `TL` area: TODO
 
-TODO: port the 8 in-scope tasks below as native priml
+4 of 8 ported (linked). TODO: port the other 4 in-scope tasks below as native priml
 baselines, one subpackage each, the way [`../dl/`](../dl/) does: the
 task's editable function becomes a config slot, `exp000` is the pristine
 recipe, each published baseline is a fork of that slot, and
@@ -15,7 +15,7 @@ package share one subpackage of common code, as
 | `security-adversarial-attack-sparse-l0` | Harry24k/adversarial-attacks-pytorch | yes |
 | `security-adversarial-attack-white-box-linf` | Harry24k/adversarial-attacks-pytorch | yes |
 | `security-adversarial-training` | Harry24k/adversarial-attacks-pytorch | yes |
-| `security-backdoor-defense` | custom | yes |
-| `security-machine-unlearning` | custom | yes |
-| `security-membership-inference-defense` | custom | yes |
-| `security-poison-robust-learning` | custom | yes |
+| [`security-backdoor-defense`](backdoor_defense/README.md) | custom | yes; `defense` |
+| [`security-machine-unlearning`](machine_unlearning/README.md) | custom | yes; `method` |
+| [`security-membership-inference-defense`](membership_inference_defense/README.md) | custom | yes; `step.loss` |
+| [`security-poison-robust-learning`](poison_robust_learning/README.md) | custom | yes; `step.loss` |

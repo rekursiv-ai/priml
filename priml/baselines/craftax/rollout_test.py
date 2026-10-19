@@ -77,10 +77,9 @@ from priml.baselines.craftax.testing import (
     digest,
     env_digests,
     fill_portable,
-    gpu_key,
     host_agnostic_pipeline,
     portable_uniform,
-    require_golden,
+    require_cuda,
     smoke_feature,
     tiny_exp000_step,
     tiny_policy,
@@ -502,38 +501,40 @@ def test_the_interpreted_sampler_draws_as_the_torch_sampler(
     """The kernel's streams, masked CDF and snap to the last legal action.
 
     Agent 0's last action is masked, so a fall-through snaps; 5 agents leave
-    a block of 8 three dead lanes.
+    a block of 8 three dead lanes. The agents start at draws 0 through 4, so
+    one launch reads each stream at a different offset and advances it.
     """
     monkeypatch.setattr(rollout_module, "_require_cuda", _accept_any_device)
     decoded, mask, draws = _portable_draw_inputs(5)
+    assert draws.unique().numel() == 5
     config = PhiloxSampler.Config()
     config.block = 8
     config.num_warps = 1
     kernel_draws, torch_draws = draws.clone(), draws.clone()
-    for _ in range(2):
-        # The logsumexp's ``where`` evaluates the rescale it discards, whose
-        # ``exp`` overflows to inf on a GPU too; numpy would otherwise raise.
-        with np.errstate(over="ignore"):
-            kernel = config.make()(
-                decoded,
-                mask,
-                kernel_draws,
-                buffer=3,
-                dtype=torch.float32,
-            )
-        reference = TorchPhiloxSampler.Config().make()(
+    # The logsumexp's ``where`` evaluates the rescale it discards, whose
+    # ``exp`` overflows to inf on a GPU too; numpy would otherwise raise.
+    with np.errstate(over="ignore"):
+        kernel = config.make()(
             decoded,
             mask,
-            torch_draws,
+            kernel_draws,
             buffer=3,
             dtype=torch.float32,
         )
-        assert torch.equal(kernel.actions, reference.actions)
-        assert torch.equal(kernel.values, reference.values)
-        assert torch.equal(kernel_draws, torch_draws)
-        # The one-pass logsumexp and torch's differ in their last bits, as the
-        # class docstrings say; fp32's default tolerance is a few ulp.
-        torch.testing.assert_close(kernel.logprobs, reference.logprobs)
+    reference = TorchPhiloxSampler.Config().make()(
+        decoded,
+        mask,
+        torch_draws,
+        buffer=3,
+        dtype=torch.float32,
+    )
+    assert torch.equal(kernel.actions, reference.actions)
+    assert torch.equal(kernel.values, reference.values)
+    assert torch.equal(kernel_draws, draws + 1)
+    assert torch.equal(kernel_draws, torch_draws)
+    # The one-pass logsumexp and torch's differ in their last bits, as the
+    # class docstrings say; fp32's default tolerance is a few ulp.
+    torch.testing.assert_close(kernel.logprobs, reference.logprobs)
 
 
 @pytest.mark.usefixtures("interpreted_kernels")
@@ -1028,15 +1029,9 @@ def test_exp000s_first_two_rollouts_match_their_golden() -> None:
     storage, in captured step graphs that the env's ``nogil`` loop launches,
     for two horizons of 8.
     """
-    host = gpu_key()
-    require_golden(test_file=__file__, name="rollout_exp000_tiny", host=host)
+    require_cuda()
     lines = _rollout_entries(tiny_exp000_step(), device=torch.device("cuda"))
-    assert_golden(
-        test_file=__file__,
-        name="rollout_exp000_tiny",
-        lines=lines,
-        host=host,
-    )
+    assert_golden(test_file=__file__, name="rollout_exp000_tiny", lines=lines)
 
 
 def _rollout_entries(

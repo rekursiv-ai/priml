@@ -42,17 +42,17 @@ from priml.baselines.mlsbench.dl.vision.upstream import (
     Upstream,
 )
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, pack
+from priml.testing.golden import mismatches, pack, rng_fingerprint
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from torch import Tensor
+    from torch import Tensor, nn
 
     import torch
 
-    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
+    from priml.baselines.mlsbench.dl.vision.reference import VisionLoop
 else:
     from wrapt import lazy_import
 
@@ -126,17 +126,198 @@ def capture(root: Path, scratch: Path) -> reference.Captured:
         batches = upstream.upstream_batches(pristine)
         record = upstream.upstream_record(pristine, trace, batches[0])
         sites = upstream.upstream_sites(pristine)
+        fmnist_sites = upstream.upstream_fmnist_sites(pristine)
         report = compare_wiring(trace) + compare_full_size(pristine, trace)
+        report += compare_tiny_settings(pristine)
+        settings, settings_report = capture_settings(pristine, scratch)
     port = reference.port_record(scratch)
     port_sites = reference.draw_sites(scratch)
+    port_fmnist_sites = reference.fmnist_draw_sites(scratch)
     report += mismatches(record, port)
     report += compare_loaders(batches, reference.loader_batches(scratch))
     report += check_sites(sites, port_sites)
+    report += [
+        f"fmnist {line}" for line in check_sites(fmnist_sites, port_fmnist_sites)
+    ]
+    report += settings_report
     return reference.Captured(
-        record=record,
-        sites={"reference": sites, "port": port_sites},
+        record=record | settings,
+        sites={
+            "reference": sites,
+            "port": port_sites,
+            "reference-fmnist": fmnist_sites,
+            "port-fmnist": port_fmnist_sites,
+        },
         report=report,
     )
+
+
+def capture_settings(
+    script: Upstream,
+    scratch: Path,
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Compare every one of :data:`reference.SETTINGS` with the reference.
+
+    Args:
+      script: The pristine reference script.
+      scratch: Directory the loader splits go to.
+
+    Returns:
+      record: The reference's values, keyed as :func:`reference.settings_record`.
+      report: One line per mismatch: the full-size state of each network, its
+        forwards and draws, the loss wiring, and every loader pixel.
+
+    """
+    traces, record = upstream.upstream_settings(script)
+    report = mismatches(record, reference.settings_record(scratch))
+    for name in reference.CAPTURED:
+        setting = reference.SETTINGS[name]
+        trace = traces[name]
+        report += compare_wiring(trace, classes=setting.classes)
+        report += compare_setting(trace, name)
+        report += [
+            f"settings/{name}/{line}"
+            for line in compare_loaders(
+                upstream.upstream_batches(script, dataset=setting.dataset),
+                reference.setting_batches(scratch, name),
+            )
+        ]
+    return record, report
+
+
+def compare_tiny_settings(script: Upstream) -> list[str]:
+    """Compare each setting's shallowest network, built and run, with the reference's.
+
+    Args:
+      script: The pristine reference script.
+
+    Returns:
+      report: One line per differing tensor of the state, in registration
+        order, the generator after the build, or a forward.
+
+    """
+    report: list[str] = []
+    media = reference.fixed_media(reference.STEPS)
+    for name in ("vgg16bn-cifar100", "mobilenetv2-fmnist"):
+        setting = reference.SETTINGS[name]
+        with reference.seeded(reference.SEED), host_agnostic_numerics():
+            theirs = upstream.tiny_model(script, setting.arch, reference.CLASSES)
+            script.initialize_weights(theirs)
+            want = {"draws": rng_fingerprint()}
+        with reference.seeded(reference.SEED), host_agnostic_numerics():
+            ours = reference.tiny_step(
+                setting.experiment,
+                blocks=(1, 1, 1),
+                classes=reference.CLASSES,
+                epochs=reference.EPOCHS,
+            ).model
+            got = {"draws": rng_fingerprint()}
+        lines = compare_states(theirs.state_dict(), ours.state_dict())
+        for mode in ("train", "eval"):
+            for model, record in ((theirs, want), (ours, got)):
+                model.train(mode == "train")
+                with reference.seeded(reference.SEED), host_agnostic_numerics():
+                    record[mode] = reference.logits_of(model, media).detach()
+        lines += mismatches(want, got)
+        report += [f"tiny/{name}: {line}" for line in lines]
+    return report
+
+
+def compare_task_settings(
+    scripts: Mapping[str, Upstream],
+    experiments: Mapping[str, Mapping[str, Callable[[], VisionLoop]]],
+    scratch: Path,
+    *,
+    pristine: str,
+    build: Callable[[Upstream, str], nn.Module] = upstream.initialized_tiny,
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Compare every variant of a task at each setting with the variant's script.
+
+    Args:
+      scripts: Each variant's script, pristine or edited.
+      experiments: As :func:`reference.task_settings_record`; the variant
+        names key ``scripts``.
+      scratch: Directory the loader splits go to.
+      pristine: The variant whose script runs the loaders.
+      build: As :func:`upstream.upstream_setting`.
+
+    Returns:
+      record: The scripts' values, keyed as :func:`reference.task_settings_record`.
+      report: One line per mismatch: each full network's state, its forwards
+        and draws, and every pixel of each non-CIFAR-100 setting's loaders.
+
+    """
+    record: dict[str, Tensor] = {}
+    report: list[str] = []
+    with upstream.hidden_accelerators():
+        for setting, variants in experiments.items():
+            for variant, factory in variants.items():
+                key = f"{setting}/{variant}"
+                trace, network = upstream.upstream_setting(
+                    scripts[variant],
+                    setting,
+                    key=key,
+                    build=build,
+                )
+                record |= network
+                report += compare_setting(trace, setting, factory, key=key)
+            spec = reference.SETTINGS[setting]
+            if spec.dataset == "cifar100":
+                continue
+            batches = upstream.upstream_batches(
+                scripts[pristine],
+                dataset=spec.dataset,
+            )
+            decoded = reference.decode_batches(
+                batches[0],
+                config=spec.experiment().dataset,
+                source=spec.split()[0],
+            )
+            record |= {f"settings/{setting}/{k}": v for k, v in decoded.items()}
+            report += [
+                f"settings/{setting}/{line}"
+                for line in compare_loaders(
+                    batches,
+                    reference.setting_batches(scratch, setting),
+                )
+            ]
+    report += mismatches(record, reference.task_settings_record(experiments, scratch))
+    return record, report
+
+
+def compare_setting(
+    trace: MainTrace,
+    name: str,
+    factory: Callable[[], VisionLoop] | None = None,
+    *,
+    key: str | None = None,
+) -> list[str]:
+    """Compare a setting's full network, as ``main`` initialized it, with the port's.
+
+    The full-size network is compared here, live, and never stored: its
+    golden would be a slow test. The stored values are the shallowest network's.
+
+    Args:
+      trace: The reference's ``main`` at the setting, after its own seeding.
+      name: A key of :data:`reference.SETTINGS`.
+      factory: The port's experiment; the setting's pristine one by default.
+      key: Names the report's lines; ``name`` by default.
+
+    Returns:
+      report: One line per tensor that differs, in registration order, then
+        one if the generator stands elsewhere after the build.
+
+    """
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        ours = reference.full_step(factory or reference.SETTINGS[name].experiment).model
+        draws = rng_fingerprint()
+    return [
+        f"settings/{key or name}/state: {line}"
+        for line in compare_states(trace.state, ours.state_dict())
+    ] + [
+        f"settings/{key or name}/full/{line}"
+        for line in mismatches({"draws": trace.draws}, {"draws": draws})
+    ]
 
 
 def write_goldens(out: Path, captured: reference.Captured) -> None:
@@ -158,12 +339,23 @@ def write_goldens(out: Path, captured: reference.Captured) -> None:
         out,
         {
             "reference.pt": {
-                k: v for k, v in record.items() if not k.startswith("transform/")
+                k: v
+                for k, v in record.items()
+                if not k.startswith(("transform/", "settings/"))
             },
             "reference_train_pipeline.pt": {
                 "transform/train": record["transform/train"],
             },
             "reference_test_pipeline.pt": {"transform/test": record["transform/test"]},
+            "reference_settings.pt": {
+                k: v for k, v in record.items() if k.startswith("settings/")
+            },
+            "reference_fmnist_train_pipeline.pt": {
+                "transform/fmnist/train": record["transform/fmnist/train"],
+            },
+            "reference_fmnist_test_pipeline.pt": {
+                "transform/fmnist/test": record["transform/fmnist/test"],
+            },
         },
     )
     lines = [
@@ -227,19 +419,20 @@ def check_sites(
     ]
 
 
-def compare_wiring(trace: MainTrace) -> list[str]:
+def compare_wiring(trace: MainTrace, *, classes: int = 100) -> list[str]:
     """Check what the reference's ``main`` told its loss in every epoch.
 
     Args:
       trace: A run of the reference's ``main``.
+      classes: The setting's class count.
 
     Returns:
       report: A line if any epoch's configuration is not zero-based epoch
-        ``e`` of 200 with 100 classes.
+        ``e`` of 200 with ``classes`` classes.
 
     """
     expected = [
-        {"num_classes": 100, "epoch": epoch, "total_epochs": 200}
+        {"num_classes": classes, "epoch": epoch, "total_epochs": 200}
         for epoch in range(200)
     ]
     return [] if trace.configs == expected else ["main: loss configuration differs"]
@@ -248,7 +441,7 @@ def compare_wiring(trace: MainTrace) -> list[str]:
 def compare_full_size(
     script: Upstream,
     trace: MainTrace,
-    factory: Callable[[], VisionTrainLoop] = exp000,
+    factory: Callable[[], VisionLoop] = exp000,
 ) -> list[str]:
     """Compare ResNet-56's initial state and forward with the reference's.
 

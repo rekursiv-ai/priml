@@ -11,8 +11,13 @@ inputs under the same pins, and compares with exact equality: every pool on
 fixed features with its gradients, the learning rate of all 200 epochs, the
 optimizer, the reported accuracy, ResNet-56's initial state and forward, where
 the generator stands after building it with each pool, every pixel the loaders
-produce, and every parameter after each update of a short run per pool. Any
-mismatch is printed and the exit code is 1; otherwise the values the default
+produce, and every parameter after each update of a short run per pool. At
+the ``vgg16bn-cifar100`` and ``mobilenetv2-fmnist`` settings it compares each
+pool's fork: two updates of the setting's shallowest network with every
+parameter after each, the full network's initial state and draws, the
+shallowest network's forwards through the pool, and the Fashion-MNIST loaders' every pixel. Any
+mismatch is
+printed and the exit code is 1; otherwise the values the default
 test replays are written under ``--out``.
 
 The script is imported from the clone, not vendored. Nothing runs on a GPU.
@@ -26,7 +31,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import tempfile
@@ -38,6 +43,10 @@ from priml.baselines.mlsbench.dl.vision import (
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches
+
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 def main() -> int:
@@ -60,7 +69,18 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    record = captured.record
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v for k, v in record.items() if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v for k, v in record.items() if k.startswith("settings/")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -88,13 +108,42 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         record = upstream.upstream_record(scripts, traces, lockstep)
         batches = vision_upstream.upstream_batches(scripts["avg"])
         report = capture_reference.compare_full_size(scripts["avg"], traces["avg"])
+        # Every setting's script runs the same SGD flags, so the resnet56
+        # trace's optimizer settings are each setting's.
+        setting_lockstep = {
+            f"{setting}/{name}": upstream.upstream_lockstep(
+                script,
+                name,
+                traces["avg"],
+                arch=vision.SETTINGS[setting].arch,
+                prefix=f"settings/{setting}/",
+            )
+            for setting in reference.SETTING_POOLS
+            for name, script in scripts.items()
+        }
     report += mismatches(record, reference.port_record())
     report += capture_reference.compare_lockstep(
         lockstep,
         run=reference.lockstep_record,
     )
+    lockstep_values: dict[str, Tensor] = {}
+    for values, _ in setting_lockstep.values():
+        lockstep_values |= values
+    report += mismatches(lockstep_values, reference.settings_lockstep_record())
+    report += capture_reference.compare_lockstep(
+        setting_lockstep,
+        run=reference.setting_lockstep_record,
+    )
+    record |= lockstep_values
     report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
-    return vision.Captured(record=record, sites={}, report=report)
+    settings, settings_report = capture_reference.compare_task_settings(
+        scripts,
+        reference.SETTING_POOLS,
+        scratch,
+        pristine="avg",
+    )
+    report += settings_report
+    return vision.Captured(record=record | settings, sites={}, report=report)
 
 
 class _Flags(Protocol):

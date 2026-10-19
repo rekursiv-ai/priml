@@ -22,7 +22,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import SETTINGS_SCRIPT
 
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ REGULARIZATION: Final = (
 """The two lines of the stand-in's regularizer, which the baselines' edits replace."""
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    SETTINGS_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         REGULARIZATION,
@@ -57,9 +57,9 @@ SCRIPT: Final = (
         '    parser.add_argument("--seed", type=int)\n',
         '    parser.add_argument("--seed", type=int)\n'
         '    parser.add_argument("--data-root")\n'
-        '    parser.add_argument("--batch-size", type=int)\n'
-        '    parser.add_argument("--lr", type=float)\n'
-        '    parser.add_argument("--momentum", type=float)\n'
+        '    parser.add_argument("--batch-size", type=int, default=128)\n'
+        '    parser.add_argument("--lr", type=float, default=0.1)\n'
+        '    parser.add_argument("--momentum", type=float, default=0.9)\n'
         '    parser.add_argument("--weight-decay", type=float, default=0)\n'
         '    parser.add_argument("--output-dir")\n',
     )
@@ -79,21 +79,35 @@ SCRIPT: Final = (
         "evaluate(model, test_loader, None, config)",
         "evaluate(model, test_loader, criterion, None)",
     )
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = [64, "M"]
+
+
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+"""
 )
-"""A stand-in for the ``dl-regularization`` script."""
+"""A stand-in for the ``dl-regularization`` script.
+
+Its ``build_model`` builds the stand-in ResNet for every ``--arch``; the
+architecture tables exist so the shallowest-network build can patch them."""
 
 SETTING: Final = """\
 #!/bin/bash
 cd /workspace
 python pytorch-vision/custom_reg.py \\
-    --arch resnet56 --dataset cifar100 \\
+    --arch ARCH --dataset DATASET \\
     --data-root /data/cifar \\
     --epochs 200 --batch-size 128 \\
     --lr 0.2 --momentum 0.8 --weight-decay 5e-4 \\
     --seed ${SEED:-42} \\
     --output-dir ${OUTPUT_DIR:-./output}
 """
-"""A stand-in launch script; its rate and momentum differ from the port's."""
+"""A stand-in launch script; its rate and momentum differ from the port's.
+
+``ARCH`` and ``DATASET`` name each setting's own."""
 
 BODIES: Final = {
     "dropblock": "torch.tensor(0.0, device=outputs.device)",
@@ -115,7 +129,14 @@ def write_clone(root: Path) -> None:
     script.write_text(SCRIPT)
     setting = root / upstream.SETTING
     setting.parent.mkdir(parents=True)
-    setting.write_text(SETTING)
+    setting.write_text(
+        SETTING.replace("ARCH", "resnet56").replace("DATASET", "cifar100"),
+    )
+    for name, launch in upstream.SETTING_SCRIPTS.items():
+        spec = reference.SETTINGS[name]
+        (root / launch).write_text(
+            SETTING.replace("ARCH", spec.arch).replace("DATASET", spec.dataset),
+        )
     edits = root / upstream.EDITS
     edits.mkdir(parents=True)
     first = SCRIPT[: SCRIPT.index(REGULARIZATION)].count("\n") + 1
@@ -207,6 +228,26 @@ def test_each_regularizer_is_run_at_every_probe_epoch(tmp_path: Path) -> None:
     assert record["regularizer/confidence_penalty/logits_grad"].abs().sum() > 0
 
 
+def test_the_scripts_regularizer_is_called_with_its_own_argument_order() -> None:
+    seen: list[tuple[object, ...]] = []
+
+    def regularizer(*arguments: object) -> torch.Tensor:
+        seen.append(arguments)
+        return torch.zeros(())
+
+    model = torch.nn.Linear(4, 3)
+    media, logits, label = torch.ones(2, 4), torch.zeros(2, 3), torch.tensor([0, 2])
+    config = {"num_classes": 3, "epoch": 1, "total_epochs": 4}
+    upstream._ScriptCall(regularizer)(
+        model,
+        media=media,
+        logits=logits,
+        label=label,
+        config=config,
+    )
+    assert seen == [(model, media, logits, label, config)]
+
+
 @pytest.mark.parametrize("name", ["zero", "confidence_penalty"])
 def test_lockstep_adds_the_term_to_cross_entropy(tmp_path: Path, name: str) -> None:
     root = clone(tmp_path)
@@ -222,6 +263,47 @@ def test_lockstep_adds_the_term_to_cross_entropy(tmp_path: Path, name: str) -> N
     ]
     assert len(states) == reference.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
+
+
+def test_with_epochs_replaces_only_the_horizon() -> None:
+    argv = ["script.py", "--epochs", "200", "--seed", "42"]
+    assert upstream.with_epochs(argv, 2) == [
+        "script.py",
+        "--epochs",
+        "2",
+        "--seed",
+        "42",
+    ]
+    assert argv[2] == "200"
+
+
+def test_a_settings_recipe_is_keyed_under_it_as_its_launch_traced_it(
+    tmp_path: Path,
+) -> None:
+    root = clone(tmp_path)
+    argv = upstream.setting_argv(root, upstream.SETTING_SCRIPTS["vgg16bn-cifar100"])
+    trace = upstream.trace_setting(scripts(root)["zero"], argv)
+    record = upstream.upstream_setting_recipe(trace, "vgg16bn-cifar100", argv)
+    prefix = "settings/vgg16bn-cifar100/"
+    assert set(record) == {
+        f"{prefix}schedule/lr",
+        f"{prefix}optimizer/settings",
+        f"{prefix}setting/batch_size",
+    }
+    assert record[f"{prefix}schedule/lr"].shape == (200,)
+    assert record[f"{prefix}setting/batch_size"].tolist() == [128, 128]
+
+
+def test_each_regularizer_runs_on_a_settings_tiny_network(tmp_path: Path) -> None:
+    variants = scripts(clone(tmp_path))
+    model = upstream.tiny_network(variants["zero"], "vgg16bn")
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    record = upstream.upstream_setting_regularizers(variants, "s", model)
+    assert {k.split("/")[3] for k in record} == set(upstream.EDITED)
+    assert all(k.startswith("settings/s/regularizer/") for k in record)
+    assert record["settings/s/regularizer/orthogonal_reg/parameters_grad"].abs().sum()
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, before[name]), name
 
 
 def test_the_record_holds_every_regularizer_and_the_recipe(tmp_path: Path) -> None:

@@ -13,7 +13,11 @@ their gradients and random draws and one evaluation forward; the learning rate
 of all 200 epochs, the optimizer and the reported accuracy; ResNet-56's initial
 state and its training and evaluation forwards with every block; where the
 generator stands after building each; every pixel the loaders produce; and
-every parameter after each update of a short run per block. Any mismatch is
+every parameter after each update of a short run per block. At the
+``resnet20-cifar10`` and hidden ``resnet110-cifar100`` settings it compares,
+per block, the full network's initial state, generator position and forwards,
+each stochastic-depth block's position, the schedule and optimizer, and the
+CIFAR-10 loaders' every pixel. Any mismatch is
 printed and the exit code is 1; otherwise the values the default test replays
 are written under ``--out``.
 
@@ -31,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
+import functools
 import tempfile
 
 from priml.baselines.mlsbench.dl.residual import reference, upstream
@@ -74,7 +79,19 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v
+                for k, v in captured.record.items()
+                if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v for k, v in captured.record.items() if k.startswith("settings/")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -104,6 +121,9 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         report = capture_reference.compare_full_size(scripts["basic"], traces["basic"])
         for name in upstream.EDITED:
             report += compare_full_network(scripts[name], name, traces[name])
+        settings, settings_report = capture_settings(scripts, scratch)
+    report += settings_report
+    report += mismatches(settings, reference.settings_record(scratch))
     report += mismatches(record, reference.port_record())
     report += capture_reference.compare_lockstep(
         lockstep,
@@ -111,7 +131,70 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     )
     report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
     report += check_branches(record)
-    return vision.Captured(record=record, sites={}, report=report)
+    return vision.Captured(record=record | settings, sites={}, report=report)
+
+
+def capture_settings(
+    scripts: dict[str, vision_upstream.Upstream],
+    scratch: Path,
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Run every variant's ``main`` at each other setting and compare its network.
+
+    Args:
+      scripts: Each variant of the script, keyed as :data:`reference.VARIANTS`.
+      scratch: Directory the loader splits go to.
+
+    Returns:
+      record: The script's values, keyed as :func:`reference.settings_record`.
+      report: One line per tensor that differs: the full initial state, the
+        schedule and optimizer ``main`` used, and every loader pixel.
+
+    """
+    record, report = capture_reference.compare_task_settings(
+        scripts,
+        reference.SETTINGS,
+        scratch,
+        pristine="basic",
+    )
+    for setting, variants in reference.SETTINGS.items():
+        record[f"settings/{setting}/stochastic_depth/positions"] = (
+            upstream.block_positions(scripts["stochastic_depth"], setting)
+        )
+        known = vision.SETTINGS[setting]
+        trace = vision_upstream.trace_main(
+            scripts["basic"],
+            arch=known.arch,
+            dataset=known.dataset,
+            classes=known.classes,
+        )
+        factory = variants["basic"]
+        report += [
+            f"settings/{setting}/{line}"
+            for line in mismatches(
+                _recipe(trace),
+                vision.schedule_record(factory) | vision.optimizer_record(factory),
+            )
+        ]
+        lockstep = {
+            name: upstream.upstream_lockstep(
+                scripts[name],
+                name,
+                trace,
+                classes=known.classes,
+                key=reference.lockstep_key(name, setting=setting),
+            )
+            for name in variants
+        }
+        for values, _ in lockstep.values():
+            record |= values
+        report += [
+            f"settings/{setting}/{line}"
+            for line in capture_reference.compare_lockstep(
+                lockstep,
+                run=functools.partial(reference.lockstep_record, setting=setting),
+            )
+        ]
+    return record, report
 
 
 def check_branches(record: dict[str, Tensor]) -> list[str]:
@@ -201,6 +284,17 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         required=True,
         help="The testdata directory the golden is written to.",
     )
+
+
+def _recipe(trace: vision_upstream.MainTrace) -> dict[str, Tensor]:
+    """Return the rates and optimizer settings ``main`` used, keyed as the port's."""
+    return {
+        "schedule/lr": torch.tensor(trace.rates, dtype=torch.float64),
+        "optimizer/settings": torch.tensor(
+            [trace.settings[name] for name in vision.HYPERPARAMETERS],
+            dtype=torch.float64,
+        ),
+    }
 
 
 if __name__ == "__main__":

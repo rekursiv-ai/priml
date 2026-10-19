@@ -12,6 +12,10 @@ exp000  constant (pristine)
   +-- exp001  cosine annealing
   +-- exp002  5-epoch linear warmup, then cosine
   +-- exp003  one cycle
+  +-- exp004  resnet20-cifar10 setting
+  |     +-- exp005 / exp006 / exp007  cosine / warmup cosine / one cycle
+  +-- exp008  mobilenetv2-fmnist setting (hidden)
+        +-- exp009 / exp010 / exp011  cosine / warmup cosine / one cycle
 ```
 
 ## Run it
@@ -31,5 +35,8 @@ It runs the pristine script and each baseline's edit from the clone, and
 compares with exact equality: every schedule's rate over all 200 epochs, the
 optimizer, ResNet-56's initial state and forward, the generator after the
 build, every loader pixel over two passes, and every parameter after each
-update of a two-update run per schedule. `reference_test.py` replays the
-stored values in the default tier.
+update of a two-update run per schedule. At the other two settings it
+compares each schedule's fork against the script at that setting: all 200
+rates as `main` sets them there, the full network's initial state, forwards
+and draws, and the Fashion-MNIST loaders' every pixel. `reference_test.py`
+replays the stored values in the default tier.

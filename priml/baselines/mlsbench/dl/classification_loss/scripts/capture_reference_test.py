@@ -21,7 +21,10 @@ from priml.baselines.mlsbench.dl.classification_loss.scripts import (
 from priml.baselines.mlsbench.dl.classification_loss.upstream_test import (
     write_clone,
 )
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision,
+    upstream as vision_upstream,
+)
 from priml.baselines.mlsbench.dl.vision.scripts import (
     capture_reference as vision_capture,
 )
@@ -32,6 +35,8 @@ _CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from torch import nn
 
     import pytest
 
@@ -97,13 +102,61 @@ def test_capture_assembles_both_sides_into_one_report(
         return {name: torch.zeros(2)}
 
     monkeypatch.setattr(reference, "lockstep_record", lockstep)
+
+    def setting_lockstep(
+        name: str,
+        *,
+        states: list[dict[str, torch.Tensor]] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if states is not None:
+            states += [{"w": torch.zeros(2)}] * vision.STEPS
+        return {f"settings/{name}": torch.zeros(2)}
+
+    monkeypatch.setattr(reference, "setting_lockstep_record", setting_lockstep)
+    empty: dict[str, torch.Tensor] = {}
+    monkeypatch.setattr(reference, "setting_loss_record", returning(empty))
+    # The stand-in has a ResNet only; each setting's run trains it in place of
+    # the setting's network, which ``tiny_model``'s own tests cover.
+    built: list[str] = []
+
+    def resnet(script: vision_upstream.Upstream, arch: str, classes: int) -> nn.Module:
+        built.append(arch)
+        return script.ResNet(script.BasicBlock, [1, 1, 1], classes)
+
+    monkeypatch.setattr(vision_upstream, "tiny_model", resnet)
+
+    def settings(
+        *_arguments: object,
+        **_keywords: object,
+    ) -> tuple[dict[str, torch.Tensor], list[str]]:
+        return {"settings/x/draws": torch.zeros(2)}, ["settings/x/state: differs"]
+
+    monkeypatch.setattr(vision_capture, "compare_task_settings", settings)
     captured = capture_reference.capture(*clone(tmp_path))
-    assert captured.record.keys() == stored.keys()
+    setting_records = {
+        f"settings/{setting}/{kind}/{name}/{field}"
+        for setting in reference.SETTING_LOSSES
+        for name in reference.LOSSES
+        for kind, field in (
+            ("loss", "value"),
+            ("loss", "grad"),
+            ("lockstep", "loss"),
+            ("lockstep", "logits"),
+            ("lockstep", "probe"),
+            ("lockstep", "context"),
+        )
+    }
+    assert captured.record.keys() == (
+        stored.keys() | setting_records | {"settings/x/draws"}
+    )
     assert captured.sites == {}
+    assert built.count("vgg16bn") == built.count("mobilenetv2") == len(reference.LOSSES)
     keys = {line.split(":")[0] for line in captured.report}
     assert {key for key in keys if key.startswith("loss/")} == STAND_IN_LOSSES
     assert "lockstep/cross_entropy/logits" in keys
     assert "lockstep/poly/1" in keys
+    assert "lockstep/vgg16bn-cifar100/poly/1" in keys
+    assert "settings/x/state" in keys
 
 
 def test_a_lockstep_run_that_matches_reports_nothing_and_one_that_drifts_is_named() -> (
@@ -122,7 +175,7 @@ def test_a_lockstep_run_that_matches_reports_nothing_and_one_that_drifts_is_name
     assert vision_capture.compare_lockstep(
         {"cross_entropy": ({}, drifted)},
         run=run,
-    ) == ["lockstep/cross_entropy/2: stem.weight: 1/432 differ"]
+    ) == ["lockstep/cross_entropy/2: stem.weight: 1/108 differ"]
 
 
 def test_main_prints_the_report_and_writes_nothing_when_something_differs(
@@ -151,9 +204,11 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
     monkeypatch.setattr(sys, "argv", argv)
+    record["settings/y"] = torch.arange(2)
     assert capture_reference.main() == 0
-    assert f"0 mismatches; wrote 1 values to {out}." in capsys.readouterr().out
+    assert f"0 mismatches; wrote 2 values to {out}." in capsys.readouterr().out
     assert read_tensors(out / "reference.pt").keys() == {"x"}
+    assert read_tensors(out / "reference_settings.pt").keys() == {"settings/y"}
 
 
 if __name__ == "__main__":

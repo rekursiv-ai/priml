@@ -20,6 +20,14 @@ from priml.baselines.mlsbench.dl.normalization.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.normalization.norms import GroupNorm
 from priml.baselines.mlsbench.dl.normalization.upstream import (
@@ -46,6 +54,25 @@ NORMS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
     "switchable_norm": exp003,
 }
 """The experiment that carries each normalization, keyed as the script's variants."""
+
+SETTING_NORMS: Final[dict[str, dict[str, Callable[[], VisionTrainLoop]]]] = {
+    "resnet110-cifar100": {
+        "batch_norm": exp004,
+        "group_norm": exp005,
+        "batch_instance_norm": exp006,
+        "switchable_norm": exp007,
+    },
+    "mobilenetv2-fmnist": {
+        "batch_norm": exp008,
+        "group_norm": exp009,
+        "batch_instance_norm": exp010,
+        "switchable_norm": exp011,
+    },
+}
+"""Per other setting of the task, keyed as the vision ``SETTINGS``, each norm's experiment."""
+
+FMNIST: Final = "mobilenetv2-fmnist"
+"""The setting whose dataset differs from ``exp000``'s, so its loaders are compared."""
 
 
 def norm_of(factory: Callable[[], VisionTrainLoop]) -> Callable[[int], nn.Module]:
@@ -109,6 +136,51 @@ def lockstep_record(
         each update.
 
     Returns:
+      record: As :func:`lockstep_run`, under ``lockstep/<name>/``.
+
+    """
+    return lockstep_run(NORMS[name], prefix=f"lockstep/{name}/", states=states)
+
+
+def setting_lockstep_record(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train a setting's shallowest network for two updates, one per epoch.
+
+    Args:
+      name: ``<setting>/<norm>``, keys of :data:`SETTING_NORMS`.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
+      record: As :func:`lockstep_run`, under ``settings/<setting>/lockstep/<norm>/``.
+
+    """
+    setting, norm = name.split("/")
+    return lockstep_run(
+        SETTING_NORMS[setting][norm],
+        prefix=f"settings/{setting}/lockstep/{norm}/",
+        states=states,
+    )
+
+
+def lockstep_run(
+    factory: Callable[[], VisionTrainLoop],
+    *,
+    prefix: str,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train an experiment's shallowest network for two updates, one per epoch.
+
+    Args:
+      factory: The experiment; its network is cut as ``tiny_step`` cuts it.
+      prefix: Put before every key.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
       record: Per update the loss, the logits it came from and the logits of
         a fixed probe in evaluation mode afterwards.
 
@@ -118,7 +190,7 @@ def lockstep_record(
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
         step = reference.tiny_step(
-            NORMS[name],
+            factory,
             blocks=(1, 1, 1),
             classes=reference.CLASSES,
             epochs=reference.EPOCHS,
@@ -139,10 +211,24 @@ def lockstep_record(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
     return {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(losses),
+        f"{prefix}logits": torch.stack(logits),
+        f"{prefix}probe": torch.stack(probes),
     }
+
+
+def settings_record() -> dict[str, Tensor]:
+    """Run every setting's lockstep, keyed as the settings golden is.
+
+    Returns:
+      record: :func:`setting_lockstep_record` of every entry of :data:`SETTING_NORMS`.
+
+    """
+    record: dict[str, Tensor] = {}
+    for setting, norms in SETTING_NORMS.items():
+        for name in norms:
+            record |= setting_lockstep_record(f"{setting}/{name}")
+    return record
 
 
 def port_record() -> dict[str, Tensor]:

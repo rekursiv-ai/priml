@@ -92,23 +92,25 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
     }
 
 
-def initialized(script: Upstream) -> nn.Module:
+def initialized(script: Upstream, arch: str = ARCH) -> nn.Module:
     """Build the shallowest network and initialize it as ``main`` does.
 
     Args:
       script: The script carrying the initialization under test.
+      arch: The setting's ``--arch``; it cuts the network as ``tiny_model``
+        does and is what ``main`` tells the initializer, which Fixup reads.
 
     Returns:
       model: The network, with ``main``'s configuration given to the initializer.
 
     """
     task = cast(Script, cast(object, script))
-    model = task.ResNet(task.BasicBlock, [1, 1, 1], reference.CLASSES)
+    model = upstream.tiny_model(script, arch, reference.CLASSES)
     depth = sum(
         1 for m in model.modules() if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear))
     )
     config: dict[str, object] = {
-        "arch": ARCH,
+        "arch": arch,
         "num_classes": reference.CLASSES,
         "depth": depth,
     }
@@ -149,13 +151,22 @@ def upstream_network(
     return record, state
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    arch: str = ARCH,
+    prefix: str = "",
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the initialization under test.
       name: Which initialization, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      arch: The setting's ``--arch``; see :func:`initialized`.
+      prefix: Put before every key; ``lockstep/<name>/`` by default.
 
     Returns:
       lockstep: Per update the loss, its logits and a probe's logits
@@ -167,7 +178,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = initialized(script)
+        model = initialized(script, arch)
         optimizer = torch.optim.SGD(
             model.parameters(),
             lr=trace.settings["lr"],
@@ -190,12 +201,44 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
+    prefix = prefix or f"lockstep/{name}/"
     record = {
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(criterion.losses),
+        f"{prefix}logits": torch.stack(criterion.logits),
+        f"{prefix}probe": torch.stack(probes),
     }
     return record, states
+
+
+def upstream_setting_lockstep(
+    scripts: dict[str, Upstream],
+    settings: Iterable[str],
+    trace: MainTrace,
+) -> dict[str, Lockstep]:
+    """Run :func:`upstream_lockstep` per setting and initialization on its tiny network.
+
+    Args:
+      scripts: Each variant's script, keyed as :func:`variants`.
+      settings: Keys of the vision ``reference.SETTINGS``.
+      trace: Source of the optimizer settings; every setting's launch passes
+        the same.
+
+    Returns:
+      lockstep: Keyed ``<setting>/<init>``, records under
+        ``settings/<setting>/lockstep/<init>/``.
+
+    """
+    return {
+        f"{setting}/{name}": upstream_lockstep(
+            script,
+            name,
+            trace,
+            arch=reference.SETTINGS[setting].arch,
+            prefix=f"settings/{setting}/lockstep/{name}/",
+        )
+        for setting in settings
+        for name, script in scripts.items()
+    }
 
 
 def upstream_record(

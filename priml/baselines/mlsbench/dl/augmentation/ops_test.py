@@ -33,14 +33,20 @@ def image(seed: int = 0, *, low: int = 0, high: int = 256) -> Tensor:
     )
 
 
+def gray(seed: int = 0) -> Tensor:
+    """Return a ``(1, HEIGHT, WIDTH)`` uint8 image of random pixels, Pillow's ``L``."""
+    return image(seed)[:1].clone()
+
+
 def pil(pixels: Tensor) -> Image.Image:
-    return Image.fromarray(pixels.permute(1, 2, 0).contiguous().numpy())
+    """Return a ``(C, H, W)`` uint8 image as PIL holds it: RGB, or ``L`` for one channel."""
+    return Image.fromarray(pixels.permute(1, 2, 0).squeeze(-1).contiguous().numpy())
 
 
 def pixels(picture: Image.Image) -> Tensor:
     array = np.asarray(picture)
     if array.ndim == 2:
-        return torch.from_numpy(array.copy())
+        return torch.from_numpy(array.copy())[None]
     return torch.from_numpy(array.copy()).permute(2, 0, 1).contiguous()
 
 
@@ -233,6 +239,123 @@ def test_enhancers_are_blends_from_pillows_degenerate_images() -> None:
         lambda p: ImageEnhance.Sharpness(p).enhance(1.6),
         source,
     )
+
+
+GRAY_CASES: Final[
+    list[tuple[Callable[[Tensor], Tensor], Callable[[Image.Image], Image.Image]]]
+] = [
+    (
+        lambda x: ops.affine(
+            x,
+            ops.inverse_affine([0, 0], translate=[0, 0], shear=[30.0, 0.0]),
+        ),
+        lambda p: pillow(functional.affine)(
+            p,
+            angle=0.0,
+            translate=[0, 0],
+            scale=1.0,
+            shear=[30.0, 0.0],
+            center=[0, 0],
+        ),
+    ),
+    (
+        lambda x: ops.affine(
+            x,
+            ops.inverse_affine([0, 0], translate=[0, 0], shear=[0.0, -40.0]),
+        ),
+        lambda p: pillow(functional.affine)(
+            p,
+            angle=0.0,
+            translate=[0, 0],
+            scale=1.0,
+            shear=[0.0, -40.0],
+            center=[0, 0],
+        ),
+    ),
+    (
+        lambda x: ops.affine(
+            x,
+            ops.inverse_affine(
+                [WIDTH * 0.5, HEIGHT * 0.5],
+                translate=[3, -2],
+                shear=[0.0, 0.0],
+            ),
+        ),
+        lambda p: pillow(functional.affine)(
+            p,
+            angle=0.0,
+            translate=[3, -2],
+            scale=1.0,
+            shear=[0.0, 0.0],
+        ),
+    ),
+    (lambda x: ops.rotate(x, 17.0), lambda p: p.rotate(17.0)),
+    (lambda x: ops.rotate(x, 180.0), lambda p: p.rotate(180.0)),
+    (
+        lambda x: ops.blend(torch.zeros_like(x), x, 1.6),
+        lambda p: ImageEnhance.Brightness(p).enhance(1.6),
+    ),
+    (
+        lambda x: ops.blend(ops.grayscale(x).expand_as(x), x, 0.4),
+        lambda p: ImageEnhance.Color(p).enhance(0.4),
+    ),
+    (
+        lambda x: ops.blend(ops.smooth(x), x, 1.6),
+        lambda p: ImageEnhance.Sharpness(p).enhance(1.6),
+    ),
+    (ops.smooth, lambda p: p.filter(ImageFilter.SMOOTH)),
+    (lambda x: ops.grayscale(x)[None], lambda p: p.convert("L")),
+    (lambda x: ops.posterize(x, 3), lambda p: ImageOps.posterize(p, 3)),
+    (
+        lambda x: ops.solarize(x, 127.5),
+        lambda p: pillow(functional.solarize)(p, 127.5),
+    ),
+    (ops.autocontrast, ImageOps.autocontrast),
+    (ops.equalize, ImageOps.equalize),
+]
+"""Each Pillow operation the policies reach, and the port's, on an ``L`` image."""
+
+
+@pytest.mark.parametrize(
+    ("ours", "theirs"),
+    GRAY_CASES,
+    ids=[
+        "shear-x",
+        "shear-y",
+        "translate",
+        "rotate",
+        "rotate-180",
+        "brightness",
+        "color",
+        "sharpness",
+        "smooth",
+        "grayscale",
+        "posterize",
+        "solarize",
+        "autocontrast",
+        "equalize",
+    ],
+)
+def test_every_operation_matches_pillow_on_a_grayscale_image(
+    ours: Callable[[Tensor], Tensor],
+    theirs: Callable[[Image.Image], Image.Image],
+) -> None:
+    source = gray()
+    assert pil(source).mode == "L"
+    assert_pillow(ours, theirs, source)
+
+
+def test_a_quarter_turn_of_a_square_grayscale_image_matches_pillow() -> None:
+    square = gray()[:, :HEIGHT, :HEIGHT]
+    assert_pillow(lambda x: ops.rotate(x, 90.0), lambda p: p.rotate(90.0), square)
+
+
+def test_equalize_remaps_a_large_grayscale_image_as_pillow_does() -> None:
+    generator = torch.Generator().manual_seed(0)
+    # One channel is Pillow's ``L`` mode, which ``ops.grayscale`` and ``pil`` key on.
+    source = torch.randint(0, 256, (1, 16, 17), generator=generator).to(torch.uint8)
+    assert not torch.equal(ops.equalize(source), source)
+    assert_pillow(ops.equalize, ImageOps.equalize, source)
 
 
 def test_inverse_affine_fixes_the_center_of_a_shear() -> None:

@@ -18,7 +18,6 @@ from unittest import mock
 import contextlib
 import io
 import sys
-import warnings
 
 from PIL import Image
 from torch import Tensor, nn
@@ -36,7 +35,7 @@ from priml.testing.golden import rng_fingerprint
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Generator, Iterable
 
     from torch.utils.data import DataLoader, Subset
 
@@ -73,6 +72,10 @@ class Script(Protocol):
     BasicBlock: type[nn.Module]
 
     ResNet: Callable[[type[nn.Module], list[int], int], nn.Module]
+
+    def build_model(self, arch: str, num_classes: int) -> nn.Module:
+        """Build the network an ``--arch`` names."""
+        raise NotImplementedError
 
     def initialize_weights(self, model: nn.Module) -> None:
         """Initialize in place."""
@@ -166,24 +169,36 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
     return {name: script_of(s) for name, s in ({"uniform": pristine} | edited).items()}
 
 
-def trace_main(script: Script) -> Trace:
-    """Run ``main`` for 200 epochs of the ``resnet32-cifar100lt`` setting.
+def trace_main(
+    script: Script,
+    setting: reference.Setting | None = None,
+    *,
+    epochs: int = 200,
+) -> Trace:
+    """Run ``main`` for the epochs of one setting, ``resnet32-cifar100lt`` by default.
 
     The training split is :func:`reference.balanced_label` with no pixels: the
     cut reads only the labels, and no epoch iterates a loader.
 
     Args:
       script: The pristine script or an edit of it.
+      setting: One of :data:`reference.SETTINGS`; ``None`` is the scored one.
+      epochs: The ``--epochs`` passed, the schedule's horizon.
 
     Returns:
       trace: What the replaced calls saw.
 
     """
+    arch, dataset, ratio = (
+        ("resnet32", "cifar100", reference.RATIO)
+        if setting is None
+        else (setting.arch, setting.dataset, setting.imbalance_ratio)
+    )
     trace = Trace()
     spy = _MainSpy(trace)
-    argv = ["script.py", "--arch", "resnet32", "--dataset", "cifar100"]
-    argv += ["--imbalance-ratio", str(reference.RATIO)]
-    argv += ["--epochs", "200", "--seed", str(vision.SEED)]
+    argv = ["script.py", "--arch", arch, "--dataset", dataset]
+    argv += ["--imbalance-ratio", str(ratio)]
+    argv += ["--epochs", str(epochs), "--seed", str(vision.SEED)]
     printed = io.StringIO()
     with (
         _datasets(script, _LabelsOnly),
@@ -193,11 +208,7 @@ def trace_main(script: Script) -> Trace:
         mock.patch.object(script, "get_dataloaders", spy.wrap(script.get_dataloaders)),
         contextlib.redirect_stdout(printed),
         host_agnostic_numerics(),
-        warnings.catch_warnings(),
     ):
-        # With the epoch functions replaced, no optimizer step precedes the
-        # scheduler's, which torch warns about; the order it checks is moot here.
-        warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*")
         script.main()
     (reported,) = (
         line.removeprefix("TEST_METRICS: test_acc=")
@@ -239,13 +250,23 @@ def upstream_weights(scripts: dict[str, Script]) -> dict[str, Tensor]:
     return record
 
 
-def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
+def upstream_lockstep(
+    script: Script,
+    name: str,
+    trace: Trace,
+    *,
+    arch: str = "resnet32",
+    prefix: str | None = None,
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the weighting under test.
       name: Which weighting, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      arch: The setting's ``--arch``; its network is cut as the vision
+        ``tiny_model`` cuts it.
+      prefix: Put before every key; ``lockstep/<name>/`` by default.
 
     Returns:
       lockstep: Per update the loss, its logits and a probe's logits
@@ -256,7 +277,11 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with vision.seeded(vision.SEED), host_agnostic_numerics():
-        model = script.ResNet(script.BasicBlock, [1, 1, 1], vision.CLASSES)
+        model = upstream.tiny_model(
+            cast(upstream.Upstream, cast(object, script)),
+            arch,
+            vision.CLASSES,
+        )
         script.initialize_weights(model)
         counts = torch.tensor(reference.LOCKSTEP_COUNTS)
         weight = script.compute_class_weights(counts, len(counts), dict(CONFIG))
@@ -281,19 +306,81 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
+    prefix = prefix or f"lockstep/{name}/"
     record = {
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(criterion.losses),
+        f"{prefix}logits": torch.stack(criterion.logits),
+        f"{prefix}probe": torch.stack(probes),
     }
     return record, states
 
 
-def upstream_batches(script: Script) -> tuple[Batches, Batches]:
+def upstream_setting(
+    scripts: dict[str, Script],
+    name: str,
+) -> tuple[dict[str, Trace], dict[str, Tensor], dict[str, Lockstep]]:
+    """Trace every variant's ``main`` at a setting and run what it built.
+
+    Args:
+      scripts: Keyed as :func:`variants`.
+      name: A key of :data:`reference.SETTINGS`.
+
+    Returns:
+      traces: Each variant's run of ``main``.
+      record: Keyed as :func:`reference.setting_record`.
+      lockstep: Each variant's :func:`upstream_lockstep`, keyed
+        ``<setting>/<variant>``, if the setting's network differs.
+
+    """
+    setting = reference.SETTINGS[name]
+    prefix = f"settings/{name}/"
+    traces = {variant: trace_main(s, setting) for variant, s in scripts.items()}
+    pristine = traces["uniform"].main
+    record = {
+        f"{prefix}schedule/lr": torch.tensor(pristine.rates, dtype=torch.float64),
+        f"{prefix}optimizer/settings": torch.tensor(
+            [pristine.settings[k] for k in vision.HYPERPARAMETERS],
+            dtype=torch.float64,
+        ),
+        f"{prefix}counts": traces["uniform"].counts,
+    }
+    record |= {
+        f"{prefix}weight/{variant}": trace.weight for variant, trace in traces.items()
+    }
+    record |= upstream.tiny_setting_record(
+        cast(upstream.Upstream, cast(object, scripts["uniform"])),
+        setting.arch,
+        name,
+    )
+    lockstep: dict[str, Lockstep] = {}
+    if setting.lockstep:
+        short = trace_main(scripts["uniform"], setting, epochs=vision.EPOCHS)
+        for variant, script in scripts.items():
+            lockstep[f"{name}/{variant}"] = upstream_lockstep(
+                script,
+                variant,
+                short,
+                arch=setting.arch,
+                prefix=f"{prefix}lockstep/{variant}/",
+            )
+            record |= lockstep[f"{name}/{variant}"][0]
+    return traces, record, lockstep
+
+
+def upstream_batches(
+    script: Script,
+    setting: reference.Setting | None = None,
+    *,
+    imbalance_ratio: float = reference.SPLIT_RATIO,
+) -> tuple[Batches, Batches]:
     """Run the script's loaders over the synthetic split, alternating the splits.
 
     Args:
       script: The pristine script.
+      setting: One of :data:`reference.SETTINGS`, whose ``--dataset`` names the
+        dataset class read; ``None`` is CIFAR-100.
+      imbalance_ratio: Cut of the synthetic split's four classes, as
+        :func:`reference.loader_batches` takes it.
 
     Returns:
       passes: The training passes, then the test passes, through the script's
@@ -302,11 +389,12 @@ def upstream_batches(script: Script) -> tuple[Batches, Batches]:
     """
     train: Batches = []
     evaluation: Batches = []
+    dataset = "cifar100" if setting is None else setting.dataset
     with vision.seeded(vision.SEED), _datasets(script, _SyntheticSplit):
         train_loader, test_loader, _, _ = script.get_dataloaders(
-            "cifar100",
+            dataset,
             "unused",
-            reference.SPLIT_RATIO,
+            imbalance_ratio,
             batch_size=vision.LOADER_BATCH,
             seed=vision.SEED,
         )
@@ -469,6 +557,9 @@ class _MainSpy:
             }
             self.trace.weight = cast(Tensor, criterion.weight).clone()
         main.rates.append(from_plain(group["lr"], float))
+        # No parameter holds a gradient, so the step moves nothing; it lets the
+        # script's scheduler see the optimizer step it expects before its own.
+        optimizer.step()
         return 0.0, 0.0
 
     def evaluate(self, *args: object) -> tuple[float, float]:
@@ -480,6 +571,8 @@ class _MainSpy:
 class _LabelsOnly:
     """CIFAR-100's label layout, without pixels; both splits alike."""
 
+    classes = reference.CLASSES
+
     def __init__(
         self,
         *,
@@ -489,7 +582,13 @@ class _LabelsOnly:
         transform: object,
     ) -> None:
         del root, train, download, transform
-        self.targets = reference.balanced_label().tolist()
+        self.targets = reference.balanced_label(self.classes).tolist()
+
+
+class _LabelsOnly10(_LabelsOnly):
+    """CIFAR-10's label layout, without pixels."""
+
+    classes = 10
 
 
 class _SyntheticSplit:
@@ -516,13 +615,19 @@ class _SyntheticSplit:
         return self.transform(Image.fromarray(pixels)), self.targets[index]
 
 
-def _datasets(
-    script: Script,
-    dataset: type,
-) -> contextlib.AbstractContextManager[object]:
-    """Make the script's ``torchvision.datasets.CIFAR100`` read ``dataset``."""
+# CIFAR-100 reads it as given; CIFAR-10 reads :class:`_LabelsOnly10` in place of
+# :class:`_LabelsOnly`, and the synthetic split as it is, whose four classes are all
+# below ten.
+@contextlib.contextmanager
+def _datasets(script: Script, dataset: type) -> Generator[None]:
+    """Make the script's CIFAR datasets read ``dataset``."""
     vision_script = cast(upstream.Upstream, cast(object, script))
-    return mock.patch.object(vision_script.torchvision.datasets, "CIFAR100", dataset)
+    ten = _LabelsOnly10 if dataset is _LabelsOnly else dataset
+    with (
+        mock.patch.object(vision_script.torchvision.datasets, "CIFAR100", dataset),
+        mock.patch.object(vision_script.torchvision.datasets, "CIFAR10", ten),
+    ):
+        yield
 
 
 def _kept(loader: DataLoader[object]) -> Tensor:

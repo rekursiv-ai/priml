@@ -21,10 +21,23 @@ from priml.baselines.mlsbench.dl.multitask.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.multitask.metrics import HeadAccuracy
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import (
+    experiments as vision,
+    settings,
+)
+from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.runtime import SingleProcess
 from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
@@ -40,7 +53,32 @@ ALL_EXPERIMENTS: Final[list[ExperimentFactory[MultiTaskTrainLoop]]] = [
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 ]
+
+UNCERTAINTY: Final = {"step.mtl_loss"}
+DWA: Final = {"step.mtl_loss", "step.mtl_loss.temperature", "step.mtl_loss.eps"}
+PCGRAD: Final = {"step.mtl_loss", "step.mtl_loss.eps"}
+
+FORKS: Final = {
+    exp001: (exp000, UNCERTAINTY),
+    exp002: (exp000, DWA),
+    exp003: (exp000, PCGRAD),
+    exp005: (exp004, UNCERTAINTY),
+    exp006: (exp004, DWA),
+    exp007: (exp004, PCGRAD),
+    exp009: (exp008, UNCERTAINTY),
+    exp010: (exp008, DWA),
+    exp011: (exp008, PCGRAD),
+}
+"""Each baseline fork, its setting's summing parent, and the fields it sets."""
 
 
 def changed_fields(parent: object, child: MultiTaskTrainLoop) -> set[str]:
@@ -56,8 +94,14 @@ def shrink(config: MultiTaskTrainLoop, *, directory: Path) -> MultiTaskTrainLoop
     config.runtime.device = "cpu"
     config.step.parallelism = NoParallel.Config(device="cpu")
     assert isinstance(config.step.model, TwoHeadResNet.Config)
-    config.step.model.trunk.blocks_per_stage = (1, 1, 1)
-    config.step.model.trunk.channels_hidden = (2, 4, 5)
+    trunk = config.step.model.trunk
+    if isinstance(trunk, VGG16BN.Config):
+        trunk.channels_hidden = ((4,), (5,))
+        trunk.channels_hidden_head = 6
+    else:
+        assert isinstance(trunk, ResNet.Config)
+        trunk.blocks_per_stage = (1, 1, 1)
+        trunk.channels_hidden = (2, 4, 5)
     config.step.train_budget_epochs = config.max_epochs = 1
     config.base_dir = None
     config.working_dir = directory
@@ -114,19 +158,34 @@ def test_exp000_is_the_vision_recipe_with_a_second_head() -> None:
 
 
 @pytest.mark.parametrize(
-    ("factory", "changed"),
-    [
-        (exp001, {"step.mtl_loss"}),
-        (exp002, {"step.mtl_loss", "step.mtl_loss.temperature", "step.mtl_loss.eps"}),
-        (exp003, {"step.mtl_loss", "step.mtl_loss.eps"}),
-    ],
-    ids=["exp001", "exp002", "exp003"],
+    ("factory", "parent", "changed"),
+    [(child, parent, changed) for child, (parent, changed) in FORKS.items()],
+    ids=[f.__name__ for f in FORKS],
 )
 def test_a_fork_changes_only_the_combination(
     factory: ExperimentFactory[MultiTaskTrainLoop],
+    parent: ExperimentFactory[MultiTaskTrainLoop],
     changed: set[str],
 ) -> None:
-    assert changed_fields(exp000(), factory()) == {"experiment_name", *changed}
+    assert changed_fields(parent(), factory()) == {"experiment_name", *changed}
+
+
+def test_exp004_deepens_nothing_but_the_trunk_to_resnet20() -> None:
+    assert changed_fields(exp000(), exp004()) == {
+        "experiment_name",
+        *(f"step.model.trunk.blocks_per_stage[{index}]" for index in range(3)),
+    }
+
+
+def test_exp008_puts_the_vgg16bn_setting_network_in_the_trunk() -> None:
+    changed = changed_fields(exp000(), exp008())
+    assert {p for p in changed if not p.startswith("step.model.trunk")} == {
+        "experiment_name",
+    }
+    model = exp008().step.model
+    assert isinstance(model, TwoHeadResNet.Config)
+    assert model.trunk == settings.vgg16bn_cifar100(vision.exp000()).step.model
+    assert exp008().dataset == exp000().dataset
 
 
 @pytest.mark.parametrize(
@@ -165,8 +224,14 @@ def test_every_experiment_states_its_hypothesis_sources_and_pending_results(
 
 
 def test_each_fork_names_its_parent_in_the_first_line() -> None:
-    for child in (exp001, exp002, exp003):
-        assert (inspect.getdoc(child) or "").startswith("exp000 + "), child.__name__
+    for child, (parent, _) in FORKS.items():
+        assert (inspect.getdoc(child) or "").startswith(f"{parent.__name__} + "), (
+            child.__name__
+        )
+    for setting in (exp004, exp008):
+        assert (inspect.getdoc(setting) or "").startswith("exp000 at the "), (
+            setting.__name__
+        )
 
 
 def test_exp000_matches_its_golden_config() -> None:

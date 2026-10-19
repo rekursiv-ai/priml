@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final, cast, override
 
 import logging
 
 from configgle import PartialConfig
+from PIL import Image
 from torch import Tensor
 from torch.nn import functional
-from torchvision import datasets
+from torchvision import datasets, transforms
 
 import numpy as np
 import pytest
@@ -18,9 +19,11 @@ import torch
 
 from priml.baselines.mlsbench.dl.vision.data import (
     Cifar100Data,
+    TrainLoader,
     normalize,
     pad_crop_flip,
     prepare,
+    resized,
 )
 from priml.testing.golden import rng_fingerprint
 
@@ -218,6 +221,64 @@ def test_eval_pass_is_sequential_unaugmented_and_draws_one_unused_seed(
     )
 
 
+class _Unshuffled(TrainLoader):
+    """Passes in index order, taking no shuffle seed, and labels every image 9."""
+
+    @override
+    def permutation(self, count: int) -> Tensor:
+        return torch.arange(count)
+
+    @override
+    def batch(self, index: Tensor, stream: torch.Generator) -> dict[str, Tensor]:
+        out = super().batch(index, stream)
+        out["label"] = torch.full_like(out["label"], 9)
+        return out
+
+
+def test_a_subclass_replaces_the_permutation_and_each_batch(tmp_path: Path) -> None:
+    media = write_split(tmp_path)
+    config = make_data(tmp_path, streams=2).config
+    loader = _Unshuffled(media, torch.arange(COUNT), config)
+    seed(0)
+    batches = list(loader)
+    after_pass = rng_fingerprint()
+    seed(0)
+    stream_seed = int(torch.empty((), dtype=torch.int64).random_())
+    assert torch.equal(after_pass, rng_fingerprint())
+    streams = [torch.Generator().manual_seed(stream_seed + w) for w in range(2)]
+    mean, std = torch.tensor(config.mean), torch.tensor(config.std)
+    for index, got in enumerate(batches):
+        chosen = torch.arange(2 * index, min(2 * index + 2, COUNT))
+        want = normalize(
+            pad_crop_flip(media[chosen], streams[index % 2], pad=1),
+            mean=mean,
+            std=std,
+        )
+        assert torch.equal(got["media"], want)
+        assert got["label"].tolist() == [9] * len(chosen)
+
+
+class _UnshuffledData(Cifar100Data):
+    """A dataset whose training loader is :class:`_Unshuffled`."""
+
+    @override
+    def train_loader(self) -> TrainLoader:
+        return _Unshuffled(self.train_media, self.train_label, self.config)
+
+
+def test_a_dataset_subclass_supplies_its_own_training_loader(tmp_path: Path) -> None:
+    _ = write_split(tmp_path)
+    config = make_data(tmp_path).config
+    data = _UnshuffledData(config.copy_tree().finalize())
+    loader = data.train_dataloader()
+    assert isinstance(loader, _Unshuffled)
+    seed(0)
+    _ = next(iter(loader))
+    state = data.state_dict()["loader"]
+    assert state is not None
+    assert state["next_batch"] == 1
+
+
 def test_loaders_know_their_length(tmp_path: Path) -> None:
     _ = write_split(tmp_path)
     data = make_data(tmp_path)
@@ -398,6 +459,70 @@ def test_a_batch_or_stream_count_below_one_is_refused(
     setattr(config, field, value)
     with pytest.raises(ValueError, match=field):
         config.make()
+
+
+class _FakeFashionMNIST:
+    """Three 28x28 grayscale images in the layout torchvision's dataset exposes."""
+
+    # Square: data.resized, which prepare calls, resizes only square images.
+    data: ClassVar = (
+        (torch.arange(3 * 28 * 28) * 37 % 251)
+        .to(torch.uint8)
+        .reshape(
+            3,
+            28,
+            28,
+        )
+    )
+    targets: ClassVar = torch.tensor([4, 0, 9])
+
+    def __init__(self, root: str, *, train: bool, download: bool) -> None:
+        del root, train, download
+
+
+def test_prepare_caches_fashion_mnist_resized_to_32_with_one_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(datasets, "FashionMNIST", _FakeFashionMNIST)
+    prepare(tmp_path, dataset="fmnist")
+    stored = cast(
+        dict[str, Tensor],
+        torch.load(tmp_path / "train.pt", weights_only=True),
+    )
+    assert (stored["media"].dtype, stored["media"].shape) == (
+        torch.uint8,
+        (3, 1, 32, 32),
+    )
+    expected = transforms.Resize(32)(Image.fromarray(_FakeFashionMNIST.data[1].numpy()))
+    assert torch.equal(stored["media"][1, 0], torch.from_numpy(np.array(expected)))
+    assert stored["label"].tolist() == [4, 0, 9]
+
+
+def test_resized_matches_torchvisions_resize_of_a_pil_image() -> None:
+    # Square images, one channel then three: data.resized takes only square
+    # images, and the one-channel case is the Fashion-MNIST path it serves.
+    gray = (torch.arange(2 * 28 * 28) * 37 % 251).to(torch.uint8).reshape(2, 1, 28, 28)
+    rgb = (torch.arange(2 * 3 * 5 * 5) * 37 % 251).to(torch.uint8).reshape(2, 3, 5, 5)
+    for images, mode in ((gray, "L"), (rgb, "RGB")):
+        out = resized(images, size=32)
+        for image, got in zip(images, out, strict=True):
+            pil = Image.fromarray(image.permute(1, 2, 0).squeeze(-1).numpy())
+            assert pil.mode == mode
+            want = transforms.ToTensor()(transforms.Resize(32)(pil))
+            assert torch.equal(got.float().div(255), want)
+
+
+def test_a_grayscale_batch_normalizes_into_as_many_channels_as_the_statistics() -> None:
+    # One channel: data.normalize broadcasting a grayscale batch is the behavior.
+    images = (torch.arange(2 * 4 * 5) * 37 % 251).to(torch.uint8).reshape(2, 1, 4, 5)
+    mean, std = torch.tensor([0.25, 0.5, 0.125]), torch.tensor([0.5, 0.25, 2.0])
+    out = normalize(images, mean=mean, std=std)
+    repeated = transforms.Normalize(mean.tolist(), std.tolist())(
+        images.float().div(255).repeat(1, 3, 1, 1),
+    )
+    assert out.shape == (2, 3, 4, 5)
+    assert torch.equal(out, repeated)
 
 
 def test_prepare_fetches_cifar10_when_asked(

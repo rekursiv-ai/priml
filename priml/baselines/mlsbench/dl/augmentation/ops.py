@@ -154,12 +154,15 @@ def grayscale(image: Tensor) -> Tensor:
     """Return the ITU-R 601 luma Pillow's ``convert("L")`` computes.
 
     Args:
-      image: ``(3, H, W)`` uint8 RGB pixels.
+      image: ``(3, H, W)`` uint8 RGB pixels, or ``(1, H, W)`` grayscale, which
+        ``convert("L")`` returns unchanged.
 
     Returns:
       luma: ``(H, W)`` uint8 pixels, rounded in 16.16 fixed point.
 
     """
+    if len(image) == 1:
+        return image[0].clone()
     red, green, blue = image.int()
     luma = red * 19_595 + green * 38_470 + blue * 7_471 + 0x8000
     return (luma >> 16).to(torch.uint8)

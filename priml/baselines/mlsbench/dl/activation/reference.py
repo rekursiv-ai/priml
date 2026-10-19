@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from configgle import Makeable
 from torch import Tensor
 
 import torch
@@ -22,19 +21,25 @@ from priml.baselines.mlsbench.dl.activation.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.vision import reference
-from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.model import ResNet, built_activation
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
-    from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 
 ACTIVATIONS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
@@ -44,6 +49,22 @@ ACTIVATIONS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
     "mish": exp003,
 }
 """The experiment that carries each activation, keyed as the script's variants."""
+
+SETTING_ACTIVATIONS: Final[dict[str, dict[str, Callable[[], VisionTrainLoop]]]] = {
+    "vgg16bn-cifar100": {
+        "relu": exp004,
+        "gelu": exp005,
+        "silu": exp006,
+        "mish": exp007,
+    },
+    "mobilenetv2-fmnist": {
+        "relu": exp008,
+        "gelu": exp009,
+        "silu": exp010,
+        "mish": exp011,
+    },
+}
+"""Per other setting, keyed as the vision ``SETTINGS``, each activation's experiment."""
 
 
 def fixed_inputs() -> Tensor:
@@ -70,9 +91,7 @@ def activation_record() -> dict[str, Tensor]:
     for name, factory in ACTIVATIONS.items():
         model = factory().step.model
         assert isinstance(model, ResNet.Config)
-        activation = model.activation
-        if isinstance(activation, Makeable):
-            raise TypeError("Expected not isinstance(activation, Makeable).")
+        activation = built_activation(model.activation)
         leaf = fixed_inputs().requires_grad_()
         with host_agnostic_numerics():
             value = activation(leaf)
@@ -108,6 +127,67 @@ def lockstep_record(
         each update.
 
     Returns:
+      record: As :func:`lockstep_run`, under ``lockstep/<name>/``.
+
+    """
+    return lockstep_run(ACTIVATIONS[name], prefix=f"lockstep/{name}/", states=states)
+
+
+def setting_lockstep_record(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train a setting's shallowest network for two updates, one per epoch.
+
+    Args:
+      name: ``<setting>/<activation>``, keys of :data:`SETTING_ACTIVATIONS`.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
+      record: As :func:`lockstep_run`, under
+        ``settings/<setting>/lockstep/<activation>/``.
+
+    """
+    setting, activation = name.split("/")
+    return lockstep_run(
+        SETTING_ACTIVATIONS[setting][activation],
+        prefix=f"settings/{setting}/lockstep/{activation}/",
+        states=states,
+    )
+
+
+def settings_record() -> dict[str, Tensor]:
+    """Run every setting's lockstep, keyed as the settings golden is.
+
+    Returns:
+      record: :func:`setting_lockstep_record` of every entry of
+        :data:`SETTING_ACTIVATIONS`.
+
+    """
+    record: dict[str, Tensor] = {}
+    for setting, activations in SETTING_ACTIVATIONS.items():
+        for name in activations:
+            record |= setting_lockstep_record(f"{setting}/{name}")
+    return record
+
+
+def lockstep_run(
+    factory: Callable[[], VisionTrainLoop],
+    *,
+    prefix: str,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train an experiment's shallowest network for two updates, one per epoch.
+
+    Args:
+      factory: The experiment; its network is cut as ``tiny_step`` cuts it.
+      prefix: Put before every key.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
       record: Per update the loss, the logits it came from and the logits of
         a fixed probe in evaluation mode afterwards.
 
@@ -117,7 +197,7 @@ def lockstep_record(
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
         step = reference.tiny_step(
-            ACTIVATIONS[name],
+            factory,
             blocks=(1, 1, 1),
             classes=reference.CLASSES,
             epochs=reference.EPOCHS,
@@ -138,37 +218,10 @@ def lockstep_record(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
     return {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(losses),
+        f"{prefix}logits": torch.stack(logits),
+        f"{prefix}probe": torch.stack(probes),
     }
-
-
-def loader_batches(directory: Path) -> tuple[Batches, Batches]:
-    """Run ``exp000``'s loaders over the synthetic split, alternating the splits.
-
-    Args:
-      directory: Scratch directory the split is written to.
-
-    Returns:
-      passes: Per training pass the batches in order, then per evaluation pass
-        the batches in order, normalized with CIFAR-10's statistics.
-
-    """
-    media, label = reference.synthetic_split()
-    for split in ("train", "test"):
-        torch.save({"media": media, "label": label}, directory / f"{split}.pt")
-    config = exp000().dataset
-    config.working_dir = directory
-    config.batch_size = config.eval_batch_size = reference.LOADER_BATCH
-    train: Batches = []
-    evaluation: Batches = []
-    with reference.seeded(reference.SEED):
-        data = config.make()
-        for _ in range(reference.LOADER_PASSES):
-            train.append(list(data.train_dataloader()))
-            evaluation.append(list(data.eval_dataloader()))
-    return train, evaluation
 
 
 def port_record() -> dict[str, Tensor]:

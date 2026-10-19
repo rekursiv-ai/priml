@@ -47,11 +47,10 @@ from priml.baselines.craftax.testing import (
     assert_golden,
     digest,
     fill_portable,
-    gpu_key,
     multi_hot_embedding,
     packed_observations,
     portable_uniform,
-    require_golden,
+    require_cuda,
     sole_feature_policy,
     tiny_board_policy,
     tiny_exp000_step,
@@ -459,8 +458,7 @@ def test_exp000s_policy_matches_its_golden_on_the_gpu() -> None:
     step over all four, the window forward, and the backward from fixed
     gradients.
     """
-    host = gpu_key()
-    require_golden(test_file=__file__, name="model_exp000_tiny", host=host)
+    require_cuda()
     config = tiny_exp000_step().model
     assert isinstance(config, MinGRUPolicy.Config)
     model = config.make()
@@ -476,12 +474,7 @@ def test_exp000s_policy_matches_its_golden_on_the_gpu() -> None:
         grad_values.cuda(),
         steps=4,
     )
-    assert_golden(
-        test_file=__file__,
-        name="model_exp000_tiny",
-        lines=lines,
-        host=host,
-    )
+    assert_golden(test_file=__file__, name="model_exp000_tiny", lines=lines)
 
 
 def test_without_the_new_slots_the_policy_builds_what_it_built() -> None:

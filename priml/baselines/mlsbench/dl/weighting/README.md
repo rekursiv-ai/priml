@@ -11,7 +11,14 @@ exp000  uniform weights
   +-- exp001  sqrt inverse frequency           (inverse_freq)
   +-- exp002  sqrt inverse effective number    (effective_number)
   +-- exp003  log-frequency gap, rarest 5x     (balanced_softmax)
+  +-- exp004  resnet32-cifar10lt: CIFAR-10, ratio 100, uniform
+  |     +-- exp005..exp007  the three baselines
+  +-- exp008  vgg16bn-cifar100lt (hidden): VGG-16-BN, ratio 50, uniform
+        +-- exp009..exp011  the three baselines
 ```
+
+`vgg16bn_cifar100lt.sh` passes `--imbalance-ratio 50`, so `exp008` changes
+the network and the ratio together.
 
 `LongTailCifar100Data` cuts the prepared training split at load: class `c`
 keeps `max(int(500 * 100^(-c/99)), 1)` images, picked by a NumPy
@@ -44,5 +51,10 @@ kept positions and counts of the real training split when `--cifar100` names
 torchvision's CIFAR-100 root (`/opt/scratch/datasets/cifar100` once
 `prepare_data` has run); ResNet-32's initial state and forward; the
 200 rates; the optimizer; every pixel of the long-tailed loaders; and every
-parameter after two updates per weighting. `reference_test.py` replays the
-stored values.
+parameter after two updates per weighting. At the other two settings it
+compares each weighting's full network state, the setting's counts, weights,
+kept positions, rates, optimizer, draws and forwards, the long-tailed CIFAR-10
+loader, and two updates of the shallowest VGG the script's own `VGG16_CFG`
+builds (patched to the vision capture's `TINY_ARCHS`, on both sides).
+`reference_test.py` replays `testdata/reference.pt` and
+`testdata/reference_settings.pt`.

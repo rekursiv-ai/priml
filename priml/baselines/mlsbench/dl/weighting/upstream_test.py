@@ -10,10 +10,12 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 from unittest import mock
 
 import pickle
+import warnings
 
 from torch import nn
 from torchvision.datasets import cifar
@@ -21,21 +23,25 @@ from torchvision.datasets import cifar
 import numpy as np
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.upstream_test import (
-    SCRIPT as LOSS_SCRIPT,
-    stored_record,
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision,
+    upstream as vision_upstream,
 )
+from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
 from priml.baselines.mlsbench.dl.weighting import reference, upstream
+from priml.testing.golden import read_tensors
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from pathlib import Path
 
     from torch import Tensor
 
     import pytest
+
+DATA: Final = _CWD / "testdata"
 
 SGD_SETTINGS: Final = ("lr", "momentum", "weight_decay")
 """The optimizer settings ``main`` passes to SGD."""
@@ -64,7 +70,11 @@ def create_imbalanced_cifar(dataset, imbalance_ratio, num_classes, seed=42):
 
 
 def get_dataloaders(dataset_name, data_root, imbalance_ratio, batch_size=128, num_workers=4, seed=42):
-    stats = ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+    stats = (
+        ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        if dataset_name == "cifar10"
+        else ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+    )
     train_transform = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -72,17 +82,18 @@ def get_dataloaders(dataset_name, data_root, imbalance_ratio, batch_size=128, nu
         transforms.Normalize(*stats),
     ])
     test_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(*stats)])
-    full = torchvision.datasets.CIFAR100(
-        root=data_root, train=True, download=False, transform=train_transform
+    Dataset, classes = (
+        (torchvision.datasets.CIFAR10, 10)
+        if dataset_name == "cifar10"
+        else (torchvision.datasets.CIFAR100, 100)
     )
-    test = torchvision.datasets.CIFAR100(
-        root=data_root, train=False, download=False, transform=test_transform
-    )
-    train, counts = create_imbalanced_cifar(full, imbalance_ratio, 100, seed)
+    full = Dataset(root=data_root, train=True, download=False, transform=train_transform)
+    test = Dataset(root=data_root, train=False, download=False, transform=test_transform)
+    train, counts = create_imbalanced_cifar(full, imbalance_ratio, classes, seed)
     return (
         DataLoader(train, batch_size=batch_size, shuffle=True),
         DataLoader(test, batch_size=batch_size),
-        100,
+        classes,
         counts,
     )
 
@@ -112,7 +123,7 @@ def main():
     train_loader, test_loader, classes, counts = get_dataloaders(
         args.dataset, "unused", args.imbalance_ratio, 128, seed=args.seed
     )
-    model = ResNet(BasicBlock, [1, 1, 1], classes)
+    model = build_model(args.arch, classes)
     initialize_weights(model)
     weights = compute_class_weights(counts, classes, {})
     criterion = nn.CrossEntropyLoss(weight=weights)
@@ -130,6 +141,9 @@ def main():
 SCRIPT: Final = (
     "import numpy as np\nfrom torch.utils.data import DataLoader, Subset\n"
     + LOSS_SCRIPT.split("def compute_loss")[0]
+    + "class VGG(nn.Module):\n    VGG16_CFG = [64, 'M']\n\n\n"
+    + "def build_model(arch, num_classes):\n"
+    + "    return ResNet(BasicBlock, [1, 1, 1], num_classes)\n\n\n"
     + WEIGHTS
     + "\n\n"
     + LOADERS
@@ -226,6 +240,21 @@ def test_lockstep_trains_with_the_weighted_criterion(tmp_path: Path) -> None:
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
 
 
+def test_lockstep_builds_the_scored_settings_resnet_by_default(tmp_path: Path) -> None:
+    variants = scripts(tmp_path)
+    trace = upstream.trace_main(variants["uniform"])
+    seen: list[tuple[str, int]] = []
+    build = vision_upstream.tiny_model
+
+    def tiny(script: vision_upstream.Upstream, arch: str, classes: int) -> nn.Module:
+        seen.append((arch, classes))
+        return build(script, arch, classes)
+
+    with mock.patch.object(vision_upstream, "tiny_model", tiny):
+        upstream.upstream_lockstep(variants["uniform"], "uniform", trace)
+    assert seen == [("resnet32", vision.CLASSES)]
+
+
 def test_lockstep_builds_weighs_and_steps_as_main_does(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     trace = upstream.trace_main(variants["uniform"])
@@ -310,6 +339,44 @@ def test_the_real_cut_reads_torchvision_files(
     assert len(indices) == 3 + 2 + 1
 
 
+def test_a_vgg_setting_is_traced_per_variant_and_trained_two_updates(
+    tmp_path: Path,
+) -> None:
+    variants = scripts(tmp_path)
+    traces, record, lockstep = upstream.upstream_setting(
+        variants,
+        "vgg16bn-cifar100lt",
+    )
+    assert list(traces) == list(variants)
+    prefix = "settings/vgg16bn-cifar100lt/"
+    assert record[f"{prefix}schedule/lr"].shape == (200,)
+    assert torch.equal(record[f"{prefix}weight/uniform"], torch.ones(reference.CLASSES))
+    assert list(lockstep) == [f"vgg16bn-cifar100lt/{name}" for name in variants]
+    assert record[f"{prefix}lockstep/uniform/loss"].shape == (vision.STEPS,)
+    # Ratio 50 over 100 classes: 500 images of class 0 down to 10 of class 99.
+    assert record[f"{prefix}counts"][[0, -1]].tolist() == [500.0, 10.0]
+
+
+def test_a_cifar10_setting_reads_cifar10_and_runs_no_lockstep(tmp_path: Path) -> None:
+    traces, record, lockstep = upstream.upstream_setting(
+        scripts(tmp_path),
+        "resnet32-cifar10lt",
+    )
+    assert lockstep == {}
+    assert record["settings/resnet32-cifar10lt/counts"].shape == (10,)
+    assert traces["uniform"].indices.shape == (
+        int(record["settings/resnet32-cifar10lt/counts"].sum()),
+    )
+
+
+def test_main_runs_without_a_warning(tmp_path: Path) -> None:
+    with warnings.catch_warnings():
+        # The script's scheduler warns if it steps before the optimizer has.
+        warnings.simplefilter("error")
+        trace = upstream.trace_main(scripts(tmp_path)["uniform"])
+    assert len(trace.main.rates) == 200
+
+
 def test_the_record_holds_every_key_the_port_gives(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     pristine = variants["uniform"]
@@ -326,7 +393,7 @@ def test_the_record_holds_every_key_the_port_gives(tmp_path: Path) -> None:
         upstream.upstream_subset(pristine),
         batches[0],
     )
-    assert record.keys() == stored_record(reference).keys()
+    assert record.keys() == read_tensors(DATA / "reference.pt").keys()
 
 
 if __name__ == "__main__":

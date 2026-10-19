@@ -1,6 +1,6 @@
 # MLS-Bench `Opt` area: TODO
 
-TODO: port the 13 in-scope tasks below as native priml
+1 of 13 ported (linked). TODO: port the other 12 in-scope tasks below as native priml
 baselines, one subpackage each, the way [`../dl/`](../dl/) does: the
 task's editable function becomes a config slot, `exp000` is the pristine
 recipe, each published baseline is a fork of that slot, and
@@ -16,7 +16,7 @@ package share one subpackage of common code, as
 | `optimization-diagonal-net` | TrueNobility303/RAIN | yes |
 | `optimization-dp-sgd` | custom | yes |
 | `optimization-evolution-strategy` | DEAP/deap | yes |
-| `optimization-gradient-compression` | custom | yes |
+| `optimization-gradient-compression` | custom | yes; ported in [`gradient_compression/`](gradient_compression/README.md), slot `step.compressor` |
 | `optimization-hyperparameter-search` | custom | yes |
 | `optimization-multi-objective` | DEAP/deap | yes |
 | `optimization-nas` | automl/naslib | yes |

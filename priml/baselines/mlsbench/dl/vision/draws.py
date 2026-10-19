@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 from unittest import mock
 
 import functools
-import traceback
+import inspect
 
 
 if TYPE_CHECKING:
@@ -94,15 +94,18 @@ class _Counted:
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Count the call, then make it."""
         # The caller is the nearest frame outside this file and outside any
-        # trampoline a mutation tester wraps around ``__call__``.
-        caller = next(
-            frame
-            for frame in reversed(traceback.extract_stack())
-            if frame.filename != __file__
-            and Path(frame.filename).name != "trampoline.py"
-        )
-        file = "/".join(Path(caller.filename).parts[-2:])
-        key = f"{self.api}@{file}:{caller.name}"
+        # trampoline a mutation tester wraps around ``__call__``. Walking the
+        # live frames reads no source, unlike ``traceback.extract_stack``.
+        frame = inspect.currentframe()
+        while frame is not None and (
+            frame.f_code.co_filename == __file__
+            or Path(frame.f_code.co_filename).name == "trampoline.py"
+        ):
+            frame = frame.f_back
+        if frame is None:
+            raise ValueError("Expected frame is not None.")
+        file = "/".join(Path(frame.f_code.co_filename).parts[-2:])
+        key = f"{self.api}@{file}:{frame.f_code.co_name}"
         self.counts[key] = self.counts.get(key, 0) + 1
         return self.original(*args, **kwargs)
 

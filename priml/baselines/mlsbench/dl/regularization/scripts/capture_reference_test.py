@@ -16,8 +16,13 @@ import torch
 from priml.baselines.mlsbench.dl.regularization import reference, upstream
 from priml.baselines.mlsbench.dl.regularization.scripts import capture_reference
 from priml.baselines.mlsbench.dl.regularization.upstream_test import write_clone
-from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.upstream_test import stand_in_port
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision,
+    upstream as vision_upstream,
+)
+from priml.baselines.mlsbench.dl.vision.scripts import (
+    capture_reference as shared,
+)
 from priml.testing.golden import read_tensors
 
 
@@ -25,40 +30,112 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from torch import Tensor
+
     import pytest
 
 
 def returning[T](value: T) -> Callable[..., T]:
     """Return a function that ignores its arguments and gives back ``value``."""
 
-    def call(*_arguments: object) -> T:
+    def call(*_arguments: object, **_keywords: object) -> T:
         return value
 
     return call
 
 
-def test_capture_names_what_the_stand_in_does_differently(
+def stand_in_forward(script: object, arch: str, setting: str) -> dict[str, Tensor]:
+    """Stand in for a setting's forward: one value under the setting's prefix."""
+    del script, arch
+    return {f"settings/{setting}/train": torch.zeros(2)}
+
+
+def stand_in_lockstep(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]],
+) -> dict[str, Tensor]:
+    """Stand in for a port lockstep: a one-tensor state per update, a loss."""
+    states += [{"w": torch.ones(2)} for _ in range(vision.STEPS)]
+    return {f"{name}/loss": torch.ones(2)}
+
+
+def test_capture_assembles_both_sides_and_every_setting_into_one_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stand_in_port(reference, monkeypatch)
-    root = tmp_path / "clone"
-    write_clone(root)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    report = capture_reference.capture(root, scratch).report
-    keys = {line.split(":")[0] for line in report}
-    assert "pristine" not in keys
-    assert "setting/batch_size" not in keys
-    assert {
-        "schedule/lr",
-        "optimizer/settings",
-        "draws/exp000",
-        "regularizer/confidence_penalty/value",
-        "regularizer/orthogonal_reg/parameters_grad",
-    } <= keys
-    assert any(line.startswith("lockstep/zero/1: ") for line in report)
-    assert any(line.startswith("loader/train/") for line in report)
+    """Every run is a stand-in; the runs themselves are tested elsewhere."""
+    scripts = dict.fromkeys(reference.REGULARIZERS, object())
+    zero = {"w": torch.zeros(2)}
+    lockstep: vision_upstream.Lockstep = ({}, [zero] * vision.STEPS)
+    batch = {"media": torch.zeros(2), "label": torch.arange(2)}
+    moved = {"media": torch.ones(2), "label": torch.arange(2)}
+    tiny = torch.nn.Linear(2, 3)
+    stand_ins = {
+        (upstream, "pristine_raises"): True,
+        (upstream, "variants"): scripts,
+        (upstream, "setting_argv"): ["script.py", "--epochs", "200"],
+        (upstream, "trace_setting"): vision_upstream.MainTrace(),
+        (upstream, "upstream_lockstep"): lockstep,
+        (upstream, "upstream_regularizers"): {},
+        (upstream, "upstream_record"): {"regularizer/x": torch.zeros(2)},
+        (reference, "setting_batch_size"): torch.ones(2),
+        (vision_upstream, "upstream_batches"): ([[batch]], [[batch]]),
+        (shared, "compare_wiring"): ["wiring: differs"],
+        (shared, "compare_full_size"): ["state: 1 tensors against 2"],
+        (reference, "port_record"): {
+            "regularizer/x": torch.ones(2),
+            "setting/batch_size": torch.ones(2),
+        },
+        (vision, "loader_batches"): ([[moved]], [[batch]]),
+        (upstream, "upstream_setting_recipe"): {"settings/s/recipe": torch.zeros(2)},
+        (shared, "compare_setting"): [],
+        (upstream, "tiny_network"): tiny,
+        (reference, "tiny_network"): tiny,
+        (upstream, "upstream_setting_regularizers"): {},
+        (vision, "decode_batches"): {"loader/index": torch.zeros(2)},
+        (vision, "setting_batches"): ([[batch]], [[batch]]),
+        (reference, "settings_record"): {},
+        (vision, "task_settings_record"): {},
+    }
+    for (module, name), value in stand_ins.items():
+        monkeypatch.setattr(module, name, returning(value))
+    monkeypatch.setattr(vision_upstream, "tiny_setting_record", stand_in_forward)
+    monkeypatch.setattr(reference, "lockstep_record", stand_in_lockstep)
+    monkeypatch.setattr(reference, "setting_lockstep_record", stand_in_lockstep)
+    captured = capture_reference.capture(tmp_path, tmp_path)
+    settings = list(reference.SETTING_REGULARIZERS)
+    fmnist = [s for s in settings if vision.SETTINGS[s].dataset != "cifar100"]
+    assert set(captured.record) == {
+        "regularizer/x",
+        "setting/batch_size",
+        "settings/s/recipe",
+        *(
+            f"settings/{s}/{name}/train"
+            for s, variants in reference.SETTING_REGULARIZERS.items()
+            for name in variants
+        ),
+        *(f"settings/{s}/loader/index" for s in fmnist),
+    }
+    assert captured.report == [
+        "wiring: differs",
+        "state: 1 tensors against 2",
+        "regularizer/x: 2/2 differ",
+        *(
+            f"lockstep/{name}/{step}: w: 2/2 differ"
+            for name in reference.REGULARIZERS
+            for step in range(1, vision.STEPS + 1)
+        ),
+        "loader/train/0: 0/media: 2/2 differ",
+        *(f"settings/{s}/wiring: differs" for s in settings),
+        *(f"missing {k}" for k in sorted(captured.record) if k.startswith("settings/")),
+        *(
+            f"lockstep/{s}/{name}/{step}: w: 2/2 differ"
+            for s in settings
+            for name in reference.REGULARIZERS
+            for step in range(1, vision.STEPS + 1)
+        ),
+    ]
 
 
 def test_a_pristine_regularizer_that_returns_is_reported(tmp_path: Path) -> None:

@@ -12,7 +12,13 @@ and gradients on a probe network, the setting's batch size, the rate of all 200
 epochs, the optimizer, ResNet-56's initial state and forward, where the
 generator stands after building it, every pixel the loaders produce, and every
 parameter after each update of a short run per regularizer. ``main`` is traced
-with the arguments of the setting's launch script. Any mismatch is printed and
+with the arguments of the setting's launch script. At the ``vgg16bn-cifar100``
+and ``mobilenetv2-fmnist`` settings, ``main`` is traced once with each
+setting's launch script and compared: the full network's initial state,
+forwards and draws against each regularizer's fork, the rates (VGG's warmup
+included), optimizer and batch size, each regularizer's value and gradients
+on the setting's shallowest network, two updates of that network per
+regularizer, and every Fashion-MNIST loader pixel. Any mismatch is printed and
 the exit code is 1; otherwise the values the default test replays are written
 under ``--out``.
 
@@ -27,7 +33,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import tempfile
@@ -39,6 +45,12 @@ from priml.baselines.mlsbench.dl.vision import (
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches
+
+
+if TYPE_CHECKING:
+    from torch import Tensor
+
+    from priml.baselines.mlsbench.dl.vision.upstream import Lockstep, Upstream
 
 
 def main() -> int:
@@ -61,7 +73,24 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v
+                for k, v in captured.record.items()
+                if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v
+                for k, v in captured.record.items()
+                # The script hardcodes 512- and 1280-wide layers that even the
+                # shallowest network keeps; their gradients are compared in
+                # ``capture`` and would fill the golden a thousand times over.
+                if k.startswith("settings/") and not k.endswith("/parameters_grad")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -82,8 +111,12 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     argv = upstream.setting_argv(root)
     with vision_upstream.hidden_accelerators():
         trace = upstream.trace_setting(scripts["zero"], argv)
+        short = upstream.trace_setting(
+            scripts["zero"],
+            upstream.with_epochs(argv, vision.EPOCHS),
+        )
         lockstep = {
-            name: upstream.upstream_lockstep(script, name, trace)
+            name: upstream.upstream_lockstep(script, name, short)
             for name, script in scripts.items()
         }
         record = upstream.upstream_record(
@@ -102,7 +135,119 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         run=reference.lockstep_record,
     )
     report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
-    return vision.Captured(record=record, sites={}, report=report)
+    settings, settings_report = capture_settings(root, scripts, scratch)
+    return vision.Captured(
+        record=record | settings,
+        sites={},
+        report=report + settings_report,
+    )
+
+
+def capture_settings(
+    root: Path,
+    scripts: dict[str, Upstream],
+    scratch: Path,
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Compare every regularizer at the task's other settings with its script.
+
+    ``main`` is traced once per setting, with its launch arguments: what it
+    builds before the first epoch does not depend on the regularizer, so one
+    trace's network is every variant's.
+
+    Args:
+      root: Clone of the benchmark, for the settings' launch scripts.
+      scripts: Each variant's script, keyed as :func:`upstream.variants`.
+      scratch: Directory the Fashion-MNIST loader split goes to.
+
+    Returns:
+      record: The scripts' values, keyed as :func:`reference.settings_record`
+        and the vision ``task_settings_record``; :func:`main` stores all but
+        the parameter gradients.
+      report: One line per mismatch.
+
+    """
+    record: dict[str, Tensor] = {}
+    report: list[str] = []
+    lockstep: dict[str, Lockstep] = {}
+    pristine = scripts["zero"]
+    with vision_upstream.hidden_accelerators():
+        for setting, variants in reference.SETTING_REGULARIZERS.items():
+            spec = vision.SETTINGS[setting]
+            argv = upstream.setting_argv(root, upstream.SETTING_SCRIPTS[setting])
+            trace = upstream.trace_setting(pristine, argv, classes=spec.classes)
+            report += [
+                f"settings/{setting}/{line}"
+                for line in capture_reference.compare_wiring(
+                    trace,
+                    classes=spec.classes,
+                )
+            ]
+            record |= upstream.upstream_setting_recipe(trace, setting, argv)
+            forward = vision_upstream.tiny_setting_record(pristine, spec.arch, setting)
+            for name, factory in variants.items():
+                key = f"{setting}/{name}"
+                report += capture_reference.compare_setting(
+                    trace,
+                    setting,
+                    factory,
+                    key=key,
+                )
+                record |= {
+                    k.replace(f"settings/{setting}/", f"settings/{key}/"): v
+                    for k, v in forward.items()
+                }
+            tiny = upstream.tiny_network(pristine, spec.arch)
+            report += [
+                f"settings/{setting}/tiny/{line}"
+                for line in capture_reference.compare_states(
+                    tiny.state_dict(),
+                    reference.tiny_network(setting).state_dict(),
+                )
+            ]
+            record |= upstream.upstream_setting_regularizers(scripts, setting, tiny)
+            short = upstream.trace_setting(
+                pristine,
+                upstream.with_epochs(argv, vision.EPOCHS),
+                classes=spec.classes,
+            )
+            for name, script in scripts.items():
+                key = f"{setting}/{name}"
+                lockstep[key] = upstream.upstream_lockstep(
+                    script,
+                    name,
+                    short,
+                    arch=spec.arch,
+                    prefix=f"settings/{setting}/lockstep/{name}/",
+                )
+                record |= lockstep[key][0]
+            if spec.dataset != "cifar100":
+                batches = vision_upstream.upstream_batches(
+                    pristine,
+                    dataset=spec.dataset,
+                )
+                decoded = vision.decode_batches(
+                    batches[0],
+                    config=spec.experiment().dataset,
+                    source=spec.split()[0],
+                )
+                record |= {f"settings/{setting}/{k}": v for k, v in decoded.items()}
+                report += [
+                    f"settings/{setting}/{line}"
+                    for line in capture_reference.compare_loaders(
+                        batches,
+                        vision.setting_batches(scratch, setting),
+                    )
+                ]
+    port = reference.settings_record() | vision.task_settings_record(
+        reference.SETTING_REGULARIZERS,
+        scratch,
+    )
+    report += mismatches(record, port)
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.setting_lockstep_record,
+    )
+    return record, report
 
 
 def check_pristine(root: Path) -> list[str]:

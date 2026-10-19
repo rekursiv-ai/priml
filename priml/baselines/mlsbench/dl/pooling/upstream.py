@@ -140,13 +140,24 @@ def pooled(pool: nn.Module, name: str) -> dict[str, Tensor]:
     return record
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    arch: str = "resnet56",
+    prefix: str = "",
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the pool under test.
       name: Which pool, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      arch: The setting's ``--arch``; its network is
+        :func:`~priml.baselines.mlsbench.dl.vision.upstream.tiny_model`.
+      prefix: Prepended to the record's keys, ``settings/<setting>/`` for a
+        setting's run.
 
     Returns:
       lockstep: Per update the loss, its logits and a probe's logits
@@ -158,7 +169,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = task.ResNet(task.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = upstream.tiny_model(script, arch, reference.CLASSES)
         task.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -181,9 +192,9 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
     record = {
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}lockstep/{name}/loss": torch.stack(criterion.losses),
+        f"{prefix}lockstep/{name}/logits": torch.stack(criterion.logits),
+        f"{prefix}lockstep/{name}/probe": torch.stack(probes),
     }
     return record, states
 

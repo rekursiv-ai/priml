@@ -13,7 +13,10 @@ every pixel and label each variant's loaders produce over two passes,
 ResNet-56's initial state and forward, where the generator stands after
 building it, the 200 learning rates, the optimizer, and every parameter after
 each update of a short run per variant. It also checks that every policy
-operation, and each signed one with both signs, was reached on both sides. Any mismatch is printed
+operation, and each signed one with both signs, was reached on both sides. At
+the ``resnet20-cifar10`` and hidden ``mobilenetv2-fmnist`` settings it repeats,
+per variant, the full network, the training pipeline, the loaders and the test
+pipeline, Fashion-MNIST's on grayscale images. Any mismatch is printed
 and the exit code is 1; otherwise the values the default test replays are
 written under ``--out``.
 
@@ -46,6 +49,9 @@ from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from PIL import Image
     from torch import Tensor
 
     from priml.baselines.mlsbench.dl.vision.upstream import Lockstep, Upstream
@@ -75,7 +81,21 @@ def main() -> int:
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
     try:
-        capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+        capture_reference.write_records(
+            flags.out,
+            {
+                "reference.pt": {
+                    k: v
+                    for k, v in captured.record.items()
+                    if not k.startswith("settings/")
+                },
+                "reference_settings.pt": {
+                    k: v
+                    for k, v in captured.record.items()
+                    if k.startswith("settings/")
+                },
+            },
+        )
     except ValueError as error:
         print(error)
         return 1
@@ -105,6 +125,8 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
             name: upstream.upstream_batches(script) for name, script in scripts.items()
         }
         report = capture_reference.compare_full_size(scripts["pad_crop_flip"], trace)
+    settings, settings_report = capture_settings(scripts, scratch)
+    report += settings_report
     pipelines, census, test = compare_pipelines(scripts)
     report += pipelines
     record = {
@@ -135,7 +157,146 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
             )
         ]
     report += census
-    return vision.Captured(record=record, sites={}, report=report)
+    return vision.Captured(record=record | settings, sites={}, report=report)
+
+
+def capture_settings(
+    scripts: dict[str, Upstream],
+    scratch: Path,
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Compare every variant at each other setting with its script.
+
+    Args:
+      scripts: Each variant of the script, keyed as :data:`reference.AUGMENTS`.
+      scratch: Directory the loader splits go to.
+
+    Returns:
+      record: The script's values, keyed as :func:`reference.settings_record`.
+      report: One line per mismatch: each full network, every pixel of each
+        variant's training pipeline and loaders and of the test pipeline, and
+        every policy operation either side never reached on the setting.
+
+    """
+    record, report = capture_reference.compare_task_settings(
+        scripts,
+        reference.SETTINGS,
+        scratch,
+        pristine="pad_crop_flip",
+    )
+    with vision_upstream.hidden_accelerators():
+        for setting, variants in reference.SETTINGS.items():
+            dataset = vision.SETTINGS[setting].dataset
+            for name in variants:
+                key = f"settings/{setting}/{name}"
+                train, _ = upstream.pipelines(scripts[name], dataset=dataset)
+                pixels, census = compare_pipeline(setting, name, train)
+                report += pixels + census
+                media = upstream.upstream_pipeline(
+                    train,
+                    reference.source_images(setting, reference.GOLDEN_IMAGES),
+                    seed=vision.SEED,
+                )
+                record[f"{key}/augment"] = reference.classified(media)
+                report += [
+                    f"{key}/{line}"
+                    for line in capture_reference.compare_loaders(
+                        upstream.upstream_batches(scripts[name], dataset=dataset),
+                        reference.setting_loader_batches(setting, name, scratch),
+                    )
+                ]
+                report += mismatches(
+                    {f"{key}/augment": record[f"{key}/augment"]},
+                    reference.setting_pipeline_record(setting, name),
+                )
+            report += compare_test_pipeline(scripts["pad_crop_flip"], setting)
+            known = vision.SETTINGS[setting]
+            trace = vision_upstream.trace_main(
+                scripts["pad_crop_flip"],
+                arch=known.arch,
+                dataset=known.dataset,
+                classes=known.classes,
+            )
+            lockstep = {
+                name: upstream.upstream_lockstep(
+                    scripts[name],
+                    name,
+                    trace,
+                    setting=setting,
+                    images=reference.lockstep_images(setting),
+                    key=reference.lockstep_key(name, setting=setting),
+                )
+                for name in variants
+            }
+            for values, _ in lockstep.values():
+                record |= reference.stored(values)
+            report += compare_lockstep(lockstep, setting=setting)
+    return record, report
+
+
+def compare_pipeline(
+    setting: str,
+    name: str,
+    train: Callable[[Image.Image], Tensor],
+) -> tuple[list[str], list[str]]:
+    """Compare one variant's training pipeline at a setting, pixel by pixel.
+
+    Args:
+      setting: A key of :data:`reference.SETTINGS`.
+      name: A key of :data:`reference.AUGMENTS`.
+      train: The script's training pipeline at the setting.
+
+    Returns:
+      report: A line if the pixels differ.
+      census: One line per policy operation and sign a side never reached, and
+        one if the two sides applied different operations.
+
+    """
+    key = f"settings/{setting}/{name}/pipeline"
+    images = reference.source_images(setting, reference.PIPELINE_IMAGES)
+    with upstream.op_census() as theirs:
+        want = upstream.upstream_pipeline(train, images, seed=vision.SEED)
+    with reference.op_census() as ours:
+        got = reference.augmented(
+            name,
+            reference.prepared(setting, images),
+            seed=vision.SEED,
+            factory=reference.SETTINGS[setting][name],
+        )
+    census: list[str] = []
+    if name in POLICIES:
+        census += [
+            f"reference {key}: {k} never reached" for k in upstream.census_gaps(theirs)
+        ]
+        census += [f"port {key}: {k} never reached" for k in upstream.census_gaps(ours)]
+        census += [] if theirs == ours else [f"{key}: operation counts differ"]
+    return mismatches({key: want}, {key: got}), census
+
+
+def compare_test_pipeline(script: Upstream, setting: str) -> list[str]:
+    """Compare the script's fixed test pipeline at a setting with normalization.
+
+    Args:
+      script: The pristine script.
+      setting: A key of :data:`reference.SETTINGS`.
+
+    Returns:
+      report: A line if the pixels differ.
+
+    """
+    _, test = upstream.pipelines(script, dataset=vision.SETTINGS[setting].dataset)
+    images = reference.source_images(setting, reference.PIPELINE_IMAGES)
+    config = reference.SETTINGS[setting]["pad_crop_flip"]().dataset
+    key = f"settings/{setting}/test/pipeline"
+    return mismatches(
+        {key: upstream.upstream_pipeline(test, images, seed=vision.SEED)},
+        {
+            key: normalize(
+                reference.prepared(setting, images),
+                mean=torch.tensor(config.mean),
+                std=torch.tensor(config.std),
+            ),
+        },
+    )
 
 
 def compare_pipelines(
@@ -188,28 +349,31 @@ def compare_pipelines(
     )
 
 
-def compare_lockstep(lockstep: dict[str, Lockstep]) -> list[str]:
+def compare_lockstep(lockstep: dict[str, Lockstep], *, setting: str = "") -> list[str]:
     """Compare each update's batch and every parameter and buffer after it.
 
     Args:
       lockstep: Each variant's :func:`upstream.upstream_lockstep`.
+      setting: A key of :data:`reference.SETTINGS`, or empty for ``exp000``'s.
 
     Returns:
-      report: One line per tensor that differs.
+      report: One line per tensor that differs, prefixed with the setting.
 
     """
-    run = _Recorded()
+    run = _Recorded(setting)
     report = capture_reference.compare_lockstep(lockstep, run=run)
     for name, (theirs, _) in lockstep.items():
-        key = f"lockstep/{name}/media"
+        key = f"{reference.lockstep_key(name, setting=setting)}/media"
         report += mismatches({key: theirs[key]}, {key: run.record[key]})
-    return report
+    prefix = f"settings/{setting}/" if setting else ""
+    return [f"{prefix}{line}" for line in report]
 
 
 class _Recorded:
-    """The port's lockstep run, keeping every record it returned."""
+    """The port's lockstep run at one setting, keeping every record it returned."""
 
-    def __init__(self) -> None:
+    def __init__(self, setting: str) -> None:
+        self.setting = setting
         self.record: dict[str, Tensor] = {}
 
     def __call__(
@@ -219,7 +383,7 @@ class _Recorded:
         states: list[dict[str, Tensor]] | None = None,
     ) -> dict[str, Tensor]:
         """Run ``name``'s lockstep and keep its record."""
-        record = reference.lockstep_record(name, states=states)
+        record = reference.lockstep_record(name, states=states, setting=self.setting)
         self.record |= record
         return record
 

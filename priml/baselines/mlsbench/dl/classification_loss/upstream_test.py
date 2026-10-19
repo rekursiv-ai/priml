@@ -19,7 +19,10 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT,
+    SETTINGS_SCRIPT,
+)
 from priml.testing.golden import read_tensors
 
 
@@ -50,7 +53,8 @@ def write_clone(root: Path) -> None:
     """
     script = root / vision_upstream.PRISTINE
     script.parent.mkdir(parents=True)
-    script.write_text(SCRIPT)
+    # The settings' additions follow ``SCRIPT``, so the loss keeps its lines.
+    script.write_text(SETTINGS_SCRIPT)
     edits = root / upstream.EDITS
     edits.mkdir(parents=True)
     first = SCRIPT[: SCRIPT.index(LOSS)].count("\n") + 1
@@ -79,7 +83,8 @@ def test_each_variant_carries_its_baselines_loss(tmp_path: Path) -> None:
     plain = variants["cross_entropy"].compute_loss(logits, targets, config)
     assert variants["focal"].compute_loss(logits, targets, config) == plain * 2
     assert variants["poly"].compute_loss(logits, targets, config) == plain + 1
-    assert (tmp_path / "scratch" / "focal_loss.py").read_text() == SCRIPT.replace(
+    focal = (tmp_path / "scratch" / "focal_loss.py").read_text()
+    assert focal == SETTINGS_SCRIPT.replace(
         "return F.cross_entropy(logits, targets)\n",
         "return F.cross_entropy(logits, targets) * 2\n",
         1,
@@ -103,6 +108,17 @@ def test_lockstep_records_two_updates_and_leaves_the_script_unpatched(
     assert record["lockstep/cross_entropy/probe"].shape == (2, 2, reference.CLASSES)
     assert len(states) == 2
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
+
+
+def test_setting_losses_run_each_variant_at_each_settings_class_count(
+    tmp_path: Path,
+) -> None:
+    variants = scripts(tmp_path)
+    record = upstream.upstream_setting_losses(variants, ["mobilenetv2-fmnist"])
+    plain = record["settings/mobilenetv2-fmnist/loss/cross_entropy/value"]
+    assert record["settings/mobilenetv2-fmnist/loss/focal/value"] == plain * 2
+    assert record["settings/mobilenetv2-fmnist/loss/poly/grad"].shape == (3, 10)
+    assert len(record) == 2 * len(variants)
 
 
 def test_the_record_has_every_key_the_golden_holds(tmp_path: Path) -> None:

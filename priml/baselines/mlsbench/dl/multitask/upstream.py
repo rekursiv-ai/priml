@@ -24,10 +24,8 @@ from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import contextlib
-import functools
 import io
 import sys
-import warnings
 
 from PIL import Image
 from torch import Tensor, nn
@@ -78,12 +76,17 @@ class Script(Protocol):
     """The part of the ``cv-multitask-loss`` script the capture uses."""
 
     BasicBlock: type[nn.Module]
+    VGG: type[nn.Module]
     torchvision: _Torchvision
     CIFAR100_COARSE_MAP: list[int]
 
     ResNet: Callable[[type[nn.Module], list[int]], nn.Module]
 
     MultiTaskLoss: Callable[[int], nn.Module]
+
+    def build_model(self, arch: str) -> nn.Module:
+        """Build the two-head network an ``--arch`` names."""
+        raise NotImplementedError
 
     def initialize_weights(self, model: nn.Module) -> None:
         """Initialize in place."""
@@ -167,11 +170,12 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
     return {name: cast(Script, cast(object, s)) for name, s in scripts.items()}
 
 
-def trace_main(script: Script) -> Trace:
-    """Run the script's ``main`` for 200 epochs of the ``resnet56`` setting.
+def trace_main(script: Script, *, arch: str = "resnet56") -> Trace:
+    """Run the script's ``main`` for 200 epochs of one setting.
 
     Args:
       script: The pristine script or an edit of it.
+      arch: The setting's ``--arch``.
 
     Returns:
       trace: What the replaced calls saw.
@@ -179,7 +183,7 @@ def trace_main(script: Script) -> Trace:
     """
     trace = Trace()
     spy = _MainSpy(trace)
-    argv = ["script.py", "--arch", "resnet56", "--epochs", "200"]
+    argv = ["script.py", "--arch", arch, "--epochs", "200"]
     argv += ["--seed", str(vision.SEED)]
     printed = io.StringIO()
     with (
@@ -189,11 +193,7 @@ def trace_main(script: Script) -> Trace:
         mock.patch.object(script, "evaluate", spy.evaluate),
         contextlib.redirect_stdout(printed),
         host_agnostic_numerics(),
-        warnings.catch_warnings(),
     ):
-        # With the epoch functions replaced, no optimizer step precedes the
-        # scheduler's, which torch warns about; the order it checks is moot here.
-        warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*")
         script.main()
     (reported,) = (
         line.removeprefix("TEST_METRICS: test_acc=")
@@ -267,13 +267,46 @@ def upstream_combinations(scripts: dict[str, Script]) -> dict[str, Tensor]:
     return record
 
 
-def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
+def tiny_model(script: Script, arch: str) -> nn.Module:
+    """Build the script's shallowest two-head network of an ``--arch``, uninitialized.
+
+    A VGG is built from the vision capture's ``TINY_ARCHS`` table, patched in
+    only for the build; a ResNet has one block per stage.
+
+    Args:
+      script: The pristine script or an edit of it.
+      arch: The setting's ``--arch``.
+
+    Returns:
+      model: The network, as torch's constructors initialized it.
+
+    """
+    if arch != "vgg16bn":
+        with upstream.narrowed_widths(script):
+            return script.ResNet(script.BasicBlock, [1, 1, 1])
+    with (
+        mock.patch.object(script.VGG, "VGG16_CFG", vision.TINY_ARCHS[arch]),
+        upstream.narrowed_widths(script),
+    ):
+        return script.build_model(arch)
+
+
+def upstream_lockstep(
+    script: Script,
+    name: str,
+    trace: Trace,
+    *,
+    arch: str = "resnet56",
+    prefix: str = "",
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the combination under test.
       name: Which combination, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      arch: The setting's ``--arch``; its network is cut by :func:`tiny_model`.
+      prefix: Put before every key.
 
     Returns:
       lockstep: Keyed as :func:`reference.lockstep_record`; and the network's
@@ -284,7 +317,7 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
     states: list[dict[str, Tensor]] = []
     report: list[str] = []
     with vision.seeded(vision.SEED), host_agnostic_numerics():
-        model = script.ResNet(script.BasicBlock, [1, 1, 1])
+        model = tiny_model(script, arch)
         script.initialize_weights(model)
         inner = script.MultiTaskLoss(2)
         spy = reference.CombinationSpy(
@@ -329,7 +362,7 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
             scheduler.step()
     if report:
         raise ValueError(report)
-    return reference.spy_record(name, spy, probes, inner), states
+    return reference.spy_record(name, spy, probes, inner, prefix=prefix), states
 
 
 def upstream_record(
@@ -365,6 +398,56 @@ def upstream_record(
     return record
 
 
+def upstream_setting(
+    scripts: dict[str, Script],
+    setting: str,
+) -> tuple[dict[str, Trace], dict[str, Tensor], dict[str, Lockstep]]:
+    """Trace every variant's ``main`` at a setting and run what it built.
+
+    Args:
+      scripts: Each variant's script, keyed as :func:`variants`.
+      setting: A key of :data:`reference.SETTINGS`.
+
+    Returns:
+      traces: Each variant's run of ``main``.
+      record: Keyed as :func:`reference.setting_record`.
+      lockstep: Each variant's :func:`upstream_lockstep`, keyed
+        ``<setting>/<variant>``, if the setting is in
+        :data:`reference.LOCKSTEP_SETTINGS`.
+
+    """
+    arch = reference.SETTINGS[setting]
+    prefix = f"settings/{setting}/"
+    traces = {name: trace_main(s, arch=arch) for name, s in scripts.items()}
+    pristine = traces["sum"]
+    record = {
+        f"{prefix}schedule/lr": torch.tensor(pristine.rates, dtype=torch.float64),
+        f"{prefix}optimizer/settings": torch.tensor(
+            [pristine.settings[name] for name in vision.HYPERPARAMETERS],
+            dtype=torch.float64,
+        ),
+    }
+    for name, trace in traces.items():
+        record[f"{prefix}draws/{name}"] = trace.draws
+        record[f"{prefix}optimizer/{name}/numels"] = torch.tensor(trace.numels)
+    with vision.seeded(vision.SEED), host_agnostic_numerics():
+        model = tiny_model(scripts["sum"], arch)
+        scripts["sum"].initialize_weights(model)
+    record |= reference.network_forward(model, f"{prefix}forward")
+    lockstep: dict[str, Lockstep] = {}
+    if setting in reference.LOCKSTEP_SETTINGS:
+        for name, script in scripts.items():
+            lockstep[f"{setting}/{name}"] = upstream_lockstep(
+                script,
+                name,
+                pristine,
+                arch=arch,
+                prefix=prefix,
+            )
+            record |= lockstep[f"{setting}/{name}"][0]
+    return traces, record, lockstep
+
+
 def upstream_batches(
     script: Script,
     *,
@@ -386,16 +469,11 @@ def upstream_batches(
     # The script's dataset class lives in a module imported from a file, which a
     # forkserver worker cannot import by name; a forked worker inherits it. The
     # start method changes no draw: each worker's seed comes from the parent.
-    forked = (
-        functools.partial(data.DataLoader, multiprocessing_context="fork")
-        if num_workers
-        else data.DataLoader
-    )
     with (
         vision.seeded(vision.SEED),
         vision.script_workers(),
         mock.patch.object(script.torchvision.datasets, "CIFAR100", _FakeCifar100),
-        mock.patch.object(data, "DataLoader", forked),
+        mock.patch.object(data, "DataLoader", upstream.ForkedLoader(data.DataLoader)),
     ):
         train_loader, test_loader = script.get_dataloaders(
             "unused",
@@ -408,12 +486,22 @@ def upstream_batches(
     return train, evaluation
 
 
-def check_walk(pcgrad: Script, model: nn.Module) -> list[str]:
+def check_walk(
+    pcgrad: Script,
+    model: nn.Module,
+    *,
+    coarse: str = "fc_coarse.",
+    media: Tensor | None = None,
+) -> list[str]:
     """Check the ``pcgrad`` walk against the port's on a network's fine loss.
 
     Args:
       pcgrad: The script carrying the ``pcgrad`` edit.
       model: A two-head network of that script.
+      coarse: Name prefix of the coarse head's parameters, which the fine
+        loss never reaches.
+      media: The images the fine loss is taken on; ``vision.fixed_media(0)``
+        by default, too small for VGG's five pools.
 
     Returns:
       report: A line if the edit's walk is not a subsequence of the port's,
@@ -421,7 +509,8 @@ def check_walk(pcgrad: Script, model: nn.Module) -> list[str]:
 
     """
     with host_agnostic_numerics():
-        fine, _ = cast(tuple[Tensor, Tensor], model(vision.fixed_media(0)))
+        images = vision.fixed_media(0) if media is None else media
+        fine, _ = cast(tuple[Tensor, Tensor], model(images))
         loss_fine = torch.nn.functional.cross_entropy(fine, vision.fixed_label(0))
         instance = pcgrad.MultiTaskLoss(2)
         report = pin_shared(instance, loss_fine)
@@ -430,7 +519,7 @@ def check_walk(pcgrad: Script, model: nn.Module) -> list[str]:
     missed = [
         n
         for n, p in model.named_parameters()
-        if id(p) not in found and not n.startswith("fc_coarse.")
+        if id(p) not in found and not n.startswith(coarse)
     ]
     if missed:
         report.append(f"pcgrad: the port's walk missed {missed}")
@@ -502,6 +591,9 @@ class _MainSpy:
             self.trace.numels = [p.numel() for g in groups for p in g["params"]]
         self.trace.rates.append(from_plain(group["lr"], float))
         self.trace.epochs.append((epoch, total_epochs))
+        # No parameter holds a gradient, so the step moves nothing; it lets the
+        # script's scheduler see the optimizer step it expects before its own.
+        optimizer.step()
         return 0.0, 0.0
 
     def evaluate(self, model: object, loader: object, device: object) -> float:

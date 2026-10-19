@@ -31,19 +31,19 @@ tasks.
 
 | Area | Package | Tasks | In scope | Ported |
 |---|---|---|---|---|
-| DL | [`dl/`](dl/) | 11 | 11 | 11, one setting of three each |
+| DL | [`dl/`](dl/) | 11 | 11 | 11, every setting |
 | LM | [`lm/`](lm/README.md) | 18 | 16 | 0 |
 | CAL | [`cal/`](cal/README.md) | 14 | 14 | 0 |
 | RL | [`rl/`](rl/README.md) | 13 | 13 | 0 |
-| Opt | [`opt/`](opt/README.md) | 13 | 13 | 0 |
+| Opt | [`opt/`](opt/README.md) | 13 | 13 | 1 |
 | Rob | [`rob/`](rob/README.md) | 12 | 12 | 0 |
 | V&G | [`vg/`](vg/README.md) | 11 | 11 | 0 |
 | Sys | [`mlsys/`](mlsys/README.md) | 10 | 10 | 0 |
 | Sci | [`sci/`](sci/README.md) | 10 | 10 | 0 |
 | TS | [`ts/`](ts/README.md) | 10 | 10 | 0 |
 | SCR | [`scr/`](scr/README.md) | 10 | 10 | 0 |
-| TL | [`tl/`](tl/README.md) | 8 | 8 | 0 |
-| **Total** | | **140** | **138** | **11** |
+| TL | [`tl/`](tl/README.md) | 8 | 8 | 4 |
+| **Total** | | **140** | **138** | **16** |
 
 `Sys` is packaged as `mlsys/` so it does not read as the standard library's
 `sys`.
@@ -65,8 +65,18 @@ tasks.
 | [`dl/augmentation/`](dl/augmentation/README.md) | `cv-data-augmentation` | `dataset.augment` |
 
 [`dl/vision/`](dl/vision/README.md) is no task: it holds the data, model, step
-and `exp000` recipe every DL task reuses, and its README lists the settings and
-tasks not yet ported.
+and `exp000` recipe every DL task reuses, and its `settings.py` switches a
+recipe to each other upstream setting.
+
+## Other ported packages
+
+| Package | Task | Slot |
+|---|---|---|
+| [`opt/gradient_compression/`](opt/gradient_compression/README.md) | `optimization-gradient-compression` | `step.compressor` |
+| [`tl/backdoor_defense/`](tl/backdoor_defense/README.md) | `security-backdoor-defense` | `defense` |
+| [`tl/machine_unlearning/`](tl/machine_unlearning/README.md) | `security-machine-unlearning` | `method` |
+| [`tl/membership_inference_defense/`](tl/membership_inference_defense/README.md) | `security-membership-inference-defense` | `step.loss` |
+| [`tl/poison_robust_learning/`](tl/poison_robust_learning/README.md) | `security-poison-robust-learning` | `step.loss` |
 
 ## Proof against upstream
 

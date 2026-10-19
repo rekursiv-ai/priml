@@ -20,6 +20,7 @@ from unittest import mock
 
 import contextlib
 import io
+import multiprocessing
 import sys
 import warnings
 
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
     from types import ModuleType
 
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Dataset
 
 PRISTINE: Final = Path(
     "harbor/tasks-docker/mls-bench__cv-classification-loss/tests/meta/pristine"
@@ -48,7 +49,11 @@ PRISTINE: Final = Path(
 )
 """The unedited ``cv-classification-loss`` script, relative to the clone."""
 
-DATASETS: Final = {"cifar10": "CIFAR10", "cifar100": "CIFAR100"}
+DATASETS: Final = {
+    "cifar10": "CIFAR10",
+    "cifar100": "CIFAR100",
+    "fmnist": "FashionMNIST",
+}
 """The torchvision class each ``--dataset`` the loaders are run with reads."""
 
 
@@ -69,9 +74,15 @@ class Upstream(Protocol):
     """The part of the reference script the capture uses."""
 
     BasicBlock: type[nn.Module]
+    VGG: type[nn.Module]
+    MobileNetV2: type[nn.Module]
     torchvision: _Torchvision
 
     ResNet: Callable[[type[nn.Module], list[int], int], nn.Module]
+
+    def build_model(self, arch: str, num_classes: int) -> nn.Module:
+        """Build the network an ``--arch`` names."""
+        raise NotImplementedError
 
     def initialize_weights(self, model: nn.Module) -> None:
         """Initialize in place."""
@@ -204,6 +215,66 @@ def hidden_accelerators() -> Generator[None]:
         yield
 
 
+class ForkedLoader:
+    """Builds a ``DataLoader`` whose workers, when it has any, are forked.
+
+    A script whose dataset or transform class is defined in a file it was
+    imported from, or inside a function, cannot be pickled into a
+    ``forkserver`` worker; a forked worker inherits it. The start method changes
+    no draw: each worker's seed comes from the parent.
+    """
+
+    def __init__(
+        self,
+        loader: Callable[..., DataLoader[tuple[Tensor, Tensor]]],
+    ) -> None:
+        self.loader = loader
+
+    def __call__(
+        self,
+        dataset: Dataset[tuple[Tensor, Tensor]],
+        *,
+        batch_size: int = 1,
+        shuffle: bool = False,
+        num_workers: int = 0,
+        pin_memory: bool = False,
+    ) -> DataLoader[tuple[Tensor, Tensor]]:
+        """Build the loader, forked when ``num_workers`` asks for workers."""
+        return self.loader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            multiprocessing_context="fork" if num_workers else None,
+        )
+
+
+@contextmanager
+def forked_workers() -> Generator[None]:
+    """Start a script's loader workers by forking, as Linux did before Python 3.14.
+
+    The reference's Fashion-MNIST pipeline holds a lambda, which the
+    ``forkserver`` default of Python 3.14 cannot pickle into a worker. A forked
+    worker inherits it instead, and its draws are the same: each worker seeds
+    itself from the loader's base seed and its index, whatever started it.
+
+    Yields:
+      nothing: Used as a context manager.
+
+    """
+    previous = multiprocessing.get_start_method()
+    multiprocessing.set_start_method("fork", force=True)
+    try:
+        with warnings.catch_warnings():
+            # Python warns that forking a multi-threaded process may deadlock;
+            # the workers only index the dataset and run its transforms.
+            warnings.filterwarnings("ignore", message=".*use of fork\\(\\) may lead.*")
+            yield
+    finally:
+        multiprocessing.set_start_method(previous, force=True)
+
+
 def trace_main(
     script: Upstream,
     *,
@@ -280,13 +351,167 @@ def upstream_record(
     record |= upstream_pipelines(script)
     record |= reference.decode_batches(
         train_batches,
-        translate_pad=Cifar100Data.Config().translate_pad,
+        config=Cifar100Data.Config(),
+        source=reference.synthetic_split()[0],
     )
     return record
 
 
+def initialized_tiny(script: Upstream, arch: str) -> nn.Module:
+    """Build the reference's shallowest network of an ``--arch`` and initialize it."""
+    model = tiny_model(script, arch, reference.CLASSES)
+    script.initialize_weights(model)
+    return model
+
+
+def upstream_setting(
+    script: Upstream,
+    name: str,
+    *,
+    key: str | None = None,
+    build: Callable[[Upstream, str], nn.Module] = initialized_tiny,
+) -> tuple[MainTrace, dict[str, Tensor]]:
+    """Trace ``main`` at a setting, and initialize and run its shallowest network.
+
+    Args:
+      script: A pytorch-vision task script, pristine or edited.
+      name: A key of :data:`reference.SETTINGS`.
+      key: Names the record; ``name`` by default.
+      build: Builds and initializes the shallowest network of an ``--arch``,
+        as the task's script initializes.
+
+    Returns:
+      trace: The run of ``main``; its state is the full network's after
+        initialization.
+      record: Keyed as :func:`reference.setting_record`.
+
+    """
+    setting = reference.SETTINGS[name]
+    trace = trace_main(
+        script,
+        arch=setting.arch,
+        dataset=setting.dataset,
+        classes=setting.classes,
+    )
+    return trace, tiny_setting_record(script, setting.arch, key or name, build=build)
+
+
+def tiny_setting_record(
+    script: Upstream,
+    arch: str,
+    key: str,
+    *,
+    build: Callable[[Upstream, str], nn.Module] = initialized_tiny,
+) -> dict[str, Tensor]:
+    """Build an ``--arch``'s shallowest network from the task's seed and run it.
+
+    Args:
+      script: A task script, pristine or edited, or a driver.
+      arch: The setting's ``--arch``.
+      key: Names the record.
+      build: As :func:`upstream_setting`.
+
+    Returns:
+      record: Keyed as :func:`reference.setting_record` under ``key``.
+
+    """
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        model = build(script, arch)
+        draws = rng_fingerprint()
+    return {f"settings/{key}/draws": draws} | reference.setting_forward(model, key)
+
+
+def tiny_model(script: Upstream, arch: str, classes: int) -> nn.Module:
+    """Build the reference's shallowest network of an ``--arch``, uninitialized.
+
+    A VGG or MobileNetV2 is built from the table of
+    :data:`reference.TINY_ARCHS`, patched in only for the build; a ResNet has
+    one block per stage. Every hardcoded width is narrowed by
+    :func:`narrowed_widths`. The caller runs ``initialize_weights``.
+
+    Args:
+      script: A pytorch-vision task script, pristine or edited.
+      arch: The reference's ``--arch``.
+      classes: Logits.
+
+    Returns:
+      model: The network, as torch's constructors initialized it.
+
+    """
+    if arch == "vgg16bn":
+        table, field = script.VGG, "VGG16_CFG"
+    elif arch == "mobilenetv2":
+        table, field = script.MobileNetV2, "CFG"
+    else:
+        with narrowed_widths(script):
+            return script.ResNet(script.BasicBlock, [1, 1, 1], classes)
+    with (
+        mock.patch.object(table, field, reference.TINY_ARCHS[arch]),
+        narrowed_widths(script),
+    ):
+        return script.build_model(arch, classes)
+
+
+@contextmanager
+def narrowed_widths(script: object) -> Generator[None]:
+    """Build every layer with the widths of :data:`reference.TINY_WIDTHS`.
+
+    The reference writes ResNet's stage widths, MobileNetV2's stem and last
+    convolution and VGG's classifier as literals, so no table reaches them.
+    Each layer is built through ``nn`` or, in ``dl-normalization``, the
+    script's ``CustomNorm``; while patched, each narrows any argument equal to
+    a hardcoded width. ``nn``'s layers are not classes while patched, so only
+    construction may run inside: an ``isinstance`` against them raises.
+
+    Args:
+      script: The script being built from.
+
+    Yields:
+      nothing: Used as a context manager.
+
+    """
+    with contextlib.ExitStack() as stack:
+        for name in ("Conv2d", "BatchNorm2d", "Linear"):
+            layer = cast("Callable[..., nn.Module]", getattr(nn, name))
+            stack.enter_context(mock.patch.object(nn, name, _Narrowed(layer)))
+        norm = cast(object, vars(script).get("CustomNorm"))
+        if isinstance(norm, type):
+            narrowed = _Narrowed(cast("Callable[..., nn.Module]", norm))
+            stack.enter_context(mock.patch.object(script, "CustomNorm", narrowed))
+        yield
+
+
+def upstream_settings(
+    script: Upstream,
+) -> tuple[dict[str, MainTrace], dict[str, Tensor]]:
+    """Run every setting's network and loaders, and the Fashion-MNIST pipelines.
+
+    Args:
+      script: The pristine reference script.
+
+    Returns:
+      traces: Each setting's run of ``main``.
+      record: Keyed as :func:`reference.settings_record`.
+
+    """
+    traces: dict[str, MainTrace] = {}
+    record = upstream_fmnist_pipelines(script)
+    for name in reference.CAPTURED:
+        setting = reference.SETTINGS[name]
+        traces[name], network = upstream_setting(script, name)
+        record |= network
+        train, _ = upstream_batches(script, dataset=setting.dataset)
+        decoded = reference.decode_batches(
+            train,
+            config=setting.experiment().dataset,
+            source=setting.split()[0],
+        )
+        record |= {f"settings/{name}/{key}": value for key, value in decoded.items()}
+    return traces, record
+
+
 def upstream_network(script: Upstream) -> dict[str, Tensor]:
-    """Initialize the shallowest network at the reference's widths and run it.
+    """Initialize the shallowest network at ``reference.TINY_WIDTHS`` and run it.
 
     Args:
       script: The pristine reference script.
@@ -296,7 +521,7 @@ def upstream_network(script: Upstream) -> dict[str, Tensor]:
 
     """
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = script.ResNet(script.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = tiny_model(script, "resnet56", reference.CLASSES)
         script.initialize_weights(model)
         draws = rng_fingerprint()
         media = reference.fixed_media(reference.STEPS)
@@ -331,7 +556,11 @@ def upstream_batches(
     """
     train: Batches = []
     evaluation: Batches = []
-    with reference.seeded(reference.SEED), reference.script_workers():
+    with (
+        reference.seeded(reference.SEED),
+        reference.script_workers(),
+        forked_workers(),
+    ):
         train_loader, test_loader = _loaders(
             script,
             num_workers=num_workers,
@@ -353,17 +582,46 @@ def upstream_pipelines(script: Upstream) -> dict[str, Tensor]:
       record: Keyed as :func:`reference.transform_record`.
 
     """
-    train_loader, test_loader = _loaders(script, num_workers=0)
-    pixels = [
-        image.permute(1, 2, 0).contiguous().numpy()
-        for image in reference.fixed_images(2)
-    ]
-    train_transform = _transform(train_loader)
-    test_transform = _transform(test_loader)
-    with reference.seeded(reference.SEED):
-        train = torch.stack([train_transform(Image.fromarray(p)) for p in pixels])
-    test = torch.stack([test_transform(Image.fromarray(p)) for p in pixels])
+    train, test = _pipelines(script, reference.fixed_images(2), dataset="cifar100")
     return {"transform/train": train, "transform/test": test}
+
+
+def upstream_fmnist_pipelines(script: Upstream) -> dict[str, Tensor]:
+    """Run both of the reference's Fashion-MNIST pipelines on two fixed 28x28 images.
+
+    Args:
+      script: The pristine reference script.
+
+    Returns:
+      record: Keyed as :func:`reference.fmnist_transform_record`.
+
+    """
+    images = reference.fixed_images(2, channels=1, side=28)
+    train, test = _pipelines(script, images, dataset="fmnist")
+    return {"transform/fmnist/train": train, "transform/fmnist/test": test}
+
+
+def upstream_fmnist_sites(script: Upstream) -> dict[str, int]:
+    """Count the draws of building MobileNetV2 and of the Fashion-MNIST data path.
+
+    Args:
+      script: The pristine reference script.
+
+    Returns:
+      counts: As :func:`reference.fmnist_draw_sites`; the loaders run in this
+        process so the transforms' draws are seen.
+
+    """
+    setting = reference.SETTINGS["mobilenetv2-fmnist"]
+    with recorded_draws() as counts:
+        with reference.seeded(reference.SEED):
+            script.initialize_weights(script.build_model(setting.arch, setting.classes))
+        _ = upstream_fmnist_pipelines(script)
+        train_loader, test_loader = _loaders(script, num_workers=0, dataset="fmnist")
+        for _ in range(reference.LOADER_PASSES):
+            _ = list(train_loader)
+            _ = list(test_loader)
+    return counts
 
 
 def upstream_sites(script: Upstream) -> dict[str, int]:
@@ -401,6 +659,137 @@ class CriterionSpy:
         self.losses.append(loss.detach())
         self.logits.append(logits.detach())
         return loss
+
+
+class FakeCifar100:
+    """The synthetic split, standing in for torchvision's CIFAR classes.
+
+    Takes the keywords the reference's ``get_dataloaders`` passes and serves
+    :func:`reference.synthetic_split` through the script's transform, as a PIL
+    image, the way torchvision's class does.
+
+    Args:
+      root: Ignored.
+      train: Ignored; both splits are the synthetic split.
+      download: Ignored.
+      transform: The script's pipeline for one PIL image.
+
+    """
+
+    def __init__(
+        self,
+        *,
+        root: str,
+        train: bool,
+        download: bool,
+        transform: Callable[[Image.Image], Tensor],
+    ) -> None:
+        del root, train, download
+        self.media, self.label = reference.synthetic_split()
+        self.transform = transform
+
+    def __len__(self) -> int:
+        """Return the images in the split."""
+        return len(self.media)
+
+    def __getitem__(self, index: int) -> tuple[Tensor, int]:
+        """Return image ``index`` through the transform, and its label."""
+        return self.transform(_pil(self.media[index])), int(self.label[index])
+
+
+class FakeFashionMNIST(FakeCifar100):
+    """The grayscale synthetic split, served as torchvision serves Fashion-MNIST.
+
+    Each image is a 28x28 ``L``-mode PIL image of
+    :func:`reference.synthetic_gray_split`.
+    """
+
+    def __init__(
+        self,
+        *,
+        root: str,
+        train: bool,
+        download: bool,
+        transform: Callable[[Image.Image], Tensor],
+    ) -> None:
+        super().__init__(root=root, train=train, download=download, transform=transform)
+        self.media, self.label = reference.synthetic_gray_split()
+
+
+@contextmanager
+def synthetic_datasets(script: Upstream, dataset: str) -> Generator[None]:
+    """Make a script's torchvision class for ``dataset`` serve the synthetic split.
+
+    Inside the block, the class :data:`DATASETS` names on the script's own
+    ``torchvision.datasets`` is :class:`FakeFashionMNIST` for ``fmnist`` and
+    :class:`FakeCifar100` otherwise; it is restored on exit.
+
+    Args:
+      script: A pytorch-vision task script.
+      dataset: The setting's ``--dataset``.
+
+    Yields:
+      nothing: Used as a context manager.
+
+    """
+    fake = FakeFashionMNIST if dataset == "fmnist" else FakeCifar100
+    with mock.patch.object(script.torchvision.datasets, DATASETS[dataset], fake):
+        yield
+
+
+def _pil(image: Tensor) -> Image.Image:
+    """Return a ``(C, H, W)`` uint8 image as PIL holds it: RGB, or ``L`` for one channel."""
+    return Image.fromarray(image.permute(1, 2, 0).squeeze(-1).contiguous().numpy())
+
+
+def _pipelines(
+    script: Upstream,
+    images: Tensor,
+    *,
+    dataset: str,
+) -> tuple[Tensor, Tensor]:
+    """Run a dataset's training pipeline, seeded, and its test pipeline on ``images``."""
+    train_loader, test_loader = _loaders(script, num_workers=0, dataset=dataset)
+    train_transform = _transform(train_loader)
+    test_transform = _transform(test_loader)
+    with reference.seeded(reference.SEED):
+        train = torch.stack([train_transform(_pil(image)) for image in images])
+    test = torch.stack([test_transform(_pil(image)) for image in images])
+    return train, test
+
+
+def _load_module(path: Path) -> ModuleType:
+    """Import a script from its file."""
+    loader = machinery.SourceFileLoader(path.stem, str(path))
+    spec = machinery.ModuleSpec(path.stem, loader, origin=str(path))
+    spec.has_location = True
+    module = util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _loaders(
+    script: Upstream,
+    *,
+    num_workers: int,
+    dataset: str = "cifar100",
+) -> tuple[DataLoader[tuple[Tensor, Tensor]], DataLoader[tuple[Tensor, Tensor]]]:
+    """Build the reference's loaders over the synthetic split."""
+    with synthetic_datasets(script, dataset):
+        train, test, _ = script.get_dataloaders(
+            dataset,
+            "unused",
+            batch_size=reference.LOADER_BATCH,
+            num_workers=num_workers,
+        )
+    return train, test
+
+
+def _transform(
+    loader: DataLoader[tuple[Tensor, Tensor]],
+) -> Callable[[Image.Image], Tensor]:
+    """Return the transform a loader's dataset applies."""
+    return cast(FakeCifar100, loader.dataset).transform
 
 
 class _MainSpy:
@@ -466,59 +855,22 @@ class _MainSpy:
         return 0.0, 100.0 * next(self.scripted) / reference.SCRIPTED_TOTAL
 
 
-class _FakeCifar100:
-    """The synthetic split, in the shape the reference expects of a dataset."""
+class _Narrowed:
+    """Builds a layer with each hardcoded width among its arguments narrowed."""
 
-    def __init__(
-        self,
-        *,
-        root: str,
-        train: bool,
-        download: bool,
-        transform: Callable[[Image.Image], Tensor],
-    ) -> None:
-        del root, train, download
-        self.media, self.label = reference.synthetic_split()
-        self.transform = transform
+    def __init__(self, layer: Callable[..., nn.Module]) -> None:
+        self.layer = layer
 
-    def __len__(self) -> int:
-        return len(self.media)
-
-    def __getitem__(self, index: int) -> tuple[Tensor, int]:
-        pixels = self.media[index].permute(1, 2, 0).contiguous().numpy()
-        return self.transform(Image.fromarray(pixels)), int(self.label[index])
-
-
-def _load_module(path: Path) -> ModuleType:
-    """Import a script from its file."""
-    loader = machinery.SourceFileLoader(path.stem, str(path))
-    spec = machinery.ModuleSpec(path.stem, loader, origin=str(path))
-    spec.has_location = True
-    module = util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-def _loaders(
-    script: Upstream,
-    *,
-    num_workers: int,
-    dataset: str = "cifar100",
-) -> tuple[DataLoader[tuple[Tensor, Tensor]], DataLoader[tuple[Tensor, Tensor]]]:
-    """Build the reference's loaders over the synthetic split."""
-    name = DATASETS[dataset]
-    with mock.patch.object(script.torchvision.datasets, name, _FakeCifar100):
-        train, test, _ = script.get_dataloaders(
-            dataset,
-            "unused",
-            batch_size=reference.LOADER_BATCH,
-            num_workers=num_workers,
+    def __call__(self, *args: object, **kwargs: object) -> nn.Module:
+        """Build the layer from the narrowed arguments."""
+        return self.layer(
+            *map(_narrow, args),
+            **{key: _narrow(value) for key, value in kwargs.items()},
         )
-    return train, test
 
 
-def _transform(
-    loader: DataLoader[tuple[Tensor, Tensor]],
-) -> Callable[[Image.Image], Tensor]:
-    """Return the transform a loader's dataset applies."""
-    return cast(_FakeCifar100, loader.dataset).transform
+def _narrow(value: object) -> object:
+    """Return a hardcoded width's tiny width; any other argument as it is."""
+    if isinstance(value, int):
+        return reference.TINY_WIDTHS.get(value, value)
+    return value

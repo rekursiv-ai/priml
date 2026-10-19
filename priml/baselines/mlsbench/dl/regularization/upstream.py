@@ -48,6 +48,14 @@ EDITS: Final = Path("tasks/dl-regularization/edits")
 SETTING: Final = Path("tasks/dl-regularization/scripts/resnet56_cifar100.sh")
 """Launch script of the ``resnet56-cifar100`` setting, relative to the clone."""
 
+SETTING_SCRIPTS: Final = {
+    "vgg16bn-cifar100": Path("tasks/dl-regularization/scripts/vgg16bn_cifar100.sh"),
+    "mobilenetv2-fmnist": Path(
+        "tasks/dl-regularization/scripts/mobilenetv2_fmnist.sh",
+    ),
+}
+"""Launch script of each other setting, keyed as the vision ``SETTINGS``."""
+
 EDITED: Final = ("dropblock", "confidence_penalty", "orthogonal_reg")
 """The baselines, each named as its edit file and as its port's variant."""
 
@@ -149,38 +157,61 @@ def pristine_raises(root: Path) -> bool:
     return False
 
 
-def setting_argv(root: Path) -> list[str]:
-    """Return the arguments the setting's launch script passes to the training script.
+def setting_argv(root: Path, launch: Path = SETTING) -> list[str]:
+    """Return the arguments a setting's launch script passes to the training script.
 
     Shell defaults (``${SEED:-42}``) resolve to their default.
 
     Args:
       root: Clone of the benchmark.
+      launch: The launch script, relative to the clone; ``resnet56-cifar100``'s
+        by default.
 
     Returns:
       argv: ``sys.argv`` as the script would see it.
 
     """
-    text = (root / SETTING).read_text().replace("\\\n", " ")
+    text = (root / launch).read_text().replace("\\\n", " ")
     script = PRISTINE.parent.name + "/" + PRISTINE.name
     (command,) = (line for line in text.splitlines() if script in line)
     tokens = shlex.split(re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", command))
     return ["script.py", *tokens[tokens.index(script) + 1 :]]
 
 
-def trace_setting(script: Upstream, argv: list[str]) -> MainTrace:
+def trace_setting(
+    script: Upstream,
+    argv: list[str],
+    *,
+    classes: int = 100,
+) -> MainTrace:
     """Trace ``main`` as the setting launches it.
 
     Args:
       script: A ``dl-regularization`` script, pristine or edited.
       argv: The setting's :func:`setting_argv`.
+      classes: What the replaced loaders report for the setting's dataset.
 
     Returns:
       trace: What the replaced calls saw.
 
     """
     with mock.patch.object(script, "main", _WithArgv(script.main, argv)):
-        return upstream.trace_main(script)
+        return upstream.trace_main(script, classes=classes)
+
+
+def with_epochs(argv: list[str], epochs: int) -> list[str]:
+    """Return ``argv`` with its ``--epochs`` value replaced.
+
+    Args:
+      argv: A setting's :func:`setting_argv`.
+      epochs: The new horizon.
+
+    Returns:
+      argv: A copy, every other argument as it was.
+
+    """
+    index = argv.index("--epochs") + 1
+    return [*argv[:index], str(epochs), *argv[index + 1 :]]
 
 
 def upstream_regularizers(scripts: dict[str, Upstream]) -> dict[str, Tensor]:
@@ -201,13 +232,25 @@ def upstream_regularizers(scripts: dict[str, Upstream]) -> dict[str, Tensor]:
     return record
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    arch: str = "resnet56",
+    prefix: str | None = None,
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the regularizer under test.
       name: Which regularizer, for the record's keys.
-      trace: Source of the optimizer settings ``main`` used.
+      trace: ``main`` traced over ``reference.EPOCHS`` epochs: the source of
+        the optimizer settings and of each epoch's rate, as the script's own
+        scheduler set it; for a VGG that is a warmup no fixed scheduler here
+        could stand in for.
+      arch: The setting's ``--arch``; its network is cut as ``tiny_model`` cuts it.
+      prefix: Put before every key; ``lockstep/<name>/`` by default.
 
     Returns:
       lockstep: Per update the loss, the regularization term, the logits, a
@@ -225,7 +268,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
         host_agnostic_numerics(),
         mock.patch.object(task, "compute_regularization", spy),
     ):
-        model = task.ResNet(task.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = upstream.tiny_model(script, arch, reference.CLASSES)
         task.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -235,10 +278,6 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
             weight_decay=trace.settings["weight_decay"],
             nesterov=bool(trace.settings["nesterov"]),
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=reference.EPOCHS,
-        )
         config = {
             "num_classes": reference.CLASSES,
             "epoch": 0,
@@ -246,6 +285,8 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
         }
         for index in range(reference.STEPS):
             config["epoch"] = index
+            for group in optimizer.param_groups:
+                group["lr"] = trace.rates[index]
             batch = [(reference.fixed_media(index), reference.fixed_label(index))]
             task.train_epoch(
                 model,
@@ -261,22 +302,95 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
                     reference.logits_of(model, reference.fixed_media(reference.STEPS)),
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
-            scheduler.step()
         # The script adds the two terms and keeps no sum; this repeats its one
         # addition under the same pins.
         losses = [
             ce + reg for ce, reg in zip(criterion.losses, spy.values, strict=True)
         ]
+    prefix = prefix or f"lockstep/{name}/"
     record = {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/regularization": torch.stack(spy.values),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
-        f"lockstep/{name}/context": torch.tensor(
+        f"{prefix}loss": torch.stack(losses),
+        f"{prefix}regularization": torch.stack(spy.values),
+        f"{prefix}logits": torch.stack(criterion.logits),
+        f"{prefix}probe": torch.stack(probes),
+        f"{prefix}context": torch.tensor(
             [[c["num_classes"], c["epoch"], c["total_epochs"]] for c in spy.configs],
         ),
     }
     return record, states
+
+
+def upstream_setting_regularizers(
+    scripts: dict[str, Upstream],
+    setting: str,
+    model: nn.Module,
+) -> dict[str, Tensor]:
+    """Run each baseline's regularizer on a setting's full network.
+
+    Args:
+      scripts: The variants of :func:`variants`; ``zero`` is skipped.
+      setting: A key of :data:`SETTING_SCRIPTS`, naming the record.
+      model: The script's shallowest network at the setting, as
+        :func:`tiny_network` builds it; each run reads a copy.
+
+    Returns:
+      record: Keyed as :func:`port.setting_regularizer_record`.
+
+    """
+    record: dict[str, Tensor] = {}
+    for name in EDITED:
+        task = cast(Script, cast(object, scripts[name]))
+        record |= port.regularizer_run(
+            name,
+            _ScriptCall(task.compute_regularization),
+            network=port.Copies(model),
+            prefix=f"settings/{setting}/",
+        )
+    return record
+
+
+def tiny_network(script: Upstream, arch: str) -> nn.Module:
+    """Build and initialize the script's shallowest network of an ``--arch``.
+
+    Args:
+      script: The pristine script.
+      arch: The setting's ``--arch``.
+
+    Returns:
+      model: Built under the task's seed, as :func:`port.tiny_network` is.
+
+    """
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        model = upstream.tiny_model(script, arch, reference.CLASSES)
+        cast(Script, cast(object, script)).initialize_weights(model)
+    return model
+
+
+def upstream_setting_recipe(
+    trace: MainTrace,
+    setting: str,
+    argv: list[str],
+) -> dict[str, Tensor]:
+    """Return a setting's rates, optimizer and batch sizes as its launch traced them.
+
+    Args:
+      trace: The setting's ``main``, traced with its launch arguments.
+      setting: A key of :data:`SETTING_SCRIPTS`, naming the record.
+      argv: The setting's :func:`setting_argv`.
+
+    Returns:
+      record: Keyed as :func:`port.setting_recipe_record`.
+
+    """
+    record = {
+        "schedule/lr": torch.tensor(trace.rates, dtype=torch.float64),
+        "optimizer/settings": torch.tensor(
+            [trace.settings[name] for name in reference.HYPERPARAMETERS],
+            dtype=torch.float64,
+        ),
+        "setting/batch_size": port.setting_batch_size(argv),
+    }
+    return {f"settings/{setting}/{key}": value for key, value in record.items()}
 
 
 def upstream_record(

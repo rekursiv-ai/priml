@@ -53,8 +53,97 @@ def test_the_golden_holds_only_the_losses_and_their_updates() -> None:
     assert {k.split("/")[0] for k in stored("")} == {"loss", "lockstep"}
 
 
-def test_the_captured_golden_fits_the_size_ceiling() -> None:
-    assert (_DATA / "reference.pt").stat().st_size <= capture_reference.CEILING
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_the_captured_goldens_fit_the_size_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
+
+
+def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+def test_every_loss_matches_the_script_at_each_settings_class_count() -> None:
+    expected = stored_settings("settings/")
+    expected = {k: v for k, v in expected.items() if "/loss/" in k}
+    assert expected["settings/vgg16bn-cifar100/loss/poly/grad"].shape == (3, 100)
+    assert expected["settings/mobilenetv2-fmnist/loss/focal/grad"].shape == (3, 10)
+    assert_exact(expected, reference.setting_loss_record())
+
+
+@pytest.mark.slow
+def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
+    expected = {
+        k: v
+        for k, v in stored_settings("settings/").items()
+        if "/loss/" not in k and "/lockstep/" not in k
+    }
+    assert_exact(
+        expected,
+        vision.task_settings_record(reference.SETTING_LOSSES, tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{setting}/{name}"
+        for setting, forks in reference.SETTING_LOSSES.items()
+        for name in forks
+    ],
+)
+def test_two_updates_of_each_setting_fork_match_the_script(key: str) -> None:
+    setting, name = key.split("/")
+    assert_exact(
+        stored_settings(f"settings/{setting}/lockstep/{name}/"),
+        reference.setting_lockstep_record(key),
+    )
+
+
+def test_a_setting_lockstep_hands_back_the_state_after_each_update() -> None:
+    states: list[dict[str, torch.Tensor]] = []
+    record = reference.setting_lockstep_record(
+        "mobilenetv2-fmnist/focal",
+        states=states,
+    )
+    assert len(states) == vision.STEPS
+    assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
+    assert record["settings/mobilenetv2-fmnist/lockstep/focal/context"].tolist() == [
+        [vision.CLASSES, 0, vision.EPOCHS],
+        [vision.CLASSES, 1, vision.EPOCHS],
+    ]
+
+
+def test_the_settings_golden_holds_every_fork() -> None:
+    keys = set(stored_settings(""))
+    for setting, forks in reference.SETTING_LOSSES.items():
+        for name in forks:
+            assert {
+                f"settings/{setting}/{name}/{kind}"
+                for kind in ("draws", "train", "eval")
+            } | {
+                f"settings/{setting}/loss/{name}/{kind}" for kind in ("value", "grad")
+            } | {
+                f"settings/{setting}/lockstep/{name}/{kind}"
+                for kind in ("loss", "logits", "probe", "context")
+            } <= keys
+    assert any(k.startswith("settings/mobilenetv2-fmnist/loader/") for k in keys)
+
+
+def test_the_settings_comparison_sees_a_change_of_one_ulp() -> None:
+    key = "settings/vgg16bn-cifar100/loss/focal/grad"
+    port = {key: reference.setting_loss_record()[key]}
+    bumped = stored_settings(key)[key].clone()
+    bumped.view(-1)[7] = torch.nextafter(bumped.view(-1)[7], torch.tensor(torch.inf))
+    assert mismatches({key: bumped}, port) == [f"{key}: 1/300 differ"]
+
+
+def test_setting_logits_span_the_class_count_and_reach_the_last_class() -> None:
+    logits, label = reference.setting_logits(10)
+    assert logits.shape == (3, 10)
+    assert label.tolist() == [0, 9, 5]
+    assert len(set(logits[0].tolist())) == 10
 
 
 def test_the_comparison_sees_a_change_of_one_ulp() -> None:

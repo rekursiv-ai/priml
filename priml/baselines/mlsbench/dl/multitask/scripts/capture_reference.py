@@ -12,7 +12,12 @@ value and gradients on fixed losses, the superclass map, the 200 learning
 rates, the optimizer and the size and order of every tensor it updates, the
 reported accuracy, the two-head ResNet-56's initial state and forward, where
 the generator stands after building each experiment, every pixel and label of
-the loaders, and every parameter after two updates per combination. Any
+the loaders, and every parameter after two updates per combination. At the
+``resnet20-cifar100mt`` and ``vgg16bn-cifar100mt`` settings it compares, per
+combination, the full two-head network's initial state, the generator's
+position and the optimizer's tensors, the summing network's forwards, the
+rates and the optimizer, the ``pcgrad`` walk, and for VGG every parameter after
+two updates of the shallowest VGG the script's own table builds. Any
 mismatch is printed and the exit code is 1; otherwise the values the default
 test replays are written under ``--out``.
 
@@ -70,7 +75,19 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v
+                for k, v in captured.record.items()
+                if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v for k, v in captured.record.items() if k.startswith("settings/")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -105,7 +122,90 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         batches,
         reference.loader_batches(scratch),
     )
-    return vision.Captured(record=record, sites={}, report=report)
+    settings, settings_report = capture_settings(scripts)
+    return vision.Captured(
+        record=record | settings,
+        sites={},
+        report=report + settings_report,
+    )
+
+
+def capture_settings(
+    scripts: dict[str, upstream.Script],
+) -> tuple[dict[str, Tensor], list[str]]:
+    """Compare every combination at the task's other settings with its script.
+
+    Both settings read ``resnet56-cifar100mt``'s data, whose loaders are
+    compared above.
+
+    Args:
+      scripts: Each variant's script, keyed as :func:`upstream.variants`.
+
+    Returns:
+      record: The scripts' values, keyed as :func:`reference.settings_record`.
+      report: One line per mismatch.
+
+    """
+    record: dict[str, Tensor] = {}
+    report: list[str] = []
+    lockstep: dict[str, upstream.Lockstep] = {}
+    with vision_upstream.hidden_accelerators():
+        for setting, arch in reference.SETTINGS.items():
+            traces, values, steps = upstream.upstream_setting(scripts, setting)
+            record |= values
+            lockstep |= steps
+            report += [f"settings/{setting}/{line}" for line in compare_wiring(traces)]
+            report += compare_setting(scripts, traces, setting)
+            with vision.seeded(vision.SEED), host_agnostic_numerics():
+                theirs = scripts["sum"].build_model(arch)
+            theirs.load_state_dict(traces["sum"].state)
+            report += [
+                f"settings/{setting}/{line}"
+                for line in upstream.check_walk(
+                    scripts["pcgrad"],
+                    theirs.train(),
+                    coarse="classifier_coarse." if arch == "vgg16bn" else "fc_coarse.",
+                    media=vision.full_size_media(),
+                )
+            ]
+    report += mismatches(record, reference.settings_record())
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.setting_lockstep_record,
+    )
+    return record, report
+
+
+def compare_setting(
+    scripts: dict[str, upstream.Script],
+    traces: dict[str, upstream.Trace],
+    setting: str,
+) -> list[str]:
+    """Compare every combination's full network at a setting, as ``main`` built it.
+
+    Args:
+      scripts: Each variant's script; only the names are read.
+      traces: Each variant's ``main`` at the setting.
+      setting: A key of :data:`reference.SETTINGS`.
+
+    Returns:
+      report: One line per tensor that differs, in registration order.
+
+    """
+    report: list[str] = []
+    for name in scripts:
+        with vision.seeded(vision.SEED), host_agnostic_numerics():
+            ours = reference.full_step(
+                reference.SETTING_COMBINATIONS[setting][name],
+            ).model
+        report += [
+            f"settings/{setting}/{name}/state: {line}"
+            for line in capture_reference.compare_states(
+                traces[name].state,
+                ours.state_dict(),
+            )
+        ]
+    return report
 
 
 def compare_wiring(traces: dict[str, upstream.Trace]) -> list[str]:

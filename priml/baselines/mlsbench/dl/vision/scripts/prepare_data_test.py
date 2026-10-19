@@ -1,4 +1,4 @@
-"""Tests for the CIFAR-100 preparation CLI."""
+"""Tests for the dataset preparation CLI."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import sys
 
 import pytest
 
+from priml.baselines.mlsbench.dl.vision.experiments import exp000
 from priml.baselines.mlsbench.dl.vision.scripts import prepare_data
+from priml.baselines.mlsbench.dl.vision.settings import mobilenetv2_fmnist
 from priml.lib.testing.checks import assert_help_without_docstring
 
 
@@ -23,25 +25,67 @@ def test_default_directory_matches_the_loop_resolution() -> None:
     assert prepare_data.default_directory() == Path("/opt/scratch/datasets/cifar100")
 
 
+@pytest.mark.parametrize(
+    ("dataset", "directory"),
+    [
+        ("cifar10", "/opt/scratch/datasets/cifar10"),
+        ("cifar100", "/opt/scratch/datasets/cifar100"),
+        ("fmnist", "/opt/scratch/datasets/fmnist"),
+    ],
+)
+def test_each_datasets_default_is_where_its_recipe_reads(
+    dataset: prepare_data.Dataset,
+    directory: str,
+) -> None:
+    assert prepare_data.default_directory(dataset) == Path(directory)
+
+
+def test_the_fmnist_default_is_the_settings_own_directory() -> None:
+    config = mobilenetv2_fmnist(exp000()).dataset
+    config.base_dir = "/opt/scratch"
+    assert prepare_data.default_directory("fmnist") == Path(
+        config.copy_tree().finalize().working_dir,
+    )
+
+
+class Recorder:
+    """Stands in for ``prepare``, keeping each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, str]] = []
+
+    def __call__(self, directory: Path, *, dataset: str) -> None:
+        """Record the call."""
+        self.calls.append((directory, dataset))
+
+
 def test_main_prepares_the_requested_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called: list[Path] = []
-    monkeypatch.setattr(prepare_data, "prepare", called.append)
+    recorder = Recorder()
+    monkeypatch.setattr(prepare_data, "prepare", recorder)
     monkeypatch.setattr(sys, "argv", ["prepare_data", "--directory", str(tmp_path)])
     assert prepare_data.main() == 0
-    assert called == [tmp_path]
+    assert recorder.calls == [(tmp_path, "cifar100")]
 
 
-def test_main_falls_back_to_the_default_directory(
+def test_main_falls_back_to_the_datasets_default_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called: list[Path] = []
-    monkeypatch.setattr(prepare_data, "prepare", called.append)
-    monkeypatch.setattr(sys, "argv", ["prepare_data"])
+    recorder = Recorder()
+    monkeypatch.setattr(prepare_data, "prepare", recorder)
+    monkeypatch.setattr(sys, "argv", ["prepare_data", "--dataset", "fmnist"])
     assert prepare_data.main() == 0
-    assert called == [prepare_data.default_directory()]
+    assert recorder.calls == [(prepare_data.default_directory("fmnist"), "fmnist")]
+
+
+def test_an_unknown_dataset_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["prepare_data", "--dataset", "mnist"])
+    with pytest.raises(SystemExit, match="2"):
+        prepare_data.main()
 
 
 def test_main_help_describes_the_command(
@@ -52,7 +96,11 @@ def test_main_help_describes_the_command(
     with pytest.raises(SystemExit, match="0"):
         prepare_data.main()
     help_text = capsys.readouterr().out
-    assert "Download CIFAR-100 and cache it as 8-bit tensors.\n\nRun once" in help_text
+    assert (
+        "Download a dataset, CIFAR-100 by default, and cache it as 8-bit tensors.\n\n"
+        "Run once" in help_text
+    )
+    assert "--dataset {cifar10,cifar100,fmnist}" in help_text
     assert "prepare_data.py --directory /datasets/my-cifar100" in help_text
 
 
@@ -84,15 +132,15 @@ def test_main_configures_info_logging(
         calls.append(kwargs)
 
     monkeypatch.setattr(logging, "basicConfig", record_basic_config)
-    prepared: list[Path] = []
-    monkeypatch.setattr(prepare_data, "prepare", prepared.append)
+    recorder = Recorder()
+    monkeypatch.setattr(prepare_data, "prepare", recorder)
     monkeypatch.setattr(
         "sys.argv",
         ["prepare_data", "--directory", str(tmp_path)],
     )
     assert prepare_data.main() == 0
     assert calls == [{"level": logging.INFO, "format": "%(message)s"}]
-    assert prepared == [tmp_path]
+    assert recorder.calls == [(tmp_path, "cifar100")]
 
 
 if __name__ == "__main__":

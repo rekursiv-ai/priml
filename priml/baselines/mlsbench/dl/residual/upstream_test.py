@@ -25,7 +25,7 @@ from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRI
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
 BLOCK: Final = (
@@ -61,6 +61,22 @@ SCRIPT: Final = (
         "def train_epoch(model, loader, optimizer, device, config):",
         "def train_epoch(model, loader, criterion, optimizer, device):",
     )
+    .replace(
+        "def initialize_weights(model):",
+        "def build_model(arch, num_classes):\n"
+        "    return ResNet(CustomBlock, [1, 1, 1], num_classes)\n\n\n"
+        "def initialize_weights(model):",
+    )
+    .replace(
+        "    stats = ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))\n",
+        "    stats = ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))\n"
+        "    if dataset == 'cifar10':\n"
+        "        stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))\n",
+    )
+    .replace(
+        "torchvision.datasets.CIFAR100(",
+        "vars(torchvision.datasets)['CIFAR10' if dataset == 'cifar10' else 'CIFAR100'](",
+    )
     .replace("compute_loss(model(x), y, config)", "criterion(model(x), y)")
     .replace("def evaluate(model, loader, device, config):", "def evaluate(*args):")
     .replace(
@@ -86,7 +102,14 @@ CLASSES: Final = {
     "stochastic_depth": BLOCK.replace(
         "    def __init__",
         "    _block_counter = 5\n    def __init__",
-    ).replace(
+    )
+    .replace(
+        "        super().__init__()\n",
+        "        super().__init__()\n"
+        "        CustomBlock._block_counter += 1\n"
+        "        self.block_idx = CustomBlock._block_counter\n",
+    )
+    .replace(
         "        return F.relu(self.conv(x))\n",
         "        if self.training and torch.rand(1).item() < 0.5:\n"
         "            return F.relu(self.conv(x)) * 0\n"
@@ -213,6 +236,61 @@ def test_lockstep_records_two_updates_with_the_scripts_block(tmp_path: Path) -> 
     assert not torch.equal(states[0]["block.alpha"], states[1]["block.alpha"])
 
 
+def test_lockstep_builds_the_shallowest_network_and_mains_optimizer(
+    tmp_path: Path,
+) -> None:
+    script = scripts(tmp_path)["basic"]
+    task = cast(Script, script)
+    built: list[object] = []
+    devices: list[object] = []
+    resnet, train_epoch = task.ResNet, task.train_epoch
+
+    def building(
+        block: Callable[[int, int, int], torch.nn.Module],
+        blocks: list[int],
+        classes: int,
+    ) -> torch.nn.Module:
+        built.append((blocks, classes))
+        return resnet(block, blocks, classes)
+
+    def training(*arguments: object) -> tuple[float, float]:
+        devices.append(arguments[-1])
+        return cast("Callable[..., tuple[float, float]]", train_epoch)(*arguments)
+
+    trace = vision_upstream.MainTrace(
+        settings={"lr": 0.25, "momentum": 0.5, "weight_decay": 0.125},
+    )
+    optimizers: list[torch.optim.SGD] = []
+    sgd = torch.optim.SGD
+
+    def recording(
+        params: Iterable[torch.nn.Parameter],
+        *,
+        lr: float,
+        momentum: float,
+        weight_decay: float,
+    ) -> torch.optim.SGD:
+        optimizers.append(
+            sgd(params, lr=lr, momentum=momentum, weight_decay=weight_decay),
+        )
+        return optimizers[-1]
+
+    with (
+        mock.patch.object(task, "ResNet", building),
+        mock.patch.object(task, "train_epoch", training),
+        mock.patch.object(torch.optim, "SGD", recording),
+    ):
+        _ = upstream.upstream_lockstep(script, "basic", trace, classes=5)
+    assert built == [([1, 1, 1], 5)]
+    assert devices == [torch.device("cpu")] * reference.STEPS
+    (group,) = optimizers[0].param_groups
+    assert (group["initial_lr"], group["momentum"], group["weight_decay"]) == (
+        0.25,
+        0.5,
+        0.125,
+    )
+
+
 def test_the_record_holds_every_block_and_the_pristine_recipe(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     traces = {
@@ -230,6 +308,15 @@ def test_the_record_holds_every_block_and_the_pristine_recipe(tmp_path: Path) ->
     assert record["schedule/lr"].shape == (200,)
     assert record["optimizer/settings"].shape == (len(reference.HYPERPARAMETERS),)
     assert "lockstep/stochastic_depth/loss" in record
+
+
+def test_block_positions_lists_each_block_index_then_the_class_counter(
+    tmp_path: Path,
+) -> None:
+    script = scripts(tmp_path)["stochastic_depth"]
+    positions = upstream.block_positions(script, "resnet20-cifar10")
+    # The stand-in's one block takes the counter's next value, 5 + 1.
+    assert positions.tolist() == [6, 6]
 
 
 class _Unused(torch.nn.Module):

@@ -9,6 +9,7 @@ through the logits a fixed network gives them.
 from __future__ import annotations
 
 from pathlib import Path
+from types import FunctionType
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -24,6 +25,8 @@ from priml.testing.golden import mismatches, read_tensors
 _CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
 
 _DATA: Final = _CWD / "testdata"
@@ -105,12 +108,162 @@ def test_the_whole_port_record_holds_every_part_the_golden_does(
     assert_exact(golden, reference.port_record())
 
 
+def test_the_port_record_joins_every_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("pipeline_record", "lockstep_record", "test_record"):
+        monkeypatch.setattr(reference, name, labeled(name))
+    for name in ("schedule_record", "optimizer_record", "draws_record"):
+        monkeypatch.setattr(vision, name, labeled(name))
+    assert set(reference.port_record()) == {
+        "schedule_record/exp000",
+        "optimizer_record/exp000",
+        "draws_record",
+        "test_record",
+        *(
+            f"{part}/{name}"
+            for name in reference.AUGMENTS
+            for part in ("pipeline_record", "lockstep_record")
+        ),
+    }
+
+
 def test_loaders_run_each_augmentation_over_the_synthetic_split(
     tmp_path: Path,
 ) -> None:
     train, evaluation = reference.loader_batches("cutout", tmp_path)
     assert len(train) == len(evaluation) == vision.LOADER_PASSES
     assert train[0][0]["media"].dtype == torch.float32
+
+
+def stored_settings(prefix: str) -> dict[str, Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTINGS))
+@pytest.mark.parametrize("name", list(reference.AUGMENTS))
+def test_each_settings_network_builds_and_runs_like_the_script(
+    setting: str,
+    name: str,
+) -> None:
+    prefix = f"settings/{setting}/{name}/"
+    expected = {
+        k: v for k, v in stored_settings(prefix).items() if not k.endswith("/augment")
+    }
+    assert set(expected) == {f"{prefix}{key}" for key in ("draws", "train", "eval")}
+    assert_exact(
+        expected,
+        vision.setting_record(
+            setting,
+            reference.SETTINGS[setting][name],
+            key=f"{setting}/{name}",
+        ),
+    )
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTINGS))
+@pytest.mark.parametrize("name", list(reference.AUGMENTS))
+def test_each_settings_training_pipeline_matches_its_script(
+    setting: str,
+    name: str,
+) -> None:
+    key = f"settings/{setting}/{name}/augment"
+    assert_exact(stored_settings(key), reference.setting_pipeline_record(setting, name))
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTINGS))
+def test_each_settings_pristine_loader_matches_the_script(
+    setting: str,
+    tmp_path: Path,
+) -> None:
+    assert_exact(
+        stored_settings(f"settings/{setting}/loader/"),
+        vision.setting_loader_record(tmp_path, setting),
+    )
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTINGS))
+@pytest.mark.parametrize("name", list(reference.AUGMENTS))
+def test_two_updates_on_each_augmentation_match_the_script_at_each_setting(
+    setting: str,
+    name: str,
+) -> None:
+    states: list[dict[str, Tensor]] = []
+    expected = stored_settings(f"{reference.lockstep_key(name, setting=setting)}/")
+    assert len(expected) == 3
+    assert_exact(
+        expected,
+        reference.stored(
+            reference.lockstep_record(name, states=states, setting=setting),
+        ),
+    )
+    assert len(states) == vision.STEPS
+
+
+def labeled(label: str) -> Callable[..., dict[str, Tensor]]:
+    """Return a stand-in record function: one tensor named by ``label`` and its call."""
+
+    def record(*args: object, **kwargs: object) -> dict[str, Tensor]:
+        names = [a.__name__ if isinstance(a, FunctionType) else str(a) for a in args]
+        return {"/".join([label, *names, *map(str, kwargs.values())]): torch.zeros(2)}
+
+    return record
+
+
+def test_the_settings_record_joins_every_settings_parts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    for name in ("setting_pipeline_record", "lockstep_record"):
+        monkeypatch.setattr(reference, name, labeled(name))
+    monkeypatch.setattr(vision, "task_settings_record", labeled("networks"))
+    record = reference.settings_record(tmp_path)
+    assert set(record) == {
+        f"networks/{reference.SETTINGS}/{tmp_path}",
+        *(
+            key
+            for setting, variants in reference.SETTINGS.items()
+            for name in variants
+            for key in (
+                f"setting_pipeline_record/{setting}/{name}",
+                f"lockstep_record/{name}/{setting}",
+            )
+        ),
+    }
+
+
+def test_the_fmnist_golden_bites_on_one_wrong_grayscale_mirror() -> None:
+    setting = "mobilenetv2-fmnist"
+    images = reference.prepared(
+        setting,
+        reference.source_images(setting, reference.GOLDEN_IMAGES),
+    )
+    assert images.shape[1] == 1
+    media = reference.augmented(
+        "randaugment",
+        images,
+        seed=vision.SEED,
+        factory=reference.SETTINGS[setting]["randaugment"],
+    )
+    media[0] = media[0].flip(-1)
+    key = f"settings/{setting}/randaugment/augment"
+    assert mismatches(stored_settings(key), {key: reference.classified(media)}) == [
+        f"{key}: {vision.CLASSES}/{vision.CLASSES * reference.GOLDEN_IMAGES} differ",
+    ]
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = "settings/mobilenetv2-fmnist/trivialaugment/eval"
+    value = stored_settings(key)[key].clone()
+    value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(0.0))
+    assert mismatches(stored_settings(key), {key: value}) == [
+        f"{key}: 1/{value.numel()} differ",
+    ]
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_each_golden_fits_the_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= 32_768
 
 
 def test_the_census_counts_the_ports_operations_by_sign() -> None:

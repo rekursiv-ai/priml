@@ -35,8 +35,10 @@ established at the component level below.
 
 | File | Holds |
 |---|---|
-| `data.py` | Uint8 CIFAR-100, shuffle and augmentation with the reference loader's draws |
+| `data.py` | Uint8 CIFAR and Fashion-MNIST, shuffle and augmentation with the reference loader's draws |
 | `model.py` | `ResNet`, its `block`, `norm`, `pool`, `activation` and init slots, and `BasicBlock` |
+| `vgg.py`, `mobilenet.py` | `VGG16BN` and `MobileNetV2`, with the same `norm`, `pool`, `activation` and init slots |
+| `settings.py` | `vgg16bn_cifar100`, `resnet110_cifar100`, `resnet20_cifar10` and `mobilenetv2_fmnist`: switch a recipe's network and dataset |
 | `train_step.py` | The step, its `loss` and `schedule` slots, and the pristine `cross_entropy` |
 | `metrics.py` | Best and final test accuracy |
 | `experiments.py` | `exp000`, the recipe every task forks |
@@ -62,12 +64,25 @@ unreached. Nothing runs on a GPU. The values that fit in a golden (at most
 default tier. Each task's own capture proves its slot and every parameter after
 its updates.
 
+The capture also proves the script's `vgg16bn-cifar100` and
+`mobilenetv2-fmnist` settings: each full network's initial state in
+registration order and where it leaves the generator, the shallowest
+network's forwards, every
+pixel of each setting's loaders, both Fashion-MNIST pipelines, and the
+Fashion-MNIST path's random call sites.
+
 ## Porting the other settings and tasks
 
-Not yet ported: each task's other two settings. For `cv-classification-loss`
-they are `vgg16bn-cifar100` and `mobilenetv2-fmnist`: new `model.py` classes
-behind the same `model` slot; the data path is shared, with Fashion-MNIST
-repeating its channel.
+A task's fork for another setting is one call, then its own slot:
+
+```python
+cfg = settings.mobilenetv2_fmnist(exp000())
+assert isinstance(cfg.step.model, MobileNetV2.Config)
+cfg.step.model.norm = GroupNorm
+```
+
+Prepare Fashion-MNIST with `prepare_data.py --dataset fmnist`. It is cached
+resized to 32x32 with one channel; normalization repeats it to three.
 
 The eleven DL tasks are ported in the sibling packages of `mlsbench/dl/`; the
 `mlsbench/` README lists the slot each one became.

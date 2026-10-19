@@ -19,12 +19,23 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.mlsbench.dl.residual.blocks import PreActivationBlock
+from priml.baselines.mlsbench.dl.residual.blocks import (
+    PreActivationBlock,
+    StochasticDepthBlock,
+)
 from priml.baselines.mlsbench.dl.residual.experiments import (
     exp000,
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.residual.upstream import (
     BLOCKS,
@@ -32,7 +43,11 @@ from priml.baselines.mlsbench.dl.residual.upstream import (
     block_run,
 )
 from priml.baselines.mlsbench.dl.vision import reference
-from priml.baselines.mlsbench.dl.vision.model import BasicBlock, ResNet
+from priml.baselines.mlsbench.dl.vision.model import (
+    BasicBlock,
+    ResNet,
+    sized_blocks,
+)
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
 from priml.train.parallelism import NoParallel
@@ -40,6 +55,7 @@ from priml.train.parallelism import NoParallel
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from pathlib import Path
 
     from torch import nn
 
@@ -53,6 +69,22 @@ VARIANTS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
     "stochastic_depth": exp003,
 }
 """The experiment that carries each block, keyed as the script's variants."""
+
+SETTINGS: Final[dict[str, dict[str, Callable[[], VisionTrainLoop]]]] = {
+    "resnet20-cifar10": {
+        "basic": exp004,
+        "pre_activation": exp005,
+        "gated_residual": exp006,
+        "stochastic_depth": exp007,
+    },
+    "resnet110-cifar100": {
+        "basic": exp008,
+        "pre_activation": exp009,
+        "gated_residual": exp010,
+        "stochastic_depth": exp011,
+    },
+}
+"""Per other setting of the task, the experiment that carries each block there."""
 
 
 def block_of(name: str, *, channels_out: int, stride: int) -> nn.Module:
@@ -127,6 +159,7 @@ def lockstep_record(
     name: str,
     *,
     states: list[dict[str, Tensor]] | None = None,
+    setting: str = "",
 ) -> dict[str, Tensor]:
     """Train the shallowest network for two updates, one per epoch.
 
@@ -134,10 +167,14 @@ def lockstep_record(
       name: A key of :data:`VARIANTS`.
       states: When given, receives a copy of the model's whole state after
         each update.
+      setting: A key of :data:`SETTINGS` to train that setting's fork with
+        the setting's class count; empty for ``exp000``'s chain at
+        ``CLASSES`` logits.
 
     Returns:
       record: Per update the loss, the logits it came from and the logits of
-        a fixed probe in evaluation mode afterwards.
+        a fixed probe in evaluation mode afterwards, under
+        :func:`lockstep_key`.
 
     """
     losses: list[Tensor] = []
@@ -145,9 +182,11 @@ def lockstep_record(
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
         step = reference.tiny_step(
-            VARIANTS[name],
+            SETTINGS[setting][name] if setting else VARIANTS[name],
             blocks=(1, 1, 1),
-            classes=reference.CLASSES,
+            classes=reference.SETTINGS[setting].classes
+            if setting
+            else reference.CLASSES,
             epochs=reference.EPOCHS,
         )
         for index in range(reference.STEPS):
@@ -165,11 +204,17 @@ def lockstep_record(
                 states.append(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
+    key = lockstep_key(name, setting=setting)
     return {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{key}/loss": torch.stack(losses),
+        f"{key}/logits": torch.stack(logits),
+        f"{key}/probe": torch.stack(probes),
     }
+
+
+def lockstep_key(name: str, *, setting: str = "") -> str:
+    """Return the prefix of a lockstep's record: ``exp000``'s chain, or a setting's."""
+    return f"settings/{setting}/lockstep/{name}" if setting else f"lockstep/{name}"
 
 
 def port_record() -> dict[str, Tensor]:
@@ -189,4 +234,49 @@ def port_record() -> dict[str, Tensor]:
     )
     for name in VARIANTS:
         record |= lockstep_record(name)
+    return record
+
+
+def positions_record(setting: str) -> dict[str, Tensor]:
+    """Return each stochastic-depth block's position at a setting, then the count.
+
+    Args:
+      setting: A key of :data:`SETTINGS`.
+
+    Returns:
+      record: ``settings/<setting>/stochastic_depth/positions``, every block's
+        ``depth`` in network order followed by the shared ``num_layers``.
+
+    """
+    model = SETTINGS[setting]["stochastic_depth"]().step.model
+    assert isinstance(model, ResNet.Config)
+    blocks = [
+        block
+        for stage in sized_blocks(model)
+        for block, _ in stage
+        if isinstance(block, StochasticDepthBlock.Config)
+    ]
+    return {
+        f"settings/{setting}/stochastic_depth/positions": torch.tensor(
+            [b.depth for b in blocks] + [blocks[-1].num_layers],
+        ),
+    }
+
+
+def settings_record(directory: Path) -> dict[str, Tensor]:
+    """Run every other setting's comparisons and return their values.
+
+    Args:
+      directory: Scratch directory the loader run writes its split to.
+
+    Returns:
+      record: The shared per-variant networks and the CIFAR-10 loader, and
+        each setting's stochastic-depth positions; keyed as the golden is.
+
+    """
+    record = reference.task_settings_record(SETTINGS, directory)
+    for setting, variants in SETTINGS.items():
+        record |= positions_record(setting)
+        for name in variants:
+            record |= lockstep_record(name, setting=setting)
     return record

@@ -445,24 +445,51 @@ class ResNet(nn.Module):
                         **kwargs,
                     )
                     side = (side - 1) // stride + 1
-            channels = self.channels_hidden[-1]
             return (
                 total
                 + cost(
                     self.pool,
-                    channels=channels,
+                    channels=self.channels_hidden[-1],
                     seq_len=side**2,
                     batch_size=batch_size,
                     dtype=dtype,
                     **kwargs,
                 )
-                + matmul_cost(
-                    channels_in=channels,
+                + self.head_cost(
                     channels_out=self.channels_out,
-                    bias=True,
-                    rows=batch_size,
+                    batch_size=batch_size,
                     dtype=dtype,
                 )
+            )
+
+        def head(self, channels_out: int) -> nn.Linear:
+            """Build a linear classifier over the pooled features, ``channels_out`` wide."""
+            return nn.Linear(self.channels_hidden[-1], channels_out)
+
+        def head_cost(
+            self,
+            *,
+            channels_out: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+        ) -> Cost:
+            """Cost one :meth:`head` of width ``channels_out``.
+
+            Args:
+              channels_out: Logits of the head.
+              batch_size: Images in this invocation.
+              dtype: Activation dtype; ``None`` is torch's default.
+
+            Returns:
+              cost: Whole-invocation FLOPs, logical bytes and ownership.
+
+            """
+            return matmul_cost(
+                channels_in=self.channels_hidden[-1],
+                channels_out=channels_out,
+                bias=True,
+                rows=batch_size,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -485,7 +512,7 @@ class ResNet(nn.Module):
         # Registered between the stages and the head, as upstream's ``CustomPool``
         # is: a pool with parameters draws its initialization in this position.
         self.pool = config.pool.make()
-        self.head = nn.Linear(config.channels_hidden[-1], config.channels_out)
+        self.head = config.head(config.channels_out)
         # Construction above already drew torch's default initialization for every
         # layer. Those draws are overwritten here but stay in the stream: skipping
         # them, say by building on the meta device, moves every later draw and the
@@ -598,6 +625,63 @@ def built_activation(activation: ActivationFn) -> TensorFn:
         # parameter: ``make`` reads as returning ``object`` without the cast.
         return cast(TensorFn, activation.make())
     return activation
+
+
+class Activation(nn.Module):
+    """A plain activation function as a layer, so it can sit in ``nn.Sequential``."""
+
+    def __init__(self, fn: TensorFn) -> None:
+        super().__init__()
+        self.fn = fn
+
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        return self.fn(x)
+
+
+def activation_layer(activation: ActivationFn) -> nn.Module:
+    """Build one activation layer: a config's own module, or a function wrapped.
+
+    Args:
+      activation: The slot's value; a config is built afresh on every call, so
+        an activation with parameters gets its own per position.
+
+    Returns:
+      layer: The activation as a module.
+
+    """
+    built = built_activation(activation)
+    return built if isinstance(built, nn.Module) else Activation(built)
+
+
+def init_layers(
+    model: nn.Module,
+    *,
+    init_conv: InitFn,
+    init_head: InitFn,
+    init_bias: InitFn,
+) -> None:
+    """Re-initialize every convolution and linear layer in ``modules()`` order.
+
+    Convolution biases keep torch's default draw; every linear layer's weight
+    takes ``init_head`` and its bias ``init_bias``. One pass in registration
+    order is the reference's ``initialize_weights``, so the draws interleave as
+    its do.
+
+    Args:
+      model: A built network, changed in place.
+      init_conv: Initializer for every convolution weight.
+      init_head: Initializer for every linear weight.
+      init_bias: Initializer for every linear bias.
+
+    """
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            call_init(init_conv, module.weight)
+        elif isinstance(module, nn.Linear):
+            call_init(init_head, module.weight)
+            if module.bias is not None:
+                call_init(init_bias, module.bias)
 
 
 # A shared template would be mutated once per block and every block would end up

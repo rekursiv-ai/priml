@@ -14,8 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest import mock
 
-import functools
-
 from PIL import Image
 from torch.utils import data
 
@@ -126,19 +124,27 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
     }
 
 
-def pipelines(script: Upstream) -> tuple[_Pipeline, _Pipeline]:
+def pipelines(
+    script: Upstream,
+    *,
+    dataset: str = "cifar100",
+) -> tuple[_Pipeline, _Pipeline]:
     """Return the training and test pipelines the script's loaders apply per image.
 
     Args:
       script: A variant of the script.
+      dataset: The setting's ``--dataset``; Fashion-MNIST's pipelines resize
+        a grayscale image first and repeat its channel after ``ToTensor``.
 
     Returns:
-      train: The training pipeline ``build_train_transform`` returned.
+      train: The training pipeline the loaders apply, built around
+        ``build_train_transform``'s.
       test: The fixed test pipeline.
 
     """
-    with mock.patch.object(script.torchvision.datasets, "CIFAR100", _Recorded):
-        train, test, _ = script.get_dataloaders("cifar100", "unused", num_workers=0)
+    name = upstream.DATASETS[dataset]
+    with mock.patch.object(script.torchvision.datasets, name, _Recorded):
+        train, test, _ = script.get_dataloaders(dataset, "unused", num_workers=0)
     return (
         cast(_Recorded, train.dataset).transform,
         cast(_Recorded, test.dataset).transform,
@@ -155,11 +161,12 @@ def upstream_pipeline(
 
     Args:
       pipeline: A pipeline of :func:`pipelines`.
-      images: ``(B, 3, H, W)`` uint8 pixels.
+      images: ``(B, C, H, W)`` uint8 pixels; one channel is fed as an ``L``
+        image, as torchvision serves Fashion-MNIST.
       seed: Where the global generator starts, as a loader worker's is seeded.
 
     Returns:
-      media: ``(B, 3, H, W)`` float32 images, normalized.
+      media: ``(B, 3, H', W')`` float32 images, normalized.
 
     """
     with reference.seeded(seed):
@@ -183,12 +190,14 @@ def op_census() -> Generator[dict[str, int]]:
 def upstream_batches(
     script: Upstream,
     *,
+    dataset: str = "cifar100",
     num_workers: int = 4,
 ) -> tuple[Batches, Batches]:
     """Run the script's loaders, alternating the splits; workers are forked.
 
     Args:
       script: A variant of the script.
+      dataset: The setting's ``--dataset``.
       num_workers: Loader workers; the script's four by default, whose seeds
         the draws depend on.
 
@@ -196,17 +205,26 @@ def upstream_batches(
       passes: The training passes, then the test passes.
 
     """
-    if not num_workers:
-        return upstream.upstream_batches(script, num_workers=0)
     # The Cutout edit defines its transform class inside a function, which a
     # forkserver worker cannot unpickle; a forked worker inherits it. The start
     # method changes no draw: each worker's seed comes from the parent.
-    forked = functools.partial(data.DataLoader, multiprocessing_context="fork")
-    with mock.patch.object(data, "DataLoader", forked):
-        return upstream.upstream_batches(script, num_workers=num_workers)
+    with mock.patch.object(data, "DataLoader", upstream.ForkedLoader(data.DataLoader)):
+        return upstream.upstream_batches(
+            script,
+            dataset=dataset,
+            num_workers=num_workers,
+        )
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    setting: str = "",
+    images: Tensor | None = None,
+    key: str = "",
+) -> Lockstep:
     """Train the shallowest network for two updates on the script's augmentation.
 
     Update ``i`` trains on the variant's pipeline applied to two fixed images
@@ -216,15 +234,23 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
       script: The script carrying the augmentation under test.
       name: Which variant, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      setting: A key of the shared ``reference.SETTINGS``: the network is the
+        setting's ``--arch`` at its shallowest and its class count, and the
+        pipeline the setting's ``--dataset``'s. Empty for ``exp000``'s.
+      images: The two images as the dataset ships them; ``fixed_images(2)``
+        by default.
+      key: Prefix of the record's keys; ``lockstep/<name>`` by default.
 
     Returns:
       lockstep: Per update the augmented batch, the loss, its logits and a
         probe's logits afterwards; and the model's whole state after each update.
 
     """
-    train, _ = pipelines(script)
+    known = reference.SETTINGS[setting] if setting else None
+    train, _ = pipelines(script, dataset=known.dataset if known else "cifar100")
+    source = reference.fixed_images(2) if images is None else images
     media = [
-        upstream_pipeline(train, reference.fixed_images(2), seed=reference.SEED + i)
+        upstream_pipeline(train, source, seed=reference.SEED + i)
         for i in range(reference.STEPS)
     ]
     task = cast(Script, cast(object, script))
@@ -232,7 +258,11 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = script.ResNet(script.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = (
+            upstream.tiny_model(script, known.arch, known.classes)
+            if known
+            else upstream.tiny_model(script, "resnet56", reference.CLASSES)
+        )
         script.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -254,11 +284,12 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
+    key = key or f"lockstep/{name}"
     record = {
-        f"lockstep/{name}/media": torch.stack(media),
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{key}/media": torch.stack(media),
+        f"{key}/loss": torch.stack(criterion.losses),
+        f"{key}/logits": torch.stack(criterion.logits),
+        f"{key}/probe": torch.stack(probes),
     }
     return record, states
 
@@ -296,8 +327,8 @@ def census_gaps(counts: dict[str, int]) -> list[str]:
 
 
 def _pil(image: Tensor) -> Image.Image:
-    """Return a ``(3, H, W)`` uint8 tensor as the RGB image a dataset yields."""
-    return Image.fromarray(image.permute(1, 2, 0).contiguous().numpy())
+    """Return a ``(C, H, W)`` uint8 tensor as a dataset yields it: RGB, or ``L``."""
+    return Image.fromarray(image.permute(1, 2, 0).squeeze(-1).contiguous().numpy())
 
 
 class _OpSpy:

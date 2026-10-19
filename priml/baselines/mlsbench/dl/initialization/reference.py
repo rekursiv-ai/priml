@@ -23,6 +23,14 @@ from priml.baselines.mlsbench.dl.initialization.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.vision import reference
 from priml.testing.bfb import host_agnostic_numerics
@@ -43,9 +51,28 @@ INITIALIZATIONS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
 }
 """The experiment that carries each initialization, keyed as the script's variants."""
 
+SETTING_INITIALIZATIONS: Final[dict[str, dict[str, Callable[[], VisionTrainLoop]]]] = {
+    "vgg16bn-cifar100": {
+        "normal": exp004,
+        "kaiming_normal": exp005,
+        "fixup": exp006,
+        "orthogonal": exp007,
+    },
+    "mobilenetv2-fmnist": {
+        "normal": exp008,
+        "kaiming_normal": exp009,
+        "fixup": exp010,
+        "orthogonal": exp011,
+    },
+}
+"""Per other setting, keyed as the vision ``SETTINGS``, each initialization's experiment."""
+
+FMNIST: Final = "mobilenetv2-fmnist"
+"""The setting whose dataset differs from ``exp000``'s, so its loaders are compared."""
+
 
 def tiny_model(name: str) -> nn.Module:
-    """Build the shallowest network at the reference's widths, initialized as ``name``.
+    """Build the shallowest network at :data:`reference.TINY_WIDTHS`, initialized as ``name``.
 
     Args:
       name: A key of :data:`INITIALIZATIONS`.
@@ -148,6 +175,70 @@ def lockstep_record(
         each update.
 
     Returns:
+      record: As :func:`lockstep_run`, under ``lockstep/<name>/``.
+
+    """
+    return lockstep_run(
+        INITIALIZATIONS[name],
+        prefix=f"lockstep/{name}/",
+        states=states,
+    )
+
+
+def setting_lockstep_record(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train a setting's shallowest network for two updates, one per epoch.
+
+    Args:
+      name: ``<setting>/<init>``, keys of :data:`SETTING_INITIALIZATIONS`.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
+      record: As :func:`lockstep_run`, under ``settings/<setting>/lockstep/<init>/``.
+
+    """
+    setting, init = name.split("/")
+    return lockstep_run(
+        SETTING_INITIALIZATIONS[setting][init],
+        prefix=f"settings/{setting}/lockstep/{init}/",
+        states=states,
+    )
+
+
+def settings_record() -> dict[str, Tensor]:
+    """Run every setting's lockstep, keyed as the settings golden is.
+
+    Returns:
+      record: :func:`setting_lockstep_record` of every entry of
+        :data:`SETTING_INITIALIZATIONS`.
+
+    """
+    record: dict[str, Tensor] = {}
+    for setting, inits in SETTING_INITIALIZATIONS.items():
+        for name in inits:
+            record |= setting_lockstep_record(f"{setting}/{name}")
+    return record
+
+
+def lockstep_run(
+    factory: Callable[[], VisionTrainLoop],
+    *,
+    prefix: str,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train an experiment's shallowest network for two updates, one per epoch.
+
+    Args:
+      factory: The experiment; its network is cut as ``tiny_step`` cuts it.
+      prefix: Put before every key.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
       record: Per update the loss, the logits it came from and the logits of a
         fixed probe in evaluation mode afterwards.
 
@@ -157,7 +248,7 @@ def lockstep_record(
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
         step = reference.tiny_step(
-            INITIALIZATIONS[name],
+            factory,
             blocks=(1, 1, 1),
             classes=reference.CLASSES,
             epochs=reference.EPOCHS,
@@ -178,9 +269,9 @@ def lockstep_record(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
     return {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(losses),
+        f"{prefix}logits": torch.stack(logits),
+        f"{prefix}probe": torch.stack(probes),
     }
 
 

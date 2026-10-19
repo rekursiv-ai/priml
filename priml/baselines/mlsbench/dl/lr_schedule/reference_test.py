@@ -15,6 +15,7 @@ import torch
 from priml.baselines.mlsbench.dl.lr_schedule import reference
 from priml.baselines.mlsbench.dl.lr_schedule.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
@@ -66,6 +67,94 @@ def test_two_updates_with_each_schedule_match_the_script(name: str) -> None:
         reference.lockstep_record(name, states=states),
     )
     assert len(states) == vision.STEPS
+
+
+def stored_settings(prefix: str = "") -> dict[str, torch.Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_the_captured_goldens_fit_the_size_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
+
+
+def test_every_setting_forks_schedule_matches_its_script_for_all_200_epochs() -> None:
+    expected = {k: v for k, v in stored_settings().items() if "/schedule/" in k}
+    assert set(expected) == {
+        f"settings/{setting}/schedule/{name}"
+        for setting, forks in reference.SETTING_SCHEDULES.items()
+        for name in forks
+    }
+    assert all(v.shape == (200,) for v in expected.values())
+    assert_exact(expected, reference.setting_schedule_record())
+
+
+def test_the_settings_golden_holds_every_fork() -> None:
+    keys = set(stored_settings())
+    assert {
+        f"settings/{setting}/{name}/{kind}"
+        for setting, forks in reference.SETTING_SCHEDULES.items()
+        for name in forks
+        for kind in ("draws", "train", "eval")
+    } <= keys
+    assert any(k.startswith("settings/mobilenetv2-fmnist/loader/") for k in keys)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"{setting}/{schedule}"
+        for setting, forks in reference.SETTING_SCHEDULES.items()
+        for schedule in forks
+    ],
+)
+def test_two_updates_of_each_setting_fork_match_the_script(name: str) -> None:
+    setting, schedule = name.split("/")
+    prefix = f"settings/{setting}/lockstep/{schedule}/"
+    expected = stored_settings(prefix)
+    assert set(expected) == {
+        f"{prefix}{kind}" for kind in ("lr", "loss", "logits", "probe")
+    }
+    assert_exact(expected, reference.setting_lockstep_record(name))
+
+
+def test_the_settings_port_record_joins_every_part_the_golden_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = {
+        k: v
+        for k, v in stored_settings().items()
+        if "/schedule/" in k or "/lockstep/" in k
+    }
+    monkeypatch.setattr(
+        reference,
+        "setting_lockstep_record",
+        StoredPart(golden, "settings/{}/lockstep/{}/"),
+    )
+    assert_exact(golden, reference.settings_port_record())
+
+
+@pytest.mark.slow
+def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
+    expected = {
+        k: v
+        for k, v in stored_settings().items()
+        if "/schedule/" not in k and "/lockstep/" not in k
+    }
+    assert_exact(
+        expected,
+        vision.task_settings_record(reference.SETTING_SCHEDULES, tmp_path),
+    )
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = "settings/resnet20-cifar10/schedule/one_cycle"
+    port = {key: reference.setting_schedule_record()[key]}
+    rate = stored_settings(key)[key].clone()
+    rate[7] = torch.nextafter(rate[7], torch.tensor(0.0, dtype=torch.float64))
+    assert mismatches({key: rate}, port) == [f"{key}: 1/200 differ"]
 
 
 def test_the_golden_bites_on_one_ulp() -> None:

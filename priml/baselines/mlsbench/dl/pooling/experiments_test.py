@@ -19,8 +19,19 @@ from priml.baselines.mlsbench.dl.pooling.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import (
+    experiments as vision,
+    settings,
+)
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
     changed_fields,
     shrink,
@@ -30,6 +41,7 @@ from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
@@ -40,7 +52,34 @@ ALL_EXPERIMENTS: Final[list[ExperimentFactory[VisionTrainLoop]]] = [
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 ]
+
+FORKS: Final[dict[str, tuple[ExperimentFactory[VisionTrainLoop], ...]]] = {
+    "exp000": (exp001, exp002, exp003, exp004, exp008),
+    "exp004": (exp005, exp006, exp007),
+    "exp008": (exp009, exp010, exp011),
+}
+"""Each parent's direct forks, so every first line names its parent."""
+
+POOL_DELTAS: Final = [
+    {"step.model.pool"},
+    {
+        "step.model.pool",
+        "step.model.pool.p",
+        "step.model.pool.p_min",
+        "step.model.pool.eps",
+    },
+    {"step.model.pool"},
+]
+"""The fields the max, generalized-mean and average-max forks change, in order."""
 
 
 def test_exp000_is_the_vision_recipe() -> None:
@@ -48,27 +87,40 @@ def test_exp000_is_the_vision_recipe() -> None:
 
 
 @pytest.mark.parametrize(
-    ("factory", "changed"),
+    ("parent", "factory", "changed"),
     [
-        (exp001, {"step.model.pool"}),
-        (
-            exp002,
-            {
-                "step.model.pool",
-                "step.model.pool.p",
-                "step.model.pool.p_min",
-                "step.model.pool.eps",
-            },
-        ),
-        (exp003, {"step.model.pool"}),
+        (parent, factory, changed)
+        for parent, forks in (
+            (exp000, (exp001, exp002, exp003)),
+            (exp004, (exp005, exp006, exp007)),
+            (exp008, (exp009, exp010, exp011)),
+        )
+        for factory, changed in zip(forks, POOL_DELTAS, strict=True)
     ],
-    ids=["exp001", "exp002", "exp003"],
+    ids=[f"exp{n:03d}" for n in (1, 2, 3, 5, 6, 7, 9, 10, 11)],
 )
 def test_a_fork_changes_only_the_pool(
+    parent: ExperimentFactory[VisionTrainLoop],
     factory: ExperimentFactory[VisionTrainLoop],
     changed: set[str],
 ) -> None:
-    assert changed_fields(exp000(), factory()) == {"experiment_name", *changed}
+    assert changed_fields(parent(), factory()) == {"experiment_name", *changed}
+
+
+@pytest.mark.parametrize(
+    ("factory", "switch"),
+    [
+        (exp004, settings.vgg16bn_cifar100),
+        (exp008, settings.mobilenetv2_fmnist),
+    ],
+    ids=["exp004", "exp008"],
+)
+def test_a_setting_fork_changes_only_the_network_and_the_dataset(
+    factory: ExperimentFactory[VisionTrainLoop],
+    switch: Callable[[VisionTrainLoop], VisionTrainLoop],
+) -> None:
+    changed = changed_fields(exp000(), factory())
+    assert changed == changed_fields(exp000(), switch(exp000())) | {"experiment_name"}
 
 
 @pytest.mark.parametrize(
@@ -80,7 +132,8 @@ def test_experiment_trains_at_minimum_size(
     factory: ExperimentFactory[VisionTrainLoop],
     tmp_path: Path,
 ) -> None:
-    write_dataset(tmp_path)
+    # Ten labels fit every setting's head: Fashion-MNIST's has ten classes.
+    write_dataset(tmp_path, classes=10)
     loop = shrink(factory(), directory=tmp_path).make()
     loop.train()
     assert loop.step.global_step == 2
@@ -104,8 +157,11 @@ def test_every_experiment_states_its_hypothesis_sources_and_pending_results(
 
 
 def test_each_fork_names_its_parent_in_the_first_line() -> None:
-    for child in (exp001, exp002, exp003):
-        assert (inspect.getdoc(child) or "").startswith("exp000 + "), child.__name__
+    for parent, children in FORKS.items():
+        for child in children:
+            assert (inspect.getdoc(child) or "").startswith(f"{parent} "), (
+                child.__name__
+            )
 
 
 def test_exp000_matches_its_golden_config() -> None:

@@ -392,7 +392,7 @@ def _wide_joint(
     device: torch.device,
     built: list[tuple[JointWorldModel, list[Tensor], torch.device]],
 ) -> JointWorldModel:
-    """Stand in for ``_joint_world_model``: one block as wide as exp001's, float32."""
+    """Stand in for ``_joint_world_model``: one narrow block, float32."""
     replay = ContextReplay.Config()
     replay.bin_tokens = flags.bin_tokens
     replay.pass_tokens = flags.pass_tokens
@@ -403,7 +403,7 @@ def _wide_joint(
 
 
 def _wide_model() -> WorldModel:
-    """Return the tiny world model with one global block of exp001's width, 1,152."""
+    """Return the tiny world model with one global block wider than its frames."""
     config = WorldModel.Config(schema=small_schema())
     config.encoder.channels_in = config.decoder.channels_in = 16
     assert isinstance(config.encoder, FrameEncoder.Config)
@@ -412,7 +412,7 @@ def _wide_model() -> WorldModel:
         assert isinstance(stack.block, TransformerBlock.Config | DecoderBlock.Config)
         assert isinstance(stack.block.ffn, SwiGLU.Config)
         stack.block.ffn.channels_hidden = 32
-    config.transformer.channels_in = 1_152
+    config.transformer.channels_in = 24
     config.transformer.num_layers = 1
     block = config.transformer.block
     assert isinstance(block, TransformerBlock.Config)

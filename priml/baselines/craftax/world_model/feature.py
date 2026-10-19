@@ -97,7 +97,7 @@ from priml.baselines.craftax.world_model.model import (
     WorldModel,
 )
 from priml.model.attention.attention import Attention, AttentionProjections
-from priml.model.attention.flash4 import Flash4Varlen
+from priml.model.attention.flash4 import Flash4UnavailableError, Flash4Varlen
 from priml.model.attention.kernel import SdpaFused, SdpaVarlen
 from priml.model.attention.rope import RoPE
 from priml.model.transformer.block import TransformerBlock
@@ -1994,7 +1994,13 @@ class _Flash4Decode(Protocol):
 
 def _flash4() -> _Flash4Decode:
     """Import FA4's CuTe interface (Linux-only ``flash-attn-4``)."""
-    module = importlib.import_module("flash_attn.cute.interface")
+    try:
+        module = importlib.import_module("flash_attn.cute.interface")
+    except ImportError as error:
+        raise Flash4UnavailableError(
+            "FlashAttention 4 is not installed; install priml[cuda] or use "
+            "MaskedCacheAttention instead.",
+        ) from error
     if not isinstance(module, _Flash4Decode):
         raise TypeError("FA4 must provide flash_attn_varlen_func.")
     return module

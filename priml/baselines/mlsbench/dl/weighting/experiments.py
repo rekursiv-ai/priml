@@ -9,6 +9,14 @@ cross-entropy on a training split whose class ``c`` keeps ``500 * 100^(-c /
       +-- exp001  square root of inverse frequency
       +-- exp002  square root of inverse effective number, beta 0.9999
       +-- exp003  log-frequency gap, rarest class weighted 5x
+      +-- exp004  ResNet-32 on long-tailed CIFAR-10, uniform weights
+      |     +-- exp005  square root of inverse frequency
+      |     +-- exp006  square root of inverse effective number
+      |     +-- exp007  log-frequency gap
+      +-- exp008  VGG-16-BN on CIFAR-100 at ratio 50 (the hidden setting), uniform
+            +-- exp009  square root of inverse frequency
+            +-- exp010  square root of inverse effective number
+            +-- exp011  log-frequency gap
 
 Prepare the data once, then launch::
 
@@ -24,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from configgle import PartialConfig
 
-from priml.baselines.mlsbench.dl.vision import experiments
+from priml.baselines.mlsbench.dl.vision import experiments, settings
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.weighting.data import LongTailCifar100Data
 from priml.baselines.mlsbench.dl.weighting.loss import ClassWeightedCrossEntropy
@@ -158,6 +166,236 @@ def exp003() -> VisionTrainLoop:
     cfg = exp000()
     cfg.experiment_name = "exp003"
 
+    loss = cfg.step.loss
+    assert isinstance(loss, ClassWeightedCrossEntropy.Config)
+    weight = loss.class_weight = PartialConfig(log_frequency_gap)
+    weight.spread = 4.0
+    return cfg
+
+
+def exp004() -> VisionTrainLoop:
+    """exp000 at the ``resnet32-cifar10lt`` setting: long-tailed CIFAR-10, uniform.
+
+    The same ResNet-32 and ratio 100 over CIFAR-10's ten classes of 5,000,
+    normalized with CIFAR-10's statistics; the cut keeps 5,000 images of class
+    0 down to 50 of class 9.
+
+    Hypothesis:
+      With ten classes each tail class still holds 50 images, so unweighted
+      cross-entropy should neglect the tail less than on CIFAR-100.
+
+    References:
+      https://arxiv.org/abs/1901.05555
+        Cui et al. 2019, "Class-Balanced Loss Based on Effective Number of
+        Samples."
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``resnet32-cifar10lt`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp004"
+    assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.channels_out = 10
+    assert isinstance(cfg.dataset, LongTailCifar100Data.Config)
+    cfg.dataset.num_classes = 10
+    cfg.dataset.working_dir = "/datasets/cifar10"
+    cfg.dataset.mean = (0.4914, 0.4822, 0.4465)
+    cfg.dataset.std = (0.2023, 0.1994, 0.2010)
+    return cfg
+
+
+def exp005() -> VisionTrainLoop:
+    """exp004 + class weights the square root of the inverse class frequency.
+
+    Hypothesis:
+      As exp001; at ratio 100 over ten classes the tail weighs ten times the
+      head, as on CIFAR-100.
+
+    References:
+      https://arxiv.org/abs/1901.05555
+        Cui et al. 2019, "Class-Balanced Loss Based on Effective Number of
+        Samples," on inverse-frequency reweighting.
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``inverse_freq`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp005"
+    loss = cfg.step.loss
+    assert isinstance(loss, ClassWeightedCrossEntropy.Config)
+    loss.class_weight = PartialConfig(inverse_frequency)
+    return cfg
+
+
+def exp006() -> VisionTrainLoop:
+    """exp004 + class weights the square root of the inverse effective number.
+
+    Hypothesis:
+      As exp002; with 5,000 images in the head, ``beta^n`` is no longer near
+      one there, so the effective count saturates and the head is damped
+      further than by raw frequency.
+
+    References:
+      https://arxiv.org/abs/1901.05555
+        Cui et al. 2019, "Class-Balanced Loss Based on Effective Number of
+        Samples."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``effective_number`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp006"
+    loss = cfg.step.loss
+    assert isinstance(loss, ClassWeightedCrossEntropy.Config)
+    weight = loss.class_weight = PartialConfig(effective_number)
+    weight.beta = 0.9999
+    return cfg
+
+
+def exp007() -> VisionTrainLoop:
+    """exp004 + class weights linear in the log-frequency gap, rarest at 5x.
+
+    Hypothesis:
+      As exp003, over ten classes.
+
+    References:
+      https://arxiv.org/abs/2007.10740
+        Ren et al. 2020, "Balanced Meta-Softmax for Long-Tailed Visual
+        Recognition."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``balanced_softmax`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp007"
+    loss = cfg.step.loss
+    assert isinstance(loss, ClassWeightedCrossEntropy.Config)
+    weight = loss.class_weight = PartialConfig(log_frequency_gap)
+    weight.spread = 4.0
+    return cfg
+
+
+def exp008() -> VisionTrainLoop:
+    """exp000 at the hidden ``vgg16bn-cifar100lt`` setting: VGG-16-BN, ratio 50, uniform.
+
+    The setting's launch script passes ``--imbalance-ratio 50``, so the cut is
+    milder than ``resnet32-cifar100lt``'s; the script keeps
+    ``CosineAnnealingLR`` for VGG. The ratio travels with the setting, so this
+    fork changes the network and the ratio together.
+
+    Hypothesis:
+      A plain stack with a wide classifier is the bar a reweighting must
+      clear on a gentler tail.
+
+    References:
+      https://arxiv.org/abs/1409.1556
+        Simonyan and Zisserman 2015, "Very Deep Convolutional Networks for
+        Large-Scale Image Recognition."
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``vgg16bn-cifar100lt`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = settings.vgg16bn_cifar100(exp000())
+    cfg.experiment_name = "exp008"
+    assert isinstance(cfg.dataset, LongTailCifar100Data.Config)
+    cfg.dataset.imbalance_ratio = 50.0
+    return cfg
+
+
+def exp009() -> VisionTrainLoop:
+    """exp008 + class weights the square root of the inverse class frequency.
+
+    Hypothesis:
+      As exp001; at ratio 50 the tail weighs about seven times the head.
+
+    References:
+      https://arxiv.org/abs/1901.05555
+        Cui et al. 2019, "Class-Balanced Loss Based on Effective Number of
+        Samples," on inverse-frequency reweighting.
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``inverse_freq`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp009"
+    loss = cfg.step.loss
+    assert isinstance(loss, ClassWeightedCrossEntropy.Config)
+    loss.class_weight = PartialConfig(inverse_frequency)
+    return cfg
+
+
+def exp010() -> VisionTrainLoop:
+    """exp008 + class weights the square root of the inverse effective number.
+
+    Hypothesis:
+      As exp002, on a gentler tail.
+
+    References:
+      https://arxiv.org/abs/1901.05555
+        Cui et al. 2019, "Class-Balanced Loss Based on Effective Number of
+        Samples."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``effective_number`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp010"
+    loss = cfg.step.loss
+    assert isinstance(loss, ClassWeightedCrossEntropy.Config)
+    weight = loss.class_weight = PartialConfig(effective_number)
+    weight.beta = 0.9999
+    return cfg
+
+
+def exp011() -> VisionTrainLoop:
+    """exp008 + class weights linear in the log-frequency gap, rarest at 5x.
+
+    Hypothesis:
+      As exp003; the rarest class still weighs five times the head before
+      rescaling, whatever the ratio.
+
+    References:
+      https://arxiv.org/abs/2007.10740
+        Ren et al. 2020, "Balanced Meta-Softmax for Long-Tailed Visual
+        Recognition."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``balanced_softmax`` of ``cv-sample-weighting`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp011"
     loss = cfg.step.loss
     assert isinstance(loss, ClassWeightedCrossEntropy.Config)
     weight = loss.class_weight = PartialConfig(log_frequency_gap)

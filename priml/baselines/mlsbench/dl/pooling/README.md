@@ -12,12 +12,16 @@ exp000  global average pool
   +-- exp001  global max pool               (global_max)
   +-- exp002  generalized mean, p from 3    (gem)
   +-- exp003  mean of average and max       (avg_max)
+  +-- exp004  vgg16bn-cifar100 setting
+  |     +-- exp005 / exp006 / exp007  global max / gem / avg_max
+  +-- exp008  mobilenetv2-fmnist setting (hidden)
+        +-- exp009 / exp010 / exp011  global max / gem / avg_max
 ```
 
 | File | Holds |
 |---|---|
 | `pools.py` | `GlobalMaxPool`, `GeneralizedMeanPool`, `AvgMaxPool` |
-| `experiments.py` | `exp000` to `exp003` |
+| `experiments.py` | `exp000` to `exp011` |
 | `reference.py`, `upstream.py` | Port-side and script-side runs of the capture |
 | `scripts/capture_reference.py` | The bit-for-bit proof |
 
@@ -39,5 +43,9 @@ compares with exact equality: each pool's value and gradients on fixed
 features (GeM's exponent included), the 200 learning rates, the optimizer, the
 reported accuracy, ResNet-56's initial state and forward, the generator's
 position after building the network with each pool, every pixel of the
-loaders, and every parameter after two updates per pool. `reference_test.py`
-replays the stored values in the default tier.
+loaders, and every parameter after two updates per pool. At the other two
+settings it compares each pool's fork against the script at that setting: the
+full network's initial state and draws, the shallowest network's forwards
+through the pool,
+and the Fashion-MNIST loaders' every pixel. `reference_test.py` replays the
+stored values in the default tier.

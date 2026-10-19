@@ -210,13 +210,22 @@ def upstream_blocks(script: Upstream, name: str) -> dict[str, Tensor]:
     return record
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    classes: int = reference.CLASSES,
+    key: str = "",
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the block under test.
       name: Which block, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      classes: Logits of the network; a setting's own class count.
+      key: Prefix of the record's keys; ``lockstep/<name>`` by default.
 
     Returns:
       lockstep: Per update the loss, its logits and a probe's logits
@@ -228,7 +237,8 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = task.ResNet(task.CustomBlock, [1, 1, 1], reference.CLASSES)
+        with upstream.narrowed_widths(script):
+            model = task.ResNet(task.CustomBlock, [1, 1, 1], classes)
         task.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -250,10 +260,11 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
+    key = key or f"lockstep/{name}"
     record = {
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{key}/loss": torch.stack(criterion.losses),
+        f"{key}/logits": torch.stack(criterion.logits),
+        f"{key}/probe": torch.stack(probes),
     }
     return record, states
 
@@ -289,6 +300,29 @@ def upstream_record(
     for values, _ in lockstep.values():
         record |= values
     return record
+
+
+def block_positions(script: Upstream, setting: str) -> Tensor:
+    """Build the script's network at a setting; return how its blocks numbered themselves.
+
+    Args:
+      script: The stochastic-depth variant.
+      setting: A key of the shared ``reference.SETTINGS``.
+
+    Returns:
+      positions: Int64, every block's ``block_idx`` in network order, then the
+        class-wide ``_block_counter`` its forward reads as the deepest position.
+
+    """
+    known = reference.SETTINGS[setting]
+    model = script.build_model(known.arch, known.classes)
+    indices = [
+        cast(int, vars(module)["block_idx"])
+        for module in model.modules()
+        if "block_idx" in vars(module)
+    ]
+    block = cast(Script, cast(object, script)).CustomBlock
+    return torch.tensor([*indices, cast(int, vars(block)["_block_counter"])])
 
 
 # The stochastic-depth block numbers itself from a class-wide counter that only

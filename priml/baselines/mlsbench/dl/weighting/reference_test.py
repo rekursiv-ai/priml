@@ -7,17 +7,24 @@ edit produced, written by ``scripts/capture_reference.py``. Equality is exact.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.baselines.mlsbench.dl.weighting import reference
 from priml.baselines.mlsbench.dl.weighting.experiments import exp000
 from priml.testing.golden import mismatches, read_tensors
 
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
+    from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 
 _CWD: Final = Path(__file__).resolve().parent
 
@@ -111,6 +118,128 @@ def test_the_port_record_joins_every_part_the_golden_holds(
     )
     monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
     assert_exact(golden, reference.port_record(tmp_path))
+
+
+def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize("name", list(reference.SETTINGS))
+def test_each_settings_counts_and_weights_match_main(name: str) -> None:
+    prefix = f"settings/{name}/"
+    expected = stored_settings(f"{prefix}counts") | stored_settings(f"{prefix}weight/")
+    assert len(expected) == 1 + len(reference.WEIGHTS)
+    record, _ = reference.setting_counts_record(name)
+    assert_exact(expected, record)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{name}/{weighting}"
+        for name, setting in reference.SETTINGS.items()
+        if setting.lockstep
+        for weighting in setting.experiments
+    ],
+)
+def test_two_updates_at_each_setting_match_the_script(key: str) -> None:
+    name, weighting = key.split("/")
+    assert_exact(
+        stored_settings(f"settings/{name}/lockstep/{weighting}/"),
+        reference.setting_lockstep_record(key),
+    )
+
+
+def test_the_cifar10_loader_yields_the_scripts_images_in_its_order(
+    tmp_path: Path,
+) -> None:
+    setting = reference.SETTINGS["resnet32-cifar10lt"]
+    uniform = setting.experiments["uniform"]
+    train, _ = reference.loader_batches(
+        tmp_path,
+        uniform,
+        imbalance_ratio=reference.SPLIT_RATIO_10,
+    )
+    record = reference.decode_indices(train, uniform().dataset)
+    assert_exact(
+        stored_settings("settings/resnet32-cifar10lt/loader/"),
+        {"settings/resnet32-cifar10lt/loader/index": record["loader/index"]},
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "resnet32-cifar10lt",
+        pytest.param("vgg16bn-cifar100lt", marks=pytest.mark.slow),
+    ],
+)
+def test_each_settings_full_network_and_recipe_match_the_script(name: str) -> None:
+    expected = {
+        k: v
+        for k, v in stored_settings(f"settings/{name}/").items()
+        if "/loader/" not in k
+    }
+    assert_exact(expected, reference.setting_record(name))
+
+
+def shallow_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
+    """Build ``factory``'s step at its lockstep size, in place of the full one."""
+    return vision.tiny_step(
+        factory,
+        blocks=(1, 1, 1),
+        classes=vision.CLASSES,
+        epochs=vision.EPOCHS,
+    )
+
+
+def placeholder_record(name: str) -> dict[str, torch.Tensor]:
+    """Stand in for one setting's record with a single key naming it."""
+    return {name: torch.zeros(2)}
+
+
+def test_a_lockstep_setting_adds_every_weightings_two_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shrinks the VGG setting's full step to its lockstep size, to stay fast."""
+    monkeypatch.setattr(vision, "full_step", shallow_step)
+    record = reference.setting_record("vgg16bn-cifar100lt")
+    for name in reference.WEIGHTS:
+        key = f"settings/vgg16bn-cifar100lt/lockstep/{name}/"
+        assert_exact(
+            stored_settings(key),
+            {k: v for k, v in record.items() if k.startswith(key)},
+        )
+
+
+def test_settings_record_joins_every_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reference, "setting_record", placeholder_record)
+    assert list(reference.settings_record()) == list(reference.SETTINGS)
+
+
+def test_lockstep_hands_back_the_state_after_each_update() -> None:
+    states: list[dict[str, torch.Tensor]] = []
+    record = reference.lockstep_record("uniform", states=states)
+    assert len(states) == vision.STEPS
+    assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
+    assert_exact(stored("lockstep/uniform/"), record)
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_captured_goldens_fit_the_size_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = "settings/vgg16bn-cifar100lt/weight/effective_number"
+    weight = stored_settings(key)[key].clone()
+    weight[1] = torch.nextafter(weight[1], torch.tensor(0.0))
+    record, _ = reference.setting_counts_record("vgg16bn-cifar100lt")
+    assert mismatches({key: weight}, {key: record[key]}) == [
+        f"{key}: 1/{weight.numel()} differ",
+    ]
 
 
 if __name__ == "__main__":

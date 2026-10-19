@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, cast
 
-import functools
-
 from PIL import Image
 from torch.utils import data
 from torchvision.transforms import autoaugment
@@ -34,7 +32,7 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from priml.baselines.mlsbench.dl.vision.upstream import Batches, Upstream
+    from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 TRANSFORM: Final = """\
 def build_train_transform(config):
@@ -48,27 +46,60 @@ def build_train_transform(config):
 """The stand-in's editable function, which the baselines' edits replace."""
 
 LOADERS: Final = """\
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+
+    def __init__(self, num_classes=10):
+        super().__init__()
+        width = self.CFG[-1][1]
+        self.conv = nn.Conv2d(3, width, 3, padding=1)
+        self.fc = nn.Linear(width, num_classes)
+
+    def forward(self, x):
+        return self.fc(F.adaptive_avg_pool2d(F.relu(self.conv(x)), 1).flatten(1))
+
+
+def build_model(arch, num_classes):
+    if arch == 'mobilenetv2':
+        return MobileNetV2(num_classes)
+    return ResNet(BasicBlock, [1, 1, 1], num_classes)
+
+
+STATS = {
+    'cifar10': ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010), 'CIFAR10'),
+    'cifar100': ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761), 'CIFAR100'),
+    'fmnist': ((0.2860,) * 3, (0.3530,) * 3, 'FashionMNIST'),
+}
+
+
 def get_dataloaders(dataset, data_root, batch_size=128, num_workers=4):
-    mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
+    mean, std, name = STATS[dataset]
     config = {'img_size': 32, 'mean': mean, 'std': std, 'dataset': dataset}
     train_transform = build_train_transform(config)
     test_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
-    train = torchvision.datasets.CIFAR100(
+    if dataset == 'fmnist':
+        repeat = transforms.Lambda(lambda x: x.repeat(3, 1, 1))
+        steps = [transforms.Resize(32), *train_transform.transforms]
+        at = next(i for i, t in enumerate(steps) if isinstance(t, transforms.ToTensor))
+        steps.insert(at + 1, repeat)
+        train_transform = transforms.Compose(steps)
+        test_transform = transforms.Compose([
+            transforms.Resize(32), transforms.ToTensor(), repeat,
+            transforms.Normalize(mean, std),
+        ])
+    Dataset = vars(torchvision.datasets)[name]
+    train = Dataset(
         root=data_root, train=True, download=False, transform=train_transform
     )
-    test = torchvision.datasets.CIFAR100(
+    test = Dataset(
         root=data_root, train=False, download=False, transform=test_transform
     )
     return (
-        torch.utils.data.DataLoader(
-            train, batch_size=batch_size, shuffle=True, num_workers=num_workers
-        ),
-        torch.utils.data.DataLoader(
-            test, batch_size=batch_size, num_workers=num_workers
-        ),
+        torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True),
+        torch.utils.data.DataLoader(test, batch_size=batch_size),
         100,
     )
 """
@@ -90,6 +121,10 @@ SCRIPT: Final = (
     .replace(
         "def train_epoch(model, loader, optimizer, device, config):",
         "def train_epoch(model, loader, criterion, optimizer, device):",
+    )
+    .replace(
+        "model = ResNet(BasicBlock, [1, 1, 1], classes)",
+        "model = build_model(args.arch, classes)",
     )
     .replace("compute_loss(model(x), y, config)", "criterion(model(x), y)")
     .replace("def evaluate(model, loader, device, config):", "def evaluate(*args):")
@@ -202,19 +237,20 @@ def test_loaders_alternate_training_and_test_passes(tmp_path: Path) -> None:
     assert labels.sort().values.tolist() == list(range(reference.LOADER_IMAGES))
 
 
-def test_loader_workers_are_forked_and_none_runs_in_process(
+def test_loaders_fork_their_workers_and_read_the_settings_dataset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _LoaderCalls()
+    original = data.DataLoader
     monkeypatch.setattr(vision_upstream, "upstream_batches", calls)
-    unpatched = data.DataLoader
-    stand_in = cast("Upstream", object())
-    upstream.upstream_batches(stand_in)
-    upstream.upstream_batches(stand_in, num_workers=0)
-    (forked, four), (plain, zero) = calls.seen
-    assert isinstance(forked, functools.partial)
-    assert forked.keywords == {"multiprocessing_context": "fork"}
-    assert (four, plain, zero) == (4, unpatched, 0)
+    script = cast("vision_upstream.Upstream", object())
+    assert upstream.upstream_batches(script, dataset="fmnist") == ([], [])
+    upstream.upstream_batches(script, num_workers=0)
+    (loader, dataset, four), (_, default, zero) = calls.seen
+    assert (dataset, default, four, zero) == ("fmnist", "cifar100", 4, 0)
+    assert isinstance(loader, vision_upstream.ForkedLoader)
+    assert loader.loader is original
+    assert data.DataLoader is original
 
 
 def test_lockstep_trains_on_the_augmented_batch(tmp_path: Path) -> None:
@@ -233,14 +269,20 @@ def test_lockstep_trains_on_the_augmented_batch(tmp_path: Path) -> None:
 
 
 class _LoaderCalls:
-    """Stands in for the vision loaders; keeps the loader class and worker count."""
+    """Stands in for the vision loaders; keeps the loader class, dataset and workers."""
 
     def __init__(self) -> None:
-        self.seen: list[tuple[object, int]] = []
+        self.seen: list[tuple[object, str, int]] = []
 
-    def __call__(self, script: object, *, num_workers: int) -> tuple[Batches, Batches]:
+    def __call__(
+        self,
+        script: object,
+        *,
+        dataset: str,
+        num_workers: int,
+    ) -> tuple[Batches, Batches]:
         del script
-        self.seen.append((data.DataLoader, num_workers))
+        self.seen.append((data.DataLoader, dataset, num_workers))
         return [], []
 
 

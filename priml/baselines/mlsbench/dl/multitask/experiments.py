@@ -9,6 +9,14 @@ cross-entropies. Every later experiment forks it and changes
       +-- exp001  uncertainty weighting
       +-- exp002  dynamic weight average
       +-- exp003  PCGrad
+      +-- exp004  ResNet-20 trunk (the ``resnet20-cifar100mt`` setting), sum
+      |     +-- exp005  uncertainty weighting
+      |     +-- exp006  dynamic weight average
+      |     +-- exp007  PCGrad
+      +-- exp008  VGG-16-BN trunk (the hidden ``vgg16bn-cifar100mt`` setting), sum
+            +-- exp009  uncertainty weighting
+            +-- exp010  dynamic weight average
+            +-- exp011  PCGrad
 
 Prepare the data once, then launch::
 
@@ -37,8 +45,9 @@ from priml.baselines.mlsbench.dl.multitask.losses import (
 from priml.baselines.mlsbench.dl.multitask.metrics import HeadAccuracy
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
 from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
-from priml.baselines.mlsbench.dl.vision import experiments
+from priml.baselines.mlsbench.dl.vision import experiments, settings
 from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.train.train_loop import TrainLoop
 
 
@@ -188,5 +197,214 @@ def exp003() -> MultiTaskTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp003"
+    cfg.step.mtl_loss = PCGrad.Config()
+    return cfg
+
+
+def exp004() -> MultiTaskTrainLoop:
+    """exp000 at the ``resnet20-cifar100mt`` setting: a ResNet-20 trunk, the sum.
+
+    The setting's script builds ``ResNet(BasicBlock, [3, 3, 3])`` with both
+    heads; the data, heads and recipe are ``resnet56-cifar100mt``'s.
+
+    Hypothesis:
+      A shallower trunk has less capacity to share between the two tasks,
+      so the unweighted sum is the bar where interference costs most.
+
+    References:
+      https://arxiv.org/abs/1512.03385
+        He et al. 2016, "Deep Residual Learning for Image Recognition."
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``resnet20-cifar100mt`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp004"
+    assert isinstance(cfg.step.model, TwoHeadResNet.Config)
+    trunk = cfg.step.model.trunk
+    assert isinstance(trunk, ResNet.Config)
+    trunk.blocks_per_stage = (3, 3, 3)
+    return cfg
+
+
+def exp005() -> MultiTaskTrainLoop:
+    """exp004 + uncertainty weighting with learned log-variances.
+
+    Hypothesis:
+      As exp001, on the shallower trunk.
+
+    References:
+      https://arxiv.org/abs/1705.07115
+        Kendall, Gal and Cipolla 2018, "Multi-Task Learning Using Uncertainty
+        to Weigh Losses for Scene Geometry and Semantics."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``uncertainty`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp005"
+    cfg.step.mtl_loss = UncertaintyLoss.Config()
+    return cfg
+
+
+def exp006() -> MultiTaskTrainLoop:
+    """exp004 + dynamic weight average at temperature 2.
+
+    Hypothesis:
+      As exp002, on the shallower trunk.
+
+    References:
+      https://arxiv.org/abs/1803.10704
+        Liu, Johns and Davison 2019, "End-to-End Multi-Task Learning with
+        Attention."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``dwa`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp006"
+    cfg.step.mtl_loss = DynamicWeightAverage.Config()
+    return cfg
+
+
+def exp007() -> MultiTaskTrainLoop:
+    """exp004 + PCGrad gradient surgery over every shared parameter.
+
+    Hypothesis:
+      As exp003, on the shallower trunk; the coarse head is again never
+      updated.
+
+    References:
+      https://arxiv.org/abs/2001.06782
+        Yu et al. 2020, "Gradient Surgery for Multi-Task Learning."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``pcgrad`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c. Its walk of the graph skips
+        a heap-dependent subset of the parameters; this takes all of them.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp007"
+    cfg.step.mtl_loss = PCGrad.Config()
+    return cfg
+
+
+def exp008() -> MultiTaskTrainLoop:
+    """exp000 at the hidden ``vgg16bn-cifar100mt`` setting: a VGG-16-BN trunk, the sum.
+
+    The script's VGG gives each task a whole classifier, ``Linear(512, 512)``,
+    ReLU, dropout and the last linear layer, fine then coarse; the added head
+    is the trunk's own classifier at 20 classes. The script keeps
+    ``CosineAnnealingLR`` for VGG here, unlike ``dl-regularization``.
+
+    Hypothesis:
+      Two deep classifiers over a plain stack leave the tasks less to share,
+      so the sum is the bar on the network least like the scored ones.
+
+    References:
+      https://arxiv.org/abs/1409.1556
+        Simonyan and Zisserman 2015, "Very Deep Convolutional Networks for
+        Large-Scale Image Recognition."
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``vgg16bn-cifar100mt`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp008"
+    assert isinstance(cfg.step.model, TwoHeadResNet.Config)
+    trunk = settings.vgg16bn_cifar100(experiments.exp000()).step.model
+    assert isinstance(trunk, VGG16BN.Config)
+    cfg.step.model.trunk = trunk
+    return cfg
+
+
+def exp009() -> MultiTaskTrainLoop:
+    """exp008 + uncertainty weighting with learned log-variances.
+
+    Hypothesis:
+      As exp001, with a classifier per task.
+
+    References:
+      https://arxiv.org/abs/1705.07115
+        Kendall, Gal and Cipolla 2018, "Multi-Task Learning Using Uncertainty
+        to Weigh Losses for Scene Geometry and Semantics."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``uncertainty`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp009"
+    cfg.step.mtl_loss = UncertaintyLoss.Config()
+    return cfg
+
+
+def exp010() -> MultiTaskTrainLoop:
+    """exp008 + dynamic weight average at temperature 2.
+
+    Hypothesis:
+      As exp002, with a classifier per task.
+
+    References:
+      https://arxiv.org/abs/1803.10704
+        Liu, Johns and Davison 2019, "End-to-End Multi-Task Learning with
+        Attention."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``dwa`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp010"
+    cfg.step.mtl_loss = DynamicWeightAverage.Config()
+    return cfg
+
+
+def exp011() -> MultiTaskTrainLoop:
+    """exp008 + PCGrad gradient surgery over every shared parameter.
+
+    Hypothesis:
+      As exp003; the fine loss's leaves are the features and the fine
+      classifier, so the whole coarse classifier stays at its initialization.
+
+    References:
+      https://arxiv.org/abs/2001.06782
+        Yu et al. 2020, "Gradient Surgery for Multi-Task Learning."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``pcgrad`` of ``cv-multitask-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c. Its walk of the graph skips
+        a heap-dependent subset of the parameters; this takes all of them.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp011"
     cfg.step.mtl_loss = PCGrad.Config()
     return cfg

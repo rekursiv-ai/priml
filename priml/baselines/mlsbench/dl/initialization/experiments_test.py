@@ -19,8 +19,19 @@ from priml.baselines.mlsbench.dl.initialization.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import (
+    experiments as vision,
+    settings,
+)
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
     changed_fields,
     shrink,
@@ -30,6 +41,7 @@ from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
@@ -40,10 +52,66 @@ ALL_EXPERIMENTS: Final[list[ExperimentFactory[VisionTrainLoop]]] = [
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 ]
 
 PER_TENSOR: Final = {"step.model.init_conv", "step.model.init_head"}
 """The per-tensor initialization slots."""
+
+SETTING_FORKS: Final = {
+    exp005: exp004,
+    exp006: exp004,
+    exp007: exp004,
+    exp009: exp008,
+    exp010: exp008,
+    exp011: exp008,
+}
+"""Each baseline at another setting and that setting's pristine experiment."""
+
+
+@pytest.mark.parametrize(
+    ("factory", "switch"),
+    [(exp004, settings.vgg16bn_cifar100), (exp008, settings.mobilenetv2_fmnist)],
+    ids=["exp004", "exp008"],
+)
+def test_a_setting_experiment_is_the_switch_with_the_pristine_rule(
+    factory: ExperimentFactory[VisionTrainLoop],
+    switch: Callable[[VisionTrainLoop], VisionTrainLoop],
+) -> None:
+    switched = switch(exp000())
+    switched.experiment_name = factory.__name__
+    assert changed_fields(switched, factory()) == PER_TENSOR
+
+
+@pytest.mark.parametrize(
+    ("factory", "parent"),
+    list(SETTING_FORKS.items()),
+    ids=[f.__name__ for f in SETTING_FORKS],
+)
+def test_a_setting_fork_changes_only_the_per_tensor_initialization(
+    factory: ExperimentFactory[VisionTrainLoop],
+    parent: ExperimentFactory[VisionTrainLoop],
+) -> None:
+    assert changed_fields(parent(), factory()) == {"experiment_name", *PER_TENSOR}
+
+
+@pytest.mark.parametrize(
+    ("fixup", "kaiming"),
+    [(exp006, exp005), (exp010, exp009)],
+    ids=["exp006", "exp010"],
+)
+def test_fixup_off_a_resnet_is_kaiming_alone_as_upstream_gates_it(
+    fixup: ExperimentFactory[VisionTrainLoop],
+    kaiming: ExperimentFactory[VisionTrainLoop],
+) -> None:
+    assert changed_fields(kaiming(), fixup()) == {"experiment_name"}
 
 
 def test_exp000_is_the_vision_recipe_with_small_normal_weights() -> None:
@@ -75,7 +143,8 @@ def test_experiment_trains_at_minimum_size(
     factory: ExperimentFactory[VisionTrainLoop],
     tmp_path: Path,
 ) -> None:
-    write_dataset(tmp_path)
+    # Fashion-MNIST's 10 classes, the fewest any setting has.
+    write_dataset(tmp_path, classes=10)
     loop = shrink(factory(), directory=tmp_path).make()
     loop.train()
     assert loop.step.global_step == 2
@@ -99,8 +168,15 @@ def test_every_experiment_states_its_hypothesis_sources_and_pending_results(
 
 
 def test_each_fork_names_its_parent_in_the_first_line() -> None:
-    for child in (exp001, exp002, exp003):
-        assert (inspect.getdoc(child) or "").startswith("exp000 + "), child.__name__
+    parents = dict.fromkeys((exp001, exp002, exp003), exp000) | SETTING_FORKS
+    for child, parent in parents.items():
+        assert (inspect.getdoc(child) or "").startswith(f"{parent.__name__} + "), (
+            child.__name__
+        )
+    for setting in (exp004, exp008):
+        assert (inspect.getdoc(setting) or "").startswith("exp000 at the "), (
+            setting.__name__
+        )
 
 
 def test_exp000_runs_with_the_launch_scripts_settings() -> None:

@@ -19,7 +19,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import SETTINGS_SCRIPT
 
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ INIT: Final = (
 """The stand-in's initialization, which the baselines' edits replace."""
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    SETTINGS_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         "",
@@ -61,8 +61,20 @@ SCRIPT: Final = (
         "evaluate(model, test_loader, None, config)",
         "evaluate(model, test_loader, criterion, None)",
     )
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = [64, "M"]
+
+
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+"""
 )
-"""A stand-in for the ``dl-weight-initialization`` script."""
+"""A stand-in for the ``dl-weight-initialization`` script.
+
+Its ``build_model`` builds the stand-in ResNet for every ``--arch``; the
+architecture tables exist so the shallowest-network build can patch them."""
 
 DRAWS: Final = {
     "kaiming_normal": "nn.init.normal_(m.weight, 0, 0.5)",
@@ -123,6 +135,7 @@ def test_the_network_run_records_its_draws_logits_and_state(tmp_path: Path) -> N
         "network/fixup/eval",
     }
     assert record["network/fixup/train"].shape == (2, reference.CLASSES)
+    assert record["network/fixup/draws"].shape == (8,)
     assert torch.equal(state["fc.weight"], torch.ones(reference.CLASSES, 4))
 
 
@@ -143,6 +156,21 @@ def test_lockstep_records_two_updates_through_mains_criterion(tmp_path: Path) ->
     )
     assert len(states) == reference.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
+
+
+def test_the_setting_lockstep_runs_every_initialization_at_every_setting(
+    tmp_path: Path,
+) -> None:
+    variants = scripts(tmp_path)
+    trace = vision_upstream.trace_main(variants["normal"])
+    lockstep = upstream.upstream_setting_lockstep(variants, ["vgg16bn-cifar100"], trace)
+    assert set(lockstep) == {f"vgg16bn-cifar100/{name}" for name in variants}
+    record, states = lockstep["vgg16bn-cifar100/fixup"]
+    assert set(record) == {
+        f"settings/vgg16bn-cifar100/lockstep/fixup/{part}"
+        for part in ("loss", "logits", "probe")
+    }
+    assert len(states) == reference.STEPS
 
 
 def test_the_record_holds_every_variant_and_the_recipe(tmp_path: Path) -> None:

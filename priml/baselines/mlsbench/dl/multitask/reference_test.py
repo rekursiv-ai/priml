@@ -7,7 +7,7 @@ edit produced, written by ``scripts/capture_reference.py``. Equality is exact.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from treekle import from_plain
 
@@ -17,9 +17,18 @@ import torch
 from priml.baselines.mlsbench.dl.multitask import reference
 from priml.baselines.mlsbench.dl.multitask.data import COARSE_OF_FINE
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from priml.baselines.mlsbench.dl.multitask.experiments import (
+        MultiTaskTrainLoop,
+    )
+    from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
 
 _CWD: Final = Path(__file__).resolve().parent
 
@@ -81,7 +90,7 @@ def test_the_loader_batches_carry_superclasses(tmp_path: Path) -> None:
         assert batch["label_coarse"].tolist() == expected
 
 
-def test_the_full_optimizers_match_the_script() -> None:
+def test_the_full_networks_optimize_what_the_script_does() -> None:
     assert_exact(stored("optimizer/"), reference.optimizer_record())
 
 
@@ -108,6 +117,118 @@ def test_the_port_record_joins_every_part_the_golden_holds(
     )
     monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
     assert_exact(golden, reference.port_record())
+
+
+def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
+    """Return the captured setting values whose key starts with ``prefix``."""
+    record = read_tensors(_DATA / "reference_settings.pt")
+    return {k: v for k, v in record.items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{setting}/{name}"
+        for setting in reference.LOCKSTEP_SETTINGS
+        for name in reference.SETTING_COMBINATIONS[setting]
+    ],
+)
+def test_two_updates_at_each_setting_match_the_script(key: str) -> None:
+    setting, name = key.split("/")
+    assert_exact(
+        stored_settings(f"settings/{setting}/lockstep/{name}/"),
+        reference.setting_lockstep_record(key),
+    )
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "resnet20-cifar100mt",
+        pytest.param("vgg16bn-cifar100mt", marks=pytest.mark.slow),
+    ],
+)
+def test_each_settings_full_networks_and_recipe_match_the_script(
+    setting: str,
+) -> None:
+    assert_exact(
+        stored_settings(f"settings/{setting}/"),
+        reference.setting_record(setting),
+    )
+
+
+def shallow_step(factory: Callable[[], MultiTaskTrainLoop]) -> MultiTaskStep:
+    """Build ``factory``'s step at its lockstep size, in place of the full one."""
+    return reference.tiny_step(factory, epochs=vision.EPOCHS)
+
+
+def placeholder_record(setting: str) -> dict[str, torch.Tensor]:
+    """Stand in for one setting's record with a single key naming it."""
+    return {setting: torch.zeros(2)}
+
+
+def test_a_lockstep_setting_adds_every_combinations_two_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shrinks the full step and stubs the lockstep; the lockstep is tested above."""
+    monkeypatch.setattr(reference, "full_step", shallow_step)
+    monkeypatch.setattr(reference, "setting_lockstep_record", placeholder_record)
+    record = reference.setting_record("vgg16bn-cifar100mt")
+    assert {f"vgg16bn-cifar100mt/{name}" for name in reference.COMBINATIONS} <= set(
+        record,
+    )
+    assert not set(reference.SETTING_COMBINATIONS["resnet20-cifar100mt"]) & {
+        k.rsplit("/", 1)[-1]
+        for k in reference.setting_record("resnet20-cifar100mt")
+        if k.startswith("resnet20-cifar100mt/")
+    }
+
+
+def named_record(name: str) -> Callable[..., dict[str, torch.Tensor]]:
+    """Return a stand-in for a record function: one key, ``name``."""
+    return lambda *_: {name: torch.zeros(2)}
+
+
+def test_the_port_record_joins_every_component_and_each_lockstep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = (
+        "combination_record",
+        "schedule_record",
+        "optimizer_record",
+        "draws_record",
+    )
+    for name in components:
+        monkeypatch.setattr(reference, name, named_record(name))
+    monkeypatch.setattr(vision, "best_record", named_record("best_record"))
+    monkeypatch.setattr(reference, "lockstep_record", placeholder_record)
+    record = reference.port_record()
+    assert list(record) == [
+        *components,
+        "best_record",
+        "data/coarse_of_fine",
+        *reference.COMBINATIONS,
+    ]
+    assert torch.equal(record["data/coarse_of_fine"], torch.tensor(COARSE_OF_FINE))
+
+
+def test_settings_record_joins_every_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reference, "setting_record", placeholder_record)
+    assert list(reference.settings_record()) == list(reference.SETTINGS)
+
+
+@pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
+def test_captured_goldens_fit_the_size_ceiling(name: str) -> None:
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
+
+
+def test_the_settings_golden_bites_on_one_ulp() -> None:
+    key = "settings/vgg16bn-cifar100mt/lockstep/uncertainty/loss"
+    expected = stored_settings(key)
+    bumped = expected[key].clone()
+    bumped[1] = torch.nextafter(bumped[1], torch.tensor(torch.inf))
+    port = reference.setting_lockstep_record("vgg16bn-cifar100mt/uncertainty")
+    assert mismatches({key: bumped}, {key: port[key]}) == [f"{key}: 1/2 differ"]
 
 
 if __name__ == "__main__":

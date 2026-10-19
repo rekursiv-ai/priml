@@ -24,11 +24,18 @@ from priml.baselines.mlsbench.dl.vision.experiments import (
     exp000,
 )
 from priml.baselines.mlsbench.dl.vision.metrics import BestAccuracy
+from priml.baselines.mlsbench.dl.vision.mobilenet import MobileNetV2
 from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.settings import (
+    mobilenetv2_fmnist,
+    resnet110_cifar100,
+    vgg16bn_cifar100,
+)
 from priml.baselines.mlsbench.dl.vision.train_step import (
     VisionTrainStep,
     cross_entropy,
 )
+from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.runtime import SingleProcess
 from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
@@ -36,27 +43,46 @@ from priml.train.train_loop import TrainLoop
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import functools
 
+    from priml.baselines.mlsbench.dl.vision.reference import VisionLoop
     from priml.testing.experiments import ExperimentFactory
 
 ALL_EXPERIMENTS: Final[list[ExperimentFactory[VisionTrainLoop]]] = [exp000]
 
 
-def shrink(config: VisionTrainLoop, *, directory: Path) -> VisionTrainLoop:
+def shrink[C: TrainLoop.Config[VisionTrainStep.Config, Cifar100Data.Config]](
+    config: C,
+    *,
+    directory: Path,
+) -> C:
     """Narrow ``config`` to a size a CPU test can run, preserving its recipe.
 
-    Only SIZE changes: depth, batch, horizon. Optimizer, schedule, loss and
-    augmentation stay exactly as the experiment set them.
+    Only SIZE changes: width, depth, batch, horizon, for a ResNet, VGG16BN or
+    MobileNetV2 network. Optimizer, schedule, loss, augmentation and every
+    network slot stay exactly as the experiment set them.
     """
     assert isinstance(config.runtime, SingleProcess.Config)
     config.runtime.device = "cpu"
     config.step.parallelism = NoParallel.Config(device="cpu")
-    assert isinstance(config.step.model, ResNet.Config)
-    config.step.model.blocks_per_stage = (1, 1, 1)
-    config.step.model.channels_hidden = (4, 5, 6)
+    model = config.step.model
+    if isinstance(model, VGG16BN.Config):
+        model.channels_hidden = ((4,), (5,))
+        model.channels_hidden_head = 6
+    elif isinstance(model, MobileNetV2.Config):
+        model.channels_stem = 4
+        model.channels_hidden = (5, 6)
+        model.blocks_per_stage = (1, 1)
+        model.expand_ratios = (1, 2)
+        model.strides = (1, 2)
+        model.channels_last = 7
+    else:
+        assert isinstance(model, ResNet.Config)
+        model.blocks_per_stage = (1, 1, 1)
+        model.channels_hidden = (4, 5, 6)
     config.step.train_budget_epochs = config.max_epochs = 1
     # Set the ROOT's base_dir: TrainLoop.finalize pushes it into the dataset,
     # overwriting anything set on the child directly.
@@ -157,6 +183,23 @@ def test_experiment_trains_at_minimum_size(
     assert accuracy.total == 8
 
 
+@pytest.mark.parametrize(
+    "switch",
+    [vgg16bn_cifar100, mobilenetv2_fmnist, resnet110_cifar100],
+    ids=["vgg16bn_cifar100", "mobilenetv2_fmnist", "resnet110_cifar100"],
+)
+def test_every_setting_trains_at_minimum_size(
+    switch: Callable[[VisionTrainLoop], VisionTrainLoop],
+    tmp_path: Path,
+) -> None:
+    """``shrink`` narrows each setting's network, so a task's setting fork can train."""
+    write_dataset(tmp_path, classes=10)
+    loop = shrink(switch(exp000()), directory=tmp_path).make()
+    loop.train()
+    assert loop.step.global_step == 2
+    assert loop.dataset.timer_epoch.global_count == 1
+
+
 def test_exp000_pins_the_reference_recipe() -> None:
     """exp000 is frozen: a change here invalidates every measured comparison."""
     cfg = exp000()
@@ -196,7 +239,7 @@ def test_exp000_reports_the_best_and_the_final_test_accuracy() -> None:
     assert isinstance(exp000().metrics_eval["test_acc"], BestAccuracy.Config)
 
 
-def changed_fields(parent: VisionTrainLoop, child: VisionTrainLoop) -> set[str]:
+def changed_fields(parent: VisionLoop, child: VisionLoop) -> set[str]:
     """Return the field paths ``udiff`` reports between two unfinalized configs."""
     table = parent.udiff(child, mode="fields", finalize=False)
     return {line.split("│")[0].strip() for line in table.splitlines()[1:]}

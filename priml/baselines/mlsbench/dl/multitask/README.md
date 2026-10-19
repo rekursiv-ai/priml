@@ -11,11 +11,20 @@ exp000  sum of the two losses
   +-- exp001  uncertainty weighting       (uncertainty)
   +-- exp002  dynamic weight average      (dwa)
   +-- exp003  PCGrad                      (pcgrad)
+  +-- exp004  resnet20-cifar100mt: ResNet-20 trunk, sum
+  |     +-- exp005..exp007  the three baselines
+  +-- exp008  vgg16bn-cifar100mt (hidden): VGG-16-BN trunk, sum
+        +-- exp009..exp011  the three baselines
 ```
+
+`TwoHeadResNet` wraps any vision network (`ResNet`, `VGG16BN`,
+`MobileNetV2`): the added head is `trunk.head(channels_out)`, the trunk's own
+head at another width, read off `trunk.features(media)`. On VGG that is a
+whole second classifier, as upstream's `classifier_coarse` is.
 
 | File | Holds |
 |---|---|
-| `model.py` | `TwoHeadResNet`: the vision `ResNet` plus a second linear head |
+| `model.py` | `TwoHeadResNet`: any vision network plus a second head of its own kind |
 | `data.py` | `MultiTaskCifar100Data`: the vision loader plus `label_coarse` |
 | `losses.py` | `SumLoss`, `UncertaintyLoss`, `DynamicWeightAverage`, `PCGrad` |
 | `train_step.py` | `MultiTaskStep`: two losses, `mtl_loss`, optimizer order |
@@ -77,5 +86,12 @@ clone. It compares with exact equality:
 - the generator's position after each experiment's build
 - every pixel and label of the loaders
 - every parameter after two updates per combination
+
+At `resnet20-cifar100mt` and `vgg16bn-cifar100mt` it compares every
+combination's full network state, draws and optimizer tensors, the summing
+network's forwards, the rates and optimizer, the `pcgrad` walk, and two
+updates of the shallowest VGG the script's own `VGG16_CFG` builds (patched to
+the vision capture's `TINY_ARCHS`, on both sides). ResNet-20 cut to one block
+per stage is the lockstep network the `resnet56` records already prove.
 
 `reference_test.py` replays the stored values in the default tier.

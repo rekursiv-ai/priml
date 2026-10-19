@@ -14,11 +14,18 @@ import sys
 
 import torch
 
-from priml.baselines.mlsbench.dl.lr_schedule import reference as task
+from priml.baselines.mlsbench.dl.lr_schedule import (
+    reference as port,
+    upstream,
+)
 from priml.baselines.mlsbench.dl.lr_schedule.scripts import capture_reference
-from priml.baselines.mlsbench.dl.lr_schedule.upstream_test import write_clone
-from priml.baselines.mlsbench.dl.vision import reference
-from priml.baselines.mlsbench.dl.vision.upstream_test import stand_in_port
+from priml.baselines.mlsbench.dl.vision import (
+    reference,
+    upstream as vision_upstream,
+)
+from priml.baselines.mlsbench.dl.vision.scripts import (
+    capture_reference as shared,
+)
 from priml.testing.golden import read_tensors
 
 
@@ -26,35 +33,92 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from torch import Tensor
+
     import pytest
 
 
 def returning[T](value: T) -> Callable[..., T]:
     """Return a function that ignores its arguments and gives back ``value``."""
 
-    def call(*_arguments: object) -> T:
+    def call(*_arguments: object, **_keywords: object) -> T:
         return value
 
     return call
 
 
-def test_capture_names_what_the_stand_in_does_differently(
+def stand_in_lockstep(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]],
+) -> dict[str, Tensor]:
+    """Stand in for a port lockstep: a one-tensor state per update, a loss."""
+    states += [{"w": torch.ones(2)} for _ in range(reference.STEPS)]
+    return {f"{name}/loss": torch.ones(2)}
+
+
+def test_capture_assembles_both_sides_into_one_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stand_in_port(task, monkeypatch)
-    root = tmp_path / "clone"
-    write_clone(root)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    report = capture_reference.capture(root, scratch).report
-    keys = {line.split(":")[0] for line in report}
-    assert "schedule/constant" not in keys
-    assert "schedule/cosine" not in keys
-    assert "optimizer/settings" not in keys
-    assert {"schedule/warmup_cosine", "schedule/one_cycle", "draws/exp000"} <= keys
-    assert any(line.startswith("lockstep/constant/1: ") for line in report)
-    assert any(line.startswith("loader/train/") for line in report)
+    """Every run is a stand-in; the runs themselves are tested elsewhere."""
+    scripts = dict.fromkeys(port.SCHEDULES, object())
+    zero = {"w": torch.zeros(2)}
+    lockstep: vision_upstream.Lockstep = ({}, [zero] * reference.STEPS)
+    trace = vision_upstream.MainTrace()
+    trace.draws = torch.zeros(8)
+    batch = {"media": torch.zeros(2), "label": torch.arange(2)}
+    moved = {"media": torch.ones(2), "label": torch.arange(2)}
+    stand_ins = {
+        (upstream, "variants"): scripts,
+        (vision_upstream, "trace_main"): trace,
+        (upstream, "upstream_lockstep"): lockstep,
+        (upstream, "upstream_record"): {"schedule/x": torch.zeros(2)},
+        (vision_upstream, "upstream_batches"): ([[batch]], [[batch]]),
+        (shared, "compare_full_size"): ["state: 1 tensors against 2"],
+        (upstream, "upstream_setting_schedules"): {
+            "settings/s/schedule/x": torch.zeros(2),
+        },
+        (port, "port_record"): {
+            "schedule/x": torch.ones(2),
+            "draws/exp000": torch.zeros(8),
+        },
+        (reference, "loader_batches"): ([[moved]], [[batch]]),
+        (port, "settings_port_record"): {"settings/s/schedule/x": torch.ones(2)},
+        (shared, "compare_task_settings"): (
+            {"settings/s/x/train": torch.zeros(2)},
+            ["settings/s/x/state: differs"],
+        ),
+    }
+    for (module, name), value in stand_ins.items():
+        monkeypatch.setattr(module, name, returning(value))
+    monkeypatch.setattr(port, "lockstep_record", stand_in_lockstep)
+    monkeypatch.setattr(port, "setting_lockstep_record", stand_in_lockstep)
+    captured = capture_reference.capture(tmp_path, tmp_path)
+    assert set(captured.record) == {
+        "schedule/x",
+        "draws/exp000",
+        "settings/s/schedule/x",
+        "settings/s/x/train",
+    }
+    assert captured.report == [
+        "state: 1 tensors against 2",
+        "schedule/x: 2/2 differ",
+        *(
+            f"lockstep/{name}/{step}: w: 2/2 differ"
+            for name in port.SCHEDULES
+            for step in range(1, reference.STEPS + 1)
+        ),
+        "loader/train/0: 0/media: 2/2 differ",
+        "settings/s/schedule/x: 2/2 differ",
+        *(
+            f"lockstep/{setting}/{name}/{step}: w: 2/2 differ"
+            for setting in port.SETTING_SCHEDULES
+            for name in port.SCHEDULES
+            for step in range(1, reference.STEPS + 1)
+        ),
+        "settings/s/x/state: differs",
+    ]
 
 
 def test_main_prints_the_report_and_writes_nothing_when_something_differs(
@@ -77,15 +141,16 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    record = {"x": torch.arange(3)}
+    record = {"x": torch.arange(3), "settings/y": torch.arange(2)}
     result = reference.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
     monkeypatch.setattr(sys, "argv", argv)
     assert capture_reference.main() == 0
-    assert f"0 mismatches; wrote 1 values to {out}." in capsys.readouterr().out
+    assert f"0 mismatches; wrote 2 values to {out}." in capsys.readouterr().out
     assert read_tensors(out / "reference.pt").keys() == {"x"}
+    assert read_tensors(out / "reference_settings.pt").keys() == {"settings/y"}
 
 
 if __name__ == "__main__":

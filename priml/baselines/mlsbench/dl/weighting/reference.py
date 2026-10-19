@@ -11,6 +11,8 @@ class weights and the weighted loss, at ResNet-32.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from torch import Tensor
@@ -19,6 +21,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.vision import reference
 from priml.baselines.mlsbench.dl.vision.data import Cifar100Data, normalize
+from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
 from priml.baselines.mlsbench.dl.vision.train_step import (
     LossContext,
 )
@@ -31,6 +34,14 @@ from priml.baselines.mlsbench.dl.weighting.experiments import (
     exp001,
     exp002,
     exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
+    exp009,
+    exp010,
+    exp011,
 )
 from priml.baselines.mlsbench.dl.weighting.loss import ClassWeightedCrossEntropy
 from priml.testing.bfb import host_agnostic_numerics
@@ -38,10 +49,8 @@ from priml.testing.golden import rng_fingerprint
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
-    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
     from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 WEIGHTS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
@@ -79,15 +88,84 @@ SPLIT_PER_CLASS: Final = 6
 SPLIT_RATIO: Final = 4.0**33
 """Imbalance ratio over 100 classes that keeps 6, 3, 2 and 1 of the four held."""
 
+SPLIT_RATIO_10: Final = (5 / 3) ** 9
+"""Imbalance ratio over 10 classes that keeps 6, 3, 2 and 1 of the four held."""
 
-def balanced_label() -> Tensor:
-    """Return CIFAR-100's training labels in shape: each class 500 times, interleaved.
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Setting:
+    """One of the task's other launch scripts, and the port's experiments for it."""
+
+    arch: str
+    """The script's ``--arch``."""
+
+    dataset: str
+    """The script's ``--dataset``."""
+
+    imbalance_ratio: float
+    """The script's ``--imbalance-ratio``."""
+
+    classes: int
+    """Classes of the dataset."""
+
+    experiments: dict[str, Callable[[], VisionTrainLoop]]
+    """Each weighting's experiment, keyed as :data:`WEIGHTS`."""
+
+    lockstep: bool
+    """Whether its shallowest network differs from ``resnet32-cifar100lt``'s.
+
+    Cut to one block per stage, a ResNet-32 over ten classes is the lockstep
+    network ``lockstep/`` already proves, up to its class count, which the
+    lockstep runs fix at ``vision.CLASSES``."""
+
+    loader: bool
+    """Whether its loader reads another dataset class than CIFAR-100's."""
+
+
+SETTINGS: Final = {
+    "resnet32-cifar10lt": Setting(
+        arch="resnet32",
+        dataset="cifar10",
+        imbalance_ratio=100.0,
+        classes=10,
+        experiments={
+            "uniform": exp004,
+            "inverse_freq": exp005,
+            "effective_number": exp006,
+            "balanced_softmax": exp007,
+        },
+        lockstep=False,
+        loader=True,
+    ),
+    "vgg16bn-cifar100lt": Setting(
+        arch="vgg16bn",
+        dataset="cifar100",
+        imbalance_ratio=50.0,
+        classes=100,
+        experiments={
+            "uniform": exp008,
+            "inverse_freq": exp009,
+            "effective_number": exp010,
+            "balanced_softmax": exp011,
+        },
+        lockstep=True,
+        loader=False,
+    ),
+}
+"""The task's other settings, keyed by the task's labels."""
+
+
+def balanced_label(classes: int = CLASSES) -> Tensor:
+    """Return a CIFAR training split's labels in shape: interleaved, 50,000 in all.
+
+    Args:
+      classes: 100 for CIFAR-100, 10 for CIFAR-10.
 
     Returns:
-      label: ``(50_000,)`` int64, image ``i`` of class ``i % 100``.
+      label: ``(50_000,)`` int64, image ``i`` of class ``i % classes``.
 
     """
-    return torch.arange(CLASSES * PER_CLASS) % CLASSES
+    return torch.arange(CLASSES * PER_CLASS) % classes
 
 
 def long_tail_split() -> tuple[Tensor, Tensor]:
@@ -182,6 +260,81 @@ def subset_record() -> dict[str, Tensor]:
     return {"subset/indices": indices, "subset/counts": counts}
 
 
+def setting_counts_record(name: str) -> tuple[dict[str, Tensor], Tensor]:
+    """Cut a setting's label layout to its long tail, and weigh it per weighting.
+
+    Args:
+      name: A key of :data:`SETTINGS`.
+
+    Returns:
+      record: Under ``settings/<name>/``: the class counts and, per weighting,
+        the weights its experiment's loss takes from them.
+      indices: The kept positions, compared by the capture and too large to
+        store.
+
+    """
+    setting = SETTINGS[name]
+    indices, counts = long_tail_indices(
+        balanced_label(setting.classes),
+        imbalance_ratio=setting.imbalance_ratio,
+        num_classes=setting.classes,
+        seed=reference.SEED,
+    )
+    record = {f"settings/{name}/counts": counts}
+    # Under the upcast, as the script's ``main`` computes its weights.
+    with host_agnostic_numerics():
+        for weighting, factory in setting.experiments.items():
+            loss = _loss(factory)
+            loss.bind_class_counts(counts)
+            record[f"settings/{name}/weight/{weighting}"] = cast(Tensor, loss.weight)
+    return record, indices
+
+
+def setting_record(name: str) -> dict[str, Tensor]:
+    """Run every port-side comparison of a setting whose values fit a golden.
+
+    Args:
+      name: A key of :data:`SETTINGS`.
+
+    Returns:
+      record: Under ``settings/<name>/``: the 200 rates and the optimizer,
+        the shallowest network's draws and forwards, the counts and weights,
+        and the lockstep of every weighting if the setting's network differs.
+
+    """
+    setting = SETTINGS[name]
+    uniform = setting.experiments["uniform"]
+    prefix = f"settings/{name}/"
+    record = {
+        f"{prefix}{k}": v
+        for k, v in (
+            reference.schedule_record(uniform) | reference.optimizer_record(uniform)
+        ).items()
+    }
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        model = reference.tiny_step(
+            uniform,
+            blocks=(1, 1, 1),
+            classes=reference.CLASSES,
+            epochs=reference.EPOCHS,
+        ).model
+        record[f"{prefix}draws"] = rng_fingerprint()
+    record |= reference.setting_forward(model, name)
+    record |= setting_counts_record(name)[0]
+    if setting.lockstep:
+        for weighting in setting.experiments:
+            record |= setting_lockstep_record(f"{name}/{weighting}")
+    return record
+
+
+def settings_record() -> dict[str, Tensor]:
+    """Return :func:`setting_record` of every one of :data:`SETTINGS`."""
+    record: dict[str, Tensor] = {}
+    for name in SETTINGS:
+        record |= setting_record(name)
+    return record
+
+
 def draws_record() -> dict[str, Tensor]:
     """Return where the generator stands after building the full ``exp000`` network.
 
@@ -199,10 +352,56 @@ def lockstep_record(
     *,
     states: list[dict[str, Tensor]] | None = None,
 ) -> dict[str, Tensor]:
-    """Train the shallowest network for two updates, one per epoch.
+    """Train the shallowest ResNet-32 for two updates, one per epoch.
 
     Args:
       name: A key of :data:`WEIGHTS`.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
+      record: As :func:`lockstep_run`, under ``lockstep/<name>/``.
+
+    """
+    return lockstep_run(WEIGHTS[name], prefix=f"lockstep/{name}/", states=states)
+
+
+def setting_lockstep_record(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train a setting's shallowest network for two updates, one per epoch.
+
+    Args:
+      name: ``<setting>/<weighting>``, a key of :data:`SETTINGS` and one of
+        its experiments.
+      states: When given, receives a copy of the model's whole state after
+        each update.
+
+    Returns:
+      record: As :func:`lockstep_run`, under ``settings/<setting>/lockstep/<weighting>/``.
+
+    """
+    setting, weighting = name.split("/")
+    return lockstep_run(
+        SETTINGS[setting].experiments[weighting],
+        prefix=f"settings/{setting}/lockstep/{weighting}/",
+        states=states,
+    )
+
+
+def lockstep_run(
+    factory: Callable[[], VisionTrainLoop],
+    *,
+    prefix: str,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Train an experiment's shallowest network for two updates, one per epoch.
+
+    Args:
+      factory: The experiment; its network is cut as ``tiny_step`` cuts it.
+      prefix: Put before every key.
       states: When given, receives a copy of the model's whole state after
         each update.
 
@@ -216,7 +415,7 @@ def lockstep_record(
     probes: list[Tensor] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
         step = reference.tiny_step(
-            WEIGHTS[name],
+            factory,
             blocks=(1, 1, 1),
             classes=reference.CLASSES,
             epochs=reference.EPOCHS,
@@ -231,25 +430,42 @@ def lockstep_record(
             )
             losses.append(result["loss"])
             logits.append(result["model"])
-            probe = step.call_eval(media=reference.fixed_media(reference.STEPS))
-            assert isinstance(probe, Tensor)
-            probes.append(probe)
+            # Outside inference mode, as the script's own probe is: an
+            # inference tensor escapes the float64 upcast, so a 512-wide layer
+            # would round by host.
+            step.model.eval()
+            with torch.no_grad():
+                probes.append(
+                    reference.logits_of(
+                        step.model,
+                        reference.fixed_media(reference.STEPS),
+                    ),
+                )
+            step.model.train()
             if states is not None:
                 states.append(
                     {k: v.clone() for k, v in step.model.state_dict().items()},
                 )
     return {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}loss": torch.stack(losses),
+        f"{prefix}logits": torch.stack(logits),
+        f"{prefix}probe": torch.stack(probes),
     }
 
 
-def loader_batches(directory: Path) -> tuple[Batches, Batches]:
-    """Run the long-tailed loaders over the synthetic split, alternating the splits.
+def loader_batches(
+    directory: Path,
+    factory: Callable[[], VisionTrainLoop] = exp000,
+    *,
+    imbalance_ratio: float = SPLIT_RATIO,
+) -> tuple[Batches, Batches]:
+    """Run an experiment's long-tailed loaders over the synthetic split.
 
     Args:
       directory: Scratch directory the split is written to.
+      factory: The experiment whose dataset is run; ``exp000`` by default.
+      imbalance_ratio: Cut of the four held classes; :data:`SPLIT_RATIO`, which
+        keeps 6, 3, 2 and 1 of them over 100 classes, by default.
 
     Returns:
       passes: Per training pass the batches in order, then per evaluation pass
@@ -259,10 +475,11 @@ def loader_batches(directory: Path) -> tuple[Batches, Batches]:
     media, label = long_tail_split()
     for split in ("train", "test"):
         torch.save({"media": media, "label": label}, directory / f"{split}.pt")
-    config = LongTailCifar100Data.Config()
+    config = factory().dataset
+    assert isinstance(config, LongTailCifar100Data.Config)
     config.base_dir = None
     config.working_dir = directory
-    config.imbalance_ratio = SPLIT_RATIO
+    config.imbalance_ratio = imbalance_ratio
     config.batch_size = config.eval_batch_size = reference.LOADER_BATCH
     train: Batches = []
     evaluation: Batches = []
@@ -274,7 +491,10 @@ def loader_batches(directory: Path) -> tuple[Batches, Batches]:
     return train, evaluation
 
 
-def decode_indices(passes: Batches) -> dict[str, Tensor]:
+def decode_indices(
+    passes: Batches,
+    config: Cifar100Data.Config | None = None,
+) -> dict[str, Tensor]:
     """Name the source image of every training image a loader produced.
 
     The centre pixel lies inside the image under every crop and mirror, and
@@ -282,12 +502,14 @@ def decode_indices(passes: Batches) -> dict[str, Tensor]:
 
     Args:
       passes: Per training pass, the batches in order.
+      config: The loader's dataset, for its channel statistics; CIFAR-100's
+        by default.
 
     Returns:
       record: ``loader/index``, of shape ``(passes, images)``.
 
     """
-    config = Cifar100Data.Config()
+    config = config or Cifar100Data.Config()
     media, _ = long_tail_split()
     codes = normalize(
         media,

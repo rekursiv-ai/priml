@@ -9,6 +9,14 @@ a function and a fork; nothing in the step or the loop changes.
       +-- exp001  label smoothing
       +-- exp002  focal loss
       +-- exp003  PolyLoss
+      +-- exp004  VGG-16-BN on CIFAR-100 (the ``vgg16bn-cifar100`` setting)
+      |     +-- exp005  label smoothing
+      |     +-- exp006  focal loss
+      |     +-- exp007  PolyLoss
+      +-- exp008  MobileNetV2 on Fashion-MNIST (the ``mobilenetv2-fmnist`` setting)
+            +-- exp009  label smoothing
+            +-- exp010  focal loss
+            +-- exp011  PolyLoss
 
 Prepare the data once, then launch::
 
@@ -29,6 +37,7 @@ from priml.baselines.mlsbench.dl.classification_loss.losses import (
     label_smoothing,
     poly,
 )
+from priml.baselines.mlsbench.dl.vision import settings
 from priml.baselines.mlsbench.dl.vision.experiments import (
     exp000 as vision_exp000,
 )
@@ -143,6 +152,218 @@ def exp003() -> VisionTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp003"
+
+    loss = cfg.step.loss = PartialConfig(poly)
+    loss.epsilon = 2.0
+    return cfg
+
+
+def exp004() -> VisionTrainLoop:
+    """exp000 on the ``vgg16bn-cifar100`` setting: VGG-16-BN, cross-entropy.
+
+    Hypothesis:
+      A plain convolutional stack without residual paths is the second
+      network a loss must help; cross-entropy is its bar.
+
+    References:
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``vgg16bn-cifar100`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+      https://arxiv.org/abs/1409.1556
+        Simonyan and Zisserman 2015, "Very Deep Convolutional Networks for
+        Large-Scale Image Recognition."
+
+    Results:
+      TBD.
+
+    """
+    cfg = settings.vgg16bn_cifar100(exp000())
+    cfg.experiment_name = "exp004"
+    return cfg
+
+
+def exp005() -> VisionTrainLoop:
+    """exp004 + label smoothing 0.1.
+
+    Hypothesis:
+      As in ``exp001``: softened targets bound the logits, which should
+      regularize VGG-16-BN's 15 million parameters on CIFAR-100.
+
+    References:
+      https://arxiv.org/abs/1512.00567
+        Szegedy et al. 2016, "Rethinking the Inception Architecture for
+        Computer Vision."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``label_smoothing`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp005"
+
+    loss = cfg.step.loss = PartialConfig(label_smoothing)
+    loss.smoothing = 0.1
+    return cfg
+
+
+def exp006() -> VisionTrainLoop:
+    """exp004 + focal loss with gamma 2.
+
+    Hypothesis:
+      As in ``exp002``: down-weighting fit examples moves the gradient to the
+      hard ones of the 100 classes.
+
+    References:
+      https://arxiv.org/abs/1708.02002
+        Lin et al. 2017, "Focal Loss for Dense Object Detection."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``focal_loss`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp006"
+
+    loss = cfg.step.loss = PartialConfig(focal)
+    loss.gamma = 2.0
+    return cfg
+
+
+def exp007() -> VisionTrainLoop:
+    """exp004 + PolyLoss with epsilon 2.
+
+    Hypothesis:
+      As in ``exp003``: a heavier first polynomial term should help image
+      classification whatever the network.
+
+    References:
+      https://arxiv.org/abs/2204.12511
+        Leng et al. 2022, "PolyLoss: A Polynomial Expansion Perspective of
+        Classification Loss Functions."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``poly_loss`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp007"
+
+    loss = cfg.step.loss = PartialConfig(poly)
+    loss.epsilon = 2.0
+    return cfg
+
+
+def exp008() -> VisionTrainLoop:
+    """exp000 on the ``mobilenetv2-fmnist`` setting: MobileNetV2, cross-entropy.
+
+    The task's hidden setting: a mobile network on a 10-class grayscale
+    dataset, which a loss tuned on CIFAR-100 has never seen.
+
+    Hypothesis:
+      Cross-entropy is the bar on a small, easy dataset too, where little is
+      left to gain and a loss that over-regularizes shows.
+
+    References:
+      https://github.com/Imbernoulli/MLS-Bench
+        Setting ``mobilenetv2-fmnist`` of ``cv-classification-loss`` at
+        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+      https://arxiv.org/abs/1801.04381
+        Sandler et al. 2018, "MobileNetV2: Inverted Residuals and Linear
+        Bottlenecks."
+
+    Results:
+      TBD.
+
+    """
+    cfg = settings.mobilenetv2_fmnist(exp000())
+    cfg.experiment_name = "exp008"
+    return cfg
+
+
+def exp009() -> VisionTrainLoop:
+    """exp008 + label smoothing 0.1.
+
+    Hypothesis:
+      With ten classes a tenth of the mass spread uniformly is a larger
+      per-class target than on CIFAR-100, so the gain of ``exp001`` may not
+      carry over.
+
+    References:
+      https://arxiv.org/abs/1512.00567
+        Szegedy et al. 2016, "Rethinking the Inception Architecture for
+        Computer Vision."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``label_smoothing`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp009"
+
+    loss = cfg.step.loss = PartialConfig(label_smoothing)
+    loss.smoothing = 0.1
+    return cfg
+
+
+def exp010() -> VisionTrainLoop:
+    """exp008 + focal loss with gamma 2.
+
+    Hypothesis:
+      Fashion-MNIST's errors concentrate in a few confusable classes, which a
+      loss focused on hard examples should target.
+
+    References:
+      https://arxiv.org/abs/1708.02002
+        Lin et al. 2017, "Focal Loss for Dense Object Detection."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``focal_loss`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp010"
+
+    loss = cfg.step.loss = PartialConfig(focal)
+    loss.gamma = 2.0
+    return cfg
+
+
+def exp011() -> VisionTrainLoop:
+    """exp008 + PolyLoss with epsilon 2.
+
+    Hypothesis:
+      As in ``exp003``: a heavier first polynomial term should help image
+      classification whatever the network and dataset.
+
+    References:
+      https://arxiv.org/abs/2204.12511
+        Leng et al. 2022, "PolyLoss: A Polynomial Expansion Perspective of
+        Classification Loss Functions."
+      https://github.com/Imbernoulli/MLS-Bench
+        Baseline ``poly_loss`` of ``cv-classification-loss`` at commit
+        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+
+    Results:
+      TBD.
+
+    """
+    cfg = exp008()
+    cfg.experiment_name = "exp011"
 
     loss = cfg.step.loss = PartialConfig(poly)
     loss.epsilon = 2.0

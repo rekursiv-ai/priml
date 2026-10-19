@@ -34,6 +34,7 @@ from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
 from torch.nn import functional
 
+import numpy as np
 import torch
 
 from priml.paths import resolve_working_dir
@@ -43,10 +44,12 @@ from priml.timer import CheckpointableStepTimer
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
+    from PIL import Image
     from torchvision import datasets
 else:
     from wrapt import lazy_import
 
+    Image = lazy_import("PIL.Image")
     datasets = lazy_import("torchvision.datasets")
 
 
@@ -117,38 +120,45 @@ class Cifar100Data:
         self.config = config
         self.timer_epoch = CheckpointableStepTimer()
         """Passes over the data; ticked by the loop when the loader runs out."""
-        self._live: _TrainLoader | None = None
-        self._pending_loader_state: _TrainLoader.StateDict | None = None
+        self._live: TrainLoader | None = None
+        self._pending_loader_state: TrainLoader.StateDict | None = None
         directory = Path(config.working_dir)
         self.train_media, self.train_label = _load_split(directory / "train.pt")
         self.eval_media, self.eval_label = _load_split(directory / "test.pt")
 
-    def train_dataloader(self) -> _TrainLoader:
+    def train_dataloader(self) -> TrainLoader:
         """Return the re-iterable training loader.
 
         Returns:
           loader: Each iteration is one shuffled, augmented pass.
 
         """
-        loader = _TrainLoader(
-            self.train_media,
-            self.train_label,
-            self.config,
-        )
+        loader = self.train_loader()
         if self._pending_loader_state is not None:
             loader.load_state_dict(self._pending_loader_state)
             self._pending_loader_state = None
         self._live = loader
         return loader
 
-    def eval_dataloader(self) -> _EvalLoader:
+    def train_loader(self) -> TrainLoader:
+        """Build a fresh training loader; a task whose passes differ overrides this.
+
+        :meth:`train_dataloader` restores any pending checkpoint state into it.
+
+        Returns:
+          loader: Over this dataset's training split.
+
+        """
+        return TrainLoader(self.train_media, self.train_label, self.config)
+
+    def eval_dataloader(self) -> EvalLoader:
         """Return the re-iterable test loader.
 
         Returns:
           loader: Each iteration is one sequential pass over the test split.
 
         """
-        return _EvalLoader(self.eval_media, self.eval_label, self.config)
+        return EvalLoader(self.eval_media, self.eval_label, self.config)
 
     class StateDict(TypedDict):
         """The live loader's cursor and the pass timer.
@@ -156,7 +166,7 @@ class Cifar100Data:
         ``loader`` is None when no pass has started and none was pending.
         """
 
-        loader: _TrainLoader.StateDict | None
+        loader: TrainLoader.StateDict | None
         timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
 
     def state_dict(self) -> StateDict:
@@ -188,7 +198,7 @@ class Cifar100Data:
             self.timer_epoch.load_state_dict(state["timer_epoch"])
         # A checkpoint taken before any pass carries no cursor; restoring it
         # starts the next pass afresh rather than keeping this dataset's own.
-        loader_state = state.get("loader") or _TrainLoader.StateDict(
+        loader_state = state.get("loader") or TrainLoader.StateDict(
             order=None,
             streams=[],
             next_batch=0,
@@ -285,21 +295,23 @@ def pad_crop_flip(images: Tensor, stream: torch.Generator, *, pad: int) -> Tenso
 def prepare(
     directory: Path | str,
     *,
-    dataset: Literal["cifar10", "cifar100"] = "cifar100",
+    dataset: Literal["cifar10", "cifar100", "fmnist"] = "cifar100",
 ) -> None:
-    """Download CIFAR and cache its 8-bit tensors under ``directory``.
+    """Download a dataset and cache its 8-bit tensors under ``directory``.
 
     Idempotent: a split whose ``.pt`` file already exists is left untouched, so
-    this is safe to call at the start of every run. Pixels are stored as
-    shipped; scaling and standardization belong to the loader, where they are
-    part of the recipe.
+    this is safe to call at the start of every run. CIFAR pixels are stored as
+    shipped. Fashion-MNIST is stored as ``(N, 1, 32, 32)``, already through the
+    reference's ``Resize(32)``: that step comes first in both of its pipelines
+    and draws nothing, so caching its output changes no pixel. Scaling,
+    standardization and the grayscale channel's repeat belong to the loader,
+    where they are part of the recipe.
 
     Args:
       directory: Destination for ``train.pt`` and ``test.pt``.
-      dataset: Which CIFAR; the loader reads either.
+      dataset: Which dataset; the loader reads any of them.
 
     """
-    fetch = datasets.CIFAR10 if dataset == "cifar10" else datasets.CIFAR100
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     for split, train in (("train", True), ("test", False)):
@@ -307,18 +319,49 @@ def prepare(
         if path.exists():
             logger.info("%s: %s already prepared at %s", dataset, split, path)
             continue
-        source = fetch(str(destination), train=train, download=True)
-        media = torch.as_tensor(source.data).moveaxis(-1, -3).contiguous()
+        media, label = _fetch(dataset, destination, train=train)
         # Write to a sibling then rename: an interrupted download must not leave
         # a truncated .pt that the existence check above would later accept.
         staging = path.with_suffix(".pt.partial")
-        torch.save({"media": media, "label": torch.as_tensor(source.targets)}, staging)
+        torch.save({"media": media, "label": label}, staging)
         staging.replace(path)
         logger.info("%s: wrote %d %s images to %s", dataset, len(media), split, path)
 
 
-class _EvalLoader:
-    """Sequential batches of normalized test images."""
+def resized(images: Tensor, *, size: int) -> Tensor:
+    """Resize square 8-bit images as torchvision's ``Resize(size)`` does a PIL image.
+
+    That transform, given a square PIL image, calls ``Image.resize`` with
+    bilinear resampling; this makes the same call, so its pixels are Pillow's.
+
+    Args:
+      images: ``(B, C, H, H)`` uint8 pixels, one or three channels.
+      size: Side of the output.
+
+    Returns:
+      images: ``(B, C, size, size)`` uint8 pixels.
+
+    """
+    out: list[Tensor] = []
+    for image in images:
+        pil = Image.fromarray(image.permute(1, 2, 0).squeeze(-1).numpy())
+        pixels = np.asarray(pil.resize((size, size), Image.Resampling.BILINEAR))
+        out.append(torch.from_numpy(pixels.copy()).reshape(size, size, -1))
+    return torch.stack(out).permute(0, 3, 1, 2).contiguous()
+
+
+class EvalLoader:
+    """Sequential batches of normalized test images, as the reference's test loader.
+
+    Each pass takes one unused draw from the global generator first, as the
+    reference's loader does. A task whose test pass differs subclasses this.
+
+    Args:
+      media: ``(N, C, H, W)`` uint8 images.
+      label: ``(N,)`` integer labels.
+      config: The dataset; its ``eval_batch_size``, ``mean`` and ``std``.
+
+    """
 
     def __init__(
         self,
@@ -333,6 +376,7 @@ class _EvalLoader:
         self.std = torch.tensor(config.std)
 
     def __iter__(self) -> Iterator[dict[str, Tensor]]:
+        """Yield ``media`` and ``label`` batches in order, normalized."""
         # The reference loader takes a seed from the global generator on every
         # pass, used or not. Dropping this draw shifts the shuffle of every
         # epoch that follows an evaluation.
@@ -349,11 +393,24 @@ class _EvalLoader:
             }
 
     def __len__(self) -> int:
+        """Return the batches in one pass; the last may be short."""
         return (len(self.media) + self.batch_size - 1) // self.batch_size
 
 
-class _TrainLoader:
-    """Shuffled, augmented batches that resume inside a pass."""
+class TrainLoader:
+    """Shuffled, augmented batches with the reference loader's draws, resumable mid-pass.
+
+    A pass takes a stream seed and then a shuffle seed from the global
+    generator, and augments batch ``b`` from stream ``b % num_streams``. A
+    task whose training pass differs subclasses this.
+
+    Args:
+      media: ``(N, C, H, W)`` uint8 images.
+      label: ``(N,)`` integer labels.
+      config: The dataset; its batch size, streams, padding, statistics and
+        ``augment``.
+
+    """
 
     def __init__(
         self,
@@ -374,14 +431,11 @@ class _TrainLoader:
         self._next_batch = 0
 
     def __iter__(self) -> Iterator[dict[str, Tensor]]:
+        """Yield the rest of the active pass, or a fresh pass, as augmented batches."""
         count = len(self.media)
         if self._order is None:
             stream_seed = int(torch.empty((), dtype=torch.int64).random_())
-            shuffle_seed = int(torch.empty((), dtype=torch.int64).random_())
-            self._order = torch.randperm(
-                count,
-                generator=torch.Generator().manual_seed(shuffle_seed),
-            )
+            self._order = self.permutation(count)
             self._streams = [
                 torch.Generator().manual_seed(stream_seed + worker)
                 for worker in range(self.num_streams)
@@ -393,21 +447,57 @@ class _TrainLoader:
                 continue
             index = order[start : start + self.batch_size]
             self._next_batch = batch_index + 1
-            yield {
-                "media": self.augment(
-                    self.media[index],
-                    self._streams[batch_index % self.num_streams],
-                    pad=self.pad,
-                    mean=self.mean,
-                    std=self.std,
-                ),
-                "label": self.label[index],
-            }
+            yield self.batch(index, self._streams[batch_index % self.num_streams])
         self._order = None
         self._streams = []
         self._next_batch = 0
 
+    def permutation(self, count: int) -> Tensor:
+        """Return a pass's order: a permutation from a seed the global generator draws.
+
+        Called once per pass, after the stream seed is drawn, as the reference
+        loader's sampler draws after its workers' base seed. A task whose
+        loader does not shuffle overrides it to draw nothing.
+
+        Args:
+          count: Images in the split.
+
+        Returns:
+          order: ``(count,)`` image indices.
+
+        """
+        shuffle_seed = int(torch.empty((), dtype=torch.int64).random_())
+        return torch.randperm(
+            count,
+            generator=torch.Generator().manual_seed(shuffle_seed),
+        )
+
+    def batch(self, index: Tensor, stream: torch.Generator) -> dict[str, Tensor]:
+        """Return the augmented images at ``index`` and their labels.
+
+        A task that changes images after augmentation overrides this.
+
+        Args:
+          index: Image indices of the batch.
+          stream: The batch's augmentation stream, advanced in place.
+
+        Returns:
+          batch: ``media`` and ``label``.
+
+        """
+        return {
+            "media": self.augment(
+                self.media[index],
+                stream,
+                pad=self.pad,
+                mean=self.mean,
+                std=self.std,
+            ),
+            "label": self.label[index],
+        }
+
     def __len__(self) -> int:
+        """Return the batches in one pass; the last may be short."""
         return (len(self.media) + self.batch_size - 1) // self.batch_size
 
     class StateDict(TypedDict):
@@ -437,12 +527,28 @@ class _TrainLoader:
           state_dict: State as returned by :meth:`state_dict`.
 
         """
-        state = cast(_TrainLoader.StateDict, state_dict)
+        state = cast(TrainLoader.StateDict, state_dict)
         self._order = state["order"]
         self._streams = [
             torch.Generator().set_state(stream) for stream in state["streams"]
         ]
         self._next_batch = state["next_batch"]
+
+
+def _fetch(
+    dataset: Literal["cifar10", "cifar100", "fmnist"],
+    destination: Path,
+    *,
+    train: bool,
+) -> tuple[Tensor, Tensor]:
+    """Download one split; return channel-first uint8 images and their labels."""
+    if dataset == "fmnist":
+        source = datasets.FashionMNIST(str(destination), train=train, download=True)
+        return resized(source.data[:, None], size=32), source.targets
+    fetch = datasets.CIFAR10 if dataset == "cifar10" else datasets.CIFAR100
+    cifar = fetch(str(destination), train=train, download=True)
+    media = torch.as_tensor(cifar.data).moveaxis(-1, -3).contiguous()
+    return media, torch.as_tensor(cifar.targets)
 
 
 def _load_split(path: Path) -> tuple[Tensor, Tensor]:

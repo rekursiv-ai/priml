@@ -8,7 +8,8 @@ whose recipe it shares with the port.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Final, cast
 
 import re
 import sys
@@ -17,6 +18,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference, upstream
+from priml.baselines.mlsbench.dl.vision.experiments import exp000
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import write_clone
 from priml.testing.golden import mismatches, read_tensors
@@ -24,6 +26,8 @@ from priml.testing.golden import mismatches, read_tensors
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -116,24 +120,246 @@ def test_capture_assembles_both_sides_into_one_report(
     sites = {"uniform_@nn/init.py:f": 1}
     monkeypatch.setattr(reference, "port_record", returning(stored))
     monkeypatch.setattr(reference, "draw_sites", returning(sites))
+    monkeypatch.setattr(reference, "fmnist_draw_sites", returning(sites))
     monkeypatch.setattr(
         capture_reference,
         "compare_full_size",
         returning(["full size differs"]),
     )
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_tiny_settings",
+        returning(["tiny differs"]),
+    )
+    settings = {"settings/x": torch.zeros(2)}
+    monkeypatch.setattr(
+        capture_reference,
+        "capture_settings",
+        returning((settings, ["setting differs"])),
+    )
     captured = capture_reference.capture(clone, scratch)
-    assert captured.record.keys() == stored.keys() | {
+    assert captured.record.keys() == stored.keys() | settings.keys() | {
         "transform/train",
         "transform/test",
     }
-    assert captured.sites["port"] == sites
+    assert captured.sites["port"] == captured.sites["port-fmnist"] == sites
     assert captured.sites["reference"]
+    assert captured.sites["reference-fmnist"]
     lines = captured.report
-    assert lines[0] == "full size differs"
+    assert lines[:2] == ["full size differs", "tiny differs"]
+    assert lines[-1] == "setting differs"
+    assert any(line.startswith("fmnist port: random call site") for line in lines)
     assert [line for line in lines if line.startswith("network/")]
     assert [line for line in lines if line.startswith("loader/")]
     assert not [line for line in lines if line.startswith(("schedule/", "optimizer/"))]
     assert any(line.startswith("port: random call site") for line in lines)
+
+
+class Calls:
+    """Records each call's arguments under the name it was made through."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def returning[T](self, name: str, value: T) -> Callable[..., T]:
+        """Return a stand-in that records its call under ``name`` and gives ``value``."""
+
+        def call(*args: object, **kwargs: object) -> T:
+            self.seen.append((name, args, kwargs))
+            return value
+
+        return call
+
+    def names(self) -> list[str]:
+        """Return the names called, in order."""
+        return [name for name, _, _ in self.seen]
+
+
+def test_capture_settings_joins_each_captured_settings_comparisons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = Calls()
+    trace = upstream.MainTrace()
+    record = {"settings/a/draws": torch.arange(2)}
+    monkeypatch.setattr(reference, "CAPTURED", ("mobilenetv2-fmnist",))
+    monkeypatch.setattr(
+        upstream,
+        "upstream_settings",
+        calls.returning("upstream", ({"mobilenetv2-fmnist": trace}, record)),
+    )
+    monkeypatch.setattr(
+        reference,
+        "settings_record",
+        calls.returning("port", {"settings/a/draws": torch.arange(3)}),
+    )
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_wiring",
+        calls.returning("wiring", ["wiring differs"]),
+    )
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_setting",
+        calls.returning("setting", ["state differs"]),
+    )
+    monkeypatch.setattr(
+        upstream,
+        "upstream_batches",
+        calls.returning("theirs", NO_PASSES),
+    )
+    monkeypatch.setattr(
+        reference,
+        "setting_batches",
+        calls.returning("ours", NO_PASSES),
+    )
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_loaders",
+        calls.returning("loaders", ["loader/train/0: differs"]),
+    )
+    script = cast(upstream.Upstream, object())
+    got, report = capture_reference.capture_settings(script, tmp_path)
+    assert got is record
+    assert report == [
+        *mismatches(record, {"settings/a/draws": torch.arange(3)}),
+        "wiring differs",
+        "state differs",
+        "settings/mobilenetv2-fmnist/loader/train/0: differs",
+    ]
+    assert calls.names() == [
+        "upstream",
+        "port",
+        "wiring",
+        "setting",
+        "theirs",
+        "ours",
+        "loaders",
+    ]
+    _, wiring_args, wiring_kwargs = calls.seen[2]
+    assert (wiring_args, wiring_kwargs) == ((trace,), {"classes": 10})
+    assert calls.seen[4][2] == {"dataset": "fmnist"}
+    assert calls.seen[5][1] == (tmp_path, "mobilenetv2-fmnist")
+
+
+def weight_sum(model: torch.nn.Module, media: torch.Tensor) -> torch.Tensor:
+    """Stand in for a forward: the sum of the model's weights, whatever the images."""
+    del media
+    return torch.stack([p.sum() for p in model.parameters()]).sum()
+
+
+NO_PASSES: Final[tuple[upstream.Batches, upstream.Batches]] = ([], [])
+"""A loader run of no passes, as a stubbed loader returns it."""
+
+
+def test_compare_tiny_settings_reports_each_setting_under_its_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = Calls()
+    built = torch.nn.Linear(2, 3)
+    monkeypatch.setattr(upstream, "tiny_model", calls.returning("theirs", built))
+    step = SimpleNamespace(model=built)
+    monkeypatch.setattr(reference, "tiny_step", calls.returning("ours", step))
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_states",
+        calls.returning("states", ["state differs"]),
+    )
+    monkeypatch.setattr(reference, "logits_of", weight_sum)
+    script = SimpleNamespace(initialize_weights=calls.returning("init", None))
+    report = capture_reference.compare_tiny_settings(cast(upstream.Upstream, script))
+    # Both sides are the same stub, so the draws and both forwards agree and only
+    # the stubbed state comparison reports.
+    assert report == [
+        "tiny/vgg16bn-cifar100: state differs",
+        "tiny/mobilenetv2-fmnist: state differs",
+    ]
+    assert [args[1] for name, args, _ in calls.seen if name == "theirs"] == [
+        "vgg16bn",
+        "mobilenetv2",
+    ]
+    assert [kw["blocks"] for name, _, kw in calls.seen if name == "ours"] == [
+        (1, 1, 1),
+    ] * 2
+    assert calls.names().count("init") == 2
+
+
+def test_compare_task_settings_runs_each_variant_and_each_non_cifar100_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = Calls()
+    trace = upstream.MainTrace()
+    monkeypatch.setattr(
+        upstream,
+        "upstream_setting",
+        calls.returning("network", (trace, {"settings/n": torch.zeros(2)})),
+    )
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_setting",
+        calls.returning("setting", ["state differs"]),
+    )
+    batches: upstream.Batches = [[{"label": torch.arange(2)}]]
+    tests: upstream.Batches = []
+    monkeypatch.setattr(
+        upstream,
+        "upstream_batches",
+        calls.returning("theirs", (batches, tests)),
+    )
+    monkeypatch.setattr(
+        reference,
+        "decode_batches",
+        calls.returning("decode", {"loader/label": torch.arange(2)}),
+    )
+    monkeypatch.setattr(
+        reference,
+        "setting_batches",
+        calls.returning("ours", NO_PASSES),
+    )
+    monkeypatch.setattr(
+        capture_reference,
+        "compare_loaders",
+        calls.returning("loaders", ["loader/test/0: differs"]),
+    )
+    monkeypatch.setattr(
+        reference,
+        "task_settings_record",
+        calls.returning("port", {"settings/n": torch.zeros(2)}),
+    )
+    scripts = {
+        "a": cast(upstream.Upstream, object()),
+        "b": cast(upstream.Upstream, object()),
+    }
+    experiments = {
+        "vgg16bn-cifar100": {"a": exp000},
+        "mobilenetv2-fmnist": {"a": exp000, "b": exp000},
+    }
+    # The pristine script is not the last variant, so a loader run on whichever
+    # variant the loop ended on is caught.
+    record, report = capture_reference.compare_task_settings(
+        scripts,
+        experiments,
+        tmp_path,
+        pristine="a",
+    )
+    assert set(record) == {"settings/n", "settings/mobilenetv2-fmnist/loader/label"}
+    assert report == [
+        "state differs",
+        "state differs",
+        "state differs",
+        "settings/mobilenetv2-fmnist/loader/test/0: differs",
+        "missing settings/mobilenetv2-fmnist/loader/label",
+    ]
+    keys = [kw["key"] for name, _, kw in calls.seen if name == "network"]
+    assert keys == [
+        "vgg16bn-cifar100/a",
+        "mobilenetv2-fmnist/a",
+        "mobilenetv2-fmnist/b",
+    ]
+    (theirs,) = [(args, kw) for name, args, kw in calls.seen if name == "theirs"]
+    assert theirs == ((scripts["a"],), {"dataset": "fmnist"})
+    assert calls.seen[-1][1] == (experiments, tmp_path)
 
 
 def test_main_prints_the_report_and_writes_nothing_when_something_differs(
@@ -165,6 +391,9 @@ def test_main_writes_the_goldens_when_every_comparison_is_exact(
     record = {
         "transform/train": torch.zeros(2),
         "transform/test": torch.ones(2),
+        "transform/fmnist/train": torch.zeros(3),
+        "transform/fmnist/test": torch.ones(3),
+        "settings/a/draws": torch.arange(2),
         "x": torch.arange(3),
     }
     result = reference.Captured(
@@ -180,8 +409,15 @@ def test_main_writes_the_goldens_when_every_comparison_is_exact(
         ["capture", "--root", str(tmp_path), "--out", str(out)],
     )
     assert capture_reference.main() == 0
-    assert f"0 mismatches; wrote 3 values to {out}." in capsys.readouterr().out
+    assert f"0 mismatches; wrote 6 values to {out}." in capsys.readouterr().out
     assert read_tensors(out / "reference.pt").keys() == {"x"}
+    assert read_tensors(out / "reference_settings.pt").keys() == {"settings/a/draws"}
+    assert read_tensors(out / "reference_fmnist_train_pipeline.pt").keys() == {
+        "transform/fmnist/train",
+    }
+    assert read_tensors(out / "reference_fmnist_test_pipeline.pt").keys() == {
+        "transform/fmnist/test",
+    }
     assert read_tensors(out / "reference_train_pipeline.pt").keys() == {
         "transform/train",
     }
@@ -197,6 +433,8 @@ def test_a_golden_over_the_ceiling_is_refused_and_writes_nothing(
     record = {
         "transform/train": torch.zeros(capture_reference.CEILING),
         "transform/test": torch.zeros(2),
+        "transform/fmnist/train": torch.zeros(2),
+        "transform/fmnist/test": torch.zeros(2),
     }
     with pytest.raises(ValueError, match=re.escape("reference_train_pipeline.pt is")):
         capture_reference.write_goldens(
@@ -260,6 +498,59 @@ def test_the_loss_configuration_must_be_zero_based_over_200_epochs() -> None:
     assert capture_reference.compare_wiring(trace) == [
         "main: loss configuration differs",
     ]
+
+
+def test_the_loss_configuration_is_checked_against_the_settings_classes() -> None:
+    trace = upstream.MainTrace()
+    trace.configs = [
+        {"num_classes": 10, "epoch": epoch, "total_epochs": 200} for epoch in range(200)
+    ]
+    assert capture_reference.compare_wiring(trace, classes=10) == []
+    assert capture_reference.compare_wiring(trace) == [
+        "main: loss configuration differs",
+    ]
+
+
+def test_a_setting_whose_network_differs_is_reported_by_name(
+    clone: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The full MobileNetV2 is compared only in the capture; here the port's is shallow."""
+
+    def shallow(factory: Callable[[], reference.VisionLoop]) -> VisionTrainStep:
+        return reference.tiny_step(
+            factory,
+            blocks=(1, 1, 1),
+            classes=reference.CLASSES,
+            epochs=reference.EPOCHS,
+        )
+
+    monkeypatch.setattr(reference, "full_step", shallow)
+    pristine = upstream.load_script(clone / upstream.PRISTINE)
+    with upstream.hidden_accelerators():
+        trace, _ = upstream.upstream_setting(pristine, "mobilenetv2-fmnist")
+    report = capture_reference.compare_setting(trace, "mobilenetv2-fmnist")
+    assert report[0].startswith("settings/mobilenetv2-fmnist/state: state: ")
+    keyed = capture_reference.compare_setting(
+        trace,
+        "mobilenetv2-fmnist",
+        reference.SETTINGS["mobilenetv2-fmnist"].experiment,
+        key="mobilenetv2-fmnist/x",
+    )
+    assert keyed[0].startswith("settings/mobilenetv2-fmnist/x/state: state: ")
+
+
+def test_an_upstream_setting_record_is_keyed_as_asked(clone: Path) -> None:
+    pristine = upstream.load_script(clone / upstream.PRISTINE)
+    with upstream.hidden_accelerators():
+        _, record = upstream.upstream_setting(
+            pristine,
+            "resnet110-cifar100",
+            key="resnet110-cifar100/x",
+        )
+    assert set(record) == {
+        f"settings/resnet110-cifar100/x/{part}" for part in ("draws", "train", "eval")
+    }
 
 
 def test_loader_passes_are_compared_pixel_by_pixel() -> None:

@@ -9,7 +9,7 @@ optimizer.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import sys
 
@@ -20,15 +20,14 @@ from priml.baselines.mlsbench.dl.vision import reference
 from priml.baselines.mlsbench.dl.vision.data import Cifar100Data, normalize
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.weighting import (
-    reference as weighting,
+    reference as port,
     upstream,
 )
 from priml.baselines.mlsbench.dl.weighting.scripts import capture_reference
 from priml.baselines.mlsbench.dl.weighting.upstream_test import (
-    write_cifar100,
     write_clone,
 )
-from priml.testing.golden import read_tensors
+from priml.testing.golden import read_tensors, rng_fingerprint
 
 
 if TYPE_CHECKING:
@@ -38,7 +37,7 @@ if TYPE_CHECKING:
 
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
     from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
-    from priml.baselines.mlsbench.dl.vision.upstream import Batches
+    from priml.baselines.mlsbench.dl.vision.upstream import Batches, Lockstep
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -58,7 +57,7 @@ def returning[T](value: T) -> Callable[..., T]:
 def passes(order: list[int]) -> tuple[Batches, Batches]:
     """Return one training and one test pass of the split's images in ``order``."""
     config = Cifar100Data.Config()
-    media, label = weighting.long_tail_split()
+    media, label = port.long_tail_split()
     codes = normalize(
         media,
         mean=torch.tensor(config.mean),
@@ -107,9 +106,9 @@ def test_capture_assembles_both_sides_into_one_report(
         "real/counts": torch.ones(2),
         "label": torch.tensor([0, 1, 1]),
     }
-    monkeypatch.setattr(weighting, "port_record", returning(stored))
-    monkeypatch.setattr(weighting, "lockstep_record", port_lockstep)
-    monkeypatch.setattr(weighting, "loader_batches", returning(passes([1, 0])))
+    monkeypatch.setattr(port, "port_record", returning(stored))
+    monkeypatch.setattr(port, "lockstep_record", port_lockstep)
+    monkeypatch.setattr(port, "loader_batches", returning(passes([1, 0])))
     full_step = reference.full_step
 
     def shallow_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
@@ -122,6 +121,9 @@ def test_capture_assembles_both_sides_into_one_report(
         "real_subset",
         returning((real["real/indices"], real["real/counts"], real["label"])),
     )
+    # The settings are joined in ``test_capture_joins_both_sides_and_every_setting``.
+    no_settings: tuple[dict[str, Tensor], list[str]] = ({}, [])
+    monkeypatch.setattr(capture_reference, "capture_settings", returning(no_settings))
     report = capture_reference.capture(root, scratch, cifar100=cifar100).report
     keys = {line.split(":")[0] for line in report}
     assert {"weights/inverse_freq", "draws/exp000", "state"} <= keys
@@ -136,43 +138,177 @@ def test_capture_assembles_both_sides_into_one_report(
     assert ({"real/indices", "real/counts"} <= keys) == (cifar100 is not None)
 
 
-@pytest.mark.compute_training
-def test_capture_names_what_the_stand_in_does_differently(
+class EmptyStep:
+    """Stands in for a full step: a network with no state."""
+
+    model: Final = torch.nn.Module()
+
+
+def test_capture_settings_joins_every_settings_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = tmp_path / "clone"
-    write_clone(root)
-    write_cifar100(tmp_path)
-    monkeypatch.setattr(
-        "torchvision.datasets.cifar.check_integrity",
-        returning(value=True),
-    )
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    report = capture_reference.capture(
-        root,
-        scratch,
-        cifar100=tmp_path,
-    ).report
-    keys = {line.split(":")[0] for line in report}
-    shared = {
-        "weights/uniform",
-        "loss/uniform/value",
-        "counts/cifar100lt",
-        "main/weight",
-        "main/indices",
-        "subset/indices",
-        "schedule/lr",
-        "optimizer/settings",
-        "real/indices",
-        "real/counts",
-    }
-    assert not shared & keys, report
-    # The stand-in's loaders draw in-process rather than through four workers,
-    # so its shuffle reaches different images.
-    assert {"weights/inverse_freq", "draws/exp000", "state", "loader/index"} <= keys
-    assert any(line.startswith("lockstep/uniform/1: ") for line in report)
+    """The runs are tested elsewhere; here they are stubbed, to test the glue."""
+    trace = upstream.Trace(indices=torch.arange(2))
+    trace.main.state = {"w": torch.zeros(2)}
+    with reference.seeded(reference.SEED):
+        trace.main.draws = rng_fingerprint()
+    no_batches: tuple[Batches, Batches] = ([], [])
+
+    def setting_run(
+        scripts: object,
+        name: str,
+    ) -> tuple[dict[str, upstream.Trace], dict[str, Tensor], dict[str, Lockstep]]:
+        del scripts
+        lockstep: Lockstep = ({}, [{"w": torch.zeros(2)}])
+        return (
+            {"uniform": trace},
+            {f"settings/{name}/x": torch.zeros(2)},
+            {f"{name}/uniform": lockstep} if port.SETTINGS[name].lockstep else {},
+        )
+
+    no_counts: dict[str, Tensor] = {}
+    for module, name, value in (
+        (upstream, "upstream_setting", setting_run),
+        (port, "setting_counts_record", returning((no_counts, torch.arange(3)))),
+        (reference, "full_step", returning(EmptyStep())),
+        (upstream, "upstream_batches", returning(no_batches)),
+        (port, "loader_batches", returning(no_batches)),
+        (port, "decode_indices", returning({"loader/index": torch.arange(2)})),
+        (
+            port,
+            "settings_record",
+            returning({f"settings/{s}/x": torch.ones(2) for s in port.SETTINGS}),
+        ),
+        (port, "setting_lockstep_record", lockstep_run({"w": torch.ones(2)})),
+    ):
+        monkeypatch.setattr(module, name, value)
+    scripts = {"uniform": cast("upstream.Script", object())}
+    record, report = capture_reference.capture_settings(scripts, tmp_path)
+    loader = "settings/resnet32-cifar10lt/loader/index"
+    assert record.keys() == {loader} | {f"settings/{s}/x" for s in port.SETTINGS}
+    per_setting = [
+        line
+        for s in port.SETTINGS
+        for line in (
+            f"settings/{s}/uniform/state: state: 0 tensors against 1",
+            f"settings/{s}/uniform/indices: torch.int64[3] vs torch.int64[2]",
+        )
+    ]
+    assert report == [
+        *per_setting,
+        *(f"settings/{s}/x: 2/2 differ" for s in sorted(port.SETTINGS)),
+        "lockstep/vgg16bn-cifar100lt/uniform/1: w: 2/2 differ",
+    ]
+
+
+class Calls:
+    """Stand-ins that return fixed values and record every call's arguments."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, tuple[object, ...]]] = []
+
+    def returning[T](self, name: str, value: T) -> Callable[..., T]:
+        """Return a stand-in named ``name`` that records its arguments."""
+
+        def call(*arguments: object) -> T:
+            self.seen.append((name, arguments))
+            return value
+
+        return call
+
+
+def lockstep_run(
+    state: dict[str, torch.Tensor],
+) -> Callable[..., dict[str, torch.Tensor]]:
+    """Return a port lockstep run that hands back ``state`` after one update."""
+
+    def run(
+        name: str,
+        *,
+        states: list[dict[str, torch.Tensor]],
+    ) -> dict[str, torch.Tensor]:
+        del name
+        states.append(state)
+        return {}
+
+    return run
+
+
+@pytest.mark.parametrize("real", [False, True], ids=["no-real", "real"])
+def test_capture_joins_both_sides_and_every_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    real: bool,
+) -> None:
+    """The runs are tested elsewhere; here they are stubbed, to test the glue."""
+    calls = Calls()
+    trace = upstream.Trace(indices=torch.arange(3))
+    train: Batches = [[{"label": torch.zeros(2)}]]
+    passes: tuple[Batches, Batches] = (train, [])
+    ours: tuple[Batches, Batches] = ([[{"label": torch.ones(2)}]], [])
+    root, scratch = tmp_path / "root", tmp_path / "scratch"
+    cifar100 = tmp_path / "cifar" if real else None
+    uniform, other = object(), object()
+    scripts = {"uniform": uniform, "other": other}
+    lockstep = ({"lockstep/x": torch.zeros(2)}, [{"w": torch.zeros(2)}])
+    weights = {"weights": torch.zeros(1)}
+    subset = {"subset": torch.zeros(1)}
+    no_counts: dict[str, torch.Tensor] = {}
+    for module, name, value in (
+        (upstream, "variants", scripts),
+        (upstream, "trace_main", trace),
+        (upstream, "upstream_lockstep", lockstep),
+        (upstream, "upstream_batches", passes),
+        (upstream, "upstream_weights", weights),
+        (upstream, "upstream_subset", subset),
+        (upstream, "upstream_record", {"theirs": torch.ones(2)}),
+        (capture_reference, "compare_full_size", ["full size differs"]),
+        (port, "counts_record", (no_counts, torch.arange(2))),
+        (port, "port_record", {"theirs": torch.zeros(2)}),
+        (port, "loader_batches", ours),
+        (capture_reference, "compare_real", ["real differs"]),
+        (
+            capture_reference,
+            "capture_settings",
+            ({"settings/x": torch.zeros(3)}, ["setting differs"]),
+        ),
+    ):
+        monkeypatch.setattr(module, name, calls.returning(name, value))
+    monkeypatch.setattr(port, "lockstep_record", lockstep_run({"w": torch.ones(2)}))
+    captured = capture_reference.capture(root, scratch, cifar100=cifar100)
+    assert captured.record.keys() == {"theirs", "settings/x"}
+    assert captured.sites == {}
+    assert captured.report == [
+        "full size differs",
+        "theirs: 2/2 differ",
+        "main/indices: torch.int64[2] vs torch.int64[3]",
+        "lockstep/uniform/1: w: 2/2 differ",
+        "lockstep/other/1: w: 2/2 differ",
+        "loader/train/0: 0/label: 2/2 differ",
+        *(["real differs"] if real else []),
+        "setting differs",
+    ]
+    assert calls.seen == [
+        ("variants", (root, scratch)),
+        ("trace_main", (uniform,)),
+        ("upstream_lockstep", (uniform, "uniform", trace)),
+        ("upstream_lockstep", (other, "other", trace)),
+        ("upstream_batches", (uniform,)),
+        ("upstream_weights", (scripts,)),
+        ("upstream_subset", (uniform,)),
+        (
+            "upstream_record",
+            (trace, weights, {"uniform": lockstep, "other": lockstep}, subset, train),
+        ),
+        ("compare_full_size", (uniform, trace)),
+        ("counts_record", ()),
+        ("port_record", (scratch,)),
+        ("loader_batches", (scratch,)),
+        *([("compare_real", (uniform, cifar100))] if real else []),
+        ("capture_settings", (scripts, scratch)),
+    ]
 
 
 def test_main_prints_the_report_and_writes_nothing_when_something_differs(

@@ -50,14 +50,13 @@ from priml.baselines.craftax.testing import (
     digest,
     forward_parameters,
     fp32,
-    gpu_key,
     host_agnostic_pipeline,
     optimizer_state,
     packed_observations,
     portable_checkpoint,
     portable_uniform,
     read_golden,
-    require_golden,
+    require_cuda,
     smoke_feature,
     tiny_env,
     tiny_exp000_step,
@@ -2111,19 +2110,9 @@ def test_exp000s_kernels_match_their_tiny_golden_on_the_gpu(
     learns eagerly, epochs 2 and 3 capture each slot's learner epoch, and
     epoch 4 replays one.
     """
-    host = gpu_key()
-    require_golden(
-        test_file=__file__,
-        name="train_step_exp000_tiny",
-        host=host,
-    )
+    require_cuda()
     lines = _train_out(_from_portable_masters(tiny_exp000_step(), tmp_path))
-    assert_golden(
-        test_file=__file__,
-        name="train_step_exp000_tiny",
-        lines=lines,
-        host=host,
-    )
+    assert_golden(test_file=__file__, name="train_step_exp000_tiny", lines=lines)
 
 
 @pytest.mark.gpu_triton
@@ -2136,11 +2125,8 @@ def test_a_checkpoint_loaded_after_the_capture_trains_as_the_golden(
     puts new tensors in the optimizer's state; epochs 3 and 4 must still be
     the uninterrupted golden's.
     """
-    golden = read_golden(
-        test_file=__file__,
-        name="train_step_exp000_tiny",
-        host=gpu_key(),
-    )
+    require_cuda()
+    golden = read_golden(test_file=__file__, name="train_step_exp000_tiny")
     step = _from_portable_masters(tiny_exp000_step(), tmp_path)
     lines = _reloaded_epochs(step, tmp_path / "checkpoint.pt")
     assert lines == _after_epoch_2(golden)
@@ -2176,8 +2162,7 @@ def test_exp000s_muon_matches_its_tiny_golden_on_the_gpu(
     Three steps of the fused kernels with the rate as a device tensor, as the
     learner runs them; the first and last are clipped, the second is not.
     """
-    host = gpu_key()
-    require_golden(test_file=__file__, name="muon_exp000_tiny", host=host)
+    require_cuda()
     config = tiny_exp000_step()
     assert isinstance(config.model, MinGRUPolicy.Config)
     model = config.model.make().cuda()
@@ -2192,12 +2177,7 @@ def test_exp000s_muon_matches_its_tiny_golden_on_the_gpu(
         group["lr"] = torch.tensor(group["lr"], dtype=torch.float32, device="cuda")
     gradients = _gradients(model, scales=(2**-5, 2**-9, 2**-5))
     lines = _muon_entries(model, optimizer, gradients)
-    assert_golden(
-        test_file=__file__,
-        name="muon_exp000_tiny",
-        lines=lines,
-        host=host,
-    )
+    assert_golden(test_file=__file__, name="muon_exp000_tiny", lines=lines)
 
 
 def test_exp000s_learning_rates_match_their_golden() -> None:

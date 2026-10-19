@@ -3,8 +3,9 @@
 The script is imported from a clone of the benchmark, not vendored. It is the
 script the shared recipe ports, and that recipe's capture proves its network,
 data, schedule and optimizer. Here each variant's ``compute_loss`` runs alone on
-fixed logits, and the lockstep run repeats ``main``'s epoch loop on the
-shallowest network with the variant's loss. Nothing runs on a GPU.
+fixed logits and on each other setting's logit width, and the lockstep run
+repeats ``main``'s epoch loop on the shallowest network with the variant's
+loss. Nothing runs on a GPU.
 """
 
 from __future__ import annotations
@@ -17,12 +18,19 @@ from torch import Tensor
 
 import torch
 
+from priml.baselines.mlsbench.dl.classification_loss.reference import (
+    setting_logits,
+)
 from priml.baselines.mlsbench.dl.vision import reference, upstream
 from priml.baselines.mlsbench.dl.vision.upstream import PRISTINE
 from priml.testing.bfb import host_agnostic_numerics
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from torch import nn
+
     from priml.baselines.mlsbench.dl.vision.upstream import (
         Lockstep,
         MainTrace,
@@ -65,13 +73,24 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
     }
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
-    """Train the shallowest network for two updates, one per epoch.
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    arch: str = "resnet56",
+    prefix: str = "",
+) -> Lockstep:
+    """Train the shallowest network of an ``--arch`` for two updates, one per epoch.
 
     Args:
       script: The reference script carrying the loss under test.
       name: Which loss, for the record's keys.
       trace: Source of the optimizer settings ``main`` used.
+      arch: The setting's ``--arch``; its network is
+        :func:`~priml.baselines.mlsbench.dl.vision.upstream.tiny_model`.
+      prefix: Prepended to the record's keys, ``settings/<setting>/`` for a
+        setting's run.
 
     Returns:
       lockstep: Per update the loss, its logits, a probe's logits afterwards
@@ -87,16 +106,9 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
         host_agnostic_numerics(),
         mock.patch.object(script, "compute_loss", spy),
     ):
-        model = script.ResNet(script.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = upstream.tiny_model(script, arch, reference.CLASSES)
         script.initialize_weights(model)
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=trace.settings["lr"],
-            momentum=trace.settings["momentum"],
-            dampening=trace.settings["dampening"],
-            weight_decay=trace.settings["weight_decay"],
-            nesterov=bool(trace.settings["nesterov"]),
-        )
+        optimizer = _sgd(model, trace)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=reference.EPOCHS,
@@ -118,14 +130,46 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
     record = {
-        f"lockstep/{name}/loss": torch.stack(spy.losses),
-        f"lockstep/{name}/logits": torch.stack(spy.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
-        f"lockstep/{name}/context": torch.tensor(
+        f"{prefix}lockstep/{name}/loss": torch.stack(spy.losses),
+        f"{prefix}lockstep/{name}/logits": torch.stack(spy.logits),
+        f"{prefix}lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}lockstep/{name}/context": torch.tensor(
             [[c["num_classes"], c["epoch"], c["total_epochs"]] for c in spy.configs],
         ),
     }
     return record, states
+
+
+def upstream_setting_losses(
+    scripts: dict[str, Upstream],
+    settings: Iterable[str],
+) -> dict[str, Tensor]:
+    """Run each variant's ``compute_loss`` on every setting's logit width.
+
+    Args:
+      scripts: The script carrying each loss, keyed as :func:`variants`.
+      settings: Keys of :data:`~priml.baselines.mlsbench.dl.vision.reference.SETTINGS`.
+
+    Returns:
+      record: Keyed as
+        :func:`~priml.baselines.mlsbench.dl.classification_loss.reference.setting_loss_record`.
+
+    """
+    record: dict[str, Tensor] = {}
+    with host_agnostic_numerics():
+        for setting in settings:
+            classes = reference.SETTINGS[setting].classes
+            logits, label = setting_logits(classes)
+            # What ``main`` tells the loss in the first epoch of a 200-epoch run.
+            config = {"num_classes": classes, "epoch": 0, "total_epochs": 200}
+            for name, script in scripts.items():
+                leaf = logits.clone().requires_grad_()
+                loss = script.compute_loss(leaf, label, config)
+                loss.backward()
+                prefix = f"settings/{setting}/loss/{name}"
+                record[f"{prefix}/value"] = loss.detach()
+                record[f"{prefix}/grad"] = cast(Tensor, leaf.grad)
+    return record
 
 
 def upstream_record(
@@ -155,6 +199,18 @@ def upstream_record(
     for values, _ in lockstep.values():
         record |= values
     return record
+
+
+def _sgd(model: nn.Module, trace: MainTrace) -> torch.optim.SGD:
+    """Build the optimizer ``main`` builds, from the settings it was traced with."""
+    return torch.optim.SGD(
+        model.parameters(),
+        lr=trace.settings["lr"],
+        momentum=trace.settings["momentum"],
+        dampening=trace.settings["dampening"],
+        weight_decay=trace.settings["weight_decay"],
+        nesterov=bool(trace.settings["nesterov"]),
+    )
 
 
 class _LossSpy:

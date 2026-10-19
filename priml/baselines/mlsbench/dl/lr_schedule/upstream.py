@@ -111,7 +111,13 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
     }
 
 
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
+def upstream_lockstep(
+    script: Upstream,
+    name: str,
+    trace: MainTrace,
+    *,
+    setting: str = "",
+) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
@@ -119,6 +125,11 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
       name: Which schedule, for the record's keys.
       trace: The pristine ``main``'s run, whose optimizer settings, ``--lr``
         included, the loop builds its own from.
+      setting: A key of :data:`~priml.baselines.mlsbench.dl.vision.reference.SETTINGS`
+        whose shallowest network
+        (:func:`~priml.baselines.mlsbench.dl.vision.upstream.tiny_model`)
+        trains and whose ``--arch``/``--dataset`` ``get_lr`` is told, under
+        ``settings/<setting>/`` keys; ``resnet56-cifar100`` when empty.
 
     Returns:
       lockstep: Per update the rate, the loss, its logits and a probe's logits
@@ -130,8 +141,14 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     rates: list[float] = []
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
+    config = dict(CONFIG)
+    prefix = ""
+    if setting:
+        spec = reference.SETTINGS[setting]
+        config = {"arch": spec.arch, "dataset": spec.dataset}
+        prefix = f"settings/{setting}/"
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = task.ResNet(task.BasicBlock, [1, 1, 1], reference.CLASSES)
+        model = upstream.tiny_model(script, config["arch"], reference.CLASSES)
         task.initialize_weights(model)
         base_lr = trace.settings["lr"]
         optimizer = torch.optim.SGD(
@@ -141,7 +158,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
             weight_decay=trace.settings["weight_decay"],
         )
         for index in range(reference.STEPS):
-            rate = task.get_lr(index, reference.EPOCHS, base_lr, dict(CONFIG))
+            rate = task.get_lr(index, reference.EPOCHS, base_lr, dict(config))
             for group in optimizer.param_groups:
                 group["lr"] = rate
             rates.append(rate)
@@ -154,12 +171,47 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
     record = {
-        f"lockstep/{name}/lr": torch.tensor(rates, dtype=torch.float64),
-        f"lockstep/{name}/loss": torch.stack(criterion.losses),
-        f"lockstep/{name}/logits": torch.stack(criterion.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
+        f"{prefix}lockstep/{name}/lr": torch.tensor(rates, dtype=torch.float64),
+        f"{prefix}lockstep/{name}/loss": torch.stack(criterion.losses),
+        f"{prefix}lockstep/{name}/logits": torch.stack(criterion.logits),
+        f"{prefix}lockstep/{name}/probe": torch.stack(probes),
     }
     return record, states
+
+
+def upstream_setting_schedules(
+    scripts: dict[str, Upstream],
+    settings: Iterable[str],
+) -> dict[str, Tensor]:
+    """Trace each variant's ``main`` at each setting and keep the rate of every epoch.
+
+    ``main`` tells ``get_lr`` the setting's ``--arch`` and ``--dataset``, so a
+    schedule may differ per setting; the trace records what it set.
+
+    Args:
+      scripts: The script carrying each schedule, keyed as :func:`variants`.
+      settings: Keys of :data:`~priml.baselines.mlsbench.dl.vision.reference.SETTINGS`.
+
+    Returns:
+      record: Keyed as
+        :func:`~priml.baselines.mlsbench.dl.lr_schedule.reference.setting_schedule_record`.
+
+    """
+    record: dict[str, Tensor] = {}
+    for setting in settings:
+        spec = reference.SETTINGS[setting]
+        for name, script in scripts.items():
+            trace = upstream.trace_main(
+                script,
+                arch=spec.arch,
+                dataset=spec.dataset,
+                classes=spec.classes,
+            )
+            record[f"settings/{setting}/schedule/{name}"] = torch.tensor(
+                trace.rates,
+                dtype=torch.float64,
+            )
+    return record
 
 
 def upstream_record(

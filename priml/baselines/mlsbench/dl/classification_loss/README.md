@@ -13,12 +13,16 @@ exp000  cross-entropy
   +-- exp001  label smoothing 0.1    (label_smoothing)
   +-- exp002  focal loss, gamma 2    (focal_loss)
   +-- exp003  PolyLoss, epsilon 2    (poly_loss)
+  +-- exp004  vgg16bn-cifar100 setting
+  |     +-- exp005 / exp006 / exp007  label smoothing / focal / PolyLoss
+  +-- exp008  mobilenetv2-fmnist setting (hidden)
+        +-- exp009 / exp010 / exp011  label smoothing / focal / PolyLoss
 ```
 
 | File | Holds |
 |---|---|
 | `losses.py` | `label_smoothing`, `focal`, `poly`; the pristine `cross_entropy` is `vision`'s |
-| `experiments.py` | `exp000` to `exp003` |
+| `experiments.py` | `exp000` to `exp011` |
 | `reference.py`, `upstream.py` | Port-side and script-side runs of the capture |
 | `scripts/capture_reference.py` | The bit-for-bit proof |
 
@@ -42,4 +46,7 @@ probe's logits afterwards, what the loss was told, and every parameter after
 each. `reference_test.py` replays the stored values in the default tier. The
 network, data, schedule and optimizer are `vision`'s, proven by its capture.
 
-Not yet ported: the `vgg16bn-cifar100` and `mobilenetv2-fmnist` settings.
+At the other two settings it compares each loss's fork against the script at
+that setting: the loss and its gradient at the setting's class count, the full
+network's initial state, forwards and draws, and the Fashion-MNIST loaders'
+every pixel. `reference_settings.pt` holds those values.

@@ -12,7 +12,11 @@ state after ``main`` seeds and initializes it, and its forward, per
 initialization; where the generator stands afterwards; the shallowest network's
 state and forward; the learning rates and the optimizer; every pixel the
 loaders produce; and every parameter after each update of a short run per
-initialization. Any mismatch is printed and the exit code is 1; otherwise the
+initialization. At the ``vgg16bn-cifar100`` and ``mobilenetv2-fmnist``
+settings it compares, per initialization, the full network's state after
+``main`` initializes it and where it leaves the generator, the shallowest
+network's forwards, and
+every pixel of the Fashion-MNIST loaders. Any mismatch is printed and the exit code is 1; otherwise the
 values the default test replays are written under ``--out``.
 
 The script is imported from the clone, not vendored. Nothing runs on a GPU.
@@ -65,7 +69,19 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(
+        flags.out,
+        {
+            "reference.pt": {
+                k: v
+                for k, v in captured.record.items()
+                if not k.startswith("settings/")
+            },
+            "reference_settings.pt": {
+                k: v for k, v in captured.record.items() if k.startswith("settings/")
+            },
+        },
+    )
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -112,7 +128,34 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         run=reference.lockstep_record,
     )
     report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
-    return vision.Captured(record=record, sites={}, report=report)
+    settings, settings_report = capture_reference.compare_task_settings(
+        scripts,
+        reference.SETTING_INITIALIZATIONS,
+        scratch,
+        pristine="normal",
+        build=upstream.initialized,
+    )
+    with vision_upstream.hidden_accelerators():
+        setting_lockstep = upstream.upstream_setting_lockstep(
+            scripts,
+            reference.SETTING_INITIALIZATIONS,
+            traces["normal"],
+        )
+    for values, _ in setting_lockstep.values():
+        settings |= values
+    settings_report += mismatches(
+        {k: v for k, v in settings.items() if "/lockstep/" in k},
+        reference.settings_record(),
+    )
+    settings_report += capture_reference.compare_lockstep(
+        setting_lockstep,
+        run=reference.setting_lockstep_record,
+    )
+    return vision.Captured(
+        record=record | settings,
+        sites={},
+        report=report + settings_report,
+    )
 
 
 def compare_full_size(

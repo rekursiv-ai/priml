@@ -40,19 +40,35 @@ def statistics() -> dict[str, Tensor]:
     return {"mean": torch.tensor(CONFIG.mean), "std": torch.tensor(CONFIG.std)}
 
 
+def gray_images(count: int, *, seed: int = 0) -> Tensor:
+    """Return ``count`` single-channel uint8 images of 8x10 random pixels."""
+    return images(count, seed=seed)[:, :1].clone()
+
+
+def repeat3(x: Tensor) -> Tensor:
+    """Repeat one channel to three, the reference's Fashion-MNIST ``Lambda``."""
+    return x.repeat(3, 1, 1)
+
+
 def torchvision_pipeline(
     first: list[Callable[..., object]],
     batch: Tensor,
     *,
     last: list[Callable[..., object]] | None = None,
 ) -> Tensor:
-    """Run ``first`` + crop, mirror, ToTensor + ``last`` + Normalize per image."""
+    """Run ``first`` + crop, mirror, ToTensor + ``last`` + Normalize per image.
+
+    A one-channel batch is fed as ``L`` images and repeated to three channels
+    after ``ToTensor``, as the reference's Fashion-MNIST pipeline does.
+    """
+    repeat = [transforms.Lambda(repeat3)] if batch.shape[1] == 1 else []
     pipeline = transforms.Compose(
         [
             *first,
             transforms.RandomCrop((8, 10), padding=CONFIG.translate_pad),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
+            *repeat,
             *(last or []),
             transforms.Normalize(CONFIG.mean, CONFIG.std),
         ],
@@ -60,7 +76,9 @@ def torchvision_pipeline(
     with seeded(SEED):
         return torch.stack(
             [
-                pipeline(Image.fromarray(image.permute(1, 2, 0).numpy()))
+                pipeline(
+                    Image.fromarray(image.permute(1, 2, 0).squeeze(-1).numpy()),
+                )
                 for image in batch
             ],
         )
@@ -126,6 +144,52 @@ def test_randaugment_matches_torchvision() -> None:
 
 def test_trivialaugment_matches_torchvision() -> None:
     batch = images(16)
+    got = augment.trivialaugment_normalize(
+        batch,
+        torch.Generator().manual_seed(SEED),
+        pad=CONFIG.translate_pad,
+        num_magnitude_bins=31,
+        **statistics(),
+    )
+    want = torchvision_pipeline([transforms.TrivialAugmentWide()], batch)
+    assert torch.equal(got, want)
+
+
+def test_cutout_on_grayscale_matches_the_masked_repeated_pipeline() -> None:
+    batch = gray_images(5)
+    got = augment.cutout_normalize(
+        batch,
+        torch.Generator().manual_seed(SEED),
+        pad=CONFIG.translate_pad,
+        holes=1,
+        length=4,
+        **statistics(),
+    )
+    assert torch.equal(got, torchvision_pipeline([], batch, last=[Cutout()]))
+
+
+# 64 images reach all 14 operations of each policy on the grayscale path.
+def test_randaugment_on_grayscale_matches_torchvision_on_l_images() -> None:
+    batch = gray_images(64)
+    got = augment.randaugment_normalize(
+        batch,
+        torch.Generator().manual_seed(SEED),
+        pad=CONFIG.translate_pad,
+        num_ops=2,
+        magnitude=9,
+        num_magnitude_bins=31,
+        **statistics(),
+    )
+    want = torchvision_pipeline(
+        [transforms.RandAugment(num_ops=2, magnitude=9)],
+        batch,
+    )
+    assert got.shape == (64, 3, 8, 10)
+    assert torch.equal(got, want)
+
+
+def test_trivialaugment_on_grayscale_matches_torchvision_on_l_images() -> None:
+    batch = gray_images(64)
     got = augment.trivialaugment_normalize(
         batch,
         torch.Generator().manual_seed(SEED),

@@ -7,14 +7,12 @@ imports it from here rather than from another test module.
 
 A golden is a text file under the test's ``testdata/``: one line per frozen
 value, a tensor as its dtype, shape and sha256, a scalar as its fp32 bits.
-``--regenerate-golden`` mints it. A golden of a tiny CPU run computes inside
-:func:`host_agnostic_pipeline`, so one file holds on every host. A golden
-whose bits depend on the host -- a GPU's kernels, or the env's libm over
-enough worlds and steps to reach an input two libms round apart -- carries a
-host key in its name and skips on a host nobody minted it for,
-before the work when the test calls :func:`require_golden` first. The weights
-the goldens start from are drawn by :func:`fill_portable`, the same bits on
-every host, so no golden reads a checkpoint from outside the repository.
+``--regenerate-golden`` mints it. One file holds on every host: a tiny CPU
+run computes inside :func:`host_agnostic_pipeline`, and a GPU run's kernels
+are deterministic; a host whose bits differ fails, which is the drift the
+golden exists to catch. The weights the goldens start from are drawn by
+:func:`fill_portable`, the same bits on every host, so no golden reads a
+checkpoint from outside the repository.
 """
 
 from __future__ import annotations
@@ -28,7 +26,6 @@ from unittest.mock import patch
 
 import difflib
 import hashlib
-import re
 
 from configgle import InlineConfig
 from torch import Tensor, nn
@@ -40,7 +37,7 @@ import torch
 
 from priml.baselines.craftax.env import CraftaxEnv, WorldPool
 from priml.baselines.craftax.experiments import exp000, exp009
-from priml.baselines.craftax.game.jit import jit, platform_key
+from priml.baselines.craftax.game.jit import jit
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.model import (
     FeasibilityLoss,
@@ -591,21 +588,10 @@ def fp32(value: float | Tensor) -> str:
     return f"0x{int(single.view(np.uint32)):08x} {float(single)!r}"
 
 
-def gpu_key() -> str:
-    """Return the host key of a GPU golden: the device's model, then the platform.
-
-    The platform's libm is part of it because a golden that steps the env on
-    the CPU holds only where that libm runs (``game.jit.platform_key``).
-    Without a CUDA device there is no model to name, and the test skips.
-
-    Returns:
-      key: For example ``nvidia-h200_linux-x86_64-glibc2.35``.
-
-    """
+def require_cuda() -> None:
+    """Skip the calling test on a host without a CUDA device."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
-    model = re.sub(r"[^a-z0-9]+", "-", torch.cuda.get_device_name().lower())
-    return f"{model.strip('-')}_{platform_key()}"
 
 
 def assert_golden(
@@ -613,27 +599,23 @@ def assert_golden(
     test_file: str,
     name: str,
     lines: Sequence[str],
-    host: str = "",
 ) -> None:
-    """Assert ``lines`` equal ``testdata/<name>[_<host>].txt`` beside ``test_file``.
+    """Assert ``lines`` equal ``testdata/<name>.txt`` beside ``test_file``.
 
     A missing golden is minted and fails, for review, as ``assert_text_golden``
-    does; one keyed by ``host`` instead skips, since a golden holds only on
-    the host class it was minted on. ``--regenerate-golden`` rewrites it.
+    does. ``--regenerate-golden`` rewrites it.
 
     Args:
       test_file: ``__file__`` of the test module.
       name: The golden's name.
       lines: The rendered values, one per line.
-      host: The host key, for a golden whose bits depend on the host.
 
     Raises:
       AssertionError: The golden differs; the message holds the diff.
 
     """
-    path = _golden_path(test_file=test_file, name=name, host=host)
-    overwrite = regenerate.golden()
-    if not overwrite and path.exists():
+    path = _golden_path(test_file=test_file, name=name)
+    if not regenerate.golden() and path.exists():
         # pragma: no mutate start -- "UTF-8" names the same codec, and the
         # default is UTF-8 on every host the suite runs on.
         expected = path.read_text(encoding="utf-8").splitlines()
@@ -642,8 +624,6 @@ def assert_golden(
             diff = difflib.unified_diff(expected, lines, "golden", "now", lineterm="")
             raise AssertionError(f"{path.stem} changed:\n" + "\n".join(diff))
         return
-    if not overwrite and host:
-        pytest.skip(_missing_golden(path))
     assert_text_golden(
         test_file=test_file,
         name=path.stem,
@@ -651,45 +631,19 @@ def assert_golden(
     )
 
 
-def read_golden(*, test_file: str, name: str, host: str = "") -> list[str]:
-    """Return a golden's lines, as :func:`assert_golden` names it; skip without it.
+def read_golden(*, test_file: str, name: str) -> list[str]:
+    """Return a golden's lines, as :func:`assert_golden` names it.
 
     Args:
       test_file: ``__file__`` of the test module that owns it.
       name: The golden's name.
-      host: Its host key, if it has one.
 
     Returns:
       lines: The golden's lines.
 
     """
-    path = _golden_path(test_file=test_file, name=name, host=host)
-    if not path.exists():
-        pytest.skip(_missing_golden(path))
+    path = _golden_path(test_file=test_file, name=name)
     return path.read_text(encoding="utf-8").splitlines()
-
-
-def require_golden(
-    *,
-    test_file: str,
-    name: str,
-    host: str,
-) -> None:
-    """Skip now, before the work, on a host that has no golden to compare it with.
-
-    :func:`assert_golden` skips such a host too, but only after the work:
-    the full-size golden of exp000's 200th epoch, since retired, ran 198 s on
-    an RTX 5090 before that skip.
-    ``--regenerate-golden`` runs on, to mint it.
-
-    Args:
-      test_file: ``__file__`` of the test module.
-      name: The golden's name.
-      host: Its host key.
-
-    """
-    if not regenerate.golden():
-        read_golden(test_file=test_file, name=name, host=host)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -876,12 +830,6 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _golden_path(*, test_file: str, name: str, host: str) -> Path:
-    """Return ``testdata/<name>[_<host>].txt`` beside ``test_file``."""
-    stem = f"{name}_{host}" if host else name
-    return Path(test_file).resolve().parent / "testdata" / f"{stem}.txt"
-
-
-def _missing_golden(path: Path) -> str:
-    """Return the skip reason for a host that has no ``path`` golden."""
-    return f"no {path.stem} golden; mint it on this host with --regenerate-golden"
+def _golden_path(*, test_file: str, name: str) -> Path:
+    """Return ``testdata/<name>.txt`` beside ``test_file``."""
+    return Path(test_file).resolve().parent / "testdata" / f"{name}.txt"
