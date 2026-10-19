@@ -10,7 +10,7 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.oscillator.data import ForecastData
+from priml.baselines.oscillator.data import ForecastData, Windows
 from priml.baselines.oscillator.train_step import (
     DLinearForecast,
     FitReport,
@@ -41,6 +41,22 @@ class StudyRecord(TypedDict):
     timesteps_per_query: int
     training: FitReport
     scores: dict[str, dict[str, ForecastScores]]
+
+
+class BenchmarkRun(TypedDict):
+    """One attempted fit, including failed attempts."""
+
+    run_id: str
+    family: str
+    system_id: str
+    budget: str
+    method: str
+    access: str
+    model_seed: int
+    elapsed_seconds: float
+    status: str
+    error: str | None
+    result: StudyRecord | None
 
 
 class ForecastStudy:
@@ -94,7 +110,7 @@ class ForecastStudy:
             simulator=self.data.reference,
         )
         synthetic = self.data.windows(cfg.data.synthetic, simulator=self.data.cheap)
-        _, scale = train.channel_stats()
+        scale = self.score_scale(train)
         seed = make_seed() if cfg.seed is None else cfg.seed
         # ``torch.manual_seed`` would also seed CUDA, which this CPU-only fork
         # does not restore, so a study would reseed its caller's GPU stream.
@@ -136,6 +152,18 @@ class ForecastStudy:
             "training": training,
             "scores": scores,
         }
+
+    def score_scale(self, train: Windows) -> Tensor:
+        """Return the training-only channel scale used to report forecast errors.
+
+        Args:
+          train: Reference windows already included in the query budget.
+
+        Returns:
+          scale: Positive per-channel scales shaped (1, 1, channels).
+
+        """
+        return train.channel_stats()[1]
 
 
 def forecast_scores(

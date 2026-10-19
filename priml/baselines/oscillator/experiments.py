@@ -19,11 +19,29 @@ from priml.baselines.oscillator.forces import (
     PowerForce,
     WeightedForce,
 )
+from priml.baselines.oscillator.mechanisms import (
+    CoupledDrag,
+    SaturatingForce,
+    SineForce,
+    SystemFamily,
+)
 from priml.baselines.oscillator.nonlinear import (
     HistoryAblation,
     KernelCorrection,
     NeuralForecast,
     PolynomialKernel,
+)
+from priml.baselines.oscillator.pretrained import Chronos2Pipeline, PretrainedForecast
+from priml.baselines.oscillator.sequence import (
+    PatchSequence,
+    RbfKernel,
+    RecurrentSequence,
+)
+from priml.baselines.oscillator.suite import (
+    BenchmarkRecipe,
+    BenchmarkSuite,
+    BudgetStudy,
+    ReferenceBudget,
 )
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 from priml.model.init import unit_fan_in_uniform
@@ -680,6 +698,344 @@ def exp029() -> DelayedStudy.Config:
             SwiGLU.Config(channels_hidden=64),
         ],
     )
+    return cfg
+
+
+def exp030() -> BudgetStudy.Config:
+    """exp000 with the transfer benchmark's longer context and data protocol.
+
+    Hypothesis:
+      A full observed cycle and independent trajectories give each model a
+      meaningful chance to infer the dynamics. Geometry and split counts define
+      this new task together; the earlier baseline remains unchanged.
+
+    References:
+      exp000; PROTOCOL.md for the version 0.1 task definition.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = BudgetStudy.Config()
+    cfg.update(exp000())
+    cfg.experiment_name = "exp030"
+    cfg.data.seq_len = 64
+    cfg.data.pred_len = 24
+    cfg.data.cheap.substeps = 8
+    cfg.data.reference.substeps = cfg.data.cheap.substeps
+    cfg.data.train.count = 64
+    cfg.data.validation.count = 32
+    cfg.data.test.count = 128
+    cfg.data.shifted.count = cfg.data.test.count
+    return cfg
+
+
+def exp031() -> BudgetStudy.Config:
+    """exp030 with eight times as many optimizer updates.
+
+    Hypothesis:
+      A 2,400-update control reduces the chance of mistaking short training for
+      a model limitation on the longer context.
+
+    References:
+      exp030.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp030()
+    cfg.experiment_name = "exp031"
+    assert isinstance(cfg.method, DLinearForecast.Config)
+    cfg.method.updates *= 8
+    return cfg
+
+
+def exp032() -> BudgetStudy.Config:
+    """exp031 with the existing affine simulator correction.
+
+    Hypothesis:
+      A direct solve tests whether learning a linear output correction is enough.
+
+    References:
+      exp031; exp002 for the fixed ridge penalty.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp031()
+    cfg.experiment_name = "exp032"
+    cfg.method = RidgeCorrection.Config()
+    return cfg
+
+
+def exp033() -> BudgetStudy.Config:
+    """exp032 with a smooth nonlinear kernel instead of an affine correction.
+
+    Hypothesis:
+      A radial kernel gives a flexible direct-solve control, with no selected
+      polynomial interaction order or audit-dependent tuning.
+
+    References:
+      exp032; KernelCorrection for training-only feature normalization.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp032()
+    cfg.experiment_name = "exp033"
+    method = cfg.method = KernelCorrection.Config()
+    method.kernel = RbfKernel.Config()
+    return cfg
+
+
+def exp034() -> BudgetStudy.Config:
+    """exp031 with the fixed sparse force-library search.
+
+    Hypothesis:
+      A known force library may transfer on familiar terms and their unseen
+      composition, while missing entirely new force shapes.
+
+    References:
+      exp031; exp005 for the library and validation rule.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp031()
+    cfg.experiment_name = "exp034"
+    cfg.method = SparseSimulator.Config()
+    return cfg
+
+
+def exp035() -> BudgetStudy.Config:
+    """exp031 with two nonlinear history blocks at the same update budget.
+
+    Hypothesis:
+      A model capable of higher-order interactions is a stronger neural control
+      than the single bias-free block used in the earlier diagnostic.
+
+    References:
+      exp031; exp029 for the gradient-preserving two-block initialization.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp031()
+    cfg.experiment_name = "exp035"
+    parent = cfg.method
+    assert isinstance(parent, DLinearForecast.Config)
+    method = cfg.method = NeuralForecast.Config()
+    method.updates = parent.updates
+    method.step.model.block = Sequential.Config(
+        elements=[
+            SwiGLU.Config(
+                channels_hidden=64,
+                channels_out=64,
+                bias=True,
+                init_weight_out=unit_fan_in_uniform,
+            ),
+            SwiGLU.Config(channels_hidden=64, bias=True),
+        ],
+    )
+    return cfg
+
+
+def exp036() -> BudgetStudy.Config:
+    """exp035 with patch attention in place of the flat history blocks.
+
+    Hypothesis:
+      Explicit temporal mixing may improve sample efficiency on unseen dynamics.
+
+    References:
+      exp035; priml.model.transformer.block.TransformerBlock.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp035()
+    cfg.experiment_name = "exp036"
+    assert isinstance(cfg.method, NeuralForecast.Config)
+    cfg.method.step.model.block = PatchSequence.Config()
+    return cfg
+
+
+def exp037() -> BudgetStudy.Config:
+    """exp036 with two recurrent layers instead of the attention stack.
+
+    Hypothesis:
+      Recurrence supplies another sequence-model control at the same data and
+      optimizer-update budgets.
+
+    References:
+      exp036; https://arxiv.org/abs/2410.01201 for minGRU.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp036()
+    cfg.experiment_name = "exp037"
+    assert isinstance(cfg.method, NeuralForecast.Config)
+    assert isinstance(cfg.method.step.model.block, PatchSequence.Config)
+    cfg.method.step.model.block.block = RecurrentSequence.Config()
+    return cfg
+
+
+def exp038() -> BudgetStudy.Config:
+    """exp031 with pinned zero-shot Chronos-Bolt forecasts.
+
+    Hypothesis:
+      A pretrained forecaster provides an external anchor without using any
+      reference adaptation targets. Its two channels are forecast independently.
+
+    References:
+      exp031; https://github.com/amazon-science/chronos-forecasting.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp031()
+    cfg.experiment_name = "exp038"
+    cfg.method = PretrainedForecast.Config()
+    return cfg
+
+
+def exp039() -> BudgetStudy.Config:
+    """exp038 with a pinned multivariate Chronos-2 pipeline.
+
+    Hypothesis:
+      A stronger pretrained model that keeps both channels in one group may
+      improve over the small univariate pretrained control.
+
+    References:
+      exp038; https://arxiv.org/abs/2510.15821.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = exp038()
+    cfg.experiment_name = "exp039"
+    assert isinstance(cfg.method, PretrainedForecast.Config)
+    cfg.method.pipeline = Chronos2Pipeline.Config()
+    return cfg
+
+
+def exp040() -> BenchmarkSuite.Config:
+    """Freeze exp031--exp039 on the version 0.1 mechanism-holdout suite.
+
+    Hypothesis:
+      Comparing adaptation across held-out force laws and two reference budgets
+      separates interpolation from correction that transfers to new conditions.
+
+    References:
+      PROTOCOL.md; exp031--exp039 for every individual method recipe.
+
+    Results:
+      Reference-hardware results: TBD. Local results are reported separately.
+
+    """
+    cfg = BenchmarkSuite.Config()
+    cfg.data = exp031().data
+    large = ReferenceBudget.Config()
+    large.name = "large"
+    large.train *= 4
+    large.validation *= 4
+    cfg.budgets = [ReferenceBudget.Config(), large]
+
+    matched = SystemFamily.Config()
+    matched.name = "matched"
+    matched.instances = 1
+    cubic = SystemFamily.Config()
+    cubic.name = "cubic"
+    cubic.seed = 12001
+    cubic.instances = 1
+    cubic.reference.cubic = 0.4
+    drag = SystemFamily.Config()
+    drag.name = "quadratic_drag"
+    drag.seed = 13001
+    drag.instances = 1
+    drag.reference.corrections = [
+        WeightedForce.Config(term=PowerForce.Config(axis=1, power=2), coefficient=0.35),
+    ]
+    cfg.development = [matched, cubic, drag]
+
+    mixed = SystemFamily.Config()
+    mixed.name = "combined"
+    mixed.seed = 21001
+    mixed.reference = cubic.reference.copy_tree()
+    mixed.reference.corrections = drag.reference.corrections.copy()
+    bounded = SystemFamily.Config()
+    bounded.name = "saturating"
+    bounded.seed = 22001
+    bounded.reference.corrections = [
+        WeightedForce.Config(term=SaturatingForce.Config(), coefficient=1.2),
+    ]
+    sine = SystemFamily.Config()
+    sine.name = "sine"
+    sine.seed = 23001
+    sine.reference.corrections = [
+        WeightedForce.Config(term=SineForce.Config(), coefficient=0.8),
+    ]
+    coupled = SystemFamily.Config()
+    coupled.name = "coupled_drag"
+    coupled.seed = 24001
+    coupled.reference.corrections = [
+        WeightedForce.Config(term=CoupledDrag.Config(), coefficient=0.45),
+    ]
+    cfg.audit = [mixed, bounded, sine, coupled]
+
+    dlinear = BenchmarkRecipe.Config()
+    dlinear.study = exp031()
+    ridge = BenchmarkRecipe.Config()
+    ridge.name = "ridge"
+    ridge.study = exp032()
+    ridge.seeds = [2021]
+    kernel = BenchmarkRecipe.Config()
+    kernel.name = "rbf"
+    kernel.study = exp033()
+    kernel.seeds = [2021]
+    forces = BenchmarkRecipe.Config()
+    forces.name = "force_library"
+    forces.study = exp034()
+    forces.seeds = [2021]
+    dense = BenchmarkRecipe.Config()
+    dense.name = "history_net"
+    dense.study = exp035()
+    attention = BenchmarkRecipe.Config()
+    attention.name = "patch_attention"
+    attention.study = exp036()
+    recurrent = BenchmarkRecipe.Config()
+    recurrent.name = "patch_mingru"
+    recurrent.study = exp037()
+    bolt = BenchmarkRecipe.Config()
+    bolt.name = "chronos_bolt_tiny"
+    bolt.study = exp038()
+    bolt.seeds = [2021]
+    bolt.access = "zero-shot"
+    chronos2 = BenchmarkRecipe.Config()
+    chronos2.name = "chronos2"
+    chronos2.study = exp039()
+    chronos2.seeds = [2021]
+    chronos2.access = "zero-shot"
+    cfg.recipes = [
+        dlinear,
+        ridge,
+        kernel,
+        forces,
+        dense,
+        attention,
+        recurrent,
+        bolt,
+        chronos2,
+    ]
     return cfg
 
 

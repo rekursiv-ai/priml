@@ -461,12 +461,55 @@ reference queries beats random sampling and this simple residual correction at
 the same query budget. DLinear is one forecasting control, not a complete baseline
 for the agent's experiment-selection policy.
 
-The current system is deterministic and fully observed, and its equations are
+The original experiments are deterministic and fully observed, and their equations are
 public. It is not a secure hidden benchmark. There is only one family of dynamics,
 and no real-world evaluation. Equal DLinear update counts are not equal wall time;
 ridge uses a direct solve, so its compute is not matched to neural training.
 Poor scores here would not establish that the benchmark is broadly difficult.
 The ETTh1 test MSE cannot be compared numerically with these synthetic scores.
+
+## Version 0.1 transfer benchmark
+
+`exp030`--`exp039` define the controls for a separate, versioned evaluation.
+`exp040` combines them under the [frozen protocol](PROTOCOL.md). It evaluates
+adaptation with 96 or 384 accurate trajectories, counting validation data, on
+independent oscillator systems. The audit excludes the development equations and
+includes a compositional holdout. Familiar and larger-displacement test scores are
+reported separately. The earlier pulse-parity tasks do not enter its score.
+
+The nine methods include a fixed force library and sequence models alongside
+DLinear. Chronos-Bolt Tiny and Chronos-2 are zero-shot anchors with pinned public
+weights. They use no adaptation targets, and their pretraining compute is not
+matched to local training. Their dependencies are isolated from the project's
+dependency files. Ordinary tests do not download or load pretrained weights.
+
+Use a new output directory for each run. Stage the model files once, then run
+development before freezing the audit. These commands keep artifacts outside Git:
+
+```sh
+uv sync --frozen --group pre-commit --extra hub
+uv pip install --python .venv/bin/python --no-deps --require-hashes -r priml/baselines/oscillator/pretrained-requirements.txt
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE
+uv --quiet run --frozen --no-sync python -m priml.baselines.oscillator.scripts.release --action stage
+uv --quiet run --frozen --no-sync python -m priml.baselines.oscillator.scripts.release --phase development
+uv --quiet run --frozen --no-sync python -m priml.baselines.oscillator.scripts.release --action freeze
+uv --quiet run --frozen --no-sync python -m priml.baselines.oscillator.scripts.release --phase audit --directory /opt/scratch/artifacts/oscillator/release-audit
+```
+
+`--model-directory`, `--directory`, and `--lock` accept other writable locations.
+Use the same model location when freezing and auditing. The runner records the
+complete config, source hashes, dependency lock, and weight digests before fitting.
+`--resume` retains completed attempts only when that provenance and the runtime
+environment match; it never silently retries failed models. An interrupted fit
+without an atomic result file is rerun. A stale audit lock is an error.
+
+`results.json` contains every attempt, the integration diagnostics, and paired
+system-level summaries. A failed method receives no finite aggregate score.
+Do not tune settings after inspecting audit results and reuse the same audit
+claim. This remains a small synthetic benchmark with public equations, not a
+secure hidden test or an LLM evaluation. See [the release record](RELEASE.md) for
+local results and remaining limitations.
 
 ## References
 

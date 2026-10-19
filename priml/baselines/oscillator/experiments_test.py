@@ -37,6 +37,7 @@ from priml.baselines.oscillator.nonlinear import (
     NeuralForecast,
     PolynomialKernel,
 )
+from priml.baselines.oscillator.suite import BenchmarkSuite
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 from priml.model.init import unit_fan_in_uniform
 from priml.model.sequential import Sequential
@@ -52,9 +53,13 @@ def test_each_experiment_names_itself_and_pins_no_seed() -> None:
     assert ForecastStudy.Config().experiment_name == ""
     assert ForecastStudy.Config().seed is None
     names = [name for name in vars(experiments) if name.startswith("exp")]
-    assert set(names) == {f"exp{index:03d}" for index in range(30)} | {"exp_smoke"}
+    assert set(names) == {f"exp{index:03d}" for index in range(41)} | {"exp_smoke"}
     for name in names:
         cfg = resolve_config(f"{experiments.__name__}.{name}")
+        if name == "exp040":
+            assert isinstance(cfg, BenchmarkSuite.Config)
+            assert all(recipe.study.seed is None for recipe in cfg.recipes)
+            continue
         assert isinstance(cfg, ForecastStudy.Config)
         assert cfg.experiment_name == name
         assert cfg.seed is None
@@ -66,6 +71,28 @@ def test_exp000_changes_only_the_starting_rate() -> None:
     assert cfg.method.step.optimizer == PartialConfig(torch.optim.Adam, lr=1e-3)
     cfg.method.step.optimizer = DLinearForecast.Config().step.optimizer
     assert cfg.method == DLinearForecast.Config()
+
+
+@pytest.mark.parametrize("number", [32, 34, 35, 36, 38])
+def test_transfer_controls_change_only_the_forecaster(number: int) -> None:
+    parent = experiments.exp035() if number == 36 else experiments.exp031()
+    cfg = resolve_config(f"{experiments.__name__}.exp{number:03d}")
+    assert isinstance(cfg, ForecastStudy.Config)
+    assert cfg.method != parent.method
+    cfg.method = parent.method
+    cfg.experiment_name = parent.experiment_name
+    assert cfg == parent
+
+
+def test_transfer_training_budget_changes_only_the_update_limit() -> None:
+    before = experiments.exp030()
+    after = experiments.exp031()
+    assert isinstance(before.method, DLinearForecast.Config)
+    assert isinstance(after.method, DLinearForecast.Config)
+    assert after.method.updates == 2400
+    after.method.updates = before.method.updates
+    after.experiment_name = before.experiment_name
+    assert after == before
 
 
 def test_pretraining_fork_changes_only_the_data_allocation() -> None:

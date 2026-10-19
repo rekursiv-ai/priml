@@ -1,0 +1,264 @@
+BudgetStudy.Config(
+        experiment_name='exp036',
+        seed=None,
+        data=ForecastData.Config(
+            seq_len=64,
+            pred_len=24,
+            cheap=Oscillator.Config(
+                step_size=0.1,
+                substeps=8,
+                stiffness=1.0,
+                damping=0.15,
+                cubic=0.0
+            ),
+            reference=Oscillator.Config(
+                step_size=0.1,
+                substeps=8,
+                stiffness=1.0,
+                damping=0.15,
+                cubic=0.4
+            ),
+            train=InitialStates.Config(
+                seed=101,
+                count=64,
+                amplitude=(0.2, 1.5),
+                velocity=0.5
+            ),
+            validation=InitialStates.Config(
+                seed=202,
+                count=32,
+                amplitude=(0.2, 1.5),
+                velocity=0.5
+            ),
+            synthetic=InitialStates.Config(
+                seed=303,
+                count=256,
+                amplitude=(0.2, 1.5),
+                velocity=0.5
+            ),
+            test=InitialStates.Config(
+                seed=404,
+                count=128,
+                amplitude=(0.2, 1.5),
+                velocity=0.5
+            ),
+            shifted=InitialStates.Config(
+                seed=505,
+                count=128,
+                amplitude=(1.5, 2.5),
+                velocity=0.5
+            )
+        ),
+        method=NeuralForecast.Config(
+        │   step=TrainStep.Config(
+        │   │   model=HistoryNetwork.Config(
+        │   │   │   seq_len=64,
+        │   │   │   pred_len=24,
+        │   │   │   block=PatchSequence.Config(
+        │   │   │   │   channels_in=128,
+        │   │   │   │   channels_out=48,
+        │   │   │   │   patch_size=4,
+        │   │   │   │   proj_in=Linear.Config(
+        │   │   │   │       channels_in=8,
+        │   │   │   │       channels_out=32,
+        │   │   │   │       bias=True,
+        │   │   │   │       depth_index=(),
+        │   │   │   │       device=None,
+        │   │   │   │       dtype=None,
+        │   │   │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │   │   │       init_bias=torch.nn.init.zeros_,
+        │   │   │   │       linear_fn=<built-in function linear>,
+        │   │   │   │       shard=None
+        │   │   │   │   ),
+        │   │   │   │   block=Sequential.Config(
+        │   │   │   │   │   channels_in=32,
+        │   │   │   │   │   channels_out=32,
+        │   │   │   │   │   elements=[
+        │   │   │   │   │   │   TransformerBlock.Config(
+        │   │   │   │   │   │       channels_in=32,
+        │   │   │   │   │   │       channels_out=32,
+        │   │   │   │   │   │       attn=Attention.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           num_heads=4,
+        │   │   │   │   │   │           channels_head=8,
+        │   │   │   │   │   │           num_heads_kv=4,
+        │   │   │   │   │   │           bias=False,
+        │   │   │   │   │   │           dropout=0.0,
+        │   │   │   │   │   │           causal=False,
+        │   │   │   │   │   │           rope=RoPE.Config(
+        │   │   │   │   │   │               channels_head=8,
+        │   │   │   │   │   │               reduction_mode='cat',
+        │   │   │   │   │   │               frequencies=HuggingFaceFrequencies.Config(
+        │   │   │   │   │   │                   base=10000.0
+        │   │   │   │   │   │               ),
+        │   │   │   │   │   │               dtype=torch.float32
+        │   │   │   │   │   │           ),
+        │   │   │   │   │   │           rotate=None,
+        │   │   │   │   │   │           norm_qk=None,
+        │   │   │   │   │   │           share_qk_norm=True,
+        │   │   │   │   │   │           norm_out=None,
+        │   │   │   │   │   │           split_qkv_projection=False,
+        │   │   │   │   │   │           proj_qkv=None,
+        │   │   │   │   │   │           proj_out=None,
+        │   │   │   │   │   │           init_weight=priml.model.init.kaiming_uniform,
+        │   │   │   │   │   │           depth_index=((0, 2),),
+        │   │   │   │   │   │           attn_kernel=SdpaFused.Config()
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       ffn=SwiGLU.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           channels_hidden=64,
+        │   │   │   │   │   │           expansion=2.6666666666666665,
+        │   │   │   │   │   │           round_to=256,
+        │   │   │   │   │   │           gate=True,
+        │   │   │   │   │   │           bias=True,
+        │   │   │   │   │   │           split_gate_projection=False,
+        │   │   │   │   │   │           norm=None,
+        │   │   │   │   │   │           act=priml.model.swiglu.silu,
+        │   │   │   │   │   │           depth_index=((0, 2),),
+        │   │   │   │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │   │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │   │   │   │           up_proj=None,
+        │   │   │   │   │   │           middle=None,
+        │   │   │   │   │   │           down_proj=None,
+        │   │   │   │   │   │           shard='colwise'
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       norm1=RMSNorm.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           eps=1e-06,
+        │   │   │   │   │   │           elementwise_affine=False,
+        │   │   │   │   │   │           device=None,
+        │   │   │   │   │   │           dtype=None
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       norm2=RMSNorm.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           eps=1e-06,
+        │   │   │   │   │   │           elementwise_affine=False,
+        │   │   │   │   │   │           device=None,
+        │   │   │   │   │   │           dtype=None
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       prenorm=True,
+        │   │   │   │   │   │       checkpoint=False,
+        │   │   │   │   │   │       depth_index=((0, 2),)
+        │   │   │   │   │   │   ),
+        │   │   │   │   │   │   TransformerBlock.Config(
+        │   │   │   │   │   │       channels_in=32,
+        │   │   │   │   │   │       channels_out=32,
+        │   │   │   │   │   │       attn=Attention.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           num_heads=4,
+        │   │   │   │   │   │           channels_head=8,
+        │   │   │   │   │   │           num_heads_kv=4,
+        │   │   │   │   │   │           bias=False,
+        │   │   │   │   │   │           dropout=0.0,
+        │   │   │   │   │   │           causal=False,
+        │   │   │   │   │   │           rope=RoPE.Config(
+        │   │   │   │   │   │               channels_head=8,
+        │   │   │   │   │   │               reduction_mode='cat',
+        │   │   │   │   │   │               frequencies=HuggingFaceFrequencies.Config(
+        │   │   │   │   │   │                   base=10000.0
+        │   │   │   │   │   │               ),
+        │   │   │   │   │   │               dtype=torch.float32
+        │   │   │   │   │   │           ),
+        │   │   │   │   │   │           rotate=None,
+        │   │   │   │   │   │           norm_qk=None,
+        │   │   │   │   │   │           share_qk_norm=True,
+        │   │   │   │   │   │           norm_out=None,
+        │   │   │   │   │   │           split_qkv_projection=False,
+        │   │   │   │   │   │           proj_qkv=None,
+        │   │   │   │   │   │           proj_out=None,
+        │   │   │   │   │   │           init_weight=priml.model.init.kaiming_uniform,
+        │   │   │   │   │   │           depth_index=((1, 2),),
+        │   │   │   │   │   │           attn_kernel=SdpaFused.Config()
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       ffn=SwiGLU.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           channels_hidden=64,
+        │   │   │   │   │   │           expansion=2.6666666666666665,
+        │   │   │   │   │   │           round_to=256,
+        │   │   │   │   │   │           gate=True,
+        │   │   │   │   │   │           bias=True,
+        │   │   │   │   │   │           split_gate_projection=False,
+        │   │   │   │   │   │           norm=None,
+        │   │   │   │   │   │           act=priml.model.swiglu.silu,
+        │   │   │   │   │   │           depth_index=((1, 2),),
+        │   │   │   │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │   │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │   │   │   │           up_proj=None,
+        │   │   │   │   │   │           middle=None,
+        │   │   │   │   │   │           down_proj=None,
+        │   │   │   │   │   │           shard='colwise'
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       norm1=RMSNorm.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           eps=1e-06,
+        │   │   │   │   │   │           elementwise_affine=False,
+        │   │   │   │   │   │           device=None,
+        │   │   │   │   │   │           dtype=None
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       norm2=RMSNorm.Config(
+        │   │   │   │   │   │           channels_in=32,
+        │   │   │   │   │   │           channels_out=32,
+        │   │   │   │   │   │           eps=1e-06,
+        │   │   │   │   │   │           elementwise_affine=False,
+        │   │   │   │   │   │           device=None,
+        │   │   │   │   │   │           dtype=None
+        │   │   │   │   │   │       ),
+        │   │   │   │   │   │       prenorm=True,
+        │   │   │   │   │   │       checkpoint=False,
+        │   │   │   │   │   │       depth_index=((1, 2),)
+        │   │   │   │   │   │   )
+        │   │   │   │   │   ],
+        │   │   │   │   │   repeat=1,
+        │   │   │   │   │   depth_index=()
+        │   │   │   │   ),
+        │   │   │   │   proj_out=Linear.Config(
+        │   │   │   │       channels_in=512,
+        │   │   │   │       channels_out=48,
+        │   │   │   │       bias=True,
+        │   │   │   │       depth_index=(),
+        │   │   │   │       device=None,
+        │   │   │   │       dtype=None,
+        │   │   │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │   │   │       init_bias=torch.nn.init.zeros_,
+        │   │   │   │       linear_fn=<built-in function linear>,
+        │   │   │   │       shard=None
+        │   │   │   │   )
+        │   │   │   )
+        │   │   ),
+        │   │   optimizer=PartialConfig(<class 'torch.optim.adam.Adam'>, lr=0.001),
+        │   │   loss=SimpleLoss.Config(
+        │   │       loss_fn=priml.loss.simple_loss.mse,
+        │   │       target_key='label',
+        │   │       kwargs={'reduction': 'none'},
+        │   │       channels_out=-1
+        │   │   ),
+        │   │   accumulate_grad_batches=1,
+        │   │   drop_partial_accumulation_on_epoch_end=True,
+        │   │   train_budget_steps=2_400,
+        │   │   train_budget_sec=inf,
+        │   │   train_budget_epochs=inf,
+        │   │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │   │   parallelism=NoParallel.Config(device=None),
+        │   │   model_quantization=NoModelQuantization.Config(),
+        │   │   activation_memoization=DefaultActivationStorage.Config(),
+        │   │   compile=None,
+        │   │   ema=NoEMA.Config(),
+        │   │   gradient_clip_norm=inf,
+        │   │   skip_step_on_nonfinite_grad=False,
+        │   │   device_init='eager',
+        │   │   dtype_autocast=None,
+        │   │   autocast_cache_enabled=False
+        │   ),
+        │   batch_size=8,
+        │   validation_every=25,
+        │   sample_seed=606
+        ),
+        scoring_trajectories=64
+    )
