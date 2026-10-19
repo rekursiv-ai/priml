@@ -1123,6 +1123,78 @@ def test_pipeline_without_shortcircuit_keeps_processors() -> None:
     assert isinstance(pipeline.processors[0], DummyProcessor)
 
 
+class PathSource(DummySource):
+    """Source that inherits its location from the owning pipeline."""
+
+    class Config(DummySource.Config):
+        base_dir: Path | str | None = None
+        working_dir: Path | str = "/source"
+
+
+def test_finalize_resolves_working_dir_and_fills_source_base_dir() -> None:
+    config = DataPipeline.Config(source=PathSource.Config())
+    config.base_dir = "/scratch"
+    config.working_dir = "/pipe"
+
+    finalized = config.finalize()
+
+    assert finalized.working_dir == Path("/scratch/pipe")
+    assert isinstance(finalized.source, PathSource.Config)
+    assert finalized.source.base_dir == Path("/scratch/pipe")
+
+
+def test_finalize_keeps_explicit_source_base_dir() -> None:
+    config = DataPipeline.Config(source=PathSource.Config(base_dir="/mine"))
+
+    finalized = config.finalize()
+
+    assert isinstance(finalized.source, PathSource.Config)
+    assert finalized.source.base_dir == "/mine"
+
+
+def test_assign_gpu_to_worker_reraises_unrelated_runtime_error() -> None:
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.distributed.is_available", return_value=False),
+        patch("torch.cuda.set_device", side_effect=RuntimeError("device busy")),
+        pytest.raises(RuntimeError, match=r"^device busy$"),
+    ):
+        _assign_gpu_to_worker(6)
+
+
+def test_multiworker_pins_gpu_for_cuda_pipeline() -> None:
+    class Stage:
+        class Config(Fig["Stage"]):
+            device: str = "cuda"
+
+    class Container(DummyProcessor):
+        class Config(DummyProcessor.Config):
+            stage: Stage.Config = field(default_factory=Stage.Config)
+
+    source = DummySource.Config(num_samples=2)
+    cpu = _MultipleWorkerDataset(
+        DataPipeline.Config(source=source, processors=[DummyProcessor.Config()]),
+    )
+    cuda = _MultipleWorkerDataset(
+        DataPipeline.Config(source=source, processors=[Container.Config()]),
+    )
+    with (
+        patch(
+            "torch.utils.data.get_worker_info",
+            return_value=Mock(id=0, num_workers=1),
+        ),
+        patch(
+            "priml.data.pipeline.dataset._assign_gpu_to_worker",
+            return_value=-1,
+        ) as assign,
+    ):
+        assert len(list(cpu)) == 2
+        assign.assert_not_called()
+        assert len(list(cuda)) == 2
+    assign.assert_called_once_with(0)
+
+
 def test_create_loader_defaults_to_single_process() -> None:
     pipeline = DataPipeline(DataPipeline.Config(source=DummySource.Config()))
 

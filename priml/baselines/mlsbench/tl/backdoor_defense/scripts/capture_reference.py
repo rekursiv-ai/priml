@@ -36,7 +36,7 @@ import argparse
 import tempfile
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -95,7 +95,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -153,7 +153,8 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         run=reference.lockstep_record,
     )
     report += check_sites(sites, port_sites)
-    return vision.Captured(
+    report += reference.poison_at_tied_cut(record | inputs)
+    return vision_reference.Captured(
         record=record | inputs,
         sites={"reference": sites, "port": port_sites},
         report=report,
@@ -173,8 +174,8 @@ def compare_network(model: nn.Module, draws: Tensor, setting: str) -> list[str]:
         one if the generator stands elsewhere after the build.
 
     """
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = vision.full_step(reference.SETTINGS[setting].factory).model
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        ours = vision_reference.full_step(reference.SETTINGS[setting].factory).model
         ours_draws = rng_fingerprint()
     return [
         f"settings/{setting}/state: {line}"
@@ -213,7 +214,7 @@ def check_sites(
     ]
 
 
-def write_goldens(out: Path, captured: vision.Captured) -> None:
+def write_goldens(out: Path, captured: vision_reference.Captured) -> None:
     """Write the driver's values under ``out``, within the size ceiling.
 
     The networks' records, whose features fill most of a file, are stored
@@ -237,12 +238,7 @@ def write_goldens(out: Path, captured: vision.Captured) -> None:
             },
         },
     )
-    lines = [
-        f"{side} {key} {count}"
-        for side, counts in captured.sites.items()
-        for key, count in sorted(counts.items())
-    ]
-    (out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
+    capture_reference.write_sites(out, captured.sites)
 
 
 class _Flags(Protocol):

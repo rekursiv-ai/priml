@@ -132,6 +132,15 @@ def test_bad_initial_conditions_and_empty_history_fail() -> None:
         simulator.forecast(torch.zeros(4, 2, dtype=torch.int64), steps=3)
 
 
+def test_history_forecast_continues_from_the_last_observed_state() -> None:
+    simulator = Oscillator.Config().make()
+    history = InitialStates.Config(count=3).make().sample()[:, None, :].repeat(1, 4, 1)
+    history[:, :-1] += 1.0
+    forecast = simulator.forecast_history(history, steps=2)
+    assert forecast.shape == (3, 2, 2)
+    assert torch.equal(forecast, simulator.forecast(history[:, -1], steps=2))
+
+
 def test_divergence_propagates_as_nonfinite_values() -> None:
     values = Oscillator.Config().make().forecast(torch.full((4, 2), 1e38), steps=3)
     assert values.shape == (4, 3, 2)

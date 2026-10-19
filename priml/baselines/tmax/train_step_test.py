@@ -17,6 +17,7 @@ import torch
 
 from priml import hub, runtime
 from priml.baselines.tmax import train_step
+from priml.baselines.tmax.scoring import ScoringLinear, ScoringTiedLinear
 from priml.baselines.tmax.train_step import (
     TMaxDPPOTrainStep,
     _cluster_attention,
@@ -29,6 +30,7 @@ from priml.baselines.tmax.train_step import (
     _rows,
     _scoring_head,
     _update_token_count,
+    qwen35_4b_config,
     tiny_qwen35_config,
 )
 from priml.model.attention.gated_attention import GatedAttention
@@ -292,6 +294,32 @@ def test_the_cluster_recipe_fuses_full_attention() -> None:
     ]
     assert kernels, "the fixture must carry a full-attention block"
     assert all(isinstance(kernel, SdpaFused.Config) for kernel in kernels)
+
+
+def test_a_tied_embedding_scores_through_the_tied_head() -> None:
+    tied = tiny_qwen35_config(tie_word_embeddings=True)
+    untied = tiny_qwen35_config()
+    assert isinstance(tied.proj_out, ScoringTiedLinear.Config)
+    assert isinstance(untied.proj_out, ScoringLinear.Config)
+
+
+def test_the_released_4b_recipe_is_tied_scored_and_fused() -> None:
+    config = qwen35_4b_config()
+    assert isinstance(config.proj_out, ScoringTiedLinear.Config)
+    assert isinstance(config.block, list)
+    assert len(config.block) == 32
+    kernels = [
+        block.attn.attn_kernel
+        for block in config.block
+        if isinstance(block, TransformerBlock.Config)
+        and isinstance(block.attn, GatedAttention.Config)
+    ]
+    assert len(kernels) == 8
+    assert all(isinstance(kernel, SdpaFused.Config) for kernel in kernels)
+    for block in config.block:
+        assert isinstance(block, TransformerBlock.Config)
+        assert isinstance(block.ffn, SwiGLU.Config)
+        assert block.ffn.split_gate_projection
 
 
 def test_the_eager_parity_paths_keep_the_naive_kernel() -> None:

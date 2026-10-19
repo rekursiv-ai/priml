@@ -1,10 +1,11 @@
 """Check the fidelity suite: fixed spans, rule counts, HUD dynamics, and the report."""
 
-from collections.abc import Sequence
+from __future__ import annotations
+
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import dataclasses
 import functools
@@ -31,12 +32,7 @@ from priml.baselines.craftax.world_model.batch import (
     pack_windows,
 )
 from priml.baselines.craftax.world_model.dream import Rollout
-from priml.baselines.craftax.world_model.engine import (
-    Engine,
-    Prefix,
-)
 from priml.baselines.craftax.world_model.metric import MODALITIES
-from priml.baselines.craftax.world_model.model import WorldModel, WorldModelLogits
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import fidelity
 from priml.baselines.craftax.world_model.scripts.dream_eval import (
@@ -59,6 +55,19 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from priml.baselines.craftax.world_model.engine import (
+        Engine,
+        Prefix,
+    )
+    from priml.baselines.craftax.world_model.model import (
+        WorldModel,
+        WorldModelLogits,
+    )
 
 
 FIELDS = craftax_schema().scalar_names
@@ -808,6 +817,71 @@ def test_measure_reports_every_part_on_a_tiny_model(
     json.dumps(report)
 
 
+class _CudaModel:
+    """Stand in for a CUDA model: its device, and every cast asked of it."""
+
+    def __init__(self) -> None:
+        self.start = SimpleNamespace(device=torch.device("cuda"))
+        self.casts: list[torch.dtype] = []
+
+    def to(self, dtype: torch.dtype) -> _CudaModel:
+        self.casts.append(dtype)
+        return self
+
+
+def test_measure_dreams_a_cuda_model_in_bfloat16_after_scoring_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    without_decoding(monkeypatch, fidelity)
+    cuda = _CudaModel()
+    real = tiny_model(craftax_schema())
+    scored = fidelity.teacher_forced
+    casts_when_scored: list[list[torch.dtype]] = []
+
+    def teacher_forced(
+        model: WorldModel,
+        spans: Sequence[fidelity.Span],
+        *,
+        t_g: int,
+        s_max: int,
+        resamples: int,
+        generator: torch.Generator,
+    ) -> dict[str, PlainTree]:
+        assert model is cast("WorldModel", cuda)
+        casts_when_scored.append(list(cuda.casts))
+        return scored(
+            real,
+            spans,
+            t_g=t_g,
+            s_max=s_max,
+            resamples=resamples,
+            generator=generator,
+        )
+
+    monkeypatch.setattr(fidelity, "teacher_forced", teacher_forced)
+    corpus = validation_corpus(tmp_path, lengths=(9, 12, 10, 14), still=True)
+    fidelity.measure(
+        cast("WorldModel", cuda),
+        sources=fidelity.validation_sources(corpus),
+        t_g=16,
+        s_max=4,
+        settings=fidelity.Settings(
+            spans=2,
+            targets=2,
+            rows=2,
+            decisions=4,
+            real_episodes=2,
+            prefix=2,
+            continuation=3,
+            resamples=4,
+        ),
+        precision=nullcontext(),
+    )
+    assert casts_when_scored == [[]]
+    assert cuda.casts == [torch.bfloat16]
+
+
 def test_measure_refuses_episodes_too_short_to_continue(tmp_path: Path) -> None:
     corpus = validation_corpus(tmp_path, lengths=(9, 12))
     with pytest.raises(ValueError, match="long enough to continue"):
@@ -913,6 +987,100 @@ def test_main_writes_the_report_of_the_runs_measurement(
     assert from_plain(provenance["overrides"], list[str]) == ["base_dir=/b"]
     assert provenance["checkpoint_sha256"] == hashlib.sha256(b"checkpoint").hexdigest()
     assert (provenance["corpus"], provenance["validation_episodes"]) == (str(corpus), 3)
+
+
+class _Tracker:
+    """Stand in for ``WandbTracker``: records its config, metrics, and close."""
+
+    made: list[_Tracker] = []  # noqa: RUF012 -- The test reads the trackers main made.
+
+    @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
+    class Config:
+        project: str
+        name: str
+        group: str
+        mode: str
+        working_dir: str
+        capture_console: bool
+        run_config: dict[str, object]
+
+        def make(self) -> _Tracker:
+            tracker = _Tracker(self)
+            _Tracker.made.append(tracker)
+            return tracker
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.logged: list[tuple[dict[str, float], int]] = []
+        self.closed = False
+
+    def log_metrics(self, metrics: dict[str, float], step: int) -> None:
+        self.logged.append((metrics, step))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_main_logs_every_number_to_wandb_when_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus = validation_corpus(tmp_path, lengths=(12,))
+    config = SimpleNamespace(
+        dataset=SimpleNamespace(corpus=str(corpus), t_g=16, s_max=4),
+        step=SimpleNamespace(dtype_autocast=None),
+    )
+
+    def load_trained(
+        experiment: str,
+        checkpoint: Path,
+        *,
+        overrides: Sequence[str],
+        device: torch.device,
+    ) -> tuple[WorldModel, object]:
+        del experiment, checkpoint, overrides, device
+        return tiny_model(small_schema()), config
+
+    def measure(model: WorldModel, **kwargs: object) -> dict[str, PlainTree]:
+        del model, kwargs
+        return {"summary": {"dream/x": 2.0, "label": "y"}, "flag": True}
+
+    _Tracker.made.clear()
+    monkeypatch.setattr(fidelity, "load_trained", load_trained)
+    monkeypatch.setattr(fidelity, "measure", measure)
+    monkeypatch.setattr(fidelity, "WandbTracker", _Tracker)
+    path = tmp_path / "runs" / "r" / "checkpoints" / "step_9.pt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"c")
+    output = tmp_path / "out" / "f.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fidelity.py",
+            str(path),
+            "--device",
+            "cpu",
+            "--output",
+            str(output),
+            "--wandb",
+            "offline",
+            "--tag",
+            "t1",
+        ],
+    )
+    assert fidelity.main() == 0
+    (tracker,) = _Tracker.made
+    assert (tracker.config.name, tracker.config.group) == ("fidelity-t1", "fidelity")
+    assert tracker.config.mode == "offline"
+    assert tracker.config.working_dir == str(output.parent / "wandb")
+    assert tracker.config.run_config["tag"] == "t1"
+    ((metrics, step),) = tracker.logged
+    assert step == 0
+    assert metrics["summary/dream/x"] == 2.0
+    assert "flag" not in metrics
+    assert "summary/label" not in metrics
+    assert tracker.closed
 
 
 def test_main_rejects_an_existing_output(

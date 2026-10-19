@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 from PIL import Image
@@ -85,6 +85,7 @@ SIGNED: Final = (
 """The operations whose magnitude a coin negates."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``cv-data-augmentation`` script the lockstep uses."""
 
@@ -253,7 +254,7 @@ def upstream_lockstep(
         upstream_pipeline(train, source, seed=reference.SEED + i)
         for i in range(reference.STEPS)
     ]
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
@@ -294,7 +295,26 @@ def upstream_lockstep(
     return record, states
 
 
+def census_gaps(counts: dict[str, int]) -> list[str]:
+    """Return every operation, and negated signed one, a census never saw.
+
+    Args:
+      counts: A census, keyed ``"<op><sign>"`` with the port's names.
+
+    Returns:
+      gaps: One key per operation and sign never reached.
+
+    """
+    wanted = [f"{op}+" for op in OPS.values()] + [f"{op}-" for op in SIGNED]
+    return [key for key in wanted if key not in counts]
+
+
 type _Pipeline = Callable[[Image.Image], Tensor]
+
+
+def _pil(image: Tensor) -> Image.Image:
+    """Return a ``(C, H, W)`` uint8 tensor as a dataset yields it: RGB, or ``L``."""
+    return Image.fromarray(image.permute(1, 2, 0).squeeze(-1).contiguous().numpy())
 
 
 class _ApplyOp(Protocol):
@@ -310,25 +330,6 @@ class _ApplyOp(Protocol):
     ) -> Image.Image:
         """Return the image with the named operation applied."""
         raise NotImplementedError
-
-
-def census_gaps(counts: dict[str, int]) -> list[str]:
-    """Return every operation, and negated signed one, a census never saw.
-
-    Args:
-      counts: A census, keyed ``"<op><sign>"`` with the port's names.
-
-    Returns:
-      gaps: One key per operation and sign never reached.
-
-    """
-    wanted = [f"{op}+" for op in OPS.values()] + [f"{op}-" for op in SIGNED]
-    return [key for key in wanted if key not in counts]
-
-
-def _pil(image: Tensor) -> Image.Image:
-    """Return a ``(C, H, W)`` uint8 tensor as a dataset yields it: RGB, or ``L``."""
-    return Image.fromarray(image.permute(1, 2, 0).squeeze(-1).contiguous().numpy())
 
 
 class _OpSpy:

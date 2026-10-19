@@ -285,6 +285,22 @@ def test_cleanup_stale_temp_files_removes_only_dead_writers_temps(
     }
 
 
+def test_cleanup_keeps_temps_of_another_users_live_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def kill_denied(pid: int, signal: int) -> None:
+        raise PermissionError(pid, signal)
+
+    host = socket.gethostname().replace(".", "-")
+    other_user = tmp_path / f".0.parquet.{host}.{_dead_pid()}.abcd.tmp"
+    other_user.write_bytes(b"partial")
+    monkeypatch.setattr(os, "kill", kill_denied)
+
+    assert ParquetMergeWriter.cleanup_stale_temp_files(tmp_path) == 0
+    assert other_user.exists()
+
+
 def test_write_cleans_a_dead_writers_orphan_before_writing(tmp_path: Path):
     parquet_path = tmp_path / "test.parquet"
     pq.write_table(pa.table({"key": ["a"], "value": [1]}), parquet_path)

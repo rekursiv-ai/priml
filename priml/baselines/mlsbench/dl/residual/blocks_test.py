@@ -68,6 +68,12 @@ def test_pre_activation_infers_a_missing_width() -> None:
     assert block.conv1.in_channels == 4
 
 
+def test_pre_activation_infers_a_missing_input_width() -> None:
+    config = PreActivationBlock.Config(channels_in=4).copy_tree().finalize()
+    assert config.channels_out == 4
+    assert config.channels_in == 4
+
+
 def test_gated_block_starts_as_the_basic_block() -> None:
     config = GatedResidualBlock.Config(channels_in=3, channels_out=4)
     torch.manual_seed(0)

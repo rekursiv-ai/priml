@@ -187,6 +187,17 @@ def test_an_evaluation_needs_every_part_set(policy: MinGRUPolicy) -> None:
         Evaluation(Evaluation.Config(), policy=policy, device=torch.device("cpu"))
 
 
+@pytest.mark.parametrize("num_episodes", [0, -3])
+def test_an_evaluation_refuses_a_nonpositive_episode_count(num_episodes: int) -> None:
+    config = _config()
+    config.num_episodes = num_episodes
+    with pytest.raises(
+        ValueError,
+        match=f"num_episodes must be positive, not {num_episodes}",
+    ):
+        Evaluation.check(config)
+
+
 @pytest.mark.parametrize("option", ["stall_cap", "practice", "boss_fight_reward"])
 def test_an_evaluation_refuses_a_training_only_option(option: str) -> None:
     """Scored episodes are natural and uncapped, as the recipe's evaluator plays them."""

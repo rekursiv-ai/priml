@@ -12,8 +12,11 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision.model import (
+    Activation,
     BasicBlock,
     ResNet,
+    activation_layer,
+    init_layers,
     kaiming_normal_fan_in,
     kaiming_normal_fan_out,
     sized_blocks,
@@ -152,6 +155,36 @@ def test_initializer_slots_reach_the_layers_they_name() -> None:
     )
     assert torch.eq(model.head.weight, 0).all()
     assert torch.eq(cast(Tensor, model.head.bias), 1).all()
+
+
+def test_a_function_activation_is_wrapped_as_a_layer() -> None:
+    layer = activation_layer(torch.sigmoid)
+    assert isinstance(layer, Activation)
+    x = torch.tensor([-1.0, 0.0, 2.0])
+    assert torch.equal(layer(x), torch.sigmoid(x))
+
+
+def test_a_module_activation_is_its_own_layer() -> None:
+    layer = activation_layer(InlineConfig(nn.PReLU))
+    assert isinstance(layer, nn.PReLU)
+    assert activation_layer(InlineConfig(nn.PReLU)) is not layer
+
+
+def test_init_layers_gives_each_layer_kind_its_own_initializer() -> None:
+    conv, head, bare = nn.Conv2d(2, 3, 1), nn.Linear(3, 2), nn.Linear(2, 2, bias=False)
+    conv_bias = cast(Tensor, conv.bias).clone()
+    init_layers(
+        nn.Sequential(conv, head, bare),
+        init_conv=nn.init.ones_,
+        init_head=nn.init.zeros_,
+        init_bias=nn.init.ones_,
+    )
+    assert torch.eq(conv.weight, 1).all()
+    assert torch.equal(cast(Tensor, conv.bias), conv_bias)
+    assert torch.eq(head.weight, 0).all()
+    assert torch.eq(cast(Tensor, head.bias), 1).all()
+    assert torch.eq(bare.weight, 0).all()
+    assert bare.bias is None
 
 
 def test_fan_out_and_fan_in_scale_a_convolution_differently() -> None:

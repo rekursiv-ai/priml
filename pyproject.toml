@@ -170,6 +170,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["priml"]
+# Test support no shipped module imports. Kept: priml/testing/{bfb,golden,
+# regenerate,cost}.py (the mlsbench references import the first three; cost is
+# documented API), etth1/testing.py (scripts/reference.py imports it), and
+# craftax/world_model/testing.py (scripts/feature_gates.py imports it).
+# kernel_cache.py warms only the test environments, so it goes with them.
 exclude = ["**/*_test.py", "**/conftest.py", "priml/lib/testing/**", "priml/testing/experiments.py", "priml/testing/fixtures.py", "priml/testing/policy_gradient.py", "priml/testing/qwen3_5.py", "priml/distributed/testing.py", "priml/baselines/convextok/testing.py", "priml/baselines/craftax/testing.py", "priml/baselines/craftax/kernel_cache.py", "priml/baselines/craftax/game/testing.py", "priml/baselines/craftax/ghosts/testing.py", "priml/baselines/craftax/world_model/scripts/testing.py", "priml/baselines/craftax/world_model/viewer/testing.py", "priml/baselines/sudoku/testing.py", "priml/baselines/tmax/scripts/testing.py"]
 artifacts = ["priml/py.typed"]
 
@@ -327,7 +332,7 @@ exclude_lines = [
 ]
 show_missing = true
 skip_covered = true
-fail_under = 98
+fail_under = 100
 
 [tool.ruff]
 show-fixes = true
@@ -454,7 +459,6 @@ extend-safe-fixes = [
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
-
 "*.ipynb" = [
     "ARG001",  # Unused function argument (callbacks).
     "BLE001",  # Blind exception (sandboxed exec).
@@ -531,7 +535,6 @@ extend-safe-fixes = [
     "T201",    # Print found. (Eval scripts use print for output.)
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
-
 
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
@@ -674,7 +677,6 @@ reportInvalidCast = false                  # All cast() calls are intentional.
 reportMissingModuleSource = false
 reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
-
 
 [tool.ty.environment]
 python-version = "3.12"  # Intentional; test at 3.12 for exports.

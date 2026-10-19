@@ -10,7 +10,7 @@ initialization and epoch loop on the shallowest network. Nothing runs on a GPU.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import torch
 
@@ -46,6 +46,7 @@ ARCH: Final = "resnet56"
 """What ``main`` tells ``initialize_weights`` the architecture is."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``dl-weight-initialization`` script the capture uses."""
 
@@ -104,7 +105,7 @@ def initialized(script: Upstream, arch: str = ARCH) -> nn.Module:
       model: The network, with ``main``'s configuration given to the initializer.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     model = upstream.tiny_model(script, arch, reference.CLASSES)
     depth = sum(
         1 for m in model.modules() if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear))
@@ -173,7 +174,7 @@ def upstream_lockstep(
         afterwards; and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []

@@ -10,6 +10,7 @@ chain stays checkable on any machine.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -306,6 +307,20 @@ def test_exp008_full_evaluation_locks_with_its_own_committee() -> None:
         f"/runs/exp008_verifier_s{seed}/checkpoints/step_00004000.pt"
         for seed in range(3)
     )
+
+
+def _returning[T](value: T) -> T:
+    return value
+
+
+def test_exp009_refuses_a_parent_without_a_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp006()
+    parent.seed = None
+    monkeypatch.setattr(experiments, "exp006", partial(_returning, parent))
+    with pytest.raises(ValueError, match=r"Expected cfg\.seed is not None"):
+        experiments.exp009()
 
 
 def test_exp009_trains_two_hypotheses_winner_take_all() -> None:

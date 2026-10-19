@@ -234,6 +234,26 @@ def test_main_freezes_the_corpus_once(
         freeze_corpus.main()
 
 
+def test_main_parses_comma_separated_shares(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mixture(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    argv = ["freeze_corpus.py", "a", "b", "--corpus=arm0", "--decisions=100"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--shares=1,0,0,0", "--seed=7"])
+    assert freeze_corpus.main() == 0
+    entries = read_corpus(tmp_path / "a" / "corpora" / "arm0.json")
+    selection = freeze_corpus.select_shards(
+        [tmp_path / "a", tmp_path / "b"],
+        decisions=100,
+        shares=(1, 0, 0, 0),
+        seed=7,
+    )
+    assert entries == [entry for group in selection.values() for entry in group]
+    assert {directory.parent.name for directory, _ in entries} == {"arm0"}
+
+
 def test_main_freezes_every_published_shard_with_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

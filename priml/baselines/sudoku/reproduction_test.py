@@ -4,14 +4,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from urllib.parse import quote, unquote
 
-import fcntl
 import functools
 import json
 import logging
 import random
 import re
 import sys
-import tempfile
 
 from configgle import Fig
 from torch import Tensor
@@ -54,6 +52,7 @@ from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.testing import regenerate
 from priml.testing.golden import (
     assert_tensor_golden_part,
+    locked_directory,
     mismatches,
     read_tensors,
     write_tensors,
@@ -990,16 +989,47 @@ def test_a_pipeline_stage_replays_bit_for_bit(
     stage: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    pipeline_goldens: dict[str, dict[str, Tensor]],
 ) -> None:
     """Each stage reproduces its part of the frozen pipeline with zero mismatches."""
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
-    golden_path = _CWD / "testdata" / f"{case}.pt"
-    if regenerate.b4b():
-        _regenerate_pipeline(tmp_path / "regenerate", monkeypatch)
-    golden = read_tensors(golden_path)
+    golden = pipeline_goldens[case]
     record = _replay_stage(case, stage, golden, tmp_path / "replay", monkeypatch)
-    assert_tensor_golden_part(golden_path, f"{stage}/", record)
+    assert_tensor_golden_part(_CWD / "testdata" / f"{case}.pt", f"{stage}/", record)
+
+
+@pytest.mark.parametrize("b4b", [False, True])
+def test_the_pipeline_goldens_regenerate_only_under_the_flag(
+    b4b: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    regenerated: list[Path] = []
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_regenerate_pipeline",
+        regenerated.append,
+    )
+    regenerate.override(monkeypatch, b4b=b4b)
+    goldens = _pipeline_goldens(tmp_path)
+    assert regenerated == ([tmp_path] if b4b else [])
+    assert set(goldens) == set(_STAGES)
+
+
+@pytest.fixture(scope="module")
+def pipeline_goldens(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[str, dict[str, Tensor]]:
+    """Return each pipeline's golden, regenerated once per module under the flag."""
+    return _pipeline_goldens(tmp_path_factory.mktemp("regenerate"))
+
+
+def _pipeline_goldens(scratch: Path) -> dict[str, dict[str, Tensor]]:
+    """Regenerate both pipelines under ``--regenerate-b4b``, then read each golden."""
+    if regenerate.b4b():
+        _regenerate_pipeline(scratch)
+    return {case: read_tensors(_CWD / "testdata" / f"{case}.pt") for case in _STAGES}
 
 
 @pytest.mark.parametrize("case", list(_STAGES))
@@ -1028,12 +1058,14 @@ def _replay_stage(
 # read exp012's trained boundaries, so a regeneration re-mints both pipelines
 # whole and in order, then rewrites each file: no stage is minted from a stale
 # input, and a stage no longer in ``_STAGES`` is dropped. The lock serializes
-# xdist workers; each re-mints the same bits.
-def _regenerate_pipeline(scratch: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# xdist workers, and every part writer of these goldens; each re-mints the same bits.
+def _regenerate_pipeline(scratch: Path) -> None:
     """Re-mint every stage of both pipelines in order and rewrite their goldens."""
-    lock_path = Path(tempfile.gettempdir()) / f"{__name__}.lock"
-    with lock_path.open("a") as lock, regenerate.suppressed():
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with (
+        locked_directory(_CWD / "testdata"),
+        regenerate.suppressed(),
+        pytest.MonkeyPatch.context() as monkeypatch,
+    ):
         for case in ("exp012", "exp008"):
             golden: dict[str, Tensor] = {}
             for stage in _STAGES[case]:

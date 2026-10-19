@@ -1,11 +1,14 @@
 """Check dream evaluation: graphed-order rollouts, features, comparisons, and outputs."""
 
-from collections.abc import Sequence
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from types import ModuleType
-from typing import cast
+from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import dataclasses
+import hashlib
 import sys
 
 from treekle import PlainTree, from_plain, json_loads
@@ -32,7 +35,6 @@ from priml.baselines.craftax.world_model.experiments import (
     WorldModelLoop,
     exp_smoke,
 )
-from priml.baselines.craftax.world_model.model import WorldModel
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import dream_eval
 from priml.baselines.craftax.world_model.scripts.engine_checks import (
@@ -43,6 +45,10 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.world_model.model import WorldModel
 
 
 HORIZONS = (2, 4)
@@ -415,6 +421,52 @@ def test_sampling_engine_steps_eagerly_on_the_cpu() -> None:
     assert step == engine.step
 
 
+@dataclasses.dataclass(slots=True, kw_only=True)
+class _Seeded:
+    """Stand in for a CUDA device's default generator: records its seed."""
+
+    seed: int = -1
+
+    def manual_seed(self, seed: int) -> _Seeded:
+        self.seed = seed
+        return self
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Built:
+    """Stand in for ``Engine`` and ``GraphedStep``: what each was built from."""
+
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+
+
+def _built(*args: object, **kwargs: object) -> _Built:
+    return _Built(args=args, kwargs=kwargs)
+
+
+def test_sampling_engine_graphs_a_cuda_model_on_its_devices_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generators = [_Seeded(), _Seeded()]
+    monkeypatch.setattr(torch.cuda, "default_generators", generators)
+    monkeypatch.setattr(dream_eval, "Engine", _built)
+    monkeypatch.setattr(dream_eval, "GraphedStep", _built)
+    model = SimpleNamespace(start=SimpleNamespace(device=torch.device("cuda", 1)))
+    engine, step = dream_eval.sampling_engine(
+        cast("WorldModel", model),
+        rows=2,
+        t_max=16,
+        seed=3,
+    )
+    assert generators[1].seed == 3
+    assert generators[0].seed == -1
+    assert engine == _Built(
+        args=(model,),
+        kwargs={"rows": 2, "t_max": 16, "generator": generators[1]},
+    )
+    assert step == _Built(args=(engine,), kwargs={})
+
+
 @pytest.mark.gpu_torch_cuda
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two CUDA devices")
 def test_sampling_engine_seeds_its_models_device_not_the_current_one() -> None:
@@ -564,6 +616,94 @@ def test_main_samples_in_float32_off_cuda(
     )
     assert dream_eval.main() == 0
     assert dtypes == [torch.float32]
+
+
+def test_main_records_the_checkpoints_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "ckpt.pt"
+    checkpoint.write_bytes(b"weights" * 3)
+    seen: list[Mapping[str, PlainTree]] = []
+
+    def evaluate(model: WorldModel, **kwargs: object) -> dict[str, PlainTree]:
+        del model
+        provenance = kwargs["provenance"]
+        assert isinstance(provenance, Mapping)
+        seen.append(cast("Mapping[str, PlainTree]", provenance))
+        return {"comparison": {"distinguishable": []}}
+
+    monkeypatch.setattr(dream_eval, "load_world_model", _tiny_trained)
+    monkeypatch.setattr(dream_eval, "evaluate", evaluate)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            *("dream_eval.py", str(checkpoint), "--archive", str(tmp_path)),
+            *("--output", str(tmp_path / "out"), "--device", "cpu"),
+        ],
+    )
+    assert dream_eval.main() == 0
+    (provenance,) = seen
+    digest = hashlib.sha256(b"weights" * 3).hexdigest()
+    assert provenance["checkpoint_sha256"] == digest
+
+
+@pytest.mark.parametrize(
+    ("decisions", "prefixes", "match"),
+    [(0, 0, "decisions=0 must be positive"), (2, 1, "Got 1 prefixes for 2 rows")],
+)
+def test_rollout_refuses_no_decisions_and_a_prefix_per_row_short(
+    decisions: int,
+    prefixes: int,
+    match: str,
+) -> None:
+    schema = small_schema()
+    engine = Engine(
+        tiny_model(schema),
+        rows=2,
+        t_max=8,
+        generator=torch.Generator().manual_seed(0),
+    )
+    with pytest.raises(ValueError, match=match):
+        dream_eval.rollout(
+            engine,
+            engine.step,
+            decisions=decisions,
+            prefixes=[prefix_of(random_segment(schema, 2, seed=0))] * prefixes,
+        )
+
+
+def test_evaluate_bundles_a_pre_death_continuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    without_decoding(monkeypatch, dream_eval)
+    archive = tmp_path / "archive"
+    _write_val_archive(archive)
+    stats = dream_eval.evaluate(
+        tiny_model(craftax_schema()),
+        archive=archive,
+        output=tmp_path / "dreams",
+        rows=8,
+        t_max=16,
+        decisions=4,
+        prefix=2,
+        continuation=3,
+        horizons=HORIZONS,
+        seed=0,
+        resamples=4,
+        permutations=4,
+    )
+    bundles = from_plain(stats["bundles"], list[dict[str, object]])
+    (death,) = [b for b in bundles if b["name"] == "continuation-recorded_pre_death"]
+    continuation = from_plain(stats["continuation"], dict[str, object])
+    windows = from_plain(continuation["windows"], list[dict[str, object]])
+    assert next(w["kind"] for w in windows) == "pre_death"
+    assert death["window"] == windows[0]["name"]
+    assert death["row"] == len(windows)
+    path = from_plain(death["path"], str)
+    assert (Path(path) / "manifest.json").is_file()
 
 
 def test_divergence_finds_the_first_differing_frame() -> None:

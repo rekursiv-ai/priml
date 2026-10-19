@@ -37,7 +37,7 @@ import torch
 from priml.baselines.mlsbench.dl.multitask import reference
 from priml.baselines.mlsbench.dl.multitask.losses import graph_leaves
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream,
 )
 from priml.testing.bfb import host_agnostic_numerics
@@ -72,6 +72,7 @@ class _Torchvision(Protocol):
     datasets: ModuleType
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``cv-multitask-loss`` script the capture uses."""
 
@@ -167,7 +168,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
         )
         for name in EDITED
     }
-    return {name: cast(Script, cast(object, s)) for name, s in scripts.items()}
+    return {name: upstream.narrowed(s, Script) for name, s in scripts.items()}
 
 
 def trace_main(script: Script, *, arch: str = "resnet56") -> Trace:
@@ -184,7 +185,7 @@ def trace_main(script: Script, *, arch: str = "resnet56") -> Trace:
     trace = Trace()
     spy = _MainSpy(trace)
     argv = ["script.py", "--arch", arch, "--epochs", "200"]
-    argv += ["--seed", str(vision.SEED)]
+    argv += ["--seed", str(vision_reference.SEED)]
     printed = io.StringIO()
     with (
         mock.patch.object(sys, "argv", argv),
@@ -285,7 +286,7 @@ def tiny_model(script: Script, arch: str) -> nn.Module:
         with upstream.narrowed_widths(script):
             return script.ResNet(script.BasicBlock, [1, 1, 1])
     with (
-        mock.patch.object(script.VGG, "VGG16_CFG", vision.TINY_ARCHS[arch]),
+        mock.patch.object(script.VGG, "VGG16_CFG", vision_reference.TINY_ARCHS[arch]),
         upstream.narrowed_widths(script),
     ):
         return script.build_model(arch)
@@ -316,7 +317,7 @@ def upstream_lockstep(
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     report: list[str] = []
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = tiny_model(script, arch)
         script.initialize_weights(model)
         inner = script.MultiTaskLoss(2)
@@ -332,13 +333,13 @@ def upstream_lockstep(
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=vision.EPOCHS,
+            T_max=vision_reference.EPOCHS,
         )
-        for index in range(vision.STEPS):
+        for index in range(vision_reference.STEPS):
             batch = [
                 (
-                    vision.fixed_media(index),
-                    vision.fixed_label(index),
+                    vision_reference.fixed_media(index),
+                    vision_reference.fixed_label(index),
                     reference.coarse_label(index),
                 ),
             ]
@@ -349,13 +350,13 @@ def upstream_lockstep(
                 optimizer,
                 torch.device("cpu"),
                 index,
-                vision.EPOCHS,
+                vision_reference.EPOCHS,
             )
             model.eval()
             with torch.no_grad():
                 fine, coarse = cast(
                     tuple[Tensor, Tensor],
-                    model(vision.fixed_media(vision.STEPS)),
+                    model(vision_reference.fixed_media(vision_reference.STEPS)),
                 )
             probes.append(torch.cat([fine, coarse], dim=-1))
             states.append({k: v.clone() for k, v in model.state_dict().items()})
@@ -386,7 +387,7 @@ def upstream_record(
     record["data/coarse_of_fine"] = torch.tensor(scripts["sum"].CIFAR100_COARSE_MAP)
     record["schedule/lr"] = torch.tensor(pristine.rates, dtype=torch.float64)
     record["optimizer/settings"] = torch.tensor(
-        [pristine.settings[name] for name in vision.HYPERPARAMETERS],
+        [pristine.settings[name] for name in vision_reference.HYPERPARAMETERS],
         dtype=torch.float64,
     )
     record["best/accuracy"] = torch.tensor(pristine.best, dtype=torch.float64)
@@ -423,14 +424,14 @@ def upstream_setting(
     record = {
         f"{prefix}schedule/lr": torch.tensor(pristine.rates, dtype=torch.float64),
         f"{prefix}optimizer/settings": torch.tensor(
-            [pristine.settings[name] for name in vision.HYPERPARAMETERS],
+            [pristine.settings[name] for name in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
     }
     for name, trace in traces.items():
         record[f"{prefix}draws/{name}"] = trace.draws
         record[f"{prefix}optimizer/{name}/numels"] = torch.tensor(trace.numels)
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = tiny_model(scripts["sum"], arch)
         scripts["sum"].initialize_weights(model)
     record |= reference.network_forward(model, f"{prefix}forward")
@@ -470,17 +471,17 @@ def upstream_batches(
     # forkserver worker cannot import by name; a forked worker inherits it. The
     # start method changes no draw: each worker's seed comes from the parent.
     with (
-        vision.seeded(vision.SEED),
-        vision.script_workers(),
+        vision_reference.seeded(vision_reference.SEED),
+        vision_reference.script_workers(),
         mock.patch.object(script.torchvision.datasets, "CIFAR100", _FakeCifar100),
         mock.patch.object(data, "DataLoader", upstream.ForkedLoader(data.DataLoader)),
     ):
         train_loader, test_loader = script.get_dataloaders(
             "unused",
-            batch_size=vision.LOADER_BATCH,
+            batch_size=vision_reference.LOADER_BATCH,
             num_workers=num_workers,
         )
-        for _ in range(vision.LOADER_PASSES):
+        for _ in range(vision_reference.LOADER_PASSES):
             train.append([_batch(*b) for b in train_loader])
             evaluation.append([_batch(*b) for b in test_loader])
     return train, evaluation
@@ -500,7 +501,7 @@ def check_walk(
       model: A two-head network of that script.
       coarse: Name prefix of the coarse head's parameters, which the fine
         loss never reaches.
-      media: The images the fine loss is taken on; ``vision.fixed_media(0)``
+      media: The images the fine loss is taken on; ``vision_reference.fixed_media(0)``
         by default, too small for VGG's five pools.
 
     Returns:
@@ -509,9 +510,12 @@ def check_walk(
 
     """
     with host_agnostic_numerics():
-        images = vision.fixed_media(0) if media is None else media
+        images = vision_reference.fixed_media(0) if media is None else media
         fine, _ = cast(tuple[Tensor, Tensor], model(images))
-        loss_fine = torch.nn.functional.cross_entropy(fine, vision.fixed_label(0))
+        loss_fine = torch.nn.functional.cross_entropy(
+            fine,
+            vision_reference.fixed_label(0),
+        )
         instance = pcgrad.MultiTaskLoss(2)
         report = pin_shared(instance, loss_fine)
     assert isinstance(instance, Walker)
@@ -542,7 +546,7 @@ class _MainSpy:
 
     def __init__(self, trace: Trace) -> None:
         self.trace = trace
-        self.scripted = iter(vision.SCRIPTED_CORRECT)
+        self.scripted = iter(vision_reference.SCRIPTED_CORRECT)
 
     def get_dataloaders(
         self,
@@ -586,7 +590,8 @@ class _MainSpy:
             self.trace.state = {k: v.clone() for k, v in model.state_dict().items()}
             self.trace.draws = rng_fingerprint()
             self.trace.settings = {
-                name: float(cast(float, group[name])) for name in vision.HYPERPARAMETERS
+                name: float(cast(float, group[name]))
+                for name in vision_reference.HYPERPARAMETERS
             }
             self.trace.numels = [p.numel() for g in groups for p in g["params"]]
         self.trace.rates.append(from_plain(group["lr"], float))
@@ -599,7 +604,7 @@ class _MainSpy:
     def evaluate(self, model: object, loader: object, device: object) -> float:
         """Report the next scripted accuracy."""
         del model, loader, device
-        return 100.0 * next(self.scripted) / vision.SCRIPTED_TOTAL
+        return 100.0 * next(self.scripted) / vision_reference.SCRIPTED_TOTAL
 
 
 class _FakeCifar100:
@@ -614,7 +619,7 @@ class _FakeCifar100:
         download: bool,
     ) -> None:
         del root, train, download
-        self.media, self.label = vision.synthetic_split()
+        self.media, self.label = vision_reference.synthetic_split()
         self.transform = transform
 
     def __len__(self) -> int:

@@ -24,15 +24,15 @@ import numpy as np
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT as VISION_SCRIPT,
+)
 from priml.baselines.mlsbench.dl.weighting import reference, upstream
 from priml.testing.golden import read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -41,7 +41,9 @@ if TYPE_CHECKING:
 
     import pytest
 
-DATA: Final = _CWD / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
+
+_DATA: Final = _CWD / "testdata"
 
 SGD_SETTINGS: Final = ("lr", "momentum", "weight_decay")
 """The optimizer settings ``main`` passes to SGD."""
@@ -140,7 +142,7 @@ def main():
 
 SCRIPT: Final = (
     "import numpy as np\nfrom torch.utils.data import DataLoader, Subset\n"
-    + LOSS_SCRIPT.split("def compute_loss")[0]
+    + VISION_SCRIPT.split("def compute_loss")[0]
     + "class VGG(nn.Module):\n    VGG16_CFG = [64, 'M']\n\n\n"
     + "def build_model(arch, num_classes):\n"
     + "    return ResNet(BasicBlock, [1, 1, 1], num_classes)\n\n\n"
@@ -215,7 +217,9 @@ def test_main_reports_its_cut_weights_and_epochs(tmp_path: Path) -> None:
     assert len(trace.main.rates) == 200
     assert trace.main.settings["initial_lr"] == 0.1
     assert trace.main.draws.shape == (8,)
-    best = 100.0 * max(vision.SCRIPTED_CORRECT) / vision.SCRIPTED_TOTAL
+    best = (
+        100.0 * max(vision_reference.SCRIPTED_CORRECT) / vision_reference.SCRIPTED_TOTAL
+    )
     assert trace.main.best == float(f"{best:.2f}")
 
 
@@ -234,9 +238,13 @@ def test_lockstep_trains_with_the_weighted_criterion(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     trace = upstream.trace_main(variants["uniform"])
     record, states = upstream.upstream_lockstep(variants["uniform"], "uniform", trace)
-    assert record["lockstep/uniform/loss"].shape == (vision.STEPS,)
-    assert record["lockstep/uniform/probe"].shape == (vision.STEPS, 2, vision.CLASSES)
-    assert len(states) == vision.STEPS
+    assert record["lockstep/uniform/loss"].shape == (vision_reference.STEPS,)
+    assert record["lockstep/uniform/probe"].shape == (
+        vision_reference.STEPS,
+        2,
+        vision_reference.CLASSES,
+    )
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
 
 
@@ -252,7 +260,7 @@ def test_lockstep_builds_the_scored_settings_resnet_by_default(tmp_path: Path) -
 
     with mock.patch.object(vision_upstream, "tiny_model", tiny):
         upstream.upstream_lockstep(variants["uniform"], "uniform", trace)
-    assert seen == [("resnet32", vision.CLASSES)]
+    assert seen == [("resnet32", vision_reference.CLASSES)]
 
 
 def test_lockstep_builds_weighs_and_steps_as_main_does(tmp_path: Path) -> None:
@@ -292,17 +300,17 @@ def test_lockstep_builds_weighs_and_steps_as_main_does(tmp_path: Path) -> None:
         mock.patch.object(script, "train_epoch", epoch),
     ):
         record, _ = upstream.upstream_lockstep(script, "inverse_freq", trace)
-    assert seen["resnet"] == (script.BasicBlock, [1, 1, 1], vision.CLASSES)
+    assert seen["resnet"] == (script.BasicBlock, [1, 1, 1], vision_reference.CLASSES)
     assert seen["config"] == upstream.CONFIG
     assert seen["settings"] == {k: trace.main.settings[k] for k in SGD_SETTINGS}
     assert seen["device"] == torch.device("cpu")
     counts = torch.tensor(reference.LOCKSTEP_COUNTS)
-    for index in range(vision.STEPS):
+    for index in range(vision_reference.STEPS):
         assert torch.equal(
             record["lockstep/inverse_freq/loss"][index],
             nn.functional.cross_entropy(
                 record["lockstep/inverse_freq/logits"][index],
-                vision.fixed_label(index),
+                vision_reference.fixed_label(index),
                 weight=counts / counts.sum(),
             ),
         )
@@ -352,7 +360,7 @@ def test_a_vgg_setting_is_traced_per_variant_and_trained_two_updates(
     assert record[f"{prefix}schedule/lr"].shape == (200,)
     assert torch.equal(record[f"{prefix}weight/uniform"], torch.ones(reference.CLASSES))
     assert list(lockstep) == [f"vgg16bn-cifar100lt/{name}" for name in variants]
-    assert record[f"{prefix}lockstep/uniform/loss"].shape == (vision.STEPS,)
+    assert record[f"{prefix}lockstep/uniform/loss"].shape == (vision_reference.STEPS,)
     # Ratio 50 over 100 classes: 500 images of class 0 down to 10 of class 99.
     assert record[f"{prefix}counts"][[0, -1]].tolist() == [500.0, 10.0]
 
@@ -393,7 +401,7 @@ def test_the_record_holds_every_key_the_port_gives(tmp_path: Path) -> None:
         upstream.upstream_subset(pristine),
         batches[0],
     )
-    assert record.keys() == read_tensors(DATA / "reference.pt").keys()
+    assert record.keys() == read_tensors(_DATA / "reference.pt").keys()
 
 
 if __name__ == "__main__":

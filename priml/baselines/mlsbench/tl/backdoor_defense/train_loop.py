@@ -18,7 +18,7 @@ from configgle import Makeable, Makes
 
 import torch
 
-from priml.baselines.mlsbench.dl.vision.train_loop import EvalEpochsTrainLoop
+from priml.baselines.mlsbench.dl.vision.train_loop import VisionLoop
 from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 from priml.baselines.mlsbench.tl.backdoor_defense.defenses import (
     BackdoorDefense,
@@ -32,6 +32,7 @@ from priml.baselines.mlsbench.tl.backdoor_defense.harness import (
     filter_poison,
 )
 from priml.baselines.mlsbench.tl.backdoor_defense.poison import PoisonedData
+from priml.train.epoch_loop import EpochTrainLoop
 
 
 if TYPE_CHECKING:
@@ -41,12 +42,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class BackdoorTrainLoop(EvalEpochsTrainLoop):
+class BackdoorTrainLoop(EpochTrainLoop):
     """Trains on poisoned data, filters it with a defense, and retrains on the rest."""
 
     class Config(
         Makes["BackdoorTrainLoop"],
-        EvalEpochsTrainLoop.Config[VisionTrainStep.Config, PoisonedData.Config],
+        VisionLoop[VisionTrainStep.Config, PoisonedData.Config],
     ):
         """The vision recipe, the poisoned data and the defense that filters it."""
 
@@ -103,7 +104,7 @@ class BackdoorTrainLoop(EvalEpochsTrainLoop):
         # A fresh loop reseeds from ``config.seed``, so the retrained network
         # starts from the victim's initialization; the driver's continues its
         # generator instead, which the loop's salted seed never matched anyway.
-        retrain = EvalEpochsTrainLoop(config)
+        retrain = EpochTrainLoop(config)
         data, step = retrain.dataset, retrain.step
         assert isinstance(data, PoisonedData)
         assert isinstance(step, VisionTrainStep)

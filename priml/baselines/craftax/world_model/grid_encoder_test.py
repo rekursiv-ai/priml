@@ -83,6 +83,8 @@ def test_config_rejects_bad_geometry() -> None:
         GridConvEncoder.Config(channels_in=16, num_slots=99).make()
     with pytest.raises(ValueError, match="odd"):
         GridConvEncoder.Config(channels_in=16, num_slots=150, kernel_size=4).make()
+    with pytest.raises(ValueError, match="multiple of num_heads"):
+        GridConvEncoder.Config(channels_in=18, num_slots=150, num_heads=4).make()
 
 
 def test_frame_macs_counts_convolutions_mlps_and_film() -> None:

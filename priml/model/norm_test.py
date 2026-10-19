@@ -24,6 +24,7 @@ from priml.model.norm import (
     LayerNorm,
     LayerNorm2d,
     RMSNorm,
+    _normalization_cost,
 )
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -88,6 +89,12 @@ def test_channel_norm_preserves_exact_nchw_permutation_and_complete_gradients(
         batch_size=2,
         dtype=torch.float64,
     )
+
+
+def test_normalization_cost_rejects_an_odd_parameter_count() -> None:
+    # Every norm passes a scale and shift per channel; no config reaches an odd count.
+    with pytest.raises(ValueError, match="parameter count must be even"):
+        _normalization_cost(channels=3, groups=2, params=3, rows=2, dtype=torch.float32)
 
 
 def test_rmsnorm():

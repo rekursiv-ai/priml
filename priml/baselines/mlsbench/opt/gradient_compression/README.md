@@ -26,7 +26,7 @@ arithmetic and draws are identical are imported:
 | Loader | `vision.data.Cifar100Data`, 2 streams, test batch 256 | Same transforms; `num_workers=2` |
 | Step | `VisionTrainStep` subclassed as `CompressedTrainStep` | Compression sits between backward and step |
 | Schedule | no: local `warmup_cosine` | Linear warmup then cosine to 1% |
-| Loop | `vision.train_loop.EvalEpochsTrainLoop`, narrowed as `CompressionTrainLoop` | Evaluates after epochs picked by the `eval_epochs` slot |
+| Loop | `train.epoch_loop.EpochTrainLoop` with `vision.train_loop.VisionLoop`, narrowed as `CompressionTrainLoop` | Evaluates after epochs picked by the `eval_epochs` slot |
 | Test loss | no: local `MeanCrossEntropy` | Summed CE over the image count, a scored column |
 
 | File | Holds |
@@ -35,7 +35,7 @@ arithmetic and draws are identical are imported:
 | `model.py` | `VGG` (VGG-11-BN) |
 | `metrics.py` | `MeanCrossEntropy` |
 | `train_step.py` | `CompressedTrainStep`, `warmup_cosine` |
-| `train_loop.py` | `CompressionTrainLoop`, vision's `EvalEpochsTrainLoop` on the compressing step |
+| `train_loop.py` | `CompressionTrainLoop`, vision's `VisionLoop` on the compressing step |
 | `experiments.py` | `exp000` to `exp005` |
 | `reference.py`, `upstream.py` | Port-side and script-side runs of the capture |
 | `scripts/capture_reference.py` | The bit-for-bit proof |

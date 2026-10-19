@@ -402,21 +402,11 @@ def loader_batches(name: str, directory: Path) -> tuple[Batches, Batches]:
         the batches in order.
 
     """
-    media, label = reference.synthetic_split()
-    for split in ("train", "test"):
-        torch.save({"media": media, "label": label}, directory / f"{split}.pt")
-    config = AUGMENTS[name]().dataset
-    config.base_dir = None
-    config.working_dir = directory
-    config.batch_size = config.eval_batch_size = reference.LOADER_BATCH
-    train: Batches = []
-    evaluation: Batches = []
-    with reference.seeded(reference.SEED):
-        data = config.make()
-        for _ in range(reference.LOADER_PASSES):
-            train.append(list(data.train_dataloader()))
-            evaluation.append(list(data.eval_dataloader()))
-    return train, evaluation
+    return reference.dataset_batches(
+        AUGMENTS[name]().dataset,
+        directory,
+        split=reference.synthetic_split(),
+    )
 
 
 @contextmanager

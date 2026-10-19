@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import contextlib
@@ -27,7 +27,7 @@ from treekle import from_plain
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream,
 )
 from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
@@ -85,6 +85,7 @@ class Compressing(Protocol):
         raise NotImplementedError
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``optimization-gradient-compression`` script the capture uses."""
 
@@ -150,9 +151,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
         )
         for name in EDITED
     }
-    return {
-        name: cast(Script, cast(object, script)) for name, script in scripts.items()
-    }
+    return {name: upstream.narrowed(script, Script) for name, script in scripts.items()}
 
 
 def upstream_compressor(script: Script, name: str) -> dict[str, Tensor]:
@@ -168,7 +167,7 @@ def upstream_compressor(script: Script, name: str) -> dict[str, Tensor]:
     """
     compressor = script.Compressor(COMPRESS_RATIO)
     outputs: dict[str, list[Tensor]] = {key: [] for key in reference.GRADIENT_SHAPES}
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         for step in range(reference.COMPRESSION_STEPS):
             for key, grad in reference.fixed_gradients(step).items():
                 compressed, ctx = compressor.compress(grad, key)
@@ -202,14 +201,14 @@ def upstream_network(
 
     """
     model_name, dataset, _ = SETTINGS[name]
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = script.build_model(model_name, CLASSES[dataset], torch.device("cpu"))
         state = {k: v.clone() for k, v in model.state_dict().items()}
         draws = rng_fingerprint()
         model.train()
-        train = vision.logits_of(model, reference.fixed_images32())
+        train = vision_reference.logits_of(model, reference.fixed_images32())
         model.eval()
-        evaluated = vision.logits_of(model, reference.fixed_images32())
+        evaluated = vision_reference.logits_of(model, reference.fixed_images32())
     record = {
         f"draws/{name}": draws,
         f"forward/{name}/train": train.detach(),
@@ -261,7 +260,7 @@ class Run:
             self.model = self.script.ResNet(
                 self.script.BasicBlock,
                 [1, 1, 1],
-                vision.CLASSES,
+                vision_reference.CLASSES,
             )
         return self.model
 
@@ -271,10 +270,25 @@ class Run:
         batch_size: int,
         num_workers: int = 0,
     ) -> tuple[_EpochBatches, list[tuple[Tensor, Tensor]], int]:
-        """Return one fixed batch per epoch, one fixed test batch and the lockstep's classes."""
+        """Return one fixed batch per epoch, one fixed test batch and the lockstep's classes.
+
+        Args:
+          dataset_name: Unused; the batches are fixed.
+          batch_size: Unused; each batch holds the fixed images.
+          num_workers: Unused; nothing is loaded.
+
+        Returns:
+          train: A fixed batch in each epoch.
+          test: The fixed probe batch.
+          classes: The lockstep's class count.
+
+        """
         del dataset_name, batch_size, num_workers
-        probe = vision.fixed_media(vision.STEPS), vision.fixed_label(vision.STEPS)
-        return _EpochBatches(), [probe], vision.CLASSES
+        probe = (
+            vision_reference.fixed_media(vision_reference.STEPS),
+            vision_reference.fixed_label(vision_reference.STEPS),
+        )
+        return _EpochBatches(), [probe], vision_reference.CLASSES
 
     def evaluate(
         self,
@@ -303,8 +317,8 @@ class Run:
         if not self.scripted:
             return self._evaluate(model, test_loader, device)
         if not repeat:
-            correct = vision.SCRIPTED_CORRECT[len(self.accuracies)]
-            self.accuracies.append(100.0 * correct / vision.SCRIPTED_TOTAL)
+            correct = vision_reference.SCRIPTED_CORRECT[len(self.accuracies)]
+            self.accuracies.append(100.0 * correct / vision_reference.SCRIPTED_TOTAL)
         return self.accuracies[-1], 0.0
 
     def optimizer(
@@ -364,7 +378,10 @@ class Run:
         model.eval()
         with torch.no_grad():
             self.probes.append(
-                vision.logits_of(model, vision.fixed_media(vision.STEPS)),
+                vision_reference.logits_of(
+                    model,
+                    vision_reference.fixed_media(vision_reference.STEPS),
+                ),
             )
         model.train(training)
         self.states.append({k: v.clone() for k, v in model.state_dict().items()})
@@ -390,7 +407,7 @@ def run_train(
     *,
     epochs: int,
     scripted: bool,
-    warmup: int = 5,
+    warmup: int,
 ) -> Run:
     """Call the script's ``train`` for ``epochs`` at one setting's arguments.
 
@@ -399,7 +416,7 @@ def run_train(
       name: A key of :data:`SETTINGS`, whose ``--lr`` and names are passed.
       epochs: The ``--epochs``.
       scripted: Report scripted accuracies instead of evaluating.
-      warmup: The ``--warmup_epochs``; the setting's five by default.
+      warmup: The ``--warmup_epochs``.
 
     Returns:
       run: What the replaced pieces saw.
@@ -415,12 +432,12 @@ def run_train(
         weight_decay=5e-4,
         warmup_epochs=warmup,
         compress_ratio=COMPRESS_RATIO,
-        seed=vision.SEED,
+        seed=vision_reference.SEED,
     )
     run = Run(script, scripted=scripted)
     printed = io.StringIO()
     with (
-        vision.seeded(vision.SEED),
+        vision_reference.seeded(vision_reference.SEED),
         host_agnostic_numerics(),
         mock.patch.object(script, "build_model", run.build_model),
         mock.patch.object(script, "get_dataloaders", run.get_dataloaders),
@@ -478,7 +495,8 @@ def upstream_trace(
     """
     record: dict[str, Tensor] = {}
     for name in SETTINGS:
-        run = run_train(script, name, epochs=epochs, scripted=True)
+        warmup = reference.warmup_epochs(reference.SETTINGS[name])
+        run = run_train(script, name, epochs=epochs, scripted=True, warmup=warmup)
         record[f"schedule/{name}"] = torch.tensor(run.rates, dtype=torch.float64)
         record[f"optimizer/{name}"] = torch.tensor(
             [run.settings[key] for key in reference.SGD_SETTINGS],
@@ -503,9 +521,13 @@ def upstream_metrics(script: Script) -> dict[str, Tensor]:
       record: Keyed as :func:`~priml.baselines.mlsbench.opt.gradient_compression.reference.metric_record`.
 
     """
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         with upstream.narrowed_widths(script):
-            model = script.ResNet(script.BasicBlock, [1, 1, 1], vision.CLASSES)
+            model = script.ResNet(
+                script.BasicBlock,
+                [1, 1, 1],
+                vision_reference.CLASSES,
+            )
         accuracy, loss = script.evaluate(
             model,
             reference.metric_batches(),
@@ -536,9 +558,12 @@ def upstream_batches(
     """
     train: Batches = []
     evaluation: Batches = []
-    with vision.seeded(vision.SEED), vision.script_workers():
+    with (
+        vision_reference.seeded(vision_reference.SEED),
+        vision_reference.script_workers(),
+    ):
         train_loader, test_loader = loaders(script, dataset, num_workers=num_workers)
-        for _ in range(vision.LOADER_PASSES):
+        for _ in range(vision_reference.LOADER_PASSES):
             train.append([{"media": x, "label": y} for x, y in train_loader])
             evaluation.append([{"media": x, "label": y} for x, y in test_loader])
     return train, evaluation
@@ -608,7 +633,7 @@ def loaders(
     with mock.patch.object(script.datasets, DATASETS[dataset], _FakeCifar):
         train, test, _ = script.get_dataloaders(
             dataset,
-            vision.LOADER_BATCH,
+            vision_reference.LOADER_BATCH,
             num_workers=num_workers,
         )
     return train, test
@@ -621,7 +646,10 @@ class _EpochBatches:
         self.epoch = 0
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor]]:
-        batch = vision.fixed_media(self.epoch), vision.fixed_label(self.epoch)
+        batch = (
+            vision_reference.fixed_media(self.epoch),
+            vision_reference.fixed_label(self.epoch),
+        )
         self.epoch += 1
         yield batch
 
@@ -641,7 +669,7 @@ class _FakeCifar:
         transform: Callable[[Image.Image], Tensor],
     ) -> None:
         del root, train, download
-        self.media, self.label = vision.synthetic_split()
+        self.media, self.label = vision_reference.synthetic_split()
         self.transform = transform
 
     def __len__(self) -> int:

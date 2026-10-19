@@ -274,6 +274,41 @@ def test_a_truncated_record_stops_where_it_was_cut(ghost: Ghost) -> None:
     assert stopped.players == ghost.players[:cut]
 
 
+def test_a_creature_off_its_byte_is_a_fault_of_the_extraction() -> None:
+    def misfit(state: EnvState, rng: Array1[np.uint32]) -> None:
+        _SCRIPTED(state, rng)
+        state.passive_mobs[0].type_id[0] = 16
+
+    with eager(world=misfit):
+        record = scripted([Action.NOOP], world_seed=_WORLD, truncated=True)
+        with pytest.raises(ValueError, match="does not fit its byte"):
+            extract(record, ordinal=1)
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [("hash", "last hash"), ("whole", "neither died")],
+)
+def test_a_record_replay_passed_is_checked_again_by_the_extraction(
+    record: Record,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+    message: str,
+) -> None:
+    # A record the replay check passed, which the extraction's own replay refutes.
+    monkeypatch.setattr(replay, "verify", _matched)
+    if damage == "hash":
+        hashes = record.hashes.clone()
+        hashes[-1] ^= 1
+        damaged = dataclasses.replace(record, hashes=hashes)
+    else:
+        with eager(world=_SCRIPTED):
+            cut = scripted([int(a) for a in _SCRIPT[:2]], world_seed=_WORLD)
+        damaged = dataclasses.replace(cut, truncated=False)
+    with eager(world=_SCRIPTED), pytest.raises(ValueError, match=message):
+        extract(damaged, ordinal=1)
+
+
 def test_a_hit_and_a_kill_are_fights_and_a_despawn_is_not() -> None:
     with eager(world=tiny_world):
         states, _ = replay.reset_world(_WORLD)
@@ -412,6 +447,12 @@ def test_a_sleep_whose_ticks_end_elsewhere_fails_the_extraction() -> None:
             trace, copy, 0, 4, 49,
         )  # fmt: skip
     assert status == extract_module._SLEPT_ELSEWHERE
+
+
+def _matched(record: Record) -> int:
+    """Stand in for ``replay.verify``: every record matches its hashes."""
+    del record
+    return replay.MATCHED
 
 
 def _layout_world(states: NDArray[np.void]) -> World:

@@ -10,6 +10,7 @@ import math
 import re
 
 from torch import Tensor, nn
+from torch._dynamo import config as torch_dynamo_config
 from torch.optim import Optimizer
 from treekle import ReadError, from_plain
 
@@ -379,6 +380,81 @@ def test_scheduled_update_drives_each_optimizer_family() -> None:
     ).make()(ScheduleStep())
     assert result["lr/muon_multiplier"] < 1.0
     assert result["lr/adam_multiplier"] < 1.0
+
+
+def test_scheduled_update_applies_and_restores_the_recompile_limit() -> None:
+    dense = nn.Parameter(torch.ones(2, 3))
+    adam = torch.optim.Adam([dense], lr=0.2)
+    for group in adam.param_groups:
+        group["initial_lr"] = group["lr"]
+    limits: list[int] = []
+    real_step = adam.step
+
+    def recording_step() -> None:
+        limits.append(torch_dynamo_config.recompile_limit)
+        real_step()
+
+    class Config:
+        momentum_warmup_steps = 2
+        momentum_start = 0.8
+        momentum_end = 0.9
+
+    class ScheduleStep:
+        config = Config()
+        progress_learning_schedule = 0.25
+        completed_updates = 1
+        optimizer = CompositeOptimizer([adam])
+        model = nn.Module()
+
+    before = torch_dynamo_config.recompile_limit
+    with patch.object(adam, "step", recording_step):
+        optimizers.ScheduledOptimizerUpdate.Config(
+            optimizer_recompile_limit=before + 3,
+        ).make()(ScheduleStep())
+    assert limits == [before + 3]
+    assert torch_dynamo_config.recompile_limit == before
+
+
+def test_rmsprop_step_returns_the_closures_loss_with_grad_enabled() -> None:
+    parameter = nn.Parameter(torch.ones(3, 2))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(lr=0.1).make()([parameter])
+
+    def closure() -> Tensor:
+        loss = parameter.square().sum()
+        loss.backward()
+        return loss
+
+    loss = optimizer.step(closure)
+    assert isinstance(loss, Tensor)
+    assert loss.item() == 6.0
+    assert not torch.equal(parameter.detach(), torch.ones(3, 2))
+
+
+def _unjitted(function: Callable[..., object]) -> Callable[..., object]:
+    return function
+
+
+def test_the_sparse_kernels_compile_their_own_triton_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(optimizers, "jit_kernel", _unjitted)
+    for build in (
+        optimizers._compiled_inactive_moment,
+        optimizers._compiled_sparse_rmsprop,
+    ):
+        build.cache_clear()
+    try:
+        assert (
+            optimizers._compiled_inactive_moment()
+            is optimizers._inactive_moment_rows_triton
+        )
+        assert (
+            optimizers._compiled_sparse_rmsprop()
+            is optimizers._sparse_rmsprop_rows_triton
+        )
+    finally:
+        optimizers._compiled_inactive_moment.cache_clear()
+        optimizers._compiled_sparse_rmsprop.cache_clear()
 
 
 @pytest.mark.parametrize("dtype", optimizers.BITMAP_DTYPES)

@@ -1200,6 +1200,11 @@ def test_prefetchbuffer_close_frees_a_producer_blocked_on_a_full_queue(
     assert not threads[0].is_alive()
 
 
+def test_parmap_rejects_negative_thread_count() -> None:
+    with pytest.raises(ValueError, match=r"^num_threads must be >= 0; got -1\.$"):
+        ParMap.Config(num_threads=-1).make()
+
+
 @pytest.mark.parametrize("poll_sec", [0.0, -1.0, float("nan")])
 def test_parmap_and_prefetchbuffer_reject_a_non_positive_poll(
     poll_sec: float,

@@ -2,26 +2,38 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from importlib import metadata
+from pathlib import Path
+from typing import TYPE_CHECKING, override
 
 import json
 import math
 import os
+import platform
 import signal
 import stat
 import time
 
+from configgle import Fig, PartialConfig
+from torch import Tensor, nn
 from treekle import from_plain, json_loads, to_plain
 
 import pytest
+import torch
 
-from priml.train.budget import WallBudget
+from priml.data.dummy import DummyDataset
+from priml.runtime import SingleProcess
+from priml.train.budget import BudgetedRun, WallBudget, provenance
+from priml.train.parallelism import NoParallel
+from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-    from pathlib import Path
     from types import FrameType
+
+    from priml.loss.custom_types import LossOutput
+    from priml.train.train_loop import TrainLoop
 
 
 class Clock:
@@ -65,6 +77,19 @@ def test_config_is_printable_serializable_and_does_no_io(tmp_path: Path) -> None
     assert restored.clock is time.perf_counter
     assert "reserve_evaluation_sec" in config.pformat(hide_default_values=False)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_provenance_records_the_host_and_installed_versions() -> None:
+    record = provenance(packages=["pytest", "torch"])
+    assert record["platform"] == platform.platform()
+    assert record["python"] == platform.python_version()
+    assert record["accelerator"]
+    assert record["dependencies"] == {
+        "pytest": metadata.version("pytest"),
+        "torch": metadata.version("torch"),
+    }
+    with pytest.raises(metadata.PackageNotFoundError):
+        provenance(packages=["not-an-installed-distribution"])
 
 
 @pytest.mark.parametrize("seconds", [0, -1, -math.inf, math.nan])
@@ -416,6 +441,182 @@ def test_earlier_default_alarm_keeps_default_signal_dispatch(
 def _workload(fail: bool) -> None:
     if fail:
         raise LookupError("body")
+
+
+class _Model(nn.Module):
+    class Config(Fig["_Model"], make_with_kwargs=True):
+        in_features: int = 2
+        out_features: int = 3
+
+    def __init__(self, in_features: int, out_features: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    @override
+    def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
+        return self.linear(media)
+
+
+def _cross_entropy(output: Tensor, *, label: Tensor, **_kwargs: object) -> LossOutput:
+    return {"loss": nn.functional.cross_entropy(output, label, reduction="none")}
+
+
+class _Export:
+    """Record what the run left for an export to see."""
+
+    class Config(Fig["_Export"]): ...
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, loop: TrainLoop, output: Path) -> None:
+        assert isinstance(loop.step, TrainStep)
+        seen = {
+            "max_time": loop.max_time,
+            "horizon": loop.step.config.train_budget_sec,
+            "steps": loop.step.global_step,
+        }
+        (output / "seen.json").write_text(json.dumps(seen))
+
+
+class _Preparation:
+    """A cache that exists once its marker file does."""
+
+    class Config(Fig["_Preparation"]):
+        marker: Path = Path()
+
+    def __init__(self, config: Config) -> None:
+        self.marker = config.marker
+
+    def cache_ready(self) -> bool:
+        return self.marker.exists()
+
+    def run(self) -> None:
+        self.marker.touch()
+
+
+def _one_update(step: TrainStep) -> int:
+    del step
+    return 1
+
+
+def _json(path: Path) -> dict[str, object]:
+    return json_loads(path.read_text(), dict[str, object])
+
+
+def _run_config(
+    tmp_path: Path,
+    *,
+    train_budget_sec: float = math.inf,
+) -> BudgetedRun.Config:
+    step = TrainStep.Config()
+    step.model = _Model.Config()
+    step.optimizer = PartialConfig(torch.optim.SGD, lr=0.1)
+    step.loss = PartialConfig(_cross_entropy)
+    step.parallelism = NoParallel.Config(device="cpu")
+    step.compile = None
+    step.train_budget_sec = train_budget_sec
+    config = BudgetedRun.Config()
+    config.loop.step = step
+    config.loop.dataset = DummyDataset.Config(
+        input_shape=(2,),
+        num_classes=3,
+        num_samples=4,
+        batch_size=2,
+        device="cpu",
+    )
+    config.loop.runtime = SingleProcess.Config(device="cpu")
+    config.loop.checkpointer = None
+    config.loop.base_dir = tmp_path
+    config.loop.working_dir = "run"
+    config.loop.max_steps = 3
+    config.loop.num_steps_eval = 0
+    config.loop.eval_every_epoch = False
+    config.budget.seconds = 100
+    config.budget.clock = Clock()
+    return config
+
+
+@pytest.mark.usefixtures("alarm_scope")
+def test_budgeted_run_trains_exports_and_seals_the_receipt(tmp_path: Path) -> None:
+    config = _run_config(tmp_path, train_budget_sec=90)
+    config.export = _Export.Config()
+    config.budget.reserve_evaluation_sec = 40
+
+    resolved = config.copy_tree().finalize()
+    assert resolved.budget.receipt_path == tmp_path / "run" / "budget.json"
+
+    config.make().run()
+
+    receipt = _json(tmp_path / "run" / "budget.json")
+    assert receipt["status"] == "complete"
+    assert receipt["metadata"] == {"completed": True, "steps": 3}
+    assert "max_steps" in (tmp_path / "run" / "config.txt").read_text()
+    seen = _json(tmp_path / "run" / "seen.json")
+    assert seen == {"max_time": 60, "horizon": 60, "steps": 3}
+
+
+@pytest.mark.usefixtures("alarm_scope")
+def test_budgeted_run_adds_no_seconds_horizon_the_recipe_did_not_declare(
+    tmp_path: Path,
+) -> None:
+    config = _run_config(tmp_path)
+    config.export = _Export.Config()
+
+    config.make().run()
+
+    seen = _json(tmp_path / "run" / "seen.json")
+    assert seen["max_time"] == 100
+    assert seen["horizon"] == math.inf
+
+
+@pytest.mark.usefixtures("alarm_scope")
+@pytest.mark.parametrize("ready", [True, False])
+def test_budgeted_run_charges_a_preparation_that_is_not_ready(
+    tmp_path: Path,
+    ready: bool,
+) -> None:
+    marker = tmp_path / "cache"
+    if ready:
+        marker.touch()
+    config = _run_config(tmp_path)
+    preparation = config.preparation = _Preparation.Config()
+    preparation.marker = marker
+
+    config.make().run()
+
+    receipt = _json(tmp_path / "run" / "budget.json")
+    assert receipt["metadata"] == {"completed": True, "steps": 3, "cache_reused": ready}
+    assert marker.exists()
+
+
+@pytest.mark.usefixtures("alarm_scope")
+def test_budgeted_run_refuses_to_resume_an_earlier_training_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _run_config(tmp_path)
+    # A step restored from a checkpoint arrives with updates already counted.
+    monkeypatch.setattr(TrainStep, "global_step", property(_one_update))
+
+    with pytest.raises(ValueError, match="cannot resume an earlier training budget"):
+        config.make().run()
+
+    receipt = _json(tmp_path / "run" / "budget.json")
+    assert receipt["status"] == "failed"
+
+
+@pytest.mark.usefixtures("alarm_scope")
+def test_budgeted_run_fails_its_receipt_when_no_update_ran(tmp_path: Path) -> None:
+    config = _run_config(tmp_path)
+    config.loop.max_steps = 0
+
+    with pytest.raises(TimeoutError, match="no time for a training update"):
+        config.make().run()
+
+    receipt = _json(tmp_path / "run" / "budget.json")
+    assert receipt["status"] == "failed"
+    assert receipt["metadata"] == {"completed": False, "steps": 0}
 
 
 if __name__ == "__main__":

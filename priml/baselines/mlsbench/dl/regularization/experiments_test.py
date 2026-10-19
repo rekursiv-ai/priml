@@ -35,7 +35,7 @@ from priml.baselines.mlsbench.dl.regularization.train_step import (
     RegularizedTrainStep,
 )
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -102,7 +102,7 @@ FORKS: Final = {
 def test_exp000_is_the_vision_recipe_on_the_regularized_step() -> None:
     cfg = exp000()
     assert type(cfg.step) is RegularizedTrainStep.Config
-    assert changed_fields(vision.exp000(), cfg) == {
+    assert changed_fields(vision_experiments.exp000(), cfg) == {
         "study_name",
         "step",
         "step.regularization",

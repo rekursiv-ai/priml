@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Final
 import pytest
 import torch
 
+from priml.baselines.mlsbench.dl.vision.scripts import (
+    capture_reference as vision_capture_reference,
+)
 from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import CEILING
 from priml.baselines.mlsbench.opt.gradient_compression import reference
 from priml.baselines.mlsbench.opt.gradient_compression.compressors import (
@@ -102,10 +105,9 @@ def test_three_updates_with_each_compressor_match_the_script(name: str) -> None:
 
 
 def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    sides: dict[str, dict[str, int]] = {"reference": {}, "port": {}}
-    for line in (_DATA / "reference_sites.txt").read_text().splitlines():
-        side, key, count = line.split()
-        sides[side][key] = int(count)
+    sides = vision_capture_reference.parse_sites(
+        (_DATA / "reference_sites.txt").read_text(),
+    )
     assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
     assert reference.draw_sites(tmp_path) == sides["port"]
 

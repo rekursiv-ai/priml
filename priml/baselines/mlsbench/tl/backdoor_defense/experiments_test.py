@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -64,7 +64,7 @@ POISONING: Final = ("trigger", "poison_fraction", "target_class", "poison_seed")
 
 
 def test_exp000_is_the_vision_recipe_at_resnet20_cifar10_for_100_epochs() -> None:
-    parent = settings.resnet20_cifar10(vision.exp000())
+    parent = settings.resnet20_cifar10(vision_experiments.exp000())
     changed = {
         field
         for field in changed_fields(parent, exp000())
@@ -81,6 +81,7 @@ def test_exp000_is_the_vision_recipe_at_resnet20_cifar10_for_100_epochs() -> Non
         "checkpointer",
         "defense",
         "eval_epochs",
+        "early_stopping",
         "filter_multiplier",
     }
     poisoning = {
@@ -206,7 +207,7 @@ def test_every_experiment_filters_and_retrains_at_minimum_size(
 def test_a_checkpointer_is_refused(tmp_path: Path) -> None:
     write_dataset(tmp_path, classes=10)
     cfg = shrink(exp000(), directory=tmp_path)
-    cfg.checkpointer = vision.exp000().checkpointer
+    cfg.checkpointer = vision_experiments.exp000().checkpointer
     with pytest.raises(ValueError, match="checkpointer=None"):
         cfg.make()
 

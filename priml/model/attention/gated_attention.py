@@ -21,7 +21,7 @@ from priml.cost import (
 )
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import rotation_cost
+from priml.model.attention.rope import rotate_activation_dtype, rotation_cost
 from priml.model.attention.window import causal_chunk_mask, window_mask
 from priml.model.custom_types import (
     AttentionKernel,
@@ -353,8 +353,7 @@ class GatedAttention(nn.Module):
                     "[batch..., sequence, 1].",
                 )
             cos, sin = self.rope(positions)
-            q = _rotate(q, cos=cos.to(x.dtype), sin=sin.to(x.dtype))
-            k = _rotate(k, cos=cos.to(x.dtype), sin=sin.to(x.dtype))
+            q, k = rotate_activation_dtype(q, k, cos.to(x.dtype), sin.to(x.dtype))
         if state is not None:
             k, v = state.update(k.movedim(-3, -2), v.movedim(-3, -2))
             k, v = k.movedim(-3, -2), v.movedim(-3, -2)
@@ -418,25 +417,6 @@ def _is_text_positions(positions: Tensor, *, x: Tensor) -> bool:
     if positions.ndim == 1:
         return positions.shape[0] == x.shape[-2]
     return positions.shape[-1] == 1 and positions.shape[:-1] == x.shape[:-1]
-
-
-# Head-major layout preserves the upstream q/k norm weight-gradient reduction order. The
-# generic RoPE rotation intentionally accumulates in float32; this gated-attention
-# architecture rounds each product in activation dtype.
-def _rotate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
-    """Rotate in activation dtype and head-major layout, including backward."""
-    x = x.movedim(-3, -2)
-    cos, sin = cos.movedim(-3, -2), sin.movedim(-3, -2)
-    cos, sin = torch.cat((cos, cos), dim=-1), torch.cat((sin, sin), dim=-1)
-    width = cos.shape[-1]
-    if width > x.shape[-1]:
-        raise ValueError(
-            f"Rotary width {width} exceeds attention head width {x.shape[-1]}.",
-        )
-    rotated, passthrough = x[..., :width], x[..., width:]
-    first, second = rotated.chunk(2, dim=-1)
-    rotated = rotated * cos + torch.cat((-second, first), dim=-1) * sin
-    return torch.cat((rotated, passthrough), dim=-1).movedim(-3, -2)
 
 
 # The finite twin of window._causal_bias: it exists only to add onto a

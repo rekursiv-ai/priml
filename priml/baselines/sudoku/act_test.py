@@ -109,6 +109,21 @@ def test_global_sampled_minimum_matches_source_draw_order() -> None:
     assert torch.equal(actual_next, expected_next)
 
 
+def test_pool_refuses_a_non_integer_step_counter_dtype() -> None:
+    with pytest.raises(ValueError, match=r"steps_dtype must be torch\.int32 or"):
+        pool(AtomicPool.Config(steps_dtype=torch.float32))
+
+
+def test_global_sampled_minimum_requires_the_original_halt_logits() -> None:
+    with pytest.raises(ValueError, match="requires the original halt logits"):
+        GlobalSampledMinimum.Config().make()(
+            torch.ones(SLOTS, dtype=torch.bool),
+            steps=torch.ones(SLOTS, dtype=torch.int32),
+            max_steps=3,
+            generator=torch.Generator(),
+        )
+
+
 def test_global_sampled_minimum_skips_draws_at_one_step_cap() -> None:
     """Avoid source exploration draws when the loop cannot continue."""
     subject = GlobalSampledMinimum.Config().make()

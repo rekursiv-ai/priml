@@ -70,11 +70,11 @@ def test_disabled_instance_has_consistent_attributes(
     assert quant(model) is model
 
 
-def test_fsdp_all_gather_uses_dataclass_replace() -> None:
+def test_fsdp_all_gather_uses_dataclass_replace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """T-028: enabling FSDP all-gather must produce a valid Float8 config."""
-    available, reason = _check_float8_available()
-    if not available:
-        pytest.skip(f"float8 unavailable: {reason}")
+    monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
 
     quant = Float8ModelQuantization.Config(
         recipe="tensorwise",

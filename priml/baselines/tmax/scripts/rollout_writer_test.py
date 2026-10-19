@@ -187,6 +187,28 @@ def test_intent_loading_checks_duplicates_by_step(
         writer._load_intents()
 
 
+def test_a_record_staged_twice_is_corruption(tmp_path: Path) -> None:
+    line = '{"step": 0, "sample_idx": 0}\n'
+    _shard(tmp_path).write_text(line * 2, encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate staged rollout record"):
+        RolloutWriter(tmp_path, "mock")
+
+
+def test_incomplete_steps_name_the_partial_updates(tmp_path: Path) -> None:
+    writer = RolloutWriter(tmp_path, "mock")
+    writer.write(0, _records(0, 1))
+    writer.write(1, _records(1))
+    reloaded = RolloutWriter(tmp_path, "mock")
+    assert reloaded.incomplete_steps(2) == {0}
+    assert reloaded.completed_steps(2) == {1}
+
+
+def test_incomplete_steps_refuse_an_interrupted_final_record(tmp_path: Path) -> None:
+    _shard(tmp_path).write_text('{"step": 0, "sample_idx": 0', encoding="utf-8")
+    with pytest.raises(ValueError, match="interrupted final record"):
+        RolloutWriter(tmp_path, "mock").incomplete_steps(2)
+
+
 # -- commit validation --------------------------------------------------------
 
 
@@ -205,6 +227,53 @@ def test_a_marker_with_a_broken_contract_is_refused(
     _write_json(_marker(tmp_path, 0), marker)
     with pytest.raises(ValueError, match="invalid record or prompt-cursor contract"):
         RolloutWriter(tmp_path, "mock").committed_live_steps(2)
+
+
+def test_a_marker_over_missing_records_is_refused(tmp_path: Path) -> None:
+    RolloutWriter(tmp_path, "mock").write_live(
+        0,
+        _records(0),
+        prompt_loader_state_after={},
+    )
+    first = _shard(tmp_path).read_text(encoding="utf-8").splitlines(keepends=True)[0]
+    _shard(tmp_path).write_text(first, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"staged sample indices are \[0\]"):
+        RolloutWriter(tmp_path, "mock").committed_live_steps(2)
+
+
+def test_a_marker_over_altered_records_is_refused(tmp_path: Path) -> None:
+    RolloutWriter(tmp_path, "mock").write_live(
+        0,
+        _records(0),
+        prompt_loader_state_after={},
+    )
+    _shard(tmp_path).write_text(
+        '{"step": 0, "sample_idx": 0, "extra": 1}\n{"step": 0, "sample_idx": 1}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="does not match the staged record contents"):
+        RolloutWriter(tmp_path, "mock").committed_live_steps(2)
+
+
+def test_the_cursor_of_a_committed_step_is_returned(tmp_path: Path) -> None:
+    RolloutWriter(tmp_path, "mock").write_live(
+        0,
+        _records(0),
+        prompt_loader_state_after={"position": 7},
+    )
+    assert RolloutWriter(tmp_path, "mock").live_cursor_after(0, 2) == {"position": 7}
+
+
+def test_a_staged_step_is_returned_in_sample_order(tmp_path: Path) -> None:
+    RolloutWriter(tmp_path, "mock").write(0, _records(0)[::-1])
+    writer = RolloutWriter(tmp_path, "mock")
+    assert writer.records_for_step(0, 2) == _records(0)
+
+
+def test_a_staged_step_missing_a_sample_is_refused(tmp_path: Path) -> None:
+    RolloutWriter(tmp_path, "mock").write(0, _records(0, 1))
+    with pytest.raises(ValueError, match="exactly once"):
+        RolloutWriter(tmp_path, "mock").records_for_step(0, 2)
 
 
 def test_the_cursor_of_an_uncommitted_step_is_refused(tmp_path: Path) -> None:
@@ -237,6 +306,13 @@ def test_duplicate_records_within_one_write_are_refused(tmp_path: Path) -> None:
         )
 
 
+def test_records_already_staged_are_refused(tmp_path: Path) -> None:
+    writer = RolloutWriter(tmp_path, "mock")
+    writer.write(0, _records(0))
+    with pytest.raises(ValueError, match="Refusing to write 2 rollout record"):
+        writer.write(0, _records(0))
+
+
 def test_a_full_shard_rolls_over_to_the_next_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -266,6 +342,34 @@ def test_live_recovery_refuses_uncommitted_intents_before_the_frontier(
     )
     with pytest.raises(ValueError, match="write intents before the durable frontier"):
         RolloutWriter(tmp_path, "mock").recover_uncommitted_live_tail(2, 2)
+
+
+def test_live_recovery_refuses_uncommitted_records_before_the_frontier(
+    tmp_path: Path,
+) -> None:
+    RolloutWriter(tmp_path, "mock").write(0, _records(0))
+    with pytest.raises(ValueError, match=r"durable frontier 1: \[0\]"):
+        RolloutWriter(tmp_path, "mock").recover_uncommitted_live_tail(1, 2)
+
+
+def test_live_recovery_discards_an_intent_past_the_frontier(tmp_path: Path) -> None:
+    RolloutWriter(tmp_path, "mock").write_live(
+        0,
+        _records(0),
+        prompt_loader_state_after={},
+    )
+    size = _shard(tmp_path).stat().st_size
+    _write_json(
+        _intent(tmp_path, 1),
+        {"version": 1, "step": 1, "shard": _shard(tmp_path).name, "byte_offset": size},
+    )
+
+    recovered = RolloutWriter(tmp_path, "mock").recover_uncommitted_live_tail(1, 2)
+
+    assert recovered == {1}
+    assert not _intent(tmp_path, 1).exists()
+    assert _shard(tmp_path).stat().st_size == size
+    assert RolloutWriter(tmp_path, "mock").committed_live_steps(2) == {0}
 
 
 def test_live_recovery_refuses_a_tail_followed_by_committed_data(
@@ -333,6 +437,16 @@ def test_fixed_recovery_truncates_a_torn_tail_and_later_shards(
     assert _shard(tmp_path, 0).stat().st_size == first_size
     assert _shard(tmp_path, 1).read_bytes() == b""
     assert not _shard(tmp_path, 2).exists()
+
+
+def test_fixed_recovery_refuses_a_complete_update_after_a_partial_one(
+    tmp_path: Path,
+) -> None:
+    writer = RolloutWriter(tmp_path, "mock")
+    writer.write(0, _records(0, 1))
+    writer.write(1, _records(1))
+    with pytest.raises(ValueError, match="complete steps follow it"):
+        RolloutWriter(tmp_path, "mock").recover_incomplete_fixed_tail(2)
 
 
 def test_fixed_recovery_without_a_partial_update_changes_nothing(

@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.pooling import reference
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
@@ -49,7 +49,9 @@ def test_every_pool_matches_its_script_forward_and_backward() -> None:
 def test_the_schedule_optimizer_and_accuracy_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/") | stored("best/"),
-        vision.schedule_record() | vision.optimizer_record() | vision.best_record(),
+        vision_reference.schedule_record()
+        | vision_reference.optimizer_record()
+        | vision_reference.best_record(),
     )
 
 
@@ -72,7 +74,7 @@ def test_two_updates_with_each_pool_match_the_script(name: str) -> None:
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def stored_settings() -> dict[str, torch.Tensor]:
@@ -100,7 +102,7 @@ def test_the_settings_golden_holds_every_pools_fork() -> None:
 def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
     assert_exact(
         {k: v for k, v in stored_settings().items() if "/lockstep/" not in k},
-        vision.task_settings_record(reference.SETTING_POOLS, tmp_path),
+        vision_reference.task_settings_record(reference.SETTING_POOLS, tmp_path),
     )
 
 

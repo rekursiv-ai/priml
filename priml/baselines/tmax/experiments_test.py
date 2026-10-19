@@ -241,6 +241,16 @@ def test_building_the_loop_refuses_an_inconsistent_config() -> None:
         config.make()
 
 
+def test_a_consistent_config_builds_the_loop(tmp_path: Path) -> None:
+    config = exp_smoke()
+    config.base_dir = tmp_path
+    loop = config.make()
+    try:
+        assert loop.working_dir == tmp_path / "runs" / "tmax" / "exp_smoke"
+    finally:
+        loop.close()
+
+
 def test_learner_settings_reach_the_live_runner(tmp_path: Path) -> None:
     """Non-default learner values, so a dropped push cannot hide behind a default."""
     config = exp000()

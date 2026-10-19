@@ -394,6 +394,60 @@ def test_main_logs_the_repr_of_a_config_without_pformat(
     assert "MockJob.Config(value=42))" in caplog.text
 
 
+class BareMakeable:
+    """A ``Makeable`` that is not a ``Fig``, so it has no ``pformat``."""
+
+    _finalized = False
+    parent_class = MockJob
+
+    def make(self) -> MockJob:
+        return MockJob(MockJob.Config())
+
+    def finalize(self) -> Self:
+        return self
+
+    def copy_tree(self, visited: dict[int, object] | None = None) -> Self:
+        del visited
+        return self
+
+    def update(
+        self,
+        source: object = None,
+        /,
+        *,
+        skip_missing: bool = False,
+        **kwargs: object,
+    ) -> Self:
+        del source, skip_missing, kwargs
+        return self
+
+    @override
+    def __repr__(self) -> str:
+        return "BareMakeable()"
+
+
+def bare_experiment() -> BareMakeable:
+    """Return a non-Fig ``Makeable``."""
+    return BareMakeable()
+
+
+def test_main_logs_the_repr_of_a_non_fig_config(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "priml.launch_test.bare_experiment"],
+    )
+    with caplog.at_level("INFO", logger="priml.launch"):
+        main()
+    assert (
+        "experiment config priml.launch_test.bare_experiment:\nBareMakeable()"
+        in caplog.text
+    )
+
+
 @pytest.mark.parametrize(
     ("cuda", "mps", "expected"),
     [(True, False, "fake-gpu"), (False, True, "mps"), (False, False, "cpu")],

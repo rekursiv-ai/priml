@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import json
+import re
 
 from numpy.typing import NDArray
 from torch import Tensor
@@ -145,6 +146,16 @@ def test_arc2_requires_resident_data_and_checkpoint_fields(tmp_path: Path) -> No
     state = {key: value for key, value in data.state_dict().items() if key != "passes"}
     with pytest.raises(KeyError):
         data.load_state_dict(state)
+
+
+def test_an_unprepared_split_names_its_missing_directory(tmp_path: Path) -> None:
+    data = Arc2Data.Config(working_dir=tmp_path, batch_size=2, device="cpu").make()
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=f"^no prepared ARC data at {re.escape(str(tmp_path / 'train'))}\\.$",
+    ):
+        data.train_dataloader()
 
 
 def test_eval_batches_preserve_rows_and_pad_every_field(tmp_path: Path) -> None:

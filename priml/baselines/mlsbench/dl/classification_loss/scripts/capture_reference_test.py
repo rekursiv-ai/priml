@@ -22,16 +22,14 @@ from priml.baselines.mlsbench.dl.classification_loss.upstream_test import (
     write_clone,
 )
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
+    capture_reference as vision_capture_reference,
 )
 from priml.testing.golden import mismatches, read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,6 +37,8 @@ if TYPE_CHECKING:
     from torch import nn
 
     import pytest
+
+_CWD: Final = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD.parent / "testdata"
 
@@ -98,7 +98,7 @@ def test_capture_assembles_both_sides_into_one_report(
         *,
         states: list[dict[str, torch.Tensor]],
     ) -> dict[str, torch.Tensor]:
-        states += [{"w": torch.zeros(2)}] * vision.STEPS
+        states += [{"w": torch.zeros(2)}] * vision_reference.STEPS
         return {name: torch.zeros(2)}
 
     monkeypatch.setattr(reference, "lockstep_record", lockstep)
@@ -109,7 +109,7 @@ def test_capture_assembles_both_sides_into_one_report(
         states: list[dict[str, torch.Tensor]] | None = None,
     ) -> dict[str, torch.Tensor]:
         if states is not None:
-            states += [{"w": torch.zeros(2)}] * vision.STEPS
+            states += [{"w": torch.zeros(2)}] * vision_reference.STEPS
         return {f"settings/{name}": torch.zeros(2)}
 
     monkeypatch.setattr(reference, "setting_lockstep_record", setting_lockstep)
@@ -131,7 +131,7 @@ def test_capture_assembles_both_sides_into_one_report(
     ) -> tuple[dict[str, torch.Tensor], list[str]]:
         return {"settings/x/draws": torch.zeros(2)}, ["settings/x/state: differs"]
 
-    monkeypatch.setattr(vision_capture, "compare_task_settings", settings)
+    monkeypatch.setattr(vision_capture_reference, "compare_task_settings", settings)
     captured = capture_reference.capture(*clone(tmp_path))
     setting_records = {
         f"settings/{setting}/{kind}/{name}/{field}"
@@ -167,12 +167,12 @@ def test_a_lockstep_run_that_matches_reports_nothing_and_one_that_drifts_is_name
     run = reference.lockstep_record
     record: dict[str, torch.Tensor] = {}
     lockstep = {"cross_entropy": (record, ours)}
-    assert vision_capture.compare_lockstep(lockstep, run=run) == []
+    assert vision_capture_reference.compare_lockstep(lockstep, run=run) == []
     drifted = [dict(state) for state in ours]
     weight = drifted[1]["stem.weight"].clone()
     weight.view(-1)[0] = torch.nextafter(weight.view(-1)[0], torch.tensor(torch.inf))
     drifted[1]["stem.weight"] = weight
-    assert vision_capture.compare_lockstep(
+    assert vision_capture_reference.compare_lockstep(
         {"cross_entropy": ({}, drifted)},
         run=run,
     ) == ["lockstep/cross_entropy/2: stem.weight: 1/108 differ"]
@@ -183,7 +183,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = vision.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -199,7 +199,7 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     tmp_path: Path,
 ) -> None:
     record = {"x": torch.arange(3)}
-    result = vision.Captured(record=record, sites={}, report=[])
+    result = vision_reference.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]

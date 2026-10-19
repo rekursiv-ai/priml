@@ -32,12 +32,12 @@ from priml.baselines.mlsbench.dl.vision import (
 from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-DATA: Final = _CWD / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
+
+_DATA: Final = _CWD / "testdata"
 
 
 SCRIPT: Final = '''\
@@ -388,7 +388,7 @@ def test_the_record_holds_every_key_the_port_writes(tmp_path: Path) -> None:
         for name, s in variants.items()
     }
     record = upstream.upstream_record(variants, traces, lockstep)
-    assert record.keys() == read_tensors(DATA / "reference.pt").keys()
+    assert record.keys() == read_tensors(_DATA / "reference.pt").keys()
     assert record["data/coarse_of_fine"].tolist()[:3] == [0, 1, 2]
 
 

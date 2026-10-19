@@ -14,8 +14,10 @@ from typing import Final
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import CEILING
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
+from priml.baselines.mlsbench.dl.vision.scripts import (
+    capture_reference as vision_capture_reference,
+)
 from priml.baselines.mlsbench.tl.poison_robust_learning import reference
 from priml.baselines.mlsbench.tl.poison_robust_learning.scripts import (
     capture_reference,
@@ -57,7 +59,7 @@ def test_both_evaluations_match_the_driver_on_fixed_logits() -> None:
 
 def test_the_evaluation_logits_are_signed_halves_with_one_tied_row() -> None:
     logits, label = reference.evaluate_logits()
-    assert logits.shape == (vision.LOADER_IMAGES, reference.FLIP_CLASSES)
+    assert logits.shape == (vision_reference.LOADER_IMAGES, reference.FLIP_CLASSES)
     assert torch.equal(logits * 2, (logits * 2).round())
     assert (float(logits.min()), float(logits.max())) == (-2.0, 2.0)
     # Row 2 ties its two largest, so argmax's first-index rule decides it.
@@ -98,7 +100,32 @@ def test_a_lockstep_run_hands_back_its_states_and_evaluated_images(
     # batch that holds a flip.
     images = sum(len(m) for m in media)
     assert images * 10 == len(record["lockstep/pristine/eval"])
-    assert images > vision.LOADER_IMAGES
+    assert images > vision_reference.LOADER_IMAGES
+
+
+def test_the_port_reaches_the_drivers_random_call_sites(tmp_path: Path) -> None:
+    assert_sites_reached(_DATA, tmp_path)
+
+
+def test_a_stored_driver_side_missing_a_required_site_fails(tmp_path: Path) -> None:
+    sites = vision_capture_reference.parse_sites(
+        (_DATA / "reference_sites.txt").read_text(),
+    )
+    sites["reference"] = {
+        k: v for k, v in sites["reference"].items() if "run_poison_robust.py" not in k
+    }
+    vision_capture_reference.write_sites(tmp_path, sites)
+    with pytest.raises(AssertionError, match="run_poison_robust"):
+        assert_sites_reached(tmp_path, tmp_path / "scratch")
+
+
+def assert_sites_reached(data: Path, scratch: Path) -> None:
+    """Require both stored sides to reach every site, and the port's to replay."""
+    sides = vision_capture_reference.parse_sites(
+        (data / "reference_sites.txt").read_text(),
+    )
+    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
+    assert capture_reference.port_sites(scratch) == sides["port"]
 
 
 def test_the_port_record_is_every_record_and_lockstep_run(
@@ -129,17 +156,8 @@ def test_the_port_record_is_every_record_and_lockstep_run(
     }
 
 
-def test_the_port_reaches_the_drivers_random_call_sites(tmp_path: Path) -> None:
-    sides: dict[str, dict[str, int]] = {"reference": {}, "port": {}}
-    for line in (_DATA / "reference_sites.txt").read_text().splitlines():
-        side, key, count = line.split()
-        sides[side][key] = int(count)
-    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
-    assert capture_reference.port_sites(tmp_path) == sides["port"]
-
-
 def test_the_golden_fits_the_size_ceiling() -> None:
-    assert (_DATA / "reference.pt").stat().st_size <= CEILING
+    assert (_DATA / "reference.pt").stat().st_size <= vision_capture_reference.CEILING
 
 
 def test_the_golden_bites_on_one_ulp_of_the_ports_gradient() -> None:

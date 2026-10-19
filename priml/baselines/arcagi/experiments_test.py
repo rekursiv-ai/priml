@@ -17,8 +17,9 @@ from typing import Final, cast
 
 import inspect
 import json
+import math
 
-from configgle import PartialConfig
+from configgle import InlineConfig, PartialConfig
 from pyarrow import parquet
 from torch import Tensor
 from treekle import from_plain, json_loads
@@ -33,6 +34,7 @@ from priml.baselines.arcagi.augmentation import (
     ArcSpec,
     SpatialAugmentation,
 )
+from priml.baselines.arcagi.checkpoint import CheckpointActTrainStep
 from priml.baselines.arcagi.data import ArcParquetData, PairSource, PuzzleData
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
@@ -464,6 +466,133 @@ def test_charm_global_batch_requires_integral_per_rank_batches() -> None:
     assert finalized.global_batch_size == 770
     with pytest.raises(ValueError, match="divisible"):
         finalized.make()
+
+
+def test_charm_rejects_a_nonpositive_global_batch() -> None:
+    config = experiments.exp009()
+    config.global_batch_size = 0
+
+    with pytest.raises(
+        ValueError,
+        match=r"^CHARM global_batch_size must be positive\.$",
+    ):
+        config.copy_tree().finalize().make()
+
+
+def test_charm_rejects_a_mesh_without_a_data_parallel_size() -> None:
+    config = experiments.exp009()
+    assert isinstance(config.runtime, MultiProcess.Config)
+    config.runtime.mesh_topology = {"pp": 1, "tp": 1}
+
+    with pytest.raises(
+        ValueError,
+        match=r"^CHARM requires an explicit positive data-parallel size\.$",
+    ):
+        config.copy_tree().finalize().make()
+
+
+def test_charm_rejects_an_unrecognized_runtime_without_sizing_batches() -> None:
+    config = experiments.exp009()
+    config.runtime = InlineConfig(SingleProcess, SingleProcess.Config(device="cpu"))
+
+    finalized = config.copy_tree().finalize()
+
+    assert finalized.dataset.batch_size == ArcParquetData.Config().batch_size
+    with pytest.raises(
+        TypeError,
+        match=r"^CHARM requires MultiProcess or SingleProcess runtime\.$",
+    ):
+        finalized.make()
+
+
+def test_charm_single_process_reaches_the_train_loop_checks() -> None:
+    """A valid single-process CHARM config hands off to TrainLoop's validation."""
+    config = experiments.exp009()
+    config.runtime = SingleProcess.Config(device="cpu")
+    config.global_batch_size = 4
+    config.max_steps = math.inf
+
+    with pytest.raises(ValueError, match=r"^TrainLoop has no finite stop condition"):
+        config.copy_tree().finalize().make()
+
+
+@pytest.mark.parametrize(
+    ("name", "parent", "factory"),
+    [
+        ("eval006", experiments.exp006, experiments.eval006),
+        ("eval009", experiments.exp009, experiments.eval009),
+        ("eval010", experiments.exp010, experiments.eval010),
+    ],
+    ids=["eval006", "eval009", "eval010"],
+)
+def test_evaluation_forks_only_load_weights_and_skip_training(
+    name: str,
+    parent: Callable[[], experiments.Arc1TrainLoop | experiments.CharmTrainLoop.Config],
+    factory: Callable[
+        [],
+        experiments.Arc1TrainLoop | experiments.CharmTrainLoop.Config,
+    ],
+) -> None:
+    base, fork = parent(), factory()
+    assert isinstance(fork.step, CheckpointActTrainStep.Config)
+    assert fork.eval_only is True
+    assert fork.checkpointer is None
+    assert isinstance(fork.tracker, FileTracker.Config)
+    assert fork.experiment_name == name
+    base.step = CheckpointActTrainStep.Config().update(base.step)
+    if fork.step.ema_initialization is None:
+        base.step.ema_initialization = None
+    base.experiment_name = fork.experiment_name
+    base.eval_only = True
+    base.eval_warmup_batches = fork.eval_warmup_batches
+    base.checkpointer = None
+    base.tracker = FileTracker.Config()
+    assert base.pformat() == fork.pformat()
+
+
+def test_charm_ema_update_keeps_the_source_operation_order() -> None:
+    ema = experiments.exp009().step.ema
+    assert isinstance(ema, EMA.Config)
+    assert ema.update_fn is not None
+    shadow = torch.tensor([1.0, 3.0], dtype=torch.float64)
+    live = torch.tensor([5.0, -1.0], dtype=torch.float64)
+
+    ema.update_fn(shadow, live, 0.75)
+
+    assert shadow.tolist() == [0.25 * 5.0 + 0.75 * 1.0, 0.25 * -1.0 + 0.75 * 3.0]
+
+
+@pytest.mark.parametrize(("rank", "lm_loss"), [(0, 4.0), (1, 2.0)])
+def test_charm_source_metrics_sum_across_ranks_on_rank_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+    lm_loss: float,
+) -> None:
+    """Rank 0 reports the reduced sums; other ranks keep their local values."""
+    distributed = torch.distributed
+
+    def reduce(values: Tensor, *, dst: int, op: object) -> None:
+        del op
+        assert dst == 0
+        values.mul_(2)
+
+    monkeypatch.setattr(distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(distributed, "get_rank", lambda: rank)
+    monkeypatch.setattr(distributed, "reduce", reduce)
+    metrics = {
+        "accuracy": 2.0,
+        "count": 4.0,
+        "exact_accuracy": 0.0,
+        "lm_loss": 8.0,
+        "q_halt_accuracy": 0.0,
+        "q_halt_loss": 0.0,
+        "steps": 0.0,
+    }
+
+    reported = experiments._report_source_act_metrics(metrics, global_batch_size=4)
+
+    assert reported["lm_loss"] == lm_loss
 
 
 def test_charm_rejects_non_data_parallel_mesh_dimensions() -> None:

@@ -224,6 +224,12 @@ def test_the_package_fill_is_negative_infinity() -> None:
     ]
 
 
+def test_causal_chunk_mask_is_none_when_query_and_key_lengths_match() -> None:
+    """The square case is the one ``is_causal`` already handles."""
+    q = torch.zeros(2, 4, 3, 5)
+    assert causal_chunk_mask(q, q) is None
+
+
 def test_fully_masked_row_semantics_differ_by_fill() -> None:
     """Pin the softmax behaviour the fill convention rests on.
 

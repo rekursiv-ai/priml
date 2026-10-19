@@ -17,8 +17,11 @@ import torch
 from priml.baselines.craftax.world_model.archive import (
     Episode,
     Receipt,
+    ReplayEpisode,
+    read_corpus,
     read_summaries,
     write_corpus,
+    write_replay_shard,
     write_shard,
 )
 from priml.baselines.craftax.world_model.batch import (
@@ -45,7 +48,9 @@ from priml.baselines.craftax.world_model.index import (
     ShardIndex,
     build_index,
     decision_strata,
+    floor_trace,
 )
+from priml.baselines.craftax.world_model.snapshots import ReplayCache
 
 
 def _episode(
@@ -228,6 +233,16 @@ def test_episode_cache_evicts_least_recently_used_beyond_its_decisions(
     assert cache.resident == [(0, 1), (0, 2)]
     cache.get(0, 0)
     assert cache.resident == [(0, 0)]
+
+
+def test_episode_cache_drops_each_episodes_capture_summary(tmp_path: Path) -> None:
+    # Packing never reads it, and a long capture's summaries would fill memory.
+    episodes = [
+        dataclasses.replace(_episode(5, tag=t), summary={"episode": t}) for t in (1, 2)
+    ]
+    cache = _cache(tmp_path, episodes)
+    assert [cache.get(0, e).episode.summary for e in range(2)] == [{}, {}]
+    assert cache.decisions(0, 1) == 5
 
 
 def test_episode_cache_holds_exactly_its_capacity(tmp_path: Path) -> None:
@@ -741,6 +756,159 @@ def test_prefetch_thread_pins_on_the_consumers_gpu(
         prefetch._fill(ready, threading.Event(), 0)
     assert current == [torch.device("cuda", 3)]
     assert ready.qsize() == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("windows", 0, "windows and s_max"),
+        ("s_max", 0, "windows and s_max"),
+        ("t_g", 1, "t_g at least 2"),
+        ("micro_batches_per_step", 0, "micro_batches_per_step"),
+        ("cached_decisions", 0, "cached_decisions"),
+        ("count_multiple", 0, "count_multiple"),
+    ],
+)
+def test_a_stream_refuses_an_empty_geometry_or_budget(
+    tmp_path: Path,
+    name: str,
+    value: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _stream(_corpus(tmp_path), **{name: value})
+
+
+def test_a_shard_holding_both_splits_is_refused(tmp_path: Path) -> None:
+    mixed = tmp_path / "train" / "0" / "w0"
+    mixed.mkdir(parents=True)
+    episodes = [_episode(4, tag=1), _episode(4, tag=2, split=1)]
+    line = write_shard(mixed, index=0, episodes=episodes, provenance={})
+    write_corpus(tmp_path / "corpora" / "tiny.json", entries=[(mixed, line)])
+    with pytest.raises(ValueError, match="mixes splits"):
+        _stream(tmp_path)
+
+
+def test_a_corpus_without_validation_shards_is_refused(tmp_path: Path) -> None:
+    train = tmp_path / "train" / "0" / "w0"
+    train.mkdir(parents=True)
+    line = write_shard(train, index=0, episodes=[_episode(4)], provenance={})
+    write_corpus(tmp_path / "corpora" / "tiny.json", entries=[(train, line)])
+    with pytest.raises(ValueError, match="needs training and validation shards"):
+        _stream(tmp_path)
+
+
+@pytest.mark.parametrize("frames_too", [False, True], ids=["replay", "mixed"])
+def test_a_split_of_replay_shards_is_served_by_replay_alone(
+    tmp_path: Path,
+    *,
+    frames_too: bool,
+) -> None:
+    root = _corpus(tmp_path)
+    corpus = root / "corpora" / "tiny.json"
+    train = root / "train" / "0" / "w1"
+    train.mkdir(parents=True)
+    replayed = _episode(6, tag=4)
+    line = write_replay_shard(
+        train,
+        index=0,
+        episodes=[
+            ReplayEpisode(
+                receipt=replayed.receipt,
+                actions=replayed.actions,
+                hashes=replayed.hashes,
+                snapshots=b"",
+                floors=floor_trace(
+                    aux=replayed.aux,
+                    reward=replayed.reward,
+                    done=replayed.done,
+                ),
+                summary={},
+            ),
+        ],
+        stride=256,
+        provenance={},
+    )
+    framed = [entry for entry in read_corpus(corpus) if entry[0].parts[-3] == "val"]
+    if frames_too:
+        framed += [
+            entry for entry in read_corpus(corpus) if entry[0].parts[-3] == "train"
+        ]
+    write_corpus(corpus, entries=[(train, line), *framed])
+    if frames_too:
+        with pytest.raises(ValueError, match="mixes frame and replay shards"):
+            _stream(root)
+        return
+    stream = _stream(root)
+    assert isinstance(stream.train_cache, ReplayCache)
+    assert isinstance(stream.eval_cache, EpisodeCache)
+
+
+def test_eval_spans_refuse_an_index_whose_runs_do_not_tile_its_episodes(
+    tmp_path: Path,
+) -> None:
+    episodes = [_episode(10, split=1)]
+    index = build_index(episodes)
+    short = dataclasses.replace(index, span_length=index.span_length - 1)
+    with pytest.raises(ValueError, match="must tile episodes"):
+        EvalSpans(
+            EvalSpans.Config(spans=2, span_decisions=4),
+            indexes=[short],
+            cache=_cache(tmp_path, episodes),
+            t_g=16,
+            s_max=4,
+            windows=1,
+        )
+
+
+class _FullOnce(queue.Queue[_Item | BaseException | None]):
+    """A queue whose first put finds no room, as when the consumer is behind."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refused = 0
+
+    @override
+    def put(
+        self,
+        item: _Item | BaseException | None,
+        block: bool = True,
+        timeout: float | None = None,
+    ) -> None:
+        if not self.refused:
+            self.refused += 1
+            raise queue.Full
+        super().put(item, block=block, timeout=timeout)
+
+
+def test_the_prefetch_thread_retries_a_full_queue_until_there_is_room(
+    tmp_path: Path,
+) -> None:
+    stream = _stream(_corpus(tmp_path))
+    prefetch = _Stream(
+        stream._train_batch,
+        first=0,
+        count=1,
+        device=torch.device("cpu"),
+    )
+    ready = _FullOnce()
+    prefetch._fill(ready, threading.Event(), 0)
+    assert ready.refused == 1
+    # The batch, then the end of the stream.
+    assert ready.qsize() == 2
+
+
+def test_training_spans_dropped_inside_the_split_are_refused(tmp_path: Path) -> None:
+    spans = EvalSpans.Config(spans=6, span_decisions=4)
+    stream = _stream(_corpus(tmp_path), validation=spans, train_spans=spans)
+    with stream.training_split():
+        batches = stream.eval_dataloader()
+        stream.train_spans = None
+        with pytest.raises(ValueError, match=r"Expected self\.train_spans"):
+            stream.eval_dataloader()
+        # A loader made before the spans were dropped fails at its first batch.
+        with pytest.raises(ValueError, match=r"Expected self\.train_spans"):
+            next(batches)
 
 
 def test_training_split_needs_its_spans(tmp_path: Path) -> None:

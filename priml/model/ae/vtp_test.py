@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final
 
 import json
+import math
 
 from safetensors.torch import save_file
 from torch import Tensor, nn
@@ -538,6 +539,21 @@ def test_config_needs_a_half() -> None:
         _ = config.latent_shape()
     with pytest.raises(ValueError, match="needs an encoder or a decoder"):
         _ = config.make()
+
+
+def test_halves_removed_while_validating_statistics_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tiny()
+    real_isnan = math.isnan
+
+    def isnan_dropping_halves(value: float) -> bool:
+        config.encoder = config.decoder = None
+        return real_isnan(value)
+
+    monkeypatch.setattr(math, "isnan", isnan_dropping_halves)
+    with pytest.raises(ValueError, match=r"Expected config\.decoder is not None\."):
+        VTP(config)
 
 
 def test_a_decoder_alone_reads_its_latent_shape_from_the_upscale() -> None:

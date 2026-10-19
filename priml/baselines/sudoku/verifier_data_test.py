@@ -311,6 +311,17 @@ def test_swaps_with_no_pairs_return_the_candidate_untouched() -> None:
     assert out is candidate
 
 
+def test_swaps_of_an_empty_batch_return_the_candidate_itself() -> None:
+    candidate = torch.zeros(0, 9, dtype=torch.int64)
+    out = _swap_cells(
+        candidate,
+        torch.zeros(0, 9, dtype=torch.bool),
+        pairs=torch.tensor([2]),
+        generator=torch.Generator().manual_seed(0),
+    )
+    assert out is candidate
+
+
 @pytest.mark.parametrize("steps", [0, -1])
 def test_verifier_data_rejects_a_nonpositive_epoch(steps: int) -> None:
     """``VerifierFit.run`` would otherwise loop forever on an empty epoch."""

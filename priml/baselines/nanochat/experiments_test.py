@@ -170,6 +170,20 @@ def test_exp023_changes_only_the_prepared_inputs() -> None:
     )
 
 
+def _returning[T](value: T) -> T:
+    return value
+
+
+def test_exp023_refuses_a_parent_without_reference_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp022()
+    parent.dataset.reference_evaluation = None
+    monkeypatch.setattr(experiments, "exp022", partial(_returning, parent))
+    with pytest.raises(ValueError, match="Expected reference is not None"):
+        experiments.exp023()
+
+
 def test_exp024_changes_only_the_budget() -> None:
     changed = experiments.exp024()
     assert changed.max_time == changed.step.train_budget_sec == 300.0
@@ -534,6 +548,18 @@ def test_the_budget_never_stops_a_run_mid_accumulation() -> None:
     assert not loop._time_limit_reached()
     step._pending_passes = 0
     assert loop._time_limit_reached()
+
+
+def test_the_loop_charges_batch_loading_to_the_steps_budget() -> None:
+    """The reference's clock brackets its loader, so loading is billed too."""
+    loop = NanoChatLoop.__new__(NanoChatLoop)
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.config = NanoChatTrainStep.Config(budget_warmup_steps=0)
+    step.elapsed_sec = 12.5
+    step._steps_this_process = 0
+    loop.step = step
+    loop._on_batch_ready(0.25)
+    assert step.elapsed_sec == 12.75
 
 
 def test_the_dataset_batch_follows_the_steps_pass_size() -> None:

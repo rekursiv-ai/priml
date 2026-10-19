@@ -19,7 +19,7 @@ from priml.testing.golden import assert_text_golden
 
 
 if TYPE_CHECKING:
-    from priml.model.custom_types import DepthIndex
+    from priml.model.custom_types import DepthIndex, LayerCache
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -371,6 +371,37 @@ def test_alloc_layer_cache_gives_a_gated_attention_one_slot_for_its_inner() -> N
 def test_alloc_layer_cache_rejects_an_empty_depth_index() -> None:
     with pytest.raises(ValueError, match="empty depth_index"):
         alloc_layer_cache(_attention(()), batch=2, max_seq=5)
+
+
+class _NoDepthIndex(nn.Module):
+    """A cached attention that never states where it sits in the stack."""
+
+    @override
+    def forward(self, x: Tensor, *, cache: LayerCache, **kwargs: object) -> Tensor:
+        del cache, kwargs
+        return x
+
+    def alloc_kv_cache(
+        self,
+        *,
+        batch: int | tuple[int, ...],
+        max_seq: int,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> KVCache:
+        return KVCache.alloc(
+            batch=batch,
+            num_heads=2,
+            max_seq=max_seq,
+            channels_head=4,
+            device=device,
+            dtype=dtype,
+        )
+
+
+def test_alloc_layer_cache_rejects_a_cached_attention_without_a_depth_index() -> None:
+    with pytest.raises(TypeError, match=r"_NoDepthIndex\[0\] has no depth_index"):
+        alloc_layer_cache(_NoDepthIndex(), batch=2, max_seq=5)
 
 
 def test_alloc_layer_cache_rejects_a_duplicate_depth_index() -> None:

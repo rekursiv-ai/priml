@@ -68,6 +68,43 @@ if TYPE_CHECKING:
     from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 
+FIRST: Final = "resnet20-cifar10-badnets"
+"""The setting ``exp000`` and every baseline run at."""
+
+VARIANTS: Final[dict[str, Callable[[], BackdoorTrainLoop.Config]]] = {
+    "pristine": exp000,
+    "confidence_filter": exp001,
+    "spectral_signature": exp002,
+    "activation_clustering": exp003,
+    "zscore_outlier": exp004,
+}
+"""The experiment carrying each defense, keyed as the driver's variants."""
+
+TRIGGERS: Final[dict[str, TriggerFn]] = {"badnets": badnets, "blend": blend}
+"""The port's trigger for each ``--trigger``."""
+
+STATS: Final = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+"""CIFAR-10's channel means and deviations, which the triggers are run with."""
+
+POISON_IMAGES: Final = 43
+"""Labels :func:`poison_labels` holds; each setting's fraction poisons another count."""
+
+DEFENSE_FRACTION: Final = 0.25
+"""Poisoned fraction each defense is told on :func:`defense_inputs`."""
+
+DEFENSE_SUBSET: Final = 9
+"""Images of the second scoring, shorter than the fit split, which takes predictions."""
+
+LOADER_FRACTION: Final = 0.3
+"""Poisoned fraction of the loader runs: two of the seven synthetic images."""
+
+MAIN_IMAGES: Final = 40
+"""Images of each split ``main`` is run on: two poisoned at 5%, three at 8%."""
+
+EPOCHS_MAIN: Final = 20
+"""Epochs ``main`` is run for; it evaluates after epochs 1, 10 and 20, as the port does."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Setting:
     """One of the task's settings: the driver's flags and the port's experiment."""
@@ -128,42 +165,6 @@ SETTINGS: Final = {
 }
 """The task's settings, keyed by its own labels."""
 
-FIRST: Final = "resnet20-cifar10-badnets"
-"""The setting ``exp000`` and every baseline run at."""
-
-VARIANTS: Final[dict[str, Callable[[], BackdoorTrainLoop.Config]]] = {
-    "pristine": exp000,
-    "confidence_filter": exp001,
-    "spectral_signature": exp002,
-    "activation_clustering": exp003,
-    "zscore_outlier": exp004,
-}
-"""The experiment carrying each defense, keyed as the driver's variants."""
-
-TRIGGERS: Final[dict[str, TriggerFn]] = {"badnets": badnets, "blend": blend}
-"""The port's trigger for each ``--trigger``."""
-
-STATS: Final = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-"""CIFAR-10's channel means and deviations, which the triggers are run with."""
-
-POISON_IMAGES: Final = 43
-"""Labels :func:`poison_labels` holds; each setting's fraction poisons another count."""
-
-DEFENSE_FRACTION: Final = 0.25
-"""Poisoned fraction each defense is told on :func:`defense_inputs`."""
-
-DEFENSE_SUBSET: Final = 9
-"""Images of the second scoring, shorter than the fit split, which takes predictions."""
-
-LOADER_FRACTION: Final = 0.3
-"""Poisoned fraction of the loader runs: two of the seven synthetic images."""
-
-MAIN_IMAGES: Final = 40
-"""Images of each split ``main`` is run on: two poisoned at 5%, three at 8%."""
-
-EPOCHS_MAIN: Final = 20
-"""Epochs ``main`` is run for; it evaluates after epochs 1, 10 and 20, as the port does."""
-
 
 def python_fingerprint(state: tuple[object, ...]) -> Tensor:
     """Return the next eight 31-bit draws of a Python generator in ``state``, unadvanced."""
@@ -194,20 +195,29 @@ def trigger_media() -> Tensor:
     return ((torch.arange(2 * 3 * 5 * 6) * 11 % 49 - 24) / 8).reshape(2, 3, 5, 6)
 
 
-def defense_inputs() -> tuple[
+def defense_inputs(
+    name: str = "pristine",
+) -> tuple[
     NDArray[np.float32],
     NDArray[np.float32],
     NDArray[np.int64],
 ]:
-    """Return 13 images' features, logits and labels for the defenses.
+    """Return 13 images' features, logits and labels for a variant's defense.
 
     Class 0 has six images, class 1 four, class 2 two and class 3 one, so the
-    small-class branches are reached; classes 0 and 1 each have one outlier.
-    Each class's features vary along one axis, so its top singular vector is
-    that axis and its norms are exact: an SVD or norm of features that span
-    more directions rounds differently under each OpenBLAS kernel, as the
-    driver's own does. Features are eighths, logits multiples of 1/256 whose
-    rows' top probabilities differ.
+    small-class branches are reached. Features are eighths, logits multiples of
+    1/256 whose rows' top probabilities differ.
+
+    Spectral signatures and activation clustering take an SVD or norms, which
+    round differently under each OpenBLAS kernel, as the driver's own do,
+    unless each class's features vary along one axis: then its top singular
+    vector is that axis and its norms are exact. Classes 0 and 1 each have an
+    outlier along it. The other defenses take means and deviations only, so
+    they get features that spread along every axis, which a z-score of a
+    constant feature, divided by nothing but its epsilon, would not test.
+
+    Args:
+      name: A key of :data:`VARIANTS`.
 
     Returns:
       features: ``(13, 3)`` float32.
@@ -215,6 +225,13 @@ def defense_inputs() -> tuple[
       labels: ``(13,)`` int64.
 
     """
+    steps = np.arange(13 * 4)
+    # A ramp linear in the step would shift rows by a constant, which softmax ignores.
+    logits = ((steps * 23 % 53 - 26) / 8 + steps**2 / 256).reshape(13, 4)
+    labels = np.array([0, 1, 0, 2, 0, 1, 0, 3, 1, 0, 2, 1, 0], dtype=np.int64)
+    if name not in {"spectral_signature", "activation_clustering"}:
+        features = (np.arange(13 * 3) * 17 % 41 - 13).reshape(13, 3) / 8
+        return features.astype(np.float32), logits.astype(np.float32), labels
     features = (
         np.array(
             [
@@ -235,10 +252,6 @@ def defense_inputs() -> tuple[
         )
         / 8
     )
-    steps = np.arange(13 * 4)
-    # A ramp linear in the step would shift rows by a constant, which softmax ignores.
-    logits = ((steps * 23 % 53 - 26) / 8 + steps**2 / 256).reshape(13, 4)
-    labels = np.array([0, 1, 0, 2, 0, 1, 0, 3, 1, 0, 2, 1, 0], dtype=np.int64)
     return features.astype(np.float32), logits.astype(np.float32), labels
 
 
@@ -290,7 +303,7 @@ def setting_data(
       fraction: Poisoned fraction.
 
     Returns:
-      data: The dataset, its batches :data:`vision.LOADER_BATCH` images.
+      data: The dataset, its batches :data:`reference.LOADER_BATCH` images.
 
     """
     media, label = split
@@ -351,9 +364,9 @@ def defense_record() -> dict[str, Tensor]:
         ``defense/<variant>/subset``.
 
     """
-    features, logits, labels = defense_inputs()
     record: dict[str, Tensor] = {}
     for name, factory in VARIANTS.items():
+        features, logits, labels = defense_inputs(name)
         defense = factory().defense.make()
         with host_agnostic_numerics():
             defense.fit(features, labels, DEFENSE_FRACTION)
@@ -610,6 +623,40 @@ def filter_record(
             dtype=torch.float64,
         )
     return record
+
+
+def poison_at_tied_cut(
+    record: Mapping[str, Tensor],
+    *,
+    setting: str = FIRST,
+) -> list[str]:
+    """Report each filter whose cut splits tied scores of poisoned and clean images.
+
+    NumPy's default sort orders tied scores by the host's SIMD kernel, so which
+    of the tied images the filter removes is the host's. That moves only the
+    kept positions unless the tie holds both poisoned and clean images, when it
+    moves the recall too.
+
+    Args:
+      record: ``filter/<variant>/{scores,kept}`` of :func:`filter_record`, and
+        ``main/<setting>/is_poison``, which images carry the backdoor.
+      setting: A key of :data:`SETTINGS`, the one the filter ran at.
+
+    Returns:
+      report: One line per variant whose recall is the host's.
+
+    """
+    is_poison = record[f"main/{setting}/is_poison"]
+    report: list[str] = []
+    for name in VARIANTS:
+        scores = record[f"filter/{name}/scores"]
+        kept = torch.zeros_like(is_poison, dtype=torch.bool)
+        kept[record[f"filter/{name}/kept"]] = True
+        tied = scores == scores[~kept].min()
+        poisoned = is_poison.bool()[tied]
+        if tied[kept].any() and poisoned.any() and not poisoned.all():
+            report.append(f"filter/{name}: a poisoned image is tied at the cut")
+    return report
 
 
 def loader_batches(setting: str, directory: Path) -> tuple[Batches, Batches]:

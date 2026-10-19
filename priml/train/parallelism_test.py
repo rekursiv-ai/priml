@@ -13,6 +13,7 @@ import tempfile
 
 from torch import Tensor, nn
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 
 import pytest
@@ -334,6 +335,15 @@ def test_sum_gradients_keeps_the_single_process_identity(
         assert gradient is not None
         values.append(gradient.flatten()[0].item())
     assert values == [1, 2, 3, 4]
+
+
+def test_sum_gradients_requires_a_mesh_under_distributed_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: None)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    with pytest.raises(RuntimeError, match="requires a device mesh"):
+        SumGradients.Config().make()
 
 
 def test_sum_gradients_reduces_different_local_gradient_masks(
@@ -1039,6 +1049,32 @@ def test_strategies_train_after_an_inference_forward(
     assert len(results) == math.prod(mesh_dims.values()), results
     assert "None" not in results["rank_0"], "A parameter received no gradient."
     assert len(set(results.values())) == 1, "Ranks disagree on the gradient."
+
+
+def test_fully_sharded_one_rank_trains_after_an_inference_forward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-allocated unshard buffers let a training forward follow an inference one."""
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
+    try:
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
+        monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+        torch.manual_seed(0)
+        model = FullySharded.Config().make()(_TwoLinear())
+        x = torch.ones(2, 8)
+        with torch.inference_mode():
+            model(x)
+        cast(Tensor, model(x)).sum().backward()
+        grads = [_whole_grad(p) for p in model.parameters()]
+    finally:
+        dist.destroy_process_group()
+    assert all(grad is not None for grad in grads)
 
 
 def test_tensor_parallel_lives_in_lib() -> None:

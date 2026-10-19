@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.tl.backdoor_defense import reference
 from priml.testing.golden import mismatches, read_tensors
@@ -51,6 +51,17 @@ def test_both_triggers_stamp_the_drivers_pixels() -> None:
     assert_exact(stored("trigger/"), reference.trigger_record())
 
 
+def test_z_score_inputs_spread_on_every_axis_and_svd_inputs_on_one() -> None:
+    spread, _, labels = reference.defense_inputs("zscore_outlier")
+    axial, _, _ = reference.defense_inputs("spectral_signature")
+    classes = torch.from_numpy(labels)
+    for cls in classes.unique():
+        mask = (classes == cls).numpy()
+        varying = (torch.from_numpy(spread[mask]).std(dim=0, correction=0) > 0).sum()
+        assert varying == (3 if mask.sum() > 1 else 0)
+        assert (torch.from_numpy(axial[mask]).std(dim=0, correction=0) > 0).sum() <= 1
+
+
 def test_every_defense_scores_as_the_drivers_variant_does() -> None:
     expected = stored("defense/")
     assert {k.split("/")[1] for k in expected} == set(reference.VARIANTS)
@@ -78,11 +89,34 @@ def test_every_defense_filters_mains_features_as_the_driver_does() -> None:
     assert_exact(expected, actual)
 
 
-def test_activation_clusterings_cut_falls_among_tied_scores() -> None:
-    record = stored("filter/activation_clustering/")
+def test_activation_clusterings_cut_falls_among_tied_clean_scores() -> None:
+    record = stored("filter/") | stored(f"main/{reference.FIRST}/is_poison")
     scores = record["filter/activation_clustering/scores"]
     removed = reference.MAIN_IMAGES - len(record["filter/activation_clustering/kept"])
     assert (scores == scores.max()).sum() > removed
+    assert reference.poison_at_tied_cut(record) == []
+
+
+def test_a_cut_through_a_tie_of_poisoned_and_clean_images_is_reported() -> None:
+    # Images 1 and 2 tie at 2.0; the cut removes one of them.
+    scores = torch.tensor([0.0, 2.0, 2.0, 1.0], dtype=torch.float64)
+    record = {
+        f"filter/{name}/{key}": value
+        for name in reference.VARIANTS
+        for key, value in (("scores", scores), ("kept", torch.tensor([0, 2, 3])))
+    }
+    reported = [
+        f"filter/{name}: a poisoned image is tied at the cut"
+        for name in reference.VARIANTS
+    ]
+    key = f"main/{reference.FIRST}/is_poison"
+    for poison in ([0, 1, 0, 0], [0, 0, 1, 0]):
+        record[key] = torch.tensor(poison, dtype=torch.uint8)
+        assert reference.poison_at_tied_cut(record) == reported
+    # Both tied images poisoned, or neither: either order gives one recall.
+    for poison in ([0, 1, 1, 0], [0, 0, 0, 1]):
+        record[key] = torch.tensor(poison, dtype=torch.uint8)
+        assert reference.poison_at_tied_cut(record) == []
 
 
 def test_two_updates_match_the_drivers_train_epoch() -> None:
@@ -111,9 +145,32 @@ def test_main_evaluates_after_the_first_every_tenth_and_the_last_epoch() -> None
 def test_the_lockstep_hands_back_the_state_after_each_update() -> None:
     states: list[dict[str, torch.Tensor]] = []
     _ = reference.lockstep_record(states=states)
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     first, second = (state["head.weight"] for state in states)
     assert not torch.equal(first, second)
+
+
+@pytest.mark.parametrize(
+    ("dataset", "shape"),
+    [("fmnist", (1, 28, 28)), ("cifar10", (3, 32, 32)), ("cifar100", (3, 32, 32))],
+)
+def test_the_main_split_has_the_datasets_shape_and_distinct_images(
+    dataset: str,
+    shape: tuple[int, int, int],
+) -> None:
+    media, label = reference.main_split(dataset)
+    assert media.dtype == torch.uint8
+    assert media.shape == (reference.MAIN_IMAGES, *shape)
+    assert label.tolist() == reference.main_labels()
+    assert label.tolist()[:12] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1]
+    assert len({tuple(image.flatten().tolist()) for image in media}) == len(media)
+    assert media[0].flatten()[:3].tolist() == [0, 37, 74]
+    assert media[1].flatten()[:3].tolist() == [101, 138, 175]
+
+
+def test_an_optimizers_first_group_is_the_one_whose_settings_are_read() -> None:
+    first, second = {"lr": 0.1}, {"lr": 0.2}
+    assert reference.optimizer_group([first, second]) is first
 
 
 def test_decoding_rejects_an_image_that_is_no_crop_of_any_source() -> None:
@@ -147,7 +204,7 @@ def test_the_port_record_joins_every_component(
         "decode_record",
     ):
         monkeypatch.setattr(reference, name, fake(name))
-    monkeypatch.setattr(vision, "setting_record", fake("setting_record"))
+    monkeypatch.setattr(vision_reference, "setting_record", fake("setting_record"))
     record = reference.port_record(tmp_path)
     for setting in reference.SETTINGS:
         assert f"main_record/{(setting,)}" in record
@@ -183,17 +240,14 @@ def test_each_full_network_initializes_and_runs_as_the_driver(setting: str) -> N
     spec = reference.SETTINGS[setting]
     assert_exact(
         stored(f"settings/{setting}/", "reference_networks.pt"),
-        vision.setting_record(spec.vision, spec.factory, key=setting),
+        vision_reference.setting_record(spec.vision, spec.factory, key=setting),
     )
 
 
 def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    lines = (_DATA / "reference_sites.txt").read_text().splitlines()
-    expected = {
-        key: int(count)
-        for side, key, count in (line.split() for line in lines)
-        if side == "port"
-    }
+    expected = capture_reference.parse_sites(
+        (_DATA / "reference_sites.txt").read_text(),
+    )["port"]
     assert expected
     assert reference.draw_sites(tmp_path) == expected
 

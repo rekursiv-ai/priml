@@ -108,6 +108,30 @@ def test_every_case_seed_and_recipe_is_run_labelled_and_recorded(
     assert "seed=8," in (directory / "mismatched-exp000-8.txt").read_text()
 
 
+def test_a_nonzero_data_offset_names_its_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        comparison,
+        "subprocess",
+        SimpleNamespace(check_output=partial(_record_git, calls=[])),
+    )
+    monkeypatch.setattr(ForecastStudy, "run", _canned_run)
+    directory = tmp_path / "run"
+    argv = ["--directory", str(directory), "--experiments", "exp_smoke"]
+    assert (
+        comparison.main([*argv, "--seeds", "7", "--data-seed-offsets", "0", "1000"])
+        == 0
+    )
+    assert sorted(path.name for path in directory.glob("*.txt")) == [
+        "matched-exp_smoke-7-data1000.txt",
+        "matched-exp_smoke-7.txt",
+        "mismatched-exp_smoke-7-data1000.txt",
+        "mismatched-exp_smoke-7.txt",
+    ]
+
+
 def _record_git(
     command: list[str],
     *,

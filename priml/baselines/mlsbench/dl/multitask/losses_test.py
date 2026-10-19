@@ -68,6 +68,13 @@ def test_dwa_moves_a_restored_history_to_the_losses_device() -> None:
     assert loss.device == meta
 
 
+def test_dwa_refuses_a_restored_history_that_is_not_a_tensor() -> None:
+    dwa = DynamicWeightAverage.Config().make()
+    with pytest.raises(ValueError, match="state is None or isinstance"):
+        dwa.set_extra_state([1.0, 2.0])
+    assert dwa.prev_losses is None
+
+
 def test_pcgrad_leaves_agreeing_gradients_summed() -> None:
     w = torch.tensor([1.0, 2.0], requires_grad=True)
     module = PCGrad.Config().make()

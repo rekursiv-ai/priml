@@ -18,12 +18,13 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.upstream import hidden_accelerators
 from priml.baselines.mlsbench.tl.machine_unlearning import reference, upstream
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -266,7 +267,7 @@ def test_every_variant_is_loaded_and_the_edits_replace_the_class(
     assert record["methods/s/probe"].shape == (
         len(reference.SCHEDULE),
         2,
-        vision.CLASSES,
+        vision_reference.CLASSES,
     )
 
 
@@ -312,6 +313,42 @@ def test_main_notices_a_drawn_numpy_generator(tmp_path: Path) -> None:
     assert not untouched
 
 
+class _MaxStepsMethod:
+    """A SCRUB-shaped method reporting its max-step epochs as its loss."""
+
+    def __init__(self) -> None:
+        self.msteps = 5
+
+    def unlearn_step(  # noqa: PLR0917 -- The harness passes these six positionally.
+        self,
+        model: torch.nn.Module,
+        retain_batch: tuple[torch.Tensor, torch.Tensor],
+        forget_batch: tuple[torch.Tensor, torch.Tensor],
+        optimizer: torch.optim.Optimizer,
+        step: int,
+        epoch: int,
+    ) -> dict[str, float]:
+        """Report the max-step epochs in force as the loss."""
+        del model, retain_batch, forget_batch, optimizer, step, epoch
+        return {"loss": float(self.msteps)}
+
+
+class _MaxStepsModule:
+    """A method file whose class carries SCRUB's ``msteps``."""
+
+    def __init__(self) -> None:
+        self.UnlearningMethod: Callable[[], upstream.Method] = _MaxStepsMethod
+
+
+def test_main_shortens_scrubs_max_steps_to_the_tiny_run(tmp_path: Path) -> None:
+    script, _ = loaded(tmp_path)
+    with hidden_accelerators():
+        trace, _ = upstream.upstream_main(script, _MaxStepsModule())
+    assert [s.loss for s in trace.steps] == [
+        float(reference.TINY_SCRUB_MAX_EPOCHS),
+    ] * reference.TINY_UNLEARN_EPOCHS
+
+
 def test_evaluation_scores_the_fixed_network_and_scores(tmp_path: Path) -> None:
     script, _ = loaded(tmp_path)
     record = upstream.upstream_evaluation(script)
@@ -332,8 +369,8 @@ def test_the_full_network_is_built_by_the_harness_from_the_seed(tmp_path: Path) 
         f"settings/{key}/eval",
     }
     assert record[f"settings/{key}/train"].shape == (
-        vision.PROBE_SHAPE[0],
-        vision.CLASSES,
+        vision_reference.PROBE_SHAPE[0],
+        vision_reference.CLASSES,
     )
     assert list(state) == [
         "conv.weight",

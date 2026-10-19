@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import functools
@@ -56,6 +56,7 @@ FORWARDS: Final = 4
 """Training forwards of each standalone block, so a random block shows both outcomes."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``dl-residual-connection`` script the capture uses."""
 
@@ -106,7 +107,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
     for script in scripts.values():
         script.BasicBlock = cast(
             "type[nn.Module]",
-            cast(Script, cast(object, script)).CustomBlock,
+            upstream.narrowed(script, Script).CustomBlock,
         )
     return scripts
 
@@ -199,7 +200,7 @@ def upstream_blocks(script: Upstream, name: str) -> dict[str, Tensor]:
       record: :func:`block_run` of each of :data:`BLOCKS`.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     record: dict[str, Tensor] = {}
     for kind, channels_out, stride in BLOCKS:
         with _fresh_counter(task.CustomBlock):
@@ -232,7 +233,7 @@ def upstream_lockstep(
         afterwards; and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
@@ -321,7 +322,7 @@ def block_positions(script: Upstream, setting: str) -> Tensor:
         for module in model.modules()
         if "block_idx" in vars(module)
     ]
-    block = cast(Script, cast(object, script)).CustomBlock
+    block = upstream.narrowed(script, Script).CustomBlock
     return torch.tensor([*indices, cast(int, vars(block)["_block_counter"])])
 
 

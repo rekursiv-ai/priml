@@ -32,7 +32,12 @@ from priml.baselines.craftax.learners.pqn_train_step import (
     CraftaxPQNTrainStep,
 )
 from priml.baselines.craftax.policies.pqn import EpsilonGreedy, GreedySampler
-from priml.baselines.craftax.rollout import PhiloxSampler, TorchPhiloxSampler
+from priml.baselines.craftax.rollout import (
+    PhiloxSampler,
+    Rollout,
+    RolloutStorage,
+    TorchPhiloxSampler,
+)
 from priml.baselines.craftax.testing import (
     FakeEnv,
     assert_golden,
@@ -415,6 +420,46 @@ def test_collection_does_not_update_the_running_statistics() -> None:
         # The learner's 4 minibatches each fold in their window, once.
         assert int(step.model.normalize.steps) == 2 * 2
         assert not step.model.training
+
+
+def test_a_cuda_step_synchronizes_its_device_before_replaying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The learner's updates must land before the actor's replay reads the weights."""
+    events: list[str] = []
+    replay = Rollout.collect
+
+    def synchronize(device: torch.device | None = None) -> None:
+        events.append(f"synchronize {device}")
+
+    def recorded(rollout: Rollout, slot: int) -> RolloutStorage:
+        events.append("replay")
+        # The replay and the scoring after it run where the step's tensors live.
+        step.device = torch.device("cpu")
+        return replay(rollout, slot)
+
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    monkeypatch.setattr(Rollout, "collect", recorded)
+    with _step() as step:
+        step.device = torch.device("cuda")
+
+        rollout = step.collect()
+
+        assert events == ["synchronize cuda", "replay"]
+        assert rollout.q_values.shape == (HORIZON, ENVS, ACTIONS)
+
+
+def test_a_cpu_step_does_not_synchronize(monkeypatch: pytest.MonkeyPatch) -> None:
+    synchronized: list[torch.device | None] = []
+
+    def synchronize(device: torch.device | None = None) -> None:
+        synchronized.append(device)
+
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    with _step() as step:
+        step.collect()
+
+    assert synchronized == []
 
 
 def test_the_loss_is_half_the_mean_squared_error_of_the_taken_actions() -> None:

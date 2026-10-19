@@ -15,16 +15,16 @@ import sys
 import torch
 
 from priml.baselines.mlsbench.dl.lr_schedule import (
-    reference as port,
+    reference,
     upstream,
 )
 from priml.baselines.mlsbench.dl.lr_schedule.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision import (
-    reference,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as shared,
+    capture_reference as vision_capture_reference,
 )
 from priml.testing.golden import read_tensors
 
@@ -53,7 +53,7 @@ def stand_in_lockstep(
     states: list[dict[str, Tensor]],
 ) -> dict[str, Tensor]:
     """Stand in for a port lockstep: a one-tensor state per update, a loss."""
-    states += [{"w": torch.ones(2)} for _ in range(reference.STEPS)]
+    states += [{"w": torch.ones(2)} for _ in range(vision_reference.STEPS)]
     return {f"{name}/loss": torch.ones(2)}
 
 
@@ -62,9 +62,9 @@ def test_capture_assembles_both_sides_into_one_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every run is a stand-in; the runs themselves are tested elsewhere."""
-    scripts = dict.fromkeys(port.SCHEDULES, object())
+    scripts = dict.fromkeys(reference.SCHEDULES, object())
     zero = {"w": torch.zeros(2)}
-    lockstep: vision_upstream.Lockstep = ({}, [zero] * reference.STEPS)
+    lockstep: vision_upstream.Lockstep = ({}, [zero] * vision_reference.STEPS)
     trace = vision_upstream.MainTrace()
     trace.draws = torch.zeros(8)
     batch = {"media": torch.zeros(2), "label": torch.arange(2)}
@@ -75,25 +75,31 @@ def test_capture_assembles_both_sides_into_one_report(
         (upstream, "upstream_lockstep"): lockstep,
         (upstream, "upstream_record"): {"schedule/x": torch.zeros(2)},
         (vision_upstream, "upstream_batches"): ([[batch]], [[batch]]),
-        (shared, "compare_full_size"): ["state: 1 tensors against 2"],
+        (vision_capture_reference, "compare_full_size"): ["state: 1 tensors against 2"],
         (upstream, "upstream_setting_schedules"): {
             "settings/s/schedule/x": torch.zeros(2),
         },
-        (port, "port_record"): {
+        (reference, "port_record"): {
             "schedule/x": torch.ones(2),
             "draws/exp000": torch.zeros(8),
         },
-        (reference, "loader_batches"): ([[moved]], [[batch]]),
-        (port, "settings_port_record"): {"settings/s/schedule/x": torch.ones(2)},
-        (shared, "compare_task_settings"): (
+        (vision_reference, "loader_batches"): ([[moved]], [[batch]]),
+        (reference, "settings_port_record"): {
+            "settings/s/schedule/x": torch.ones(2),
+        },
+        (vision_capture_reference, "compare_task_settings"): (
             {"settings/s/x/train": torch.zeros(2)},
             ["settings/s/x/state: differs"],
         ),
     }
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, returning(value))
-    monkeypatch.setattr(port, "lockstep_record", stand_in_lockstep)
-    monkeypatch.setattr(port, "setting_lockstep_record", stand_in_lockstep)
+    monkeypatch.setattr(reference, "lockstep_record", stand_in_lockstep)
+    monkeypatch.setattr(
+        reference,
+        "setting_lockstep_record",
+        stand_in_lockstep,
+    )
     captured = capture_reference.capture(tmp_path, tmp_path)
     assert set(captured.record) == {
         "schedule/x",
@@ -106,16 +112,16 @@ def test_capture_assembles_both_sides_into_one_report(
         "schedule/x: 2/2 differ",
         *(
             f"lockstep/{name}/{step}: w: 2/2 differ"
-            for name in port.SCHEDULES
-            for step in range(1, reference.STEPS + 1)
+            for name in reference.SCHEDULES
+            for step in range(1, vision_reference.STEPS + 1)
         ),
         "loader/train/0: 0/media: 2/2 differ",
         "settings/s/schedule/x: 2/2 differ",
         *(
             f"lockstep/{setting}/{name}/{step}: w: 2/2 differ"
-            for setting in port.SETTING_SCHEDULES
-            for name in port.SCHEDULES
-            for step in range(1, reference.STEPS + 1)
+            for setting in reference.SETTING_SCHEDULES
+            for name in reference.SCHEDULES
+            for step in range(1, vision_reference.STEPS + 1)
         ),
         "settings/s/x/state: differs",
     ]
@@ -126,7 +132,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -142,7 +148,7 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     tmp_path: Path,
 ) -> None:
     record = {"x": torch.arange(3), "settings/y": torch.arange(2)}
-    result = reference.Captured(record=record, sites={}, report=[])
+    result = vision_reference.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]

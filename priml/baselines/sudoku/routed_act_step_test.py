@@ -306,6 +306,32 @@ def test_release_keeps_each_rows_first_confident_step(tmp_path: Path) -> None:
     )
 
 
+def test_a_release_no_row_clears_keeps_every_row_in_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = port_config("exp004", tmp_path)
+    write_dataset(tmp_path / "data")
+    loop = config.make()
+    step = cast(RoutedActTrainStep, loop.step)
+    batch = loop._get_next_batch()
+    capped = step.eval_loss(**batch)
+    step.release = HaltRelease(HaltRelease.Config(threshold=1e9))
+    seen: list[Tensor] = []
+    act_step = step.net.act_step
+
+    def record(input_ids: Tensor, *args: Tensor, **kwargs: Tensor) -> dict[str, Tensor]:
+        seen.append(input_ids)
+        return act_step(input_ids, *args, **kwargs)
+
+    monkeypatch.setattr(step.net, "act_step", record)
+    unreleased = step.eval_loss(**batch)
+    loop.close()
+    assert torch.equal(unreleased["model"], capped["model"])
+    assert len(seen) == config.step.pool.max_steps
+    assert all(boards is seen[0] for boards in seen)
+
+
 class _ReleaseFirstRow(HaltRelease):
     """Release only the first surviving row at every step."""
 

@@ -9,9 +9,9 @@ import sys
 
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.tl.backdoor_defense import (
-    reference as port,
+    reference,
     upstream,
 )
 from priml.baselines.mlsbench.tl.backdoor_defense.scripts import (
@@ -45,7 +45,7 @@ def stand_in_lockstep(
 ) -> dict[str, Tensor]:
     """Stand in for the port's lockstep: a one-tensor state per update."""
     assert states is not None
-    states += [{"w": torch.ones(2)} for _ in range(reference.STEPS)]
+    states += [{"w": torch.ones(2)} for _ in range(vision_reference.STEPS)]
     return {f"lockstep/{name}/loss": torch.ones(2)}
 
 
@@ -87,39 +87,51 @@ def test_capture_assembles_both_sides_into_one_report(
             {"settings/x/state": zero},
         ),
         (upstream, "poisoned_batches"): ([[batch]], [[batch]]),
-        (port, "decode_record"): {"decode/x": zero},
-        (port, "loader_batches"): ([[moved]], [[batch]]),
+        (reference, "decode_record"): {"decode/x": zero},
+        (reference, "loader_batches"): ([[moved]], [[batch]]),
         (upstream, "poison_record"): {"poison/x": zero},
         (upstream, "trigger_record"): {"trigger/x": zero},
         (upstream, "defense_record"): {"defense/x": zero},
         (upstream, "lockstep"): (
             {"lockstep/x/loss": zero},
-            [{"w": zero}] * reference.STEPS,
+            [{"w": zero}] * vision_reference.STEPS,
         ),
         (upstream, "upstream_sites"): dict.fromkeys(
             capture_reference.REQUIRED_UPSTREAM[1:],
             1,
         ),
-        (port, "draw_sites"): dict.fromkeys(capture_reference.REQUIRED_PORT, 1),
-        (port, "port_record"): {"main/x": torch.ones(2), **shared},
-        (port, "filter_record"): {"filter/x": zero},
-        (reference, "full_step"): SimpleNamespace(model=torch.nn.Linear(2, 3)),
+        (reference, "draw_sites"): dict.fromkeys(
+            capture_reference.REQUIRED_PORT,
+            1,
+        ),
+        (reference, "port_record"): {
+            "main/x": torch.ones(2),
+            **shared,
+        },
+        (reference, "filter_record"): {"filter/x": zero},
+        (vision_reference, "full_step"): SimpleNamespace(model=torch.nn.Linear(2, 3)),
+        (reference, "poison_at_tied_cut"): ["filter/x: tied"],
     }
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, returning(value))
     monkeypatch.setattr(upstream, "trace_driver", trace_driver)
-    monkeypatch.setattr(port, "lockstep_record", stand_in_lockstep)
+    monkeypatch.setattr(
+        reference,
+        "lockstep_record",
+        stand_in_lockstep,
+    )
     captured = capture_reference.capture(tmp_path, tmp_path)
-    others = [setting for setting in port.SETTINGS if setting != port.FIRST]
-    assert traced == [("p", port.FIRST), ("s", port.FIRST)] + [
-        ("p", setting) for setting in others
-    ]
+    others = [setting for setting in reference.SETTINGS if setting != reference.FIRST]
+    assert traced == [
+        ("p", reference.FIRST),
+        ("s", reference.FIRST),
+    ] + [("p", setting) for setting in others]
     assert set(captured.record) == {"main/x", "filter/x", "inputs/x", *shared}
     assert captured.sites["port"] == dict.fromkeys(capture_reference.REQUIRED_PORT, 1)
     assert captured.report == [
         *(
             line
-            for setting in port.SETTINGS
+            for setting in reference.SETTINGS
             for line in (
                 f"settings/{setting}/state: state: 2 tensors against 0",
                 f"settings/{setting}/full/draws: torch.int64[8] vs torch.int64[2]",
@@ -129,6 +141,7 @@ def test_capture_assembles_both_sides_into_one_report(
         "main/x: 2/2 differ",
         *(f"lockstep/pristine/{step}: w: 2/2 differ" for step in (1, 2)),
         "reference: random call site uniform_@nn/init.py was never reached",
+        "filter/x: tied",
     ]
 
 
@@ -149,7 +162,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -169,7 +182,7 @@ def test_main_splits_the_networks_records_into_their_own_golden(
         "tiny/x/features": torch.ones(3),
         "poison/x/indices": torch.arange(3),
     }
-    result = reference.Captured(
+    result = vision_reference.Captured(
         record=record,
         sites={"port": {"a@b.py:c": 2}},
         report=[],

@@ -40,6 +40,7 @@ from priml.baselines.craftax.model import (
     FeasibilityLoss,
     MinGRUPolicy,
     NoEncoder,
+    _WideLinear,
     packed_observation_embedding,
 )
 from priml.baselines.craftax.policies.encoder import MLP, BoardEncoder
@@ -162,6 +163,39 @@ def test_the_default_decoder_sums_in_fp32_and_differentiates_in_bf16_on_the_gpu(
     config = tiny_policy()
     config.output_dtype = torch.float32
     _assert_the_decoder_is_wide(config.make().cuda(), device=torch.device("cuda"))
+
+
+def test_a_cuda_decoder_writes_its_wide_sums_from_one_gemm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On CUDA the decoder is one ``mm`` with ``out_dtype``, which CPU torch lacks.
+
+    The features answer ``is_cuda`` and ``mm``'s dtype overload is computed on the
+    CPU, so the CUDA branch's output is checked against the widened product.
+    """
+    calls: list[torch.dtype] = []
+
+    def wide_mm(features: Tensor, weight: Tensor, *, out_dtype: torch.dtype) -> Tensor:
+        calls.append(out_dtype)
+        return features.to(out_dtype) @ weight.to(out_dtype)
+
+    monkeypatch.setattr(torch, "mm", wide_mm)
+    generator = torch.Generator().manual_seed(0)
+    features = torch.randn(3, 5, generator=generator).bfloat16()
+    weight = torch.randn(4, 5, generator=generator).bfloat16()
+
+    # A CPU tensor that answers ``is_cuda`` as a CUDA tensor would.
+    monkeypatch.setattr(Tensor, "is_cuda", property(_answers_cuda))
+    out = _WideLinear.apply(features, weight, torch.float32)
+
+    assert calls == [torch.float32]
+    assert out.dtype == torch.float32
+    assert torch.equal(out, features.float() @ weight.float().T)
+
+
+def _answers_cuda(tensor: Tensor) -> bool:
+    del tensor
+    return True
 
 
 def test_parameters_are_every_weight_in_pufferlibs_allocator_order() -> None:

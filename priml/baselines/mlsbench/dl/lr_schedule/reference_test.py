@@ -14,7 +14,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.lr_schedule import reference
 from priml.baselines.mlsbench.dl.lr_schedule.experiments import exp000
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
@@ -52,11 +52,11 @@ def test_the_optimizer_matches_the_script() -> None:
 
 
 def test_the_full_network_leaves_the_generator_where_the_script_does() -> None:
-    assert_exact(stored("draws/"), vision.draws_record(exp000))
+    assert_exact(stored("draws/"), vision_reference.draws_record(exp000))
 
 
 def test_the_reported_accuracy_matches_the_script() -> None:
-    assert_exact(stored("best/"), vision.best_record())
+    assert_exact(stored("best/"), vision_reference.best_record())
 
 
 @pytest.mark.parametrize("name", list(reference.SCHEDULES))
@@ -66,7 +66,7 @@ def test_two_updates_with_each_schedule_match_the_script(name: str) -> None:
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def stored_settings(prefix: str = "") -> dict[str, torch.Tensor]:
@@ -145,7 +145,7 @@ def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> N
     }
     assert_exact(
         expected,
-        vision.task_settings_record(reference.SETTING_SCHEDULES, tmp_path),
+        vision_reference.task_settings_record(reference.SETTING_SCHEDULES, tmp_path),
     )
 
 
@@ -178,7 +178,7 @@ def test_the_port_record_joins_every_part_the_golden_holds(
         "lockstep_record",
         StoredPart(golden, "lockstep/{}/"),
     )
-    monkeypatch.setattr(vision, "draws_record", StoredPart(golden, "draws/"))
+    monkeypatch.setattr(vision_reference, "draws_record", StoredPart(golden, "draws/"))
     assert_exact(golden, reference.port_record())
 
 

@@ -1,5 +1,6 @@
 """Check the per-arm archive statistics: lengths, floors, and idle frames."""
 
+from concurrent import futures
 from pathlib import Path
 
 import sys
@@ -119,6 +120,47 @@ def test_main_reports_each_split_and_arm_of_a_corpus(
         dict[str, object],
     )
     assert from_plain(val_frames["repeated"], float) == 0
+
+
+def test_frame_stats_pooled_across_workers_match_in_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Threads stand in for worker processes, whose startup alone costs ~1.5 s; the
+    # real pool runs in the ``cli_python_subprocess`` test below.
+    threads: list[int] = []
+    monkeypatch.setattr(futures, "ProcessPoolExecutor", futures.ThreadPoolExecutor)
+    monkeypatch.setattr(torch, "set_num_threads", threads.append)
+    groups = _two_groups(tmp_path)
+    serial = data_stats.frame_stats(groups, workers=1)
+    assert data_stats.frame_stats(groups, workers=2) == serial
+    assert threads == [1, 1]
+    train = from_plain(serial["train/arm1"], dict[str, object])
+    assert from_plain(train["idle"], float) == pytest.approx(299 / 300)
+
+
+@pytest.mark.cli_python_subprocess
+def test_frame_stats_decoded_in_worker_processes_match_in_process(
+    tmp_path: Path,
+) -> None:
+    groups = _two_groups(tmp_path)
+    serial = data_stats.frame_stats(groups, workers=1)
+    assert data_stats.frame_stats(groups, workers=2) == serial
+
+
+def _two_groups(root: Path) -> dict[str, list[tuple[Path, ManifestLine]]]:
+    """Publish an idle training shard and a varied validation shard, by group."""
+    return {
+        "train/arm1": [_publish(root, [_episode(300, codes=[1] * 300)])],
+        "val/arm2": [
+            _publish(
+                root,
+                [_episode(40, codes=list(range(40)))],
+                split=VALIDATION,
+                arm=2,
+            ),
+        ],
+    }
 
 
 def test_an_archive_root_names_its_shards_alike_however_it_is_spelled(

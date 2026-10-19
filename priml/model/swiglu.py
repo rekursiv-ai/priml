@@ -63,6 +63,20 @@ def gelu(x: Tensor) -> Tensor:
     return functional.gelu(x)
 
 
+@set_cost(map_cost(primal=3, adjoint=3))
+def elu(x: Tensor) -> Tensor:
+    """Apply ``x`` for positive input and ``exp(x) - 1`` otherwise.
+
+    Args:
+      x: Pre-activation values, any shape.
+
+    Returns:
+      activated: ``elu(x)``, elementwise.
+
+    """
+    return functional.elu(x)
+
+
 @set_cost(map_cost(primal=1, adjoint=1))
 def relu(x: Tensor) -> Tensor:
     """Apply ``max(0, x)``: one compare forward, one mask multiply back.

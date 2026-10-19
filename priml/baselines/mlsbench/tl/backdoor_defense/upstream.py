@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream,
 )
 from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
@@ -255,8 +255,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
 
 def driver(script: object) -> Driver:
     """Narrow an imported driver to the members the capture calls."""
-    assert isinstance(script, Driver)
-    return script
+    return upstream.narrowed(script, Driver)
 
 
 def trace_driver(script: Upstream, setting: str) -> DriverTrace:
@@ -281,14 +280,19 @@ def trace_driver(script: Upstream, setting: str) -> DriverTrace:
     printed = io.StringIO()
     argv = ["driver.py", "--arch", spec.arch, "--dataset", spec.dataset]
     argv += ["--trigger", spec.trigger, "--poison-fraction", str(spec.fraction)]
-    argv += ["--epochs", str(reference.EPOCHS_MAIN), "--seed", str(vision.SEED)]
+    argv += [
+        "--epochs",
+        str(reference.EPOCHS_MAIN),
+        "--seed",
+        str(vision_reference.SEED),
+    ]
     with (
         mock.patch.object(sys, "argv", argv),
         mock.patch.object(task, "train_epoch", spy.train_epoch),
         mock.patch.object(task, "evaluate", spy.evaluate),
         mock.patch.object(task, "BackdoorDefense", _Recorded(task, trace)),
         _main_split(script, spec.dataset),
-        vision.script_workers(),
+        vision_reference.script_workers(),
         upstream.forked_workers(),
         contextlib.redirect_stdout(printed),
         warnings.catch_warnings(),
@@ -328,7 +332,7 @@ def main_record(trace: DriverTrace, setting: str) -> dict[str, Tensor]:
         f"{key}/evaluated": torch.tensor(victim.evaluated),
         f"{key}/rates": torch.tensor(victim.rates, dtype=torch.float64),
         f"{key}/settings": torch.tensor(
-            [victim.settings[name] for name in vision.HYPERPARAMETERS],
+            [victim.settings[name] for name in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
         f"{key}/python": trace.python,
@@ -391,7 +395,7 @@ def poison_record(script: Upstream) -> dict[str, Tensor]:
     dataset = [(None, label) for label in reference.poison_labels()]
     record: dict[str, Tensor] = {}
     for name, spec in reference.SETTINGS.items():
-        random.seed(vision.SEED)
+        random.seed(vision_reference.SEED)
         indices = task.select_poison_indices(dataset, spec.fraction, spec.target)
         record[f"poison/{name}/indices"] = torch.tensor(indices)
         record[f"poison/{name}/python"] = reference.python_fingerprint(
@@ -435,9 +439,9 @@ def defense_record(scripts: dict[str, Upstream]) -> dict[str, Tensor]:
       record: Keyed as :func:`reference.defense_record`.
 
     """
-    features, logits, labels = reference.defense_inputs()
     record: dict[str, Tensor] = {}
     for name, script in scripts.items():
+        features, logits, labels = reference.defense_inputs(name)
         defense = driver(script).BackdoorDefense()
         with host_agnostic_numerics():
             defense.fit(features, labels, reference.DEFENSE_FRACTION)
@@ -475,14 +479,14 @@ def tiny_record(script: Upstream, setting: str) -> dict[str, Tensor]:
     """
     task = driver(script)
     spec = reference.SETTINGS[setting]
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = tiny_network(script, setting)
         draws = rng_fingerprint()
     with upstream.synthetic_datasets(script, spec.dataset):
         _, test_set, _, test_loader, _ = task.get_dataloaders(
             spec.dataset,
             "unused",
-            vision.LOADER_BATCH,
+            vision_reference.LOADER_BATCH,
             num_workers=0,
         )
     (batch,) = reference.fixed_batches()
@@ -499,7 +503,7 @@ def tiny_record(script: Upstream, setting: str) -> dict[str, Tensor]:
             model,
             test_set,
             cpu,
-            vision.LOADER_BATCH,
+            vision_reference.LOADER_BATCH,
             target_class=spec.target,
             trigger=spec.trigger,
             mean=mean,
@@ -534,7 +538,7 @@ def setting_record(
     """
     task = driver(script)
     spec = reference.SETTINGS[setting]
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = task.build_model(spec.arch, spec.classes)
         task.initialize_weights(model)
         draws = rng_fingerprint()
@@ -564,9 +568,9 @@ def lockstep(script: Upstream, trace: DriverTrace) -> Lockstep:
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         with upstream.narrowed_widths(script):
-            model = task.ResNet(task.BasicBlock, [1, 1, 1], vision.CLASSES)
+            model = task.ResNet(task.BasicBlock, [1, 1, 1], vision_reference.CLASSES)
         task.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -578,14 +582,24 @@ def lockstep(script: Upstream, trace: DriverTrace) -> Lockstep:
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=vision.EPOCHS,
+            T_max=vision_reference.EPOCHS,
         )
-        for index in range(vision.STEPS):
-            batch = [(vision.fixed_media(index), vision.fixed_label(index))]
+        for index in range(vision_reference.STEPS):
+            batch = [
+                (
+                    vision_reference.fixed_media(index),
+                    vision_reference.fixed_label(index),
+                ),
+            ]
             task.train_epoch(model, batch, criterion, optimizer, torch.device("cpu"))
             model.eval()
             with torch.no_grad():
-                probes.append(vision.logits_of(model, vision.fixed_media(vision.STEPS)))
+                probes.append(
+                    vision_reference.logits_of(
+                        model,
+                        vision_reference.fixed_media(vision_reference.STEPS),
+                    ),
+                )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
     record = {
@@ -624,12 +638,12 @@ def poisoned_batches(
         train_set, _, _, _, _ = task.get_dataloaders(
             spec.dataset,
             "unused",
-            vision.LOADER_BATCH,
+            vision_reference.LOADER_BATCH,
             num_workers=0,
         )
     assert isinstance(train_set, upstream.FakeCifar100)
     labels = from_plain(train_set.label.tolist(), list[int])
-    random.seed(vision.SEED)
+    random.seed(vision_reference.SEED)
     indices = task.select_poison_indices(
         [(None, label) for label in labels],
         reference.LOADER_FRACTION,
@@ -647,14 +661,14 @@ def poisoned_batches(
     train: Batches = []
     analysis: Batches = []
     with (
-        vision.seeded(vision.SEED),
-        vision.script_workers(),
+        vision_reference.seeded(vision_reference.SEED),
+        vision_reference.script_workers(),
         upstream.forked_workers(),
     ):
         for shuffle, passes in ((True, train), (True, train), (False, analysis)):
             loader = DataLoader(
                 poisoned,
-                batch_size=vision.LOADER_BATCH,
+                batch_size=vision_reference.LOADER_BATCH,
                 shuffle=shuffle,
                 num_workers=num_workers,
             )
@@ -729,7 +743,7 @@ class _EpochSpy:
                 Network(
                     settings={
                         name: _number(group[name])
-                        for name in vision.HYPERPARAMETERS
+                        for name in vision_reference.HYPERPARAMETERS
                         if name in group
                     },
                     indices=from_plain(dataset.get("indices", everything), list[int]),
@@ -823,7 +837,7 @@ class _MainGraySplit(upstream.FakeCifar100):
 
 def _initialized_tiny(script: Upstream, arch: str) -> nn.Module:
     """Build an ``--arch``'s shallowest network and initialize it as the driver does."""
-    model = upstream.tiny_model(script, arch, vision.CLASSES)
+    model = upstream.tiny_model(script, arch, vision_reference.CLASSES)
     driver(script).initialize_weights(model)
     return model
 

@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast, override
 
+import inspect
 import math
 import re
 
@@ -299,6 +300,17 @@ def test_compiles_updates_when_the_program_is_cuda(
 
     assert result.iterations == 1
     assert compile_calls == [True]
+
+
+def test_compiled_updates_wrap_each_eager_update_once() -> None:
+    """The CUDA path compiles the CPU reference updates, built once per process."""
+    compiled = pdlp._compiled_updates()
+
+    assert pdlp._compiled_updates() is compiled
+    assert all(
+        update is not eager and inspect.unwrap(update) is eager
+        for update, eager in zip(compiled, pdlp._UPDATES, strict=True)
+    )
 
 
 def test_store_uses_the_check_interval_for_the_potential_next_iterate(

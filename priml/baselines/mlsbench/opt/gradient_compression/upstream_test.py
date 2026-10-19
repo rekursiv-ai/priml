@@ -14,9 +14,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+import functools
+
+from configgle import PartialConfig
+
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.opt.gradient_compression import (
     reference,
     upstream,
@@ -24,12 +28,17 @@ from priml.baselines.mlsbench.opt.gradient_compression import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from torch import Tensor
     from torch.utils.data import DataLoader
 
     import pytest
+
+    from priml.baselines.mlsbench.opt.gradient_compression.train_loop import (
+        CompressionTrainLoop,
+    )
 
 COMPRESSOR: Final = """\
 class Compressor:
@@ -240,7 +249,7 @@ def test_lockstep_records_one_update_per_epoch(tmp_path: Path) -> None:
     record, states = upstream.upstream_lockstep(scripts(tmp_path)["none"], "none")
     epochs = reference.LOCKSTEP_EPOCHS
     assert record["lockstep/none/loss"].shape == (epochs,)
-    assert record["lockstep/none/probe"].shape == (epochs, 2, vision.CLASSES)
+    assert record["lockstep/none/probe"].shape == (epochs, 2, vision_reference.CLASSES)
     assert len(states) == epochs
     assert not torch.equal(states[0]["conv.weight"], states[1]["conv.weight"])
 
@@ -252,9 +261,50 @@ def test_the_trace_sees_the_schedule_cadence_and_best_accuracy(tmp_path: Path) -
     assert record["schedule/exp004"][5].item() == 0.05
     assert record["eval/epochs"].tolist() == [1, 10, 12]
     evaluations = len(record["eval/epochs"])
-    best = 100.0 * max(vision.SCRIPTED_CORRECT[:evaluations]) / vision.SCRIPTED_TOTAL
+    best = (
+        100.0
+        * max(vision_reference.SCRIPTED_CORRECT[:evaluations])
+        / vision_reference.SCRIPTED_TOTAL
+    )
     assert record["best/accuracy"].item() == float(f"{best:.2f}")
     assert record["optimizer/exp000"].shape == (len(reference.SGD_SETTINGS),)
+
+
+def test_the_trace_hands_the_driver_each_settings_own_warmup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warmups: list[int] = []
+    monkeypatch.setattr(
+        upstream,
+        "run_train",
+        functools.partial(_record_warmup, warmups=warmups, run=upstream.run_train),
+    )
+    monkeypatch.setitem(reference.SETTINGS, "exp004", _three_warmup_epochs)
+    upstream.upstream_trace(scripts(tmp_path)["none"], epochs=6)
+    assert warmups == [5, 3, 5]
+
+
+def _three_warmup_epochs() -> CompressionTrainLoop.Config:
+    config = reference.SETTINGS["exp000"]()
+    schedule = config.step.schedule
+    assert isinstance(schedule, PartialConfig)
+    schedule.warmup_epochs = 3
+    return config
+
+
+def _record_warmup(
+    script: upstream.Script,
+    name: str,
+    *,
+    warmups: list[int],
+    run: Callable[..., upstream.Run],
+    **kwargs: object,
+) -> upstream.Run:
+    warmup = kwargs["warmup"]
+    assert isinstance(warmup, int)
+    warmups.append(warmup)
+    return run(script, name, **kwargs)
 
 
 def test_metrics_run_the_scripts_evaluate(tmp_path: Path) -> None:
@@ -276,9 +326,9 @@ def test_the_network_record_matches_the_ports_keys(tmp_path: Path) -> None:
 def test_loaders_and_transforms_read_the_synthetic_split(tmp_path: Path) -> None:
     script = scripts(tmp_path)["none"]
     train, evaluation = upstream.upstream_batches(script, "cifar100", num_workers=0)
-    assert len(train) == len(evaluation) == vision.LOADER_PASSES
+    assert len(train) == len(evaluation) == vision_reference.LOADER_PASSES
     labels = torch.cat([batch["label"] for batch in evaluation[0]])
-    assert labels.tolist() == list(range(vision.LOADER_IMAGES))
+    assert labels.tolist() == list(range(vision_reference.LOADER_IMAGES))
     record = upstream.upstream_transforms(script)
     assert record["transform/exp000"].shape == reference.TEST_IMAGE_SHAPE
 
@@ -319,7 +369,10 @@ def test_the_sites_name_the_edit_not_its_scratch_directory(tmp_path: Path) -> No
     # The stand-in draws for every parameter, the zero one included.
     draws = len(reference.GRADIENT_SHAPES) * reference.COMPRESSION_STEPS
     assert counts["rand_like@edits/qsgd.py:compress"] == draws
-    assert counts["randperm@data/sampler.py:__iter__"] == 2 * vision.LOADER_PASSES
+    assert (
+        counts["randperm@data/sampler.py:__iter__"]
+        == 2 * vision_reference.LOADER_PASSES
+    )
 
 
 if __name__ == "__main__":

@@ -65,6 +65,22 @@ def test_the_forward_contract() -> None:
     assert torch.equal(window[:, 2], decoded)
 
 
+def test_a_feature_is_refused_by_both_forwards() -> None:
+    model = _tiny().make()
+    observations = torch.randn(5, 6)
+    state = model.initial_state(5)
+    feature = torch.zeros(5, 2)
+    with pytest.raises(ValueError, match="reads no feature"):
+        model.forward_fused(observations, state, None, features=feature)
+    with pytest.raises(ValueError, match="reads no feature"):
+        model.forward_sequence(
+            observations.reshape(5, 1, 6),
+            state,
+            torch.zeros(5, 1),
+            features=feature,
+        )
+
+
 def test_the_towers_are_tanh_mlps_whose_heads_fuse_into_one_row() -> None:
     model = _tiny().make()
     observations = torch.randn(3, 6)

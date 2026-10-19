@@ -458,6 +458,18 @@ class TestAsTensor:
         assert result["before"] == [2, 3]
         assert _tensor(result, "after").tolist() == [6, 7]
 
+    def test_tuples_are_walked_and_non_numeric_leaves_kept(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+
+        result = next(processor(iter([{"pair": ([1, 2], "tag")}])))
+
+        pair = result["pair"]
+        assert isinstance(pair, tuple)
+        first, second = cast(tuple[object, object], pair)
+        assert isinstance(first, Tensor)
+        assert first.tolist() == [1, 2]
+        assert second == "tag"
+
     def test_equal_interned_scalars_are_each_tensorized(self):
         processor = _make_processor(AsTensor.Config(device="cpu"))
 

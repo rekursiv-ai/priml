@@ -28,7 +28,7 @@ from priml.model.norm import LayerNorm, LayerNorm2d
 from priml.model.pool import avg_pool_cost
 from priml.model.sequential import Sequential
 from priml.model.special import Identity
-from priml.model.state_dict import validate_state_dict
+from priml.model.state_dict import remap_state_dict, validate_state_dict
 from priml.model.swiglu import SwiGLU, gelu
 
 
@@ -802,27 +802,19 @@ class ConvNeXt(nn.Module):
           state: Complete checkpoint parameters and buffers.
 
         Raises:
-          ValueError: A source key collides, or names, shapes, or dtypes differ.
+          ValueError: A source name collides, or names, shapes, or dtypes differ.
 
         """
-        mapped: dict[str, Tensor] = {}
-        for name, value in state.items():
-            target = (
+        mapped = remap_state_dict(
+            state,
+            lambda name: (
                 name.replace("stem.0.", "stem.conv.")
-                .replace(
-                    "stem.1.",
-                    "stem.norm.",
-                )
+                .replace("stem.1.", "stem.norm.")
                 .replace(".mlp.fc1.", ".mlp.up_proj.")
-                .replace(
-                    ".mlp.fc2.",
-                    ".mlp.down_proj.",
-                )
+                .replace(".mlp.fc2.", ".mlp.down_proj.")
                 .replace("head.fc.", "head.proj_out.")
-            )
-            if target in mapped:
-                raise ValueError(f"Checkpoint keys collide at {target}.")
-            mapped[target] = value
+            ),
+        )
         validate_state_dict(mapped, expected=self.state_dict())
         self.load_state_dict(mapped, strict=True)
 

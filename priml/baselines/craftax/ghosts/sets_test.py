@@ -270,6 +270,15 @@ def test_a_time_map_tightens_until_it_fits_and_always_keeps_floors_and_the_end()
     assert {0, 505, 999} <= kept
 
 
+def test_a_time_map_keeps_the_forced_decisions_like_the_always_kept_ones() -> None:
+    flags = bytes(_flags(100))
+    rule = TimeRule(steps=100, levels=((0, 0),))
+    runs, _ = keep_runs(flags, rule=rule)
+    assert {t for a, b in int_rows(runs) for t in range(a, b)} == {0, 99}
+    runs, _ = keep_runs(flags, rule=rule, forced=np.array([40, 41, 70], np.int64))
+    assert {t for a, b in int_rows(runs) for t in range(a, b)} == {0, 40, 41, 70, 99}
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

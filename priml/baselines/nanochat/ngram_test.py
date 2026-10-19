@@ -494,6 +494,21 @@ def test_ngram_mix_rejects_bad_inputs() -> None:
             [sink, sink],
             [],
         )
+    narrow = torch.zeros(5, 10)
+    with pytest.raises(ValueError, match=r"weights\[0\]\.shape\[1\] \* 2"):
+        ngram_mix(value, [gate], [narrow, narrow], [index, index], [narrow, narrow], [])
+    strided = torch.zeros(12, 5).t()
+    with pytest.raises(ValueError, match=r"w\.is_contiguous"):
+        ngram_mix(value, [gate], [strided, weight], [index, index], [sink, sink], [])
+    with pytest.raises(ValueError, match=r"gate\.is_contiguous"):
+        ngram_mix(
+            value,
+            [torch.zeros(2, 4, 3).transpose(-1, -2)],
+            [weight, weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
 
 
 def test_cpu_backward_reference_and_empty_sink_clear() -> None:

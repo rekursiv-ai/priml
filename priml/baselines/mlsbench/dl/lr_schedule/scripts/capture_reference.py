@@ -37,7 +37,7 @@ import tempfile
 from priml.baselines.mlsbench.dl.lr_schedule import reference, upstream
 from priml.baselines.mlsbench.dl.lr_schedule.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -80,7 +80,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -130,7 +130,10 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         lockstep,
         run=reference.lockstep_record,
     )
-    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_loaders(
+        batches,
+        vision_reference.loader_batches(scratch),
+    )
     report += mismatches(schedules, reference.settings_port_record())
     report += capture_reference.compare_lockstep(
         setting_lockstep,
@@ -143,7 +146,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         pristine="constant",
     )
     report += settings_report
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record | schedules | settings,
         sites={},
         report=report,

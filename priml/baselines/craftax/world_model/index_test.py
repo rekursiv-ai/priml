@@ -14,10 +14,12 @@ import torch
 
 from priml.baselines.craftax.world_model.archive import (
     Episode,
+    EpisodeSummary,
     FloorTrace,
     ManifestLine,
     Receipt,
     ReplayEpisode,
+    Span,
     write_replay_shard,
     write_shard,
 )
@@ -33,6 +35,7 @@ from priml.baselines.craftax.world_model.index import (
     map_chunks,
     save_tensors,
     shard_key,
+    trace_index,
     trace_strata,
 )
 
@@ -295,6 +298,23 @@ def test_replay_shard_index_equals_the_frame_shard_index(tmp_path: Path) -> None
     )
     _assert_same_index(chunked, expected)
     assert len(list((tmp_path / "cache").iterdir())) == 2
+
+
+def test_trace_index_rejects_a_frame_shard_summary() -> None:
+    episode = _episode([0] * 3, died=False)
+    summary = EpisodeSummary(
+        receipt=episode.receipt,
+        decisions=3,
+        bin=Span(offset=0, size=0, crc32=0),
+        frames=Span(offset=0, size=0, crc32=0),
+        summary={},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Only a replay shard's summaries hold floors\.$",
+    ):
+        trace_index([summary])
 
 
 def _decisions(episodes: list[Episode]) -> list[int]:

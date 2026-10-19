@@ -33,7 +33,7 @@ from priml.baselines.mlsbench.dl.multitask.experiments import (
 from priml.baselines.mlsbench.dl.multitask.metrics import HeadAccuracy
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.model import ResNet
@@ -81,9 +81,20 @@ FORKS: Final = {
 """Each baseline fork, its setting's summing parent, and the fields it sets."""
 
 
+MULTITASK_SLOTS: Final = (
+    "dataset",
+    "metrics_eval",
+    "step",
+)
+"""Where the multitask recipe differs from the vision one: data, heads, metrics.
+
+``step`` covers the two-head model and the combination; the trunk is pinned
+below to equal the vision network, so the delta cannot hide a trunk change."""
+
+
 def changed_fields(parent: object, child: MultiTaskTrainLoop) -> set[str]:
     """Return the field paths ``udiff`` reports between two unfinalized configs."""
-    assert isinstance(parent, MultiTaskTrainLoop | vision.VisionTrainLoop)
+    assert isinstance(parent, MultiTaskTrainLoop | vision_experiments.VisionTrainLoop)
     table = parent.udiff(child, mode="fields", finalize=False)
     return {line.split("│")[0].strip() for line in table.splitlines()[1:]}
 
@@ -127,30 +138,19 @@ def write_dataset(directory: Path) -> None:
         )
 
 
-MULTITASK_SLOTS: Final = (
-    "dataset",
-    "metrics_eval",
-    "step",
-)
-"""Where the multitask recipe differs from the vision one: data, heads, metrics.
-
-``step`` covers the two-head model and the combination; the trunk is pinned
-below to equal the vision network, so the delta cannot hide a trunk change."""
-
-
 def test_exp000_is_the_vision_recipe_with_a_second_head() -> None:
-    changed = changed_fields(vision.exp000(), exp000())
+    changed = changed_fields(vision_experiments.exp000(), exp000())
     assert {p for p in changed if not p.startswith(MULTITASK_SLOTS)} == {
         "(class)",
         "study_name",
     }
     cfg = exp000()
     assert isinstance(cfg.step.model, TwoHeadResNet.Config)
-    assert cfg.step.model.trunk == vision.exp000().step.model
+    assert cfg.step.model.trunk == vision_experiments.exp000().step.model
     assert cfg.step.model.channels_out == 20
-    assert cfg.step.optimizer == vision.exp000().step.optimizer
-    assert cfg.step.loss == vision.exp000().step.loss
-    assert cfg.step.schedule == vision.exp000().step.schedule
+    assert cfg.step.optimizer == vision_experiments.exp000().step.optimizer
+    assert cfg.step.loss == vision_experiments.exp000().step.loss
+    assert cfg.step.schedule == vision_experiments.exp000().step.schedule
     assert cfg.max_epochs == cfg.step.train_budget_epochs == 200
     accuracy = cfg.metrics_eval["test_acc_coarse"]
     assert isinstance(accuracy, HeadAccuracy.Config)
@@ -184,7 +184,9 @@ def test_exp008_puts_the_vgg16bn_setting_network_in_the_trunk() -> None:
     }
     model = exp008().step.model
     assert isinstance(model, TwoHeadResNet.Config)
-    assert model.trunk == settings.vgg16bn_cifar100(vision.exp000()).step.model
+    assert (
+        model.trunk == settings.vgg16bn_cifar100(vision_experiments.exp000()).step.model
+    )
     assert exp008().dataset == exp000().dataset
 
 

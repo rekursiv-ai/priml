@@ -596,6 +596,7 @@ def matmul_cost(
     dtype: torch.dtype | None = None,
     weight_bytes: int = 0,
     dequant_flops: int = 0,
+    input_grad: bool = True,
 ) -> Cost:
     """Cost one complete ``[M, K] @ [K, N]`` invocation and its adjoint.
 
@@ -613,6 +614,7 @@ def matmul_cost(
         ``K * N`` elements at ``dtype``. Zero stores it at ``dtype``.
       dequant_flops: Operations per weight to unpack a packed matrix once per
         invocation, charged to the ``elementwise`` silo at ``dtype``.
+      input_grad: Compute the input gradient; False drops its adjoint matmul.
 
     Returns:
       cost: Integer FLOPs and logical tensor bytes for the complete invocation.
@@ -637,19 +639,20 @@ def matmul_cost(
     params = (products if weight else 0) + biases
     stored = weight_bytes or nbytes(products, dt)
     moved = nbytes(rows * (channels_in + channels_out), dt) + stored
+    gradients = 1 + int(input_grad)
     return Cost(
         cells={
             ("flops", "primal", "matmul", dt): 2 * rows * products,
             ("flops", "primal", "elementwise", dt): rows * biases
             + dequant_flops * products,
-            ("flops", "adjoint", "matmul", dt): 4 * rows * products,
+            ("flops", "adjoint", "matmul", dt): 2 * gradients * rows * products,
             ("flops", "adjoint", "reduction", dt): biases * (rows - 1),
             ("bytes", "primal", "matmul", dt): moved,
             ("bytes", "primal", "elementwise", dt): nbytes(
                 2 * rows * biases + biases,
                 dt,
             ),
-            ("bytes", "adjoint", "matmul", dt): 2 * moved,
+            ("bytes", "adjoint", "matmul", dt): gradients * moved,
             ("bytes", "adjoint", "reduction", dt): nbytes(rows * biases + biases, dt),
         },
         params=params,

@@ -278,6 +278,24 @@ def _batch_records(batch: Mapping[str, object]) -> list[int]:
     ]
 
 
+def test_pack_update_packs_live_records_like_a_replayed_file(tmp_path: Path) -> None:
+    records = [_composed_record(0, 1.0), _composed_record(1, 0.0)]
+    path = tmp_path / "live_rollouts_000.jsonl"
+    _write_rollouts(path, records)
+    config = TMaxRolloutData.Config()
+    config.working_dir = path
+    config.records_per_update = 2
+    config.num_samples_per_prompt = 2
+    config.pack_length = 1
+    data = config.make()
+    packed = data.pack_update(records)
+    assert _batch_records(packed) == [100, 101]
+    assert packed["response_token_count"] == 2
+    replayed = list(data.train_dataloader())
+    assert len(replayed) == 1
+    assert _batch_records(replayed[0]) == _batch_records(packed)
+
+
 def test_a_zero_spread_group_is_dropped_and_its_slot_refilled(
     tmp_path: Path,
 ) -> None:

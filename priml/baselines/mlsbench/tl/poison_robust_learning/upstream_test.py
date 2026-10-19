@@ -20,7 +20,7 @@ import types
 import numpy as np
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.tl.poison_robust_learning import (
     reference,
     upstream,
@@ -31,13 +31,13 @@ from priml.baselines.mlsbench.tl.poison_robust_learning.data import (
 from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
 if TYPE_CHECKING:
     from PIL import Image
     from torch import Tensor
 
     import pytest
+
+_CWD: Final = Path(__file__).resolve().parent
 
 DATA: Final = _CWD / "testdata"
 
@@ -253,7 +253,7 @@ def workerless(
 def test_each_variant_imports_its_own_loss(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     assert list(variants) == ["pristine", *upstream.EDITED]
-    logits, label = vision.fixed_logits()
+    logits, label = vision_reference.fixed_logits()
     plain, _ = upstream.loss_value(variants["pristine"], logits, label, epoch=0)
     doubled, grad = upstream.loss_value(
         variants["generalized_ce"],
@@ -278,20 +278,25 @@ def test_importing_a_driver_puts_back_a_loss_module_already_loaded(
 
 
 def test_a_served_split_runs_its_transform_on_each_pil_image() -> None:
-    media, label = vision.synthetic_split()
+    media, label = vision_reference.synthetic_split()
     served = upstream.Served((media, label), _Pixels())
     image, target = served[3]
     assert isinstance(image, torch.Tensor)
     assert torch.equal(image, media[3])
     assert target == 3
-    assert len(served) == vision.LOADER_IMAGES
+    assert len(served) == vision_reference.LOADER_IMAGES
 
 
 def test_the_drivers_poisoned_dataset_flips_as_the_port_does(tmp_path: Path) -> None:
     script = scripts(tmp_path)["pristine"]
     clean = reference.flip_labels()
     dataset = upstream.poisoned(script, clean, classes=4, fraction=0.5)
-    label, index = flipped_labels(clean, num_classes=4, fraction=0.5, seed=vision.SEED)
+    label, index = flipped_labels(
+        clean,
+        num_classes=4,
+        fraction=0.5,
+        seed=vision_reference.SEED,
+    )
     assert torch.equal(dataset.labels, label)
     assert torch.equal(dataset.poison_idx, index)
     assert [dataset[i][1] for i in range(len(dataset))] == label.tolist()
@@ -303,7 +308,7 @@ def test_main_is_traced_update_by_update(tmp_path: Path) -> None:
         script,
         upstream.lockstep_argv(),
         build=upstream.linear_model,
-        split=vision.synthetic_split(),
+        split=vision_reference.synthetic_split(),
     )
     # The whole split is one batch: one update in each of two epochs.
     assert trace.epochs == [0, 1]
@@ -328,7 +333,7 @@ def test_a_run_restores_every_generator_and_leaves_python_and_numpy_unused(
         script,
         upstream.lockstep_argv(),
         build=upstream.linear_model,
-        split=vision.synthetic_split(),
+        split=vision_reference.synthetic_split(),
     )
     assert torch.equal(torch.get_rng_state(), torch_state)
     assert upstream.generator_states() == before
@@ -344,7 +349,7 @@ def test_a_stopped_run_records_the_initial_state_and_no_update(tmp_path: Path) -
         script,
         upstream.recipe_argv("resnet20-cifar10"),
         build=upstream.full_model,
-        split=vision.synthetic_split(),
+        split=vision_reference.synthetic_split(),
         serial=True,
         stop=True,
     )

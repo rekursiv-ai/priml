@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.normalization import reference
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
@@ -54,9 +54,9 @@ def test_every_norm_matches_its_script_forward_and_backward() -> None:
 def test_the_schedule_optimizer_and_accuracy_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/") | stored("best/"),
-        vision.schedule_record(reference.NORMS["batch_norm"])
-        | vision.optimizer_record(reference.NORMS["batch_norm"])
-        | vision.best_record(),
+        vision_reference.schedule_record(reference.NORMS["batch_norm"])
+        | vision_reference.optimizer_record(reference.NORMS["batch_norm"])
+        | vision_reference.best_record(),
     )
 
 
@@ -79,7 +79,7 @@ def test_two_updates_with_each_norm_match_the_script(name: str) -> None:
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
@@ -110,7 +110,7 @@ def test_each_settings_full_network_with_each_norm_matches_the_script(
         f"settings/{key}/{part}" for part in ("draws", "train", "eval")
     }
     factory = reference.SETTING_NORMS[setting][name]
-    assert_exact(expected, vision.setting_record(setting, factory, key=key))
+    assert_exact(expected, vision_reference.setting_record(setting, factory, key=key))
 
 
 @pytest.mark.parametrize(
@@ -146,7 +146,7 @@ def test_a_lockstep_hands_back_the_state_after_each_update() -> None:
         f"{reference.FMNIST}/group_norm",
         states=states,
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(
         next(iter(states[0].values())),
         next(iter(states[1].values())),
@@ -164,7 +164,7 @@ def test_the_record_joins_every_component(monkeypatch: pytest.MonkeyPatch) -> No
     for name in ("norm_record", "draws_record", "lockstep_record"):
         monkeypatch.setattr(reference, name, fake(name))
     for name in ("schedule_record", "optimizer_record", "best_record"):
-        monkeypatch.setattr(vision, name, fake(name))
+        monkeypatch.setattr(vision_reference, name, fake(name))
     assert set(reference.port_record()) == {
         "norm_record",
         "draws_record",
@@ -180,7 +180,7 @@ def test_the_fmnist_loader_shuffles_and_augments_like_the_script(
 ) -> None:
     assert_exact(
         stored_settings(f"settings/{reference.FMNIST}/loader/"),
-        vision.setting_loader_record(tmp_path, reference.FMNIST),
+        vision_reference.setting_loader_record(tmp_path, reference.FMNIST),
     )
 
 
@@ -188,7 +188,7 @@ def test_the_settings_golden_bites_on_one_ulp() -> None:
     key = f"settings/{reference.FMNIST}/group_norm/eval"
     value = stored_settings(key)[key].clone()
     value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(torch.inf))
-    port = vision.setting_record(
+    port = vision_reference.setting_record(
         reference.FMNIST,
         reference.SETTING_NORMS[reference.FMNIST]["group_norm"],
         key=f"{reference.FMNIST}/group_norm",

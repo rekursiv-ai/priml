@@ -9,7 +9,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.etth1.experiments import exp000
-from priml.testing.golden import rng_fingerprint
+from priml.testing.golden import flatten_record, rng_fingerprint
 
 
 if TYPE_CHECKING:
@@ -110,7 +110,12 @@ def update_record(
             if parameter.grad is not None
         },
     }
-    _flatten_state(record, prefix="optimizer", value=optimizer.state_dict())
+    # ``initial_lr`` is PRIML-only metadata; the reference has no such key.
+    record |= flatten_record(
+        optimizer.state_dict(),
+        prefix="optimizer",
+        skip={"initial_lr"},
+    )
     return record
 
 
@@ -166,21 +171,3 @@ def golden_record(record: Mapping[str, Tensor], *, training: bool) -> dict[str, 
         )
         or (not training and key in {"output", "rng"})
     }
-
-
-def _flatten_state(record: dict[str, Tensor], prefix: str, value: object) -> None:
-    if isinstance(value, Tensor):
-        record[prefix] = value.detach().clone()
-    elif isinstance(value, (int, float, bool)):
-        record[prefix] = torch.tensor(value)
-    elif isinstance(value, dict):
-        for key, item in cast("Mapping[str | int, object]", value).items():
-            # This metadata is PRIML-only; keep the optimizer values below it.
-            if key == "initial_lr":
-                continue
-            _flatten_state(record, prefix=f"{prefix}/{key}", value=item)
-    elif isinstance(value, (tuple, list)):
-        for index, item in enumerate(cast("list[object]", value)):
-            _flatten_state(record, prefix=f"{prefix}/{index}", value=item)
-    elif value is not None:
-        raise TypeError(f"Unsupported optimizer state: {type(value).__name__}")

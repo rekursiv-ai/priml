@@ -16,17 +16,17 @@ from typing import TYPE_CHECKING, Final
 import torch
 
 from priml.baselines.mlsbench.dl.activation import reference, upstream
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import SETTINGS_SCRIPT
 from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
 if TYPE_CHECKING:
     from priml.baselines.mlsbench.dl.vision.upstream import Upstream
 
-DATA: Final = _CWD / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
+
+_DATA: Final = _CWD / "testdata"
 
 ACTIVATION: Final = (
     "class CustomActivation(nn.Module):\n"
@@ -141,9 +141,13 @@ def test_lockstep_records_two_updates(tmp_path: Path) -> None:
     script = scripts(tmp_path)["gelu"]
     trace = upstream.trace_setting(script)
     record, states = upstream.upstream_lockstep(script, "gelu", trace)
-    assert record["lockstep/gelu/loss"].shape == (vision.STEPS,)
-    assert record["lockstep/gelu/probe"].shape == (vision.STEPS, 2, vision.CLASSES)
-    assert len(states) == vision.STEPS
+    assert record["lockstep/gelu/loss"].shape == (vision_reference.STEPS,)
+    assert record["lockstep/gelu/probe"].shape == (
+        vision_reference.STEPS,
+        2,
+        vision_reference.CLASSES,
+    )
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
 
 
@@ -159,7 +163,7 @@ def test_the_setting_lockstep_runs_every_activation_at_every_setting(
         f"settings/vgg16bn-cifar100/lockstep/mish/{part}"
         for part in ("loss", "logits", "probe")
     }
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def test_the_record_holds_every_key_the_golden_does(tmp_path: Path) -> None:
@@ -170,7 +174,7 @@ def test_the_record_holds_every_key_the_golden_does(tmp_path: Path) -> None:
         for name, script in variants.items()
     }
     record = upstream.upstream_record(variants, trace, lockstep)
-    assert record.keys() == read_tensors(DATA / "reference.pt").keys()
+    assert record.keys() == read_tensors(_DATA / "reference.pt").keys()
     assert torch.equal(
         record["schedule/lr"],
         torch.tensor(trace.rates, dtype=torch.float64),
@@ -178,7 +182,7 @@ def test_the_record_holds_every_key_the_golden_does(tmp_path: Path) -> None:
     assert torch.equal(
         record["optimizer/settings"],
         torch.tensor(
-            [trace.settings[name] for name in vision.HYPERPARAMETERS],
+            [trace.settings[name] for name in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
     )

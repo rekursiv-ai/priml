@@ -158,7 +158,27 @@ def load_script(path: Path) -> Upstream:
       script: The imported module, typed as the part this capture uses.
 
     """
-    return cast(Upstream, cast(object, _load_module(path)))
+    return cast(Upstream, _load_module(path))
+
+
+def narrowed[T](script: object, protocol: type[T]) -> T:
+    """Return an imported script as the task's ``protocol``, checking it has its members.
+
+    Args:
+      script: A script :func:`load_script` or :func:`edited_script` imported.
+      protocol: A ``runtime_checkable`` Protocol of the members the task calls.
+
+    Returns:
+      script: The same module, typed as ``protocol``.
+
+    Raises:
+      TypeError: The script lacks a member of ``protocol``.
+
+    """
+    if not isinstance(script, protocol):
+        msg = f"{script!r} lacks a member of {protocol.__name__}."
+        raise TypeError(msg)
+    return script
 
 
 def edited_script(

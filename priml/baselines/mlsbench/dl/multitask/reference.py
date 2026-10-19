@@ -134,7 +134,7 @@ def coarse_label(step: int) -> Tensor:
       step: Index that shifts the classes.
 
     Returns:
-      label_coarse: One superclass per image of :func:`vision.fixed_media`.
+      label_coarse: One superclass per image of :func:`reference.fixed_media`.
 
     """
     return torch.tensor([(3 + step) % NUM_COARSE, (11 + step) % NUM_COARSE])
@@ -273,7 +273,7 @@ def optimizer_record() -> dict[str, Tensor]:
     """Return the optimizer settings of ``exp000`` and every experiment's tensor sizes.
 
     Returns:
-      record: The entries of :data:`vision.HYPERPARAMETERS` as float64, and per
+      record: The entries of :data:`reference.HYPERPARAMETERS` as float64, and per
         experiment the size of every optimized tensor in the optimizer's order.
 
     """
@@ -453,7 +453,7 @@ def network_forward(model: nn.Module, key: str) -> dict[str, Tensor]:
 
     Returns:
       record: ``<key>/train`` and ``<key>/eval``, both heads' logits on
-        ``vision.fixed_media`` joined fine then coarse.
+        ``reference.fixed_media`` joined fine then coarse.
 
     """
     record: dict[str, Tensor] = {}

@@ -180,6 +180,39 @@ def test_a_stand_in_by_name_is_handed_records_not_their_views() -> None:
     assert held == [np.record]
 
 
+@jit.jit
+def _records_plus(states: Records[EnvState], extra: int) -> int:
+    return _count_plus(states, extra)
+
+
+@jit.jit
+def _count_plus(states: Records[EnvState], extra: int) -> int:
+    return len(states) + extra
+
+
+def test_a_stand_in_by_name_is_handed_arrays_not_their_records_views() -> None:
+    held: list[object] = []
+
+    def count_plus(states: object, extra: object) -> int:
+        held.extend((states, extra))
+        return 7
+
+    states = new_states(2)
+    with eager(_count_plus=count_plus):
+        assert _records_plus(states, 3) == 7
+    array, extra = held
+    assert type(array) is np.recarray
+    assert np.shares_memory(cast("np.ndarray", array), states)
+    assert extra == 3
+
+
+def test_a_record_of_a_grid_is_refused_its_fields() -> None:
+    grid = new_states(6).reshape(2, 3).view(np.recarray)
+    record = cast("np.record", grid[1, 0])
+    with pytest.raises(TypeError, match="one-dimensional"):
+        eager_module._viewed(record)
+
+
 def test_the_intrinsics_and_the_libm_stand_in_and_a_name_adds_one() -> None:
     # jit_test's anchor 64, where glibc's and macOS's libms agree.
     angle = np.float32(

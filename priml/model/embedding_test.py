@@ -839,6 +839,39 @@ class _CudaInput(Tensor):
     is_cuda = True
 
 
+@pytest.mark.parametrize(
+    ("cuda", "dtype", "expect_triton"),
+    [
+        (True, torch.bfloat16, True),
+        (True, torch.float32, False),
+        (False, torch.bfloat16, False),
+    ],
+)
+def test_multi_hot_forward_launches_triton_only_for_a_cuda_bf16_table(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda: bool,
+    dtype: torch.dtype,
+    expect_triton: bool,
+) -> None:
+    config = _small_layout()
+    config.dtype = dtype
+    module = config.make()
+    plain = _draw_packed(config, batch=2)
+    rows = _CudaInput(plain) if cuda else plain
+    launched: list[Tensor] = []
+
+    def forward_triton(input: Tensor) -> Tensor:
+        launched.append(input)
+        return module.forward_torch(input)
+
+    monkeypatch.setattr(module, "forward_triton", forward_triton)
+
+    features = module(rows)
+
+    assert len(launched) == int(expect_triton)
+    assert torch.equal(features, module.forward_torch(plain))
+
+
 def test_multi_hot_backward_dispatch_uses_triton_for_eight_fields_at_width_sixteen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

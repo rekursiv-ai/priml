@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import contextlib
@@ -26,7 +26,7 @@ from treekle import from_plain
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream,
 )
 from priml.baselines.mlsbench.dl.weighting import reference
@@ -66,6 +66,7 @@ CONFIG: Final = {
 """What ``main`` tells ``compute_class_weights``; no baseline reads it."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``cv-sample-weighting`` script the capture uses."""
 
@@ -141,7 +142,7 @@ class Trace:
 
 def script_of(variant: Upstream) -> Script:
     """Type an imported variant as this task's script."""
-    return cast(Script, cast(object, variant))
+    return upstream.narrowed(variant, Script)
 
 
 def variants(root: Path, scratch: Path) -> dict[str, Script]:
@@ -198,7 +199,7 @@ def trace_main(
     spy = _MainSpy(trace)
     argv = ["script.py", "--arch", arch, "--dataset", dataset]
     argv += ["--imbalance-ratio", str(ratio)]
-    argv += ["--epochs", str(epochs), "--seed", str(vision.SEED)]
+    argv += ["--epochs", str(epochs), "--seed", str(vision_reference.SEED)]
     printed = io.StringIO()
     with (
         _datasets(script, _LabelsOnly),
@@ -229,7 +230,7 @@ def upstream_weights(scripts: dict[str, Script]) -> dict[str, Tensor]:
       record: Keyed as :func:`reference.weights_record`.
 
     """
-    logits, label = vision.fixed_logits()
+    logits, label = vision_reference.fixed_logits()
     record: dict[str, Tensor] = {}
     with host_agnostic_numerics():
         for name, script in scripts.items():
@@ -276,11 +277,11 @@ def upstream_lockstep(
     settings = trace.main.settings
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = upstream.tiny_model(
             cast(upstream.Upstream, cast(object, script)),
             arch,
-            vision.CLASSES,
+            vision_reference.CLASSES,
         )
         script.initialize_weights(model)
         counts = torch.tensor(reference.LOCKSTEP_COUNTS)
@@ -294,15 +295,23 @@ def upstream_lockstep(
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=vision.EPOCHS,
+            T_max=vision_reference.EPOCHS,
         )
-        for index in range(vision.STEPS):
-            batch = [(vision.fixed_media(index), vision.fixed_label(index))]
+        for index in range(vision_reference.STEPS):
+            batch = [
+                (
+                    vision_reference.fixed_media(index),
+                    vision_reference.fixed_label(index),
+                ),
+            ]
             script.train_epoch(model, batch, criterion, optimizer, torch.device("cpu"))
             model.eval()
             with torch.no_grad():
                 probes.append(
-                    vision.logits_of(model, vision.fixed_media(vision.STEPS)),
+                    vision_reference.logits_of(
+                        model,
+                        vision_reference.fixed_media(vision_reference.STEPS),
+                    ),
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
@@ -339,7 +348,7 @@ def upstream_setting(
     record = {
         f"{prefix}schedule/lr": torch.tensor(pristine.rates, dtype=torch.float64),
         f"{prefix}optimizer/settings": torch.tensor(
-            [pristine.settings[k] for k in vision.HYPERPARAMETERS],
+            [pristine.settings[k] for k in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
         f"{prefix}counts": traces["uniform"].counts,
@@ -354,7 +363,7 @@ def upstream_setting(
     )
     lockstep: dict[str, Lockstep] = {}
     if setting.lockstep:
-        short = trace_main(scripts["uniform"], setting, epochs=vision.EPOCHS)
+        short = trace_main(scripts["uniform"], setting, epochs=vision_reference.EPOCHS)
         for variant, script in scripts.items():
             lockstep[f"{name}/{variant}"] = upstream_lockstep(
                 script,
@@ -390,15 +399,18 @@ def upstream_batches(
     train: Batches = []
     evaluation: Batches = []
     dataset = "cifar100" if setting is None else setting.dataset
-    with vision.seeded(vision.SEED), _datasets(script, _SyntheticSplit):
+    with (
+        vision_reference.seeded(vision_reference.SEED),
+        _datasets(script, _SyntheticSplit),
+    ):
         train_loader, test_loader, _, _ = script.get_dataloaders(
             dataset,
             "unused",
             imbalance_ratio,
-            batch_size=vision.LOADER_BATCH,
-            seed=vision.SEED,
+            batch_size=vision_reference.LOADER_BATCH,
+            seed=vision_reference.SEED,
         )
-        for _ in range(vision.LOADER_PASSES):
+        for _ in range(vision_reference.LOADER_PASSES):
             train.append([{"media": x, "label": y} for x, y in train_loader])
             evaluation.append([{"media": x, "label": y} for x, y in test_loader])
     return train, evaluation
@@ -420,7 +432,7 @@ def upstream_subset(script: Script) -> dict[str, Tensor]:
             "unused",
             reference.SPLIT_RATIO,
             num_workers=0,
-            seed=vision.SEED,
+            seed=vision_reference.SEED,
         )
     return {"subset/indices": _kept(train), "subset/counts": counts}
 
@@ -443,7 +455,7 @@ def real_subset(script: Script, data_root: Path) -> tuple[Tensor, Tensor, Tensor
         str(data_root),
         reference.RATIO,
         num_workers=0,
-        seed=vision.SEED,
+        seed=vision_reference.SEED,
     )
     dataset = cast("Subset[object]", train.dataset).dataset
     label = torch.as_tensor(cast(_HasTargets, dataset).targets)
@@ -476,7 +488,7 @@ def upstream_record(
     record |= subset
     record["schedule/lr"] = torch.tensor(trace.main.rates, dtype=torch.float64)
     record["optimizer/settings"] = torch.tensor(
-        [trace.main.settings[name] for name in vision.HYPERPARAMETERS],
+        [trace.main.settings[name] for name in vision_reference.HYPERPARAMETERS],
         dtype=torch.float64,
     )
     record["draws/exp000"] = trace.main.draws
@@ -498,7 +510,7 @@ class _MainSpy:
 
     def __init__(self, trace: Trace) -> None:
         self.trace = trace
-        self.scripted = iter(vision.SCRIPTED_CORRECT)
+        self.scripted = iter(vision_reference.SCRIPTED_CORRECT)
 
     def wrap(
         self,
@@ -553,7 +565,8 @@ class _MainSpy:
             main.state = {k: v.clone() for k, v in model.state_dict().items()}
             main.draws = rng_fingerprint()
             main.settings = {
-                name: float(cast(float, group[name])) for name in vision.HYPERPARAMETERS
+                name: float(cast(float, group[name]))
+                for name in vision_reference.HYPERPARAMETERS
             }
             self.trace.weight = cast(Tensor, criterion.weight).clone()
         main.rates.append(from_plain(group["lr"], float))
@@ -565,7 +578,7 @@ class _MainSpy:
     def evaluate(self, *args: object) -> tuple[float, float]:
         """Report the next scripted accuracy, whatever the script passes."""
         del args
-        return 0.0, 100.0 * next(self.scripted) / vision.SCRIPTED_TOTAL
+        return 0.0, 100.0 * next(self.scripted) / vision_reference.SCRIPTED_TOTAL
 
 
 class _LabelsOnly:

@@ -7,18 +7,19 @@ from dataclasses import field
 from configgle import Makes
 
 from priml.baselines.mlsbench.dl.vision.data import Cifar100Data
-from priml.baselines.mlsbench.dl.vision.train_loop import EvalEpochsTrainLoop
+from priml.baselines.mlsbench.dl.vision.train_loop import VisionLoop
 from priml.baselines.mlsbench.opt.gradient_compression.train_step import (
     CompressedTrainStep,
 )
+from priml.train.epoch_loop import EpochTrainLoop
 
 
-class CompressionTrainLoop(EvalEpochsTrainLoop):
+class CompressionTrainLoop(EpochTrainLoop):
     """A loop that evaluates after the epochs its policy picks, stepping with compression."""
 
     class Config(
         Makes["CompressionTrainLoop"],
-        EvalEpochsTrainLoop.Config[CompressedTrainStep.Config, Cifar100Data.Config],
+        VisionLoop[CompressedTrainStep.Config, Cifar100Data.Config],
     ):
         """The compressing step, prepared CIFAR tensors and the evaluation policy."""
 

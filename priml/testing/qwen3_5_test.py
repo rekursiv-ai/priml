@@ -256,6 +256,25 @@ def test_torch_reference_preserves_defaults_closure_and_receiver(
     assert called == ["base", "base"]
 
 
+class _CallableForward:
+    """A callable object: ``forward`` that is not a plain function."""
+
+    def __call__(self, value: Tensor) -> Tensor:
+        return value
+
+
+def test_torch_reference_rejects_a_forward_that_is_not_a_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = _Reference()
+    monkeypatch.setattr(reference, "forward", _CallableForward())
+    with pytest.raises(
+        TypeError,
+        match=r"^Expected the reference forward to be a plain function\.$",
+    ):
+        torch_reference(reference)
+
+
 def test_torch_reference_rejects_non_callable_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

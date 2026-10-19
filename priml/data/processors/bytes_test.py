@@ -2392,6 +2392,21 @@ def test_video_decoder_routes_an_unclaimed_format_on_untouched() -> None:
     assert "filter_reasons" not in out
 
 
+def test_video_decoder_rejects_a_process_without_stdout() -> None:
+    class Process:
+        stdout = None
+
+    processor = DecodeVideo(DecodeVideo.Config(ffmpeg_exe="no-pipe-ffmpeg"))
+    with (
+        patch(
+            "priml.data.processors.bytes.subprocess.Popen",
+            return_value=Process(),
+        ),
+        pytest.raises(ValueError, match=r"^Expected stdout is not None\.$"),
+    ):
+        processor._decode(b"video", height=2, width=3, keep_frames=1)
+
+
 def test_video_decoder_drops_a_failed_read_and_kills_a_hung_ffmpeg() -> None:
     events: list[str] = []
 

@@ -82,6 +82,27 @@ def test_explicit_view_applies_and_inverts_source_color_slots() -> None:
         )
 
 
+def test_explicit_view_rejects_invalid_tid_and_slots() -> None:
+    policy = ColorDihedral.Config().make()
+    grid = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint8)
+    slots = tuple(range(9))
+    with pytest.raises(ValueError, match=r"Invalid dihedral tid=8; must be in 0\.\.7"):
+        policy.inverse_explicit(grid, tid=8, colorperm_slots=slots)
+    with pytest.raises(ValueError, match=r"Invalid dihedral tid=-1; must be in 0\.\.7"):
+        policy.inverse_explicit(grid, tid=-1, colorperm_slots=slots)
+    for bad in ((*range(8),), (*range(8), 0), (*range(1, 10),)):
+        with pytest.raises(ValueError, match=r"permutation of 0\.\.8"):
+            policy.apply_explicit(grid, tid=0, colorperm_slots=bad)
+
+
+def test_inverse_of_bare_name_is_identity() -> None:
+    policy = ColorDihedral.Config(separator="|||").make()
+    grid = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8)
+    name, transform = policy.inverse("task")
+    assert name == "task"
+    assert transform(grid) is grid
+
+
 def test_token_augmentation_passes_input_device_to_symmetry_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import functools
+import sys
+import traceback
+
 import pytest
 import torch
 
@@ -11,7 +15,8 @@ from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from types import FrameType
 
 
 def test_counts_a_sampler_by_api_and_calling_function() -> None:
@@ -26,6 +31,33 @@ def test_counts_a_sampler_by_api_and_calling_function() -> None:
         f"rand@{me}": 1,
         f"randperm@{me}": 1,
     }
+
+
+def test_the_caller_is_found_where_walk_stack_from_none_skips_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Python 3.12's ``walk_stack(None)`` starts two frames up, past ``__call__``'s
+    # caller; a counter that relied on it named the wrong function there.
+    monkeypatch.setattr(
+        traceback,
+        "walk_stack",
+        functools.partial(_walk_312, walk=traceback.walk_stack),
+    )
+    with recorded_draws() as counts:
+        _ = torch.rand(1)
+    me = "vision/draws_test.py:test_the_caller_is_found_where_walk_stack_from_none_skips_it"
+    assert counts == {f"rand@{me}": 1}
+
+
+def _walk_312(
+    frame: FrameType | None,
+    *,
+    walk: Callable[[FrameType | None], Iterator[tuple[FrameType, int]]],
+) -> Iterator[tuple[FrameType, int]]:
+    if frame is None:
+        start = sys._getframe(1).f_back
+        frame = start.f_back if start is not None else None
+    return walk(frame)
 
 
 def test_counts_a_tensor_method_called_on_an_instance_or_through_the_class() -> None:

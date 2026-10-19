@@ -22,6 +22,7 @@ from priml.baselines.sudoku.experiments import exp000
 from priml.cost import (
     MEASURES,
     Cost,
+    Index,
     Report,
     _column_order,
     _div,
@@ -495,6 +496,17 @@ def test_matmul_cost_without_a_weight_owns_nothing_but_reads_both_operands() -> 
     assert c.params == c.params_active == 0
     assert c["flops", "primal", "matmul"].sum() == 48
     assert c["bytes", "primal", "matmul"].sum() == 4 * (4 * 2 + 4 * 3 + 6)
+
+
+def test_matmul_cost_without_input_gradient_halves_the_adjoint_matmul() -> None:
+    full = matmul_cost(channels_in=5, channels_out=7, rows=3)
+    weight_only = matmul_cost(channels_in=5, channels_out=7, rows=3, input_grad=False)
+    for kind in ("flops", "bytes"):
+        assert (
+            weight_only[kind, "adjoint", "matmul"].sum()
+            == full[kind, "adjoint", "matmul"].sum() // 2
+        )
+        assert weight_only[kind, "primal"] == full[kind, "primal"]
 
 
 def test_matmul_cost_adjoint_is_twice_primal_in_the_matmul_cells() -> None:
@@ -1355,6 +1367,14 @@ def test_scalar_leaf_formulas_and_composition() -> None:
         ].sum()
         == 7 * 8
     )
+
+
+def test_an_empty_index_returns_the_whole_table() -> None:
+    table = matmul_cost(channels_in=2, channels_out=3, rows=4)
+    report = intensity(table)
+    empty = cast(Index, ())
+    assert table[empty] is table
+    assert report[empty] is report
 
 
 if __name__ == "__main__":

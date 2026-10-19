@@ -127,7 +127,7 @@ def upstream_activation(script: Upstream, name: str) -> dict[str, Tensor]:
       record: The activation's values and its gradient at every input.
 
     """
-    task = _task(script)
+    task = upstream.narrowed(script, Script)
     leaf = fixed_inputs().requires_grad_()
     with host_agnostic_numerics():
         value = task.CustomActivation()(leaf)
@@ -161,7 +161,7 @@ def upstream_lockstep(
         afterwards; and the model's whole state after each update.
 
     """
-    task = _task(script)
+    task = upstream.narrowed(script, Script)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
@@ -264,7 +264,3 @@ def upstream_record(
 # The capture shares the vision port's ``Upstream`` type with its helpers, but this
 # script has no ``compute_loss`` and its ``train_epoch`` takes a criterion; narrowing
 # from ``object`` checks the members this module uses instead of intersecting both.
-def _task(script: object) -> Script:
-    """Narrow an imported script to the members this module calls."""
-    assert isinstance(script, Script)
-    return script

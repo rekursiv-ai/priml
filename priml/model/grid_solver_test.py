@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 
 import math
 import re
@@ -32,6 +39,7 @@ from priml.model.grid_solver import (
     lattice_positions,
 )
 from priml.model.init import kaiming_uniform, truncated_normal, unit_normal
+from priml.model.linear import Linear
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.prefix import ComposedSparsePrefix, RegisterTokens
@@ -686,6 +694,78 @@ def test_single_latent_rope_uses_attention_width_only_for_default_sentinel() -> 
 
     assert config.rope is not None
     assert config.rope.channels_head == 4
+
+
+def test_single_latent_halt_head_inherits_the_halt_width() -> None:
+    config = _single_latent_validation_config()
+    config.halt_head = Linear.Config(bias=True)
+    config.halt_outputs = 3
+
+    config.finalize()
+
+    assert (config.halt_head.channels_in, config.halt_head.channels_out) == (4, 3)
+
+
+def test_single_latent_rejects_a_halt_head_without_bias() -> None:
+    config = _single_latent_validation_config()
+    config.halt_head.bias = False
+
+    with pytest.raises(ValueError, match=r"Expected halt_head\.bias to be present"):
+        config.make()
+
+
+@pytest.mark.parametrize("unit", ["core", "reasoning"])
+def test_single_latent_compiles_the_configured_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    unit: Literal["core", "reasoning"],
+) -> None:
+    compiled: list[object] = []
+
+    def compile_eager(
+        fn: Callable[..., object],
+        **kwargs: object,
+    ) -> Callable[..., object]:
+        del kwargs
+        compiled.append(fn)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", compile_eager)
+    config = _single_latent_validation_config()
+    config.compile_core = CoreCompile.Config(unit=unit)
+
+    model = config.make()
+
+    assert len(compiled) == 1
+    assert (model._compiled_core is not None) == (unit == "core")
+    assert (model._compiled_mix is not None) == (unit == "reasoning")
+
+
+def test_single_latent_reset_restores_a_learned_rope() -> None:
+    config = _single_latent_validation_config()
+    config.rope = RoPEMixed.Config(channels_head=2, num_heads=2, learnable=True)
+    model = config.make()
+    assert model.rope is not None
+    frequency = next(model.rope.parameters())
+    with torch.no_grad():
+        frequency.zero_()
+
+    model.reset_parameters()
+
+    assert torch.count_nonzero(frequency)
+
+
+def test_single_latent_embed_prepends_the_scaled_prefix() -> None:
+    config = _single_latent_validation_config()
+    config.prefix = RegisterTokens.Config(num_tokens=2)
+    model = config.make()
+    tokens = torch.zeros(2, 6, dtype=torch.long)
+    assert model.prefix is not None
+    prefix = cast(Tensor, model.prefix(2))
+
+    embedded = model._embed(tokens, {})
+
+    assert embedded.shape == (2, 8, 4)
+    assert torch.equal(embedded[:, :2], 4**0.5 * prefix.to(embedded.dtype))
 
 
 def test_single_latent_without_recurrence_updates_the_fast_latent() -> None:

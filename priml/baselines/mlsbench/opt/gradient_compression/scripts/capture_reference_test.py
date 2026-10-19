@@ -13,9 +13,9 @@ import sys
 
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.opt.gradient_compression import (
-    reference as port,
+    reference,
     upstream,
 )
 from priml.baselines.mlsbench.opt.gradient_compression.scripts import (
@@ -57,7 +57,7 @@ def test_capture_assembles_both_sides_into_one_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every run is a stand-in; the runs themselves are tested elsewhere."""
-    scripts = dict.fromkeys(port.COMPRESSORS, object())
+    scripts = dict.fromkeys(reference.COMPRESSORS, object())
     zero = {"w": torch.zeros(2)}
     batch = {"media": torch.zeros(2), "label": torch.arange(2)}
     moved = {"media": torch.ones(2), "label": torch.arange(2)}
@@ -74,15 +74,15 @@ def test_capture_assembles_both_sides_into_one_report(
         (upstream, "upstream_transforms"): {"transform/x": torch.zeros(2)},
         (upstream, "upstream_batches"): ([[batch]], [[batch]]),
         (upstream, "upstream_sites"): {"rand_like@x": 1},
-        (vision, "decode_batches"): {"loader/x": torch.zeros(2)},
+        (vision_reference, "decode_batches"): {"loader/x": torch.zeros(2)},
         (capture_reference, "compare_full_size"): ["state: 1 tensors against 2"],
-        (port, "port_record"): {"compressor/x": torch.ones(2)},
-        (port, "loader_batches"): ([[moved]], [[batch]]),
-        (port, "draw_sites"): {"rand_like@y": 1},
+        (reference, "port_record"): {"compressor/x": torch.ones(2)},
+        (reference, "loader_batches"): ([[moved]], [[batch]]),
+        (reference, "draw_sites"): {"rand_like@y": 1},
     }
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, returning(value))
-    monkeypatch.setattr(port, "lockstep_record", stand_in_lockstep)
+    monkeypatch.setattr(reference, "lockstep_record", stand_in_lockstep)
     captured = capture_reference.capture(tmp_path, tmp_path)
     assert set(captured.record) == {
         "compressor/x",
@@ -99,7 +99,7 @@ def test_capture_assembles_both_sides_into_one_report(
     }
     unreached = capture_reference.check_sites({"rand_like@x": 1}, {"rand_like@y": 1})
     assert captured.report == [
-        *(["state: 1 tensors against 2"] * len(port.SETTINGS)),
+        *(["state: 1 tensors against 2"] * len(reference.SETTINGS)),
         "missing draws/x",
         "missing loader/x",
         "missing lockstep/x/loss",
@@ -109,7 +109,7 @@ def test_capture_assembles_both_sides_into_one_report(
         "compressor/x: 2/2 differ",
         *(
             f"lockstep/{name}/{step}: w: 2/2 differ"
-            for name in port.COMPRESSORS
+            for name in reference.COMPRESSORS
             for step in (1, 2)
         ),
         *(
@@ -131,7 +131,7 @@ def test_compare_full_size_names_the_setting_of_each_differing_tensor(
         def __init__(self) -> None:
             self.model = model
 
-    monkeypatch.setattr(port, "full_step", returning(Built()))
+    monkeypatch.setattr(reference, "full_step", returning(Built()))
     theirs = {k: v.clone() for k, v in model.state_dict().items()}
     assert capture_reference.compare_full_size("exp004", theirs) == []
     theirs["bias"] = theirs["bias"] + 1
@@ -154,7 +154,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = vision.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -169,7 +169,7 @@ def test_main_writes_the_golden_and_sites_when_every_comparison_is_exact(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = vision.Captured(
+    result = vision_reference.Captured(
         record={"x": torch.arange(3)},
         sites={"reference": {"a": 2}, "port": {"b": 3}},
         report=[],

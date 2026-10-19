@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Final, cast
 
+import copy
+
 from configgle import PartialConfig
 from torch import Tensor
 
@@ -194,13 +196,77 @@ def test_legacy_checkpoint_without_resume_state_is_rejected(tmp_path: Path) -> N
         loop.close()
 
 
+def test_epoch_boundary_saves_a_checkpoint_after_validation(tmp_path: Path) -> None:
+    cfg = _loop_config(tmp_path)
+    cfg.checkpointer = Etth1Checkpointer.Config()
+    cfg.checkpointer.base_dir = "/"
+    cfg.checkpointer.working_dir = tmp_path / "checkpoints"
+    cfg.checkpointer.save_every = 100
+    loop = cfg.make()
+    loop.train()
+    saved = {path.name for path in (tmp_path / "checkpoints").glob("step_*.pt")}
+    assert {"step_00000005.pt", "step_00000010.pt"} <= saved
+
+
+def test_state_round_trips_the_stopping_history(tmp_path: Path) -> None:
+    source = _loop_config(tmp_path / "source").make()
+    try:
+        for value in (0.5, 0.6):
+            source._publish_eval_metrics(
+                {"total_loss": value},
+                eval_time=0,
+                step=0,
+                is_final=False,
+            )
+        for _ in range(5):
+            source._do_train_step(source._get_next_batch())
+        state = copy.deepcopy(source.state_dict())
+    finally:
+        source.close()
+    assert state.get("pending_epoch_completion") is True
+    restored = _loop_config(tmp_path / "restored").make()
+    try:
+        restored.load_state_dict(state)
+        assert restored.best_validation_loss == 0.5
+        assert restored.bad_validation_epochs == 1
+        assert not restored.stop_early
+        assert restored.validation_losses == [0.5, 0.6]
+        assert restored._pending_epoch_completion
+        assert restored.train_loader is None
+        assert restored.train_iter is None
+        assert restored._last_boundary_epoch == restored.current_epoch
+        assert restored._last_eval_step == -1
+        assert restored._last_cadence_step == restored.step.global_step == 5
+    finally:
+        restored.close()
+
+
+def test_state_without_a_pending_flag_reads_it_from_the_dataset(
+    tmp_path: Path,
+) -> None:
+    source = _loop_config(tmp_path / "source").make()
+    try:
+        for _ in range(5):
+            source._do_train_step(source._get_next_batch())
+        state = dict(copy.deepcopy(source.state_dict()))
+    finally:
+        source.close()
+    del state["pending_epoch_completion"]
+    restored = _loop_config(tmp_path / "restored").make()
+    try:
+        restored.load_state_dict(state)
+        assert restored._pending_epoch_completion
+    finally:
+        restored.close()
+
+
 def test_update_record_refuses_optimizer_state_it_cannot_flatten() -> None:
     class Optimizer:
         def state_dict(self) -> dict[str, object]:
             return {"state": {"note": "text"}}
 
     model = torch.nn.Linear(1, 1)
-    with pytest.raises(TypeError, match="Unsupported optimizer state: str"):
+    with pytest.raises(TypeError, match="Unsupported record value: str"):
         _ = update_record(model, Optimizer(), torch.zeros(1), torch.zeros(()))
 
 

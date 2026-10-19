@@ -1,19 +1,17 @@
 """A CSR product must equal the dense product and repeat bit for bit on every device."""
 
-from collections.abc import Callable, Iterator
-from functools import partial
+from collections.abc import Iterator
 from types import FunctionType
 from unittest.mock import Mock
 
 from torch import Tensor
-from triton.runtime import interpreter, jit
 
 import pytest
 import torch
-import triton
 
 from priml.baselines.convextok import spmv
 from priml.baselines.convextok.spmv import CsrMatrix
+from priml.testing.triton_interpreter import triton_interpreter
 
 
 def _jit_probe(value: int = 1) -> None:
@@ -351,40 +349,10 @@ def test_matches_dense_product_with_an_empty_row() -> None:
 
 
 @pytest.fixture
-def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def interpreted_kernels() -> Iterator[None]:
     """Run the Triton kernels through Triton's CPU interpreter, uncached."""
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
-    # The compiler finds a constexpr by substring; the interpreter re-parses the source,
-    # sees the quoted ``'language.constexpr'``, and matches only a bare ``constexpr``.
-    monkeypatch.setattr(
-        jit,
-        "_normalize_ty",
-        partial(_normalize_bare_constexpr, normalize=jit._normalize_ty),
-    )
-    # Triton decided at import that its library kernels compile, so ``sum`` is a
-    # JITFunction the interpreter refuses to call; interpret it as the kernels are.
-    monkeypatch.setattr(
-        triton.language,
-        "sum",
-        interpreter.InterpretedFunction(triton.language.standard.sum.fn),
-    )
-    spmv._bucket_kernel.cache_clear()
-    spmv._chunk_kernel.cache_clear()
-    try:
+    with triton_interpreter(spmv._bucket_kernel, spmv._chunk_kernel):
         yield
-    finally:
-        spmv._bucket_kernel.cache_clear()
-        spmv._chunk_kernel.cache_clear()
-
-
-def _normalize_bare_constexpr(
-    ty: object,
-    *,
-    normalize: Callable[[object], str],
-) -> str:
-    return normalize(
-        ty.strip("'").removeprefix("language.") if isinstance(ty, str) else ty,
-    )
 
 
 @pytest.mark.usefixtures("interpreted_kernels")

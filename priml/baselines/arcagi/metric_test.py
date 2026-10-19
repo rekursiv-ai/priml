@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, SupportsIndex, cast, override
@@ -22,13 +23,20 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml.baselines.arcagi import metric
+from priml.baselines.arcagi import (
+    data as arc_data,
+    metric,
+)
 from priml.baselines.arcagi.augmentation import (
     ArcSpec,
     SpatialAugmentation,
     grid_hash,
 )
-from priml.baselines.arcagi.data import ArcParquetData, PairSource
+from priml.baselines.arcagi.data import (
+    ArcParquetData,
+    PairSource,
+    ParquetSourceData,
+)
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
     ParquetPassK,
@@ -338,6 +346,22 @@ def test_per_task_logs_include_summary_and_hardest_tasks(
         "[eval]   task-b pass@1=0.000",
         "[eval]   task-a pass@1=0.250",
     ]
+
+
+def test_per_task_logs_stay_silent_off_rank_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    metric = CanonicalPassK.Config().make()
+    monkeypatch.setattr(
+        "priml.baselines.arcagi.metric.is_rank_zero",
+        lambda: False,
+    )
+    caplog.set_level(logging.INFO, logger="priml.baselines.arcagi.metric")
+
+    metric._log_per_task({"pass@1": 0.5}, [("task-a", 0.0)], 1, 0)
+
+    assert caplog.messages == []
 
 
 def test_per_task_logs_keep_only_ten_hardest_tasks(
@@ -1540,6 +1564,45 @@ def test_metric_unlabeled_outputs_and_empty_tasks_have_stable_denominator(
     }
 
 
+def test_metric_excludes_tasks_without_test_inputs_from_the_mean(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "with-empty.parquet"
+    parquet.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-a",
+                    "train": [],
+                    "test": [{"input": [[1, 2]], "output": [[3, 4], [5, 6]]}],
+                    "offline_augs": [""],
+                },
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-empty",
+                    "train": [],
+                    "test": [],
+                    "offline_augs": [""],
+                },
+            ],
+        ),
+        source,
+    )
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+    ).make()
+    candidate = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=1.0)
+    metric.update(
+        candidate.unsqueeze(0),
+        **_parquet_batch([("task-a", [[1, 2]], candidate)]),
+    )
+
+    assert metric.compute() == {"pass@1": 1.0}
+
+
 def test_metric_preserves_wide_target_denominator_without_hashing_it(
     tmp_path: Path,
 ) -> None:
@@ -1687,6 +1750,65 @@ def test_metric_gather_preserves_rank_order_and_nonroot_returns_empty(
     assert metric.submission(submission_k=1) == {}
 
 
+class _IncoherentRank:
+    """A rank that is neither 0 nor not 0, as no ``int`` can be."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    @override
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    @override
+    def __hash__(self) -> int:
+        return 0
+
+
+def test_metric_gather_rejects_a_root_without_gathered_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    passk = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "get_rank", _IncoherentRank)
+
+    def gather(payload: object, output: list[object] | None, *, dst: int) -> None:
+        del payload, output, dst
+
+    monkeypatch.setattr(dist, "gather_object", gather)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Expected gathered rank states is not None\.$",
+    ):
+        passk.compute()
+
+
+def test_ground_truth_rejects_a_source_missing_an_input_grid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+
+    def without_first_input(path: Path, *, max_grid_size: int) -> ParquetSourceData:
+        parsed = arc_data.read_parquet_source(path, max_grid_size=max_grid_size)
+        shapes = parsed.test_inputs.shapes.copy()
+        shapes[0] = 0
+        return replace(parsed, test_inputs=replace(parsed.test_inputs, shapes=shapes))
+
+    monkeypatch.setattr(metric, "read_parquet_source", without_first_input)
+    passk = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+
+    with pytest.raises(ValueError, match=r"^Expected input_grid is not None\.$"):
+        passk.compute()
+
+
 def test_metric_rejects_malformed_packed_predictions(tmp_path: Path) -> None:
     source = tmp_path / "eval.parquet"
     _write_parquet_eval_source(source)
@@ -1776,6 +1898,7 @@ def test_metric_valid_count_accepts_padding_and_tensor_scalars(
     ("config", "message"),
     [
         (ParquetPassK.Config(canvas_size=0), "canvas_size must be positive."),
+        (ParquetPassK.Config(canvas_size=256), "canvas_size must be at most 255."),
         (
             ParquetPassK.Config(pass_ks=()),
             "pass_ks must contain positive attempt budgets.",
@@ -1800,6 +1923,15 @@ def test_metric_config_rejects_invalid_voting_controls(
     with pytest.raises(ValueError, match=re.escape(message)) as error:
         finalized.make()
     assert str(error.value) == message
+
+
+def test_metric_config_accepts_the_widest_hashable_canvas(tmp_path: Path) -> None:
+    source = tmp_path / "widest.parquet"
+    _write_parquet_eval_source(source)
+
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=255).make()
+
+    assert metric.config.canvas_size == 255
 
 
 def test_metric_config_accepts_single_cell_canvas(tmp_path: Path) -> None:

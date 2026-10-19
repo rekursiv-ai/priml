@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import fields
 from pathlib import Path
-from typing import Final
+from typing import Final, override
 
 import warnings
 
+from configgle import Fig
+from torch import Tensor, nn
 from torch.nn import functional
 from treekle import from_plain, to_plain
 
@@ -336,11 +338,100 @@ def test_stage_cost_requires_a_declared_spatial_transform() -> None:
         cost(config.finalized(), input_grid=(7, 11), batch_size=2, dtype=torch.float32)
 
 
+def test_stage_output_grid_requires_a_declared_downsampler() -> None:
+    config = ConvNeXtStage.Config(channels_in=3, channels_out=3)
+    config.downsample = _Undeclared.Config()
+    with pytest.raises(
+        TypeError,
+        match=r"^ConvNeXt requires a spatially declared downsampler\.$",
+    ):
+        config.finalized().output_grid((7, 11))
+
+
+def test_unfinalized_stage_cost_is_rejected() -> None:
+    # An unfinalized stage still holds its block template, not the block list.
+    with pytest.raises(AssertionError):
+        ConvNeXtStage.Config().cost(input_grid=(7, 11), batch_size=2, dtype=None)
+
+
+def test_explicit_stages_chain_their_downsampled_feature_grid() -> None:
+    config = ConvNeXt.Config(
+        channels_in=3,
+        channels_hidden=(5, 7),
+        blocks_per_stage=(1, 1),
+        stage=[ConvNeXtStage.Config(), ConvNeXtStage.Config()],
+    ).finalized()
+    stem = config.stem.output_grid((32, 48))
+    # Each default stage halves both axes with its stride-2 downsampler.
+    assert config.feature_grid((32, 48)) == (stem[0] // 4, stem[1] // 4)
+
+
+def test_explicit_stages_cannot_be_given_another_count() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^ConvNeXt width and block stage counts must match\.$",
+    ):
+        ConvNeXt.Config(
+            channels_hidden=(5, 7),
+            blocks_per_stage=(1, 1),
+            stage=[ConvNeXtStage.Config()],
+        ).finalized()
+
+
+def test_the_network_rejects_a_config_whose_stages_were_edited_after_finalize() -> None:
+    config = ConvNeXt.Config(
+        channels_in=3,
+        channels_hidden=(5,),
+        blocks_per_stage=(1,),
+    ).finalized()
+    assert isinstance(config.stage, list)
+    config.stage.append(config.stage[0].copy_tree())
+    with pytest.raises(
+        ValueError,
+        match=r"^ConvNeXt width and block stage counts must match\.$",
+    ):
+        ConvNeXt(config)
+
+
+@pytest.mark.parametrize(
+    ("channels_in", "channels_out"),
+    [(4, -1), (-1, 4)],
+)
+def test_stem_fills_one_missing_width_from_the_other(
+    channels_in: int,
+    channels_out: int,
+) -> None:
+    config = ConvNeXtStem.Config(
+        channels_in=channels_in,
+        channels_out=channels_out,
+    ).finalized()
+    assert (config.channels_in, config.channels_out) == (4, 4)
+    assert (config.conv.channels_in, config.conv.channels_out) == (4, 4)
+
+
 def test_encoder_output_grid_requires_a_declared_head_transform() -> None:
     config = ConvNeXt.Config(channels_hidden=(5,), blocks_per_stage=(1,))
-    config.head = Linear.Config(channels_out=7)
-    with pytest.raises(TypeError, match="spatial"):
+    config.head = _Undeclared.Config()
+    with pytest.raises(
+        TypeError,
+        match=r"^ConvNeXt requires a spatially declared head\.$",
+    ):
         config.finalized().output_grid((12, 20))
+
+
+class _Undeclared(nn.Module):
+    """A module whose config declares no spatial geometry at all."""
+
+    class Config(Fig["_Undeclared"]):
+        pass
+
+    def reset_parameters(self) -> None:
+        pass
+
+    @override
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        return x
 
 
 def test_block_composes_existing_primitives_in_channel_last_order() -> None:

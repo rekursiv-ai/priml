@@ -1016,6 +1016,41 @@ def _split_dim(total: int, naxes: int) -> list[int]:
     return dims
 
 
+def rotate_activation_dtype(
+    q: Tensor,
+    k: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Rotate q and k half-split, rounding every product in the activation dtype.
+
+    The slot form of ``Attention.Config.rotate``. Unlike :meth:`RoPE.rotate`,
+    which accumulates in float32 and rounds once, this evaluates
+    ``x * cos + turn(x) * sin`` at the dtype the inputs arrive in, as a fused
+    half-precision kernel does, so its last bits differ from the upcast form.
+
+    Args:
+      q: ``[..., S, num_heads, channels_head]`` queries.
+      k: ``[..., S, num_heads_kv, channels_head]`` keys.
+      cos: Half-width cosine factors ``[..., S, 1, rotated // 2]``, in the
+        activation dtype.
+      sin: Sine factors, same shape as ``cos``.
+
+    Returns:
+      q_embed: Queries with their first ``rotated`` channels rotated.
+      k_embed: Keys, likewise.
+
+    Raises:
+      ValueError: The factors cover more channels than a head has.
+
+    """
+    return _rotate_head_major(q, cos=cos, sin=sin), _rotate_head_major(
+        k,
+        cos=cos,
+        sin=sin,
+    )
+
+
 def rotate_conjugate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
     """Rotate ``x``'s channel pairs by ``-theta``, at the input's own precision.
 
@@ -1343,3 +1378,20 @@ def _learned_frequency_cost(
         params=params,
         params_active=params,
     )
+
+
+# Head-major layout preserves the upstream q/k norm weight-gradient reduction order.
+def _rotate_head_major(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
+    """Rotate in activation dtype and head-major layout, including backward."""
+    x = x.movedim(-3, -2)
+    cos, sin = cos.movedim(-3, -2), sin.movedim(-3, -2)
+    cos, sin = torch.cat((cos, cos), dim=-1), torch.cat((sin, sin), dim=-1)
+    width = cos.shape[-1]
+    if width > x.shape[-1]:
+        raise ValueError(
+            f"Rotary width {width} exceeds attention head width {x.shape[-1]}.",
+        )
+    rotated, passthrough = x[..., :width], x[..., width:]
+    first, second = rotated.chunk(2, dim=-1)
+    rotated = rotated * cos + torch.cat((-second, first), dim=-1) * sin
+    return torch.cat((rotated, passthrough), dim=-1).movedim(-3, -2)

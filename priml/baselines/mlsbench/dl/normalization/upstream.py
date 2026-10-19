@@ -11,7 +11,7 @@ Nothing runs on a GPU.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
 import torch
 
@@ -50,6 +50,7 @@ GROUP_CHANNELS: Final = (5, 16, 32, 33, 64, 100)
 """Channel counts whose group count is compared; 33 and 100 are not divisible by 32."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``dl-normalization`` script the capture uses."""
 
@@ -159,7 +160,7 @@ def upstream_norm(script: Upstream, name: str) -> dict[str, Tensor]:
       record: Keyed as :func:`norm_run`.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
 
     def build(channels: int) -> nn.Module:
         layer = task.CustomNorm(channels)
@@ -179,7 +180,7 @@ def upstream_groups(script: Upstream) -> dict[str, Tensor]:
       record: ``norm/group_norm/groups``, one entry per :data:`GROUP_CHANNELS`.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     return {
         "norm/group_norm/groups": torch.tensor(
             [
@@ -215,7 +216,7 @@ def upstream_lockstep(
         afterwards; and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []

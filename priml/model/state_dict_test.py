@@ -11,7 +11,7 @@ from torch import nn
 import pytest
 import torch
 
-from priml.model.state_dict import validate_state_dict
+from priml.model.state_dict import remap_state_dict, validate_state_dict
 from priml.testing.golden import tensor_bits_equal
 
 
@@ -74,6 +74,15 @@ def test_rejected_state_leaves_every_model_tensor_unchanged(
 
 def test_empty_state_dictionaries_are_valid() -> None:
     validate_state_dict({}, expected={})
+
+
+def test_remap_renames_each_tensor_and_rejects_a_collision() -> None:
+    state = {"a.weight": torch.zeros(2), "b.weight": torch.ones(3)}
+    mapped = remap_state_dict(state, lambda name: name.replace("a.", "c."))
+    assert list(mapped) == ["c.weight", "b.weight"]
+    assert mapped["c.weight"] is state["a.weight"]
+    with pytest.raises(ValueError, match=re.escape("collide at x")):
+        remap_state_dict(state, lambda _: "x")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 """Check Craftax bits per byte, its per-target NLL, and the zstd reference."""
 
 from collections.abc import Mapping
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
-from typing import Final
+from typing import Final, override
 
 import copy
 import math
@@ -521,6 +521,31 @@ def test_ranks_sum_before_dividing(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
+def _device_two() -> int:
+    """Name CUDA device 2, as a rank's ``set_device`` would."""
+    return 2
+
+
+def test_nccl_ranks_reduce_on_the_current_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = _one_episode()
+    stratum = torch.zeros(WINDOW).long()
+    natural = torch.arange(1, 28, dtype=torch.float64)
+    expected = _scored([batch], [stratum], natural=natural).compute()
+    collective = _NcclPeerRank(peer=None)
+    host = _HostCuda()
+    monkeypatch.setattr(_METRIC_DIST, collective)
+    monkeypatch.setattr(torch.cuda, "current_device", _device_two)
+    monkeypatch.setattr(torch.Tensor, "to", host)
+
+    result = _scored([batch], [stratum], natural=natural).compute()
+
+    assert host.requested == [torch.device("cuda", 2)]
+    assert collective.devices == [torch.device("cpu")]
+    assert result == pytest.approx(expected)
+
+
 class _Recorder:
     """A tracker remembering every call."""
 
@@ -652,6 +677,51 @@ class _PeerRank:
         self.sent = tensor.clone()
         if self.peer is not None:
             tensor.add_(self.peer)
+
+
+class _NcclPeerRank(_PeerRank):
+    """``_PeerRank`` over NCCL, which reduces only on the current CUDA device."""
+
+    def __init__(self, *, peer: torch.Tensor | None) -> None:
+        super().__init__(peer=peer)
+        self.devices: list[torch.device] = []
+
+    @override
+    def get_backend(self) -> str:
+        """Return NCCL's name, so the sums move to the device first."""
+        return "nccl"
+
+    @override
+    def all_reduce(self, tensor: torch.Tensor, op: object = dist.ReduceOp.SUM) -> None:
+        """Record the device the sums arrived on, then reduce them."""
+        self.devices.append(tensor.device)
+        super().all_reduce(tensor, op)
+
+
+class _HostCuda:
+    """``Tensor.to`` that records a CUDA destination and keeps the tensor on the host.
+
+    A descriptor, so it binds the tensor as ``self`` when patched onto ``Tensor``.
+    """
+
+    def __init__(self) -> None:
+        self.requested: list[torch.device] = []
+        self._to = torch.Tensor.to
+
+    def __get__(self, tensor: torch.Tensor, owner: type) -> partial[torch.Tensor]:
+        return partial(self._move, tensor)
+
+    def _move(
+        self,
+        tensor: torch.Tensor,
+        device: torch.device,
+        *,
+        non_blocking: bool = False,
+    ) -> torch.Tensor:
+        if device.type == "cuda":
+            self.requested.append(device)
+            return tensor
+        return self._to(tensor, device, non_blocking=non_blocking)
 
 
 def _zstd_bpb(*micro_batches: bytes) -> float:

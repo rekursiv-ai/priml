@@ -1952,7 +1952,8 @@ def test_a_cuda_rollout_launches_after_the_device_lands_the_weight_copies(
         events.append(f"collect {slot}")
         return collect(slot)
 
-    def synchronize(device: torch.device) -> None:
+    # Optional as torch's is: the CUDA cleanup fixture calls it bare while faked.
+    def synchronize(device: torch.device | None = None) -> None:
         events.append(f"synchronize {device}")
 
     monkeypatch.setattr(step.rollout, "collect", collect_after)

@@ -23,12 +23,18 @@ import tempfile
 
 from configgle import Makeable, PartialConfig
 from torch import Tensor, nn
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    RowwiseParallel,
+    parallelize_module,
+)
 from torch.nn import functional as f
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml import runtime
 from priml.cost import Cost, cost
@@ -65,7 +71,7 @@ def _layer_cache(
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
 
     from torch.distributed.device_mesh import DeviceMesh
 
@@ -256,6 +262,43 @@ def test_shard_heads_over_records_the_local_head_range() -> None:
     assert type(module._head_offset) is int
     assert module._head_offset == 2
     assert module._tp_mesh is mesh
+
+
+@pytest.fixture
+def single_rank_group(tmp_path: Path) -> Generator[None]:
+    """Open a 1-rank gloo group over a file rendezvous, enough to build a DTensor."""
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
+    try:
+        yield
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("q_lora_rank", [None, 8])
+def test_mla_parallel_style_shards_one_rank_without_changing_the_forward(
+    single_rank_group: None,
+    q_lora_rank: int | None,
+) -> None:
+    del single_rank_group
+    torch.manual_seed(0)
+    module, x = _tensor_parallel_mla(q_lora_rank=q_lora_rank)
+    dense = first_tensor(module(x))
+    mesh = init_device_mesh("cpu", (1,))
+
+    sharded = parallelize_module(module, mesh, module.tensor_parallel_style())
+
+    assert isinstance(sharded, MultiHeadLatentAttention)
+    assert sharded._tp_mesh is mesh
+    assert isinstance(sharded.proj_out, Linear)
+    assert isinstance(sharded.proj_out.weight, DTensor)
+    out = first_tensor(sharded(x))
+    full = out.full_tensor() if isinstance(out, DTensor) else out
+    torch.testing.assert_close(full, dense)
 
 
 @pytest.mark.parametrize(

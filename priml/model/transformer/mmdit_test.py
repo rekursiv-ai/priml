@@ -413,6 +413,17 @@ def test_mixed_conditioning_has_no_unconditioned_parameters() -> None:
     model.reset_parameters()
 
 
+def test_block_config_reports_its_joint_attention_head_geometry() -> None:
+    config = _cfg(channels_in=8, num_heads=2).finalize()
+    assert (config.num_heads, config.channels_head) == (2, 4)
+
+
+def test_forward_requires_one_input_per_stream() -> None:
+    model = _cfg(channels_in=8, num_heads=2).make()
+    with pytest.raises(ValueError, match="Expected 2 streams, got 1"):
+        model([torch.randn(2, 3, 8)])
+
+
 def test_default_block_forwards_per_query_masks() -> None:
     model = _cfg(channels_in=8, num_heads=2).make()
     xs = [torch.randn(2, 3, 8), torch.randn(2, 4, 8)]
@@ -490,6 +501,16 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
             0,
             source=_native_stream_config().make(),
         )
+
+
+def test_native_loading_rejects_a_conditioned_stream() -> None:
+    cfg = _cfg(channels_in=8, num_heads=2)
+    cfg.streams = [mmdit.MMDiTStream.Config()]
+    cfg.streams[0].adaln = AdaLNZero.Config()
+    cfg.streams[0].adaln.cond_dim = 4
+    model = cfg.make()
+    with pytest.raises(ValueError, match="unconditioned stream"):
+        model.load_stream(0, source=_native_stream_config().make())
 
 
 def test_adaln_zero_cost_matches_torch() -> None:

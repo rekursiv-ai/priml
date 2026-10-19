@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, TypedDict, override
 
 from configgle import Makes
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -105,6 +106,41 @@ def test_a_convolution_matches_torch_exactly() -> None:
         input_grid=(4, 5),
         batch_size=2,
         dtype=None,
+    )
+
+
+def _apply(module: nn.Module, inputs: Tensor) -> Tensor:
+    return torch.as_tensor(module(inputs))
+
+
+def test_a_biased_convolution_with_a_custom_run_matches_torch_exactly() -> None:
+    """``run`` replaces the default ``module(*inputs)`` call."""
+    analytical = assert_cost_matches_torch(
+        Conv2d.Config(3, 4, kernel_size=2, padding="valid", bias=True),
+        build_input=lambda: torch.randn(2, 3, 4, 5, requires_grad=True),
+        run=_apply,
+        input_grid=(4, 5),
+        batch_size=2,
+        dtype=None,
+    )
+    assert analytical.params == 4 * 3 * 2 * 2 + 4
+
+
+def test_a_convolution_bias_gradient_is_tallied_as_reduction_traffic() -> None:
+    """The bias derivative reads the output gradient and writes one value per channel."""
+
+    def reduction_bytes(*, bias: bool) -> int:
+        traffic = measured_traffic(
+            Conv2d.Config(3, 4, kernel_size=2, padding="valid", bias=bias),
+            build_input=lambda: torch.randn(2, 3, 4, 5, requires_grad=True),
+            run=_apply,
+        )
+        return traffic["reduction"]
+
+    output_numel = 2 * 4 * 3 * 4
+    bias_numel = 4
+    assert reduction_bytes(bias=True) - reduction_bytes(bias=False) == 4 * (
+        output_numel + bias_numel
     )
 
 

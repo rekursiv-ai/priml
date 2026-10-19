@@ -18,7 +18,7 @@ import sys
 import numpy as np
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.tl.backdoor_defense import reference, upstream
 
 
@@ -434,8 +434,8 @@ def test_the_lockstep_records_two_updates(tmp_path: Path) -> None:
     script = scripts(tmp_path)["pristine"]
     trace = upstream.trace_driver(script, reference.FIRST)
     record, states = upstream.lockstep(script, trace)
-    assert record["lockstep/loss"].shape == (vision.STEPS,)
-    assert len(states) == vision.STEPS
+    assert record["lockstep/loss"].shape == (vision_reference.STEPS,)
+    assert len(states) == vision_reference.STEPS
 
 
 if __name__ == "__main__":

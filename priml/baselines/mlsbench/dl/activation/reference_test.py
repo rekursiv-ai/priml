@@ -14,7 +14,8 @@ import torch
 
 from priml.baselines.mlsbench.dl.activation import reference
 from priml.baselines.mlsbench.dl.activation.experiments import exp000
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
@@ -55,15 +56,15 @@ def test_every_activation_and_its_gradient_match_the_script() -> None:
 
 
 def test_the_learning_rate_of_all_200_epochs_matches_the_script() -> None:
-    assert_exact(stored("schedule/"), vision.schedule_record(exp000))
+    assert_exact(stored("schedule/"), vision_reference.schedule_record(exp000))
 
 
 def test_the_optimizer_matches_the_script() -> None:
-    assert_exact(stored("optimizer/"), vision.optimizer_record(exp000))
+    assert_exact(stored("optimizer/"), vision_reference.optimizer_record(exp000))
 
 
 def test_the_best_accuracy_matches_the_script() -> None:
-    assert_exact(stored("best/"), vision.best_record())
+    assert_exact(stored("best/"), vision_reference.best_record())
 
 
 def test_the_resnet20_leaves_the_generator_where_the_script_does() -> None:
@@ -77,7 +78,7 @@ def test_two_updates_with_each_activation_match_the_script(name: str) -> None:
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def test_the_golden_bites_on_one_ulp() -> None:
@@ -90,7 +91,7 @@ def test_the_golden_bites_on_one_ulp() -> None:
 
 @pytest.mark.parametrize("name", ["reference.pt", "reference_settings.pt"])
 def test_every_golden_fits_the_ceiling(name: str) -> None:
-    assert (_DATA / name).stat().st_size <= 32_768
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
 
 
 def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
@@ -117,7 +118,7 @@ def test_each_settings_full_network_with_each_activation_matches_the_script(
         f"settings/{key}/{part}" for part in ("draws", "train", "eval")
     }
     factory = reference.SETTING_ACTIVATIONS[setting][name]
-    assert_exact(expected, vision.setting_record(setting, factory, key=key))
+    assert_exact(expected, vision_reference.setting_record(setting, factory, key=key))
 
 
 @pytest.mark.parametrize(
@@ -126,7 +127,7 @@ def test_each_settings_full_network_with_each_activation_matches_the_script(
     [
         s
         for s in reference.SETTING_ACTIVATIONS
-        if vision.SETTINGS[s].dataset != "cifar100"
+        if vision_reference.SETTINGS[s].dataset != "cifar100"
     ],
 )
 def test_each_settings_loader_shuffles_and_augments_like_the_script(
@@ -135,7 +136,7 @@ def test_each_settings_loader_shuffles_and_augments_like_the_script(
 ) -> None:
     assert_exact(
         stored_settings(f"settings/{setting}/loader/"),
-        vision.setting_loader_record(tmp_path, setting),
+        vision_reference.setting_loader_record(tmp_path, setting),
     )
 
 
@@ -171,7 +172,7 @@ def test_the_settings_record_holds_every_setting_lockstep(
 def test_a_lockstep_hands_back_the_state_after_each_update() -> None:
     states: list[dict[str, torch.Tensor]] = []
     _ = reference.setting_lockstep_record("mobilenetv2-fmnist/gelu", states=states)
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(
         next(iter(states[0].values())),
         next(iter(states[1].values())),
@@ -184,7 +185,7 @@ def test_the_record_joins_every_component(monkeypatch: pytest.MonkeyPatch) -> No
 
     for name in ("activation_record", "draws_record", "lockstep_record"):
         monkeypatch.setattr(reference, name, fake(name))
-    monkeypatch.setattr(vision, "best_record", fake("best_record"))
+    monkeypatch.setattr(vision_reference, "best_record", fake("best_record"))
     record = reference.port_record()
     assert {"activation_record/", "draws_record/", "best_record/"} <= set(record)
     assert {f"lockstep_record/{name}" for name in reference.ACTIVATIONS} <= set(record)
@@ -205,7 +206,7 @@ def test_the_settings_golden_bites_on_one_ulp() -> None:
     key = "settings/vgg16bn-cifar100/mish/eval"
     value = stored_settings(key)[key].clone()
     value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(torch.inf))
-    port = vision.setting_record(
+    port = vision_reference.setting_record(
         "vgg16bn-cifar100",
         reference.SETTING_ACTIVATIONS["vgg16bn-cifar100"]["mish"],
         key="vgg16bn-cifar100/mish",

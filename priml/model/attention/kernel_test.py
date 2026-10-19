@@ -532,6 +532,34 @@ def test_sdpa_varlen_refuses_what_its_segments_cannot_express(
         )
 
 
+def test_sdpa_varlen_cost_ignores_the_window() -> None:
+    expected = attention_kernel_cost(
+        seq_len=8,
+        batch_size=2,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+        channels_v_head=3,
+        window=-1,
+    )
+    actual = SdpaVarlen.Config.cost(
+        seq_len=8,
+        batch_size=2,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+        channels_v_head=3,
+        window=2,
+    )
+    assert actual == expected
+
+
+def test_sdpa_naive_full_dropout_zeroes_the_output() -> None:
+    q, k, v = (torch.randn(2, 3, 4, 5) for _ in range(3))
+    out = SdpaNaive.Config().make()(q, k, v, dropout_p=1.0)
+    assert torch.equal(out, torch.zeros_like(out))
+
+
 def _segment_reference(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
     """Attend inside each segment of ``CU_SEQLENS`` alone, through ``SdpaFused``."""
     flat = [t.flatten(0, 1) for t in (q, k, v)]

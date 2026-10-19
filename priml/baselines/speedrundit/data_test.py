@@ -17,6 +17,7 @@ import torch
 import torch.distributed as dist
 
 from priml.baselines.speedrundit.corpus import (
+    PREPARING,
     CorpusMismatchError,
     save_stored,
     save_table,
@@ -112,6 +113,22 @@ def test_a_corpus_without_a_receipt_is_refused(tmp_path: Path) -> None:
     (tmp_path / "vae-in" / "corpus.json").unlink()
     with pytest.raises(FileNotFoundError, match="receipt-only"):
         _ = _source(tmp_path).make()
+
+
+def test_an_unfinished_corpus_is_refused(tmp_path: Path) -> None:
+    config = _source(tmp_path)
+    _corpus(tmp_path, config=config, count=2)
+    write_receipt(
+        tmp_path / "vae-in",
+        autoencoder=config.autoencoder,
+        sample=config.sample,
+        codec_config=config.codec,
+        codec=config.codec.make(),
+        table_sha256=None,
+        details={"provenance": PREPARING},
+    )
+    with pytest.raises(CorpusMismatchError, match="is unfinished"):
+        _ = config.make()
 
 
 def test_a_corpus_from_another_autoencoder_is_refused(tmp_path: Path) -> None:

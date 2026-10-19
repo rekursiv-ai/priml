@@ -6,7 +6,7 @@ from dataclasses import KW_ONLY, replace
 from operator import attrgetter
 from typing import Self, override
 
-from configgle import Fig, LateBound, Makeable
+from configgle import Fig, LateBound, Makeable, Makes
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -105,6 +105,51 @@ class Dropout(nn.Dropout):
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
         return super().forward(input)
+
+
+class Dropout2d(Dropout):
+    """Apply native channel dropout with explicit training cost."""
+
+    class Config(Makes["Dropout2d"], Dropout.Config):
+        @override
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            channels: int = -1,
+            training: bool = True,
+            **kwargs: object,
+        ) -> Cost:
+            """Count one mask per example and channel.
+
+            Args:
+              seq_len: Positions per example.
+              batch_size: Examples per invocation.
+              dtype: Activation dtype.
+              channels: Width when not configured on this leaf.
+              training: Cost training; evaluation is an identity.
+              **kwargs: Unused outer metadata.
+
+            Returns:
+              execution: Whole-invocation arithmetic and logical traffic.
+
+            """
+            del kwargs
+            width = self.channels_in if self.channels_in != -1 else channels
+            return dropout_cost(
+                self.p,
+                elements=width * seq_len * batch_size,
+                masks=width * batch_size,
+                dtype=dtype,
+                training=training,
+            )
+
+    @override
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        return functional.dropout2d(input, self.p, self.training, self.inplace)
 
 
 def dropout_cost(

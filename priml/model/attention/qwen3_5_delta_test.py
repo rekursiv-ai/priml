@@ -10,6 +10,7 @@ from torch import nn
 import pytest
 import torch
 
+from priml.model.attention import qwen3_5_delta
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.qwen3_5_delta import (
     Qwen35GatedDeltaNet,
@@ -346,6 +347,21 @@ def test_delta_norm_slot_defaults_to_gated_transform_and_accepts_ordinary_norm()
     ordinary = ordinary_config.make()
     assert isinstance(ordinary.norm, CenteredRMSNorm)
     assert torch.equal(ordinary.norm(x), ordinary.norm(x, gate=gate))
+
+
+def test_delta_cache_requires_the_kernel_to_return_its_final_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def stateless(**kwargs: object) -> tuple[torch.Tensor, None]:
+        value = kwargs["value"]
+        assert isinstance(value, torch.Tensor)
+        return torch.zeros_like(value), None
+
+    monkeypatch.setattr(qwen3_5_delta, "chunk_gated_delta_rule", stateless)
+    native = _native()
+    cache = native.alloc_kv_cache(batch=2, max_seq=4)
+    with pytest.raises(ValueError, match="Expected state is not None"):
+        native(torch.randn(2, 3, 8), cache=_layer_cache(native, cache))
 
 
 def test_delta_ordinary_norm_omits_gate_projection() -> None:

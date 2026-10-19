@@ -29,7 +29,7 @@ from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
 )
 from priml.model.attention.multi_stream import MultiStreamAttention
-from priml.model.attention.rope import RoPE
+from priml.model.attention.rope import RoPE, RoPEMixed
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import (
     assert_bfb_against_golden,
@@ -275,6 +275,43 @@ def test_multi_stream_reset():
         share_qk_norm=False,
     ).make()
     m.reset_parameters()
+
+
+def test_multi_stream_reset_restores_learned_rope_frequencies() -> None:
+    rope = RoPEMixed.Config([2, 2])
+    rope.num_heads = 2
+    rope.learnable = True
+    model = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        num_streams=2,
+        rope=[rope],
+    ).make()
+    frequency = next(model.ropes.parameters())
+    with torch.no_grad():
+        frequency.zero_()
+
+    model.reset_parameters()
+
+    assert torch.count_nonzero(frequency)
+
+
+def test_explicit_streams_reset_each_stream() -> None:
+    model = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        streams=[AttentionProjections.Config(), AttentionProjections.Config()],
+    ).make()
+    weights = [stream.proj_qkv.weight for stream in model.streams]
+    with torch.no_grad():
+        for weight in weights:
+            weight.zero_()
+
+    model.reset_parameters()
+
+    assert all(torch.count_nonzero(weight) for weight in weights)
 
 
 def test_shared_qk_norm_resets_once(monkeypatch: pytest.MonkeyPatch) -> None:

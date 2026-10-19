@@ -87,6 +87,14 @@ METRICS: Final = ("test_acc", "mia_auc", "privacy_gap", "privacy_score")
 """The four metrics the driver publishes, in its order."""
 
 
+SETTINGS: Final[dict[str, tuple[str, Callable[[], MembershipTrainLoop]]]] = {
+    "exp000": ("resnet20-cifar10", exp000),
+    "exp005": ("vgg16bn-cifar100", exp005),
+    "exp010": ("mobilenetv2-fmnist", exp010),
+}
+"""Each setting's pristine experiment, keyed by its name, with the setting's label."""
+
+
 def defense_cases() -> dict[str, tuple[Tensor, Tensor]]:
     """Return fixed logits and labels that drive every branch of every defense.
 
@@ -300,14 +308,6 @@ def split_record(count: int) -> dict[str, Tensor]:
     """
     member, nonmember = member_split(count, seed=exp000().dataset.split_seed)
     return {f"split/{count}/member": member, f"split/{count}/nonmember": nonmember}
-
-
-SETTINGS: Final[dict[str, tuple[str, Callable[[], MembershipTrainLoop]]]] = {
-    "exp000": ("resnet20-cifar10", exp000),
-    "exp005": ("vgg16bn-cifar100", exp005),
-    "exp010": ("mobilenetv2-fmnist", exp010),
-}
-"""Each setting's pristine experiment, keyed by its name, with the setting's label."""
 
 
 def network_record() -> dict[str, Tensor]:

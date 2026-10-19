@@ -9,6 +9,7 @@ import torch
 
 from priml.baselines.arcagi.model import (
     ConvSwiGLU,
+    PuzzleEmbedding,
     RotaryBlock,
     depthwise_conv,
     depthwise_shift,
@@ -188,6 +189,31 @@ def test_conv_swiglu_infers_channels_in_from_channels_out() -> None:
     config = ConvSwiGLU.Config(channels_out=4, channels_hidden=6).finalize()
     assert config.channels_in == 4
     assert config.channels_out == 4
+
+
+def test_conv_swiglu_rounds_the_inferred_hidden_width_up_to_the_grid() -> None:
+    config = ConvSwiGLU.Config(channels_in=4, round_to=5).finalize()
+    # 4 * 8/3 = 10.67 rounds up to the next multiple of 5.
+    assert config.channels_hidden == 15
+
+
+@pytest.mark.parametrize("training", [True, False])
+def test_puzzle_embedding_returns_float32_rows_rounded_through_bfloat16(
+    training: bool,
+) -> None:
+    config = PuzzleEmbedding.Config(num_puzzles=5, num_tokens=2, batch_size=3)
+    config.channels_out = 4
+    config.init_std = 1.0
+    torch.manual_seed(0)
+    module = config.make()
+    module.train(training)
+    identifiers = torch.tensor([4, 1, 4], dtype=torch.int32)
+    out = module(3, puzzle_identifiers=identifiers)
+    rows = module.weights[identifiers.long()]
+    expected = rows.to(torch.bfloat16).float()
+    assert out.dtype is torch.float32
+    assert not torch.equal(rows, expected)
+    assert torch.equal(out[:, 0], expected * module.embed_scale)
 
 
 if __name__ == "__main__":

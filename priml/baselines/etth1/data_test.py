@@ -120,6 +120,44 @@ def test_resume_preserves_next_batch_and_rng(tmp_path: Path) -> None:
     assert torch.equal(expected_rng, torch.get_rng_state())
 
 
+def test_eval_dataloader_yields_validation_windows(tmp_path: Path) -> None:
+    dataset = fixture_config(tmp_path).make()
+    torch.manual_seed(43)
+    expected = list(dataset.val_dataloader())
+    torch.manual_seed(43)
+    actual = list(dataset.eval_dataloader())
+    for want, got in zip(expected, actual, strict=True):
+        assert not mismatches(want, got)
+
+
+def test_finish_train_epoch_requires_and_counts_complete_epoch(tmp_path: Path) -> None:
+    dataset = fixture_config(tmp_path).make()
+    assert not dataset.train_epoch_complete
+    iterator = iter(dataset.train_dataloader())
+    next(iterator)
+    assert not dataset.train_epoch_complete
+    with pytest.raises(RuntimeError, match="unread batches"):
+        dataset.finish_train_epoch()
+    for _ in range(4):
+        next(iterator)
+    assert dataset.train_epoch_complete
+    resumed = fixture_config(tmp_path).make()
+    resumed.load_state_dict(dataset.state_dict())
+    assert resumed.train_epoch_complete
+    resumed.finish_train_epoch()
+    assert not resumed.train_epoch_complete
+    assert resumed.state_dict()["loader"] is None
+    assert resumed.timer_epoch.global_count == 1
+    assert resumed.timer_epoch.local_count == 1
+
+
+def test_split_shorter_than_batch_fails(tmp_path: Path) -> None:
+    cfg = fixture_config(tmp_path)
+    cfg.batch_size = 11
+    with pytest.raises(ValueError, match="complete batch"):
+        cfg.make().train_dataloader()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

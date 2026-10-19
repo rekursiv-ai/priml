@@ -34,6 +34,9 @@ _CWD: Final = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD.parent / "testdata"
 
+NO_PASSES: Final[tuple[upstream.Batches, upstream.Batches]] = ([], [])
+"""A loader run of no passes, as a stubbed loader returns it."""
+
 
 def returning[T](value: T) -> Callable[..., T]:
     """Return a function that ignores its arguments and gives back ``value``."""
@@ -246,10 +249,6 @@ def weight_sum(model: torch.nn.Module, media: torch.Tensor) -> torch.Tensor:
     """Stand in for a forward: the sum of the model's weights, whatever the images."""
     del media
     return torch.stack([p.sum() for p in model.parameters()]).sum()
-
-
-NO_PASSES: Final[tuple[upstream.Batches, upstream.Batches]] = ([], [])
-"""A loader run of no passes, as a stubbed loader returns it."""
 
 
 def test_compare_tiny_settings_reports_each_setting_under_its_name(
@@ -601,6 +600,28 @@ def test_the_full_size_comparison_names_a_network_that_has_another_shape(
     assert [line.split(":")[0] for line in report[1:]] == [
         "forward/train",
         "forward/eval",
+    ]
+
+
+def test_the_sites_file_reads_back_as_written(tmp_path: Path) -> None:
+    sites = {"reference": {"a@b.py:c": 2, "d@e.py:f": 1}, "port": {"a@b.py:c": 3}}
+    capture_reference.write_sites(tmp_path, sites)
+    assert (
+        capture_reference.parse_sites((tmp_path / "reference_sites.txt").read_text())
+        == sites
+    )
+
+
+def test_a_score_in_both_sets_of_an_auc_is_reported() -> None:
+    record = {
+        "a/member": torch.tensor([0.25, 0.5, 0.5]),
+        "a/nonmember": torch.tensor([0.125, 0.75]),
+        "b/member": torch.tensor([0.25, 0.5]),
+        "b/nonmember": torch.tensor([0.5, 0.375]),
+    }
+    pairs = {"a/member": "a/nonmember", "b/member": "b/nonmember"}
+    assert capture_reference.shared_scores(record, pairs=pairs) == [
+        "b/member: 1 scores also in b/nonmember; their order is the host's",
     ]
 
 

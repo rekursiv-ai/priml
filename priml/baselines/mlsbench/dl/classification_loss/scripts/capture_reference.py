@@ -38,7 +38,7 @@ import tempfile
 
 from priml.baselines.mlsbench.dl.classification_loss import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -81,7 +81,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -108,7 +108,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
                 script,
                 name,
                 trace,
-                arch=vision.SETTINGS[setting].arch,
+                arch=vision_reference.SETTINGS[setting].arch,
                 prefix=f"settings/{setting}/",
             )
             for setting in reference.SETTING_LOSSES
@@ -133,7 +133,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         pristine="cross_entropy",
     )
     report += settings_report
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record | losses | settings,
         sites={},
         report=report,

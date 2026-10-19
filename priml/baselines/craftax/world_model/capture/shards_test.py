@@ -218,6 +218,17 @@ def test_the_raw_buffer_blocks_the_caller_until_encoding_frees_it(
         writer.shutdown()
 
 
+def test_closing_a_shard_with_no_episodes_publishes_nothing(
+    tmp_path: Path,
+    writer: ShardWriter,
+) -> None:
+    stream = writer.stream(tmp_path, index=4, threshold=1 << 30)
+    stream.close_shard()
+    assert (stream.index, stream.pending, stream.decisions) == (4, [], 0)
+    assert writer.finish() == []
+    assert not read_manifest(tmp_path)
+
+
 def test_a_failed_shard_stops_publication_and_is_raised(
     tmp_path: Path,
     writer: ShardWriter,

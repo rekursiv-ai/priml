@@ -220,9 +220,8 @@ class EMA:
       Set False when buffers are derived (RoPE positions) or too big to
       shadow (sparse puzzle embeddings) -- buffers stay at live-model
       values. Note the asymmetry: ``track_buffers`` only affects the
-      shadow updated in ``__call__``. The in-place ``apply_to`` swap NEVER
-      swaps buffers regardless of ``track_buffers`` -- it targets weight
-      averaging only, leaving live-model buffers in place.
+      shadow updated in ``__call__``. The in-place ``apply_to`` swap leaves
+      live-model buffers in place unless ``buffer_update_fn`` averages them.
     - ``select``: a :class:`~priml.optimizers.parameter_filter.ParameterFilter`
       choosing which params the shadow averages -- ``trainable`` (default)
       or ``everything``, which also takes frozen ones.
@@ -434,9 +433,9 @@ class EMA:
         """Swap shadow params into ``model`` for the context; restore on exit.
 
         Uses pre-allocated backup buffers so eval-time memory is O(1).
-        Buffers are NOT swapped -- they always reflect live-model values,
-        regardless of ``track_buffers``. The swap pattern targets
-        weight-averaging only. Works for both shadow kinds.
+        Persistent buffers are swapped only when ``buffer_update_fn`` averages
+        them (not the default :func:`copy_buffers`); otherwise they keep
+        live-model values. Works for both shadow kinds.
 
         Args:
           model: PyTorch module whose parameters to temporarily swap.
@@ -454,6 +453,8 @@ class EMA:
                 return
         live_params = dict(model.named_parameters())
         swapped: list[str] = []
+        buffers = self._averaged_buffers(model)
+        saved = {name: live.clone() for name, (live, _) in buffers.items()}
         try:
             # The swap mutates live params in place, so it must sit INSIDE the
             # try: a failure mid-loop (e.g. a desynced tracked param) would
@@ -473,10 +474,14 @@ class EMA:
                 self._backup[name].copy_(live)
                 live.copy_(self._shadow_param(name))
                 swapped.append(name)
+            for live, shadow in buffers.values():
+                live.copy_(shadow)
             yield
         finally:
             for name in swapped:
                 live_params[name].data.copy_(self._backup[name])
+            for name, (live, _) in buffers.items():
+                live.copy_(saved[name])
 
     class StateDict(TypedDict):
         """Checkpointed EMA state.
@@ -638,6 +643,18 @@ class EMA:
         if self.shadow_model is None:
             raise ValueError("Expected self.shadow_model is not None.")
         self.shadow_model.load_state_dict(pending)
+
+    def _averaged_buffers(self, model: nn.Module) -> dict[str, tuple[Tensor, Tensor]]:
+        """Pair each persistent live buffer with its averaged shadow."""
+        if not self.track_buffers or self.buffer_update_fn is copy_buffers:
+            return {}
+        shadow = (
+            dict(self.shadow_model.named_buffers())
+            if self.shadow_model is not None
+            else self._shadow_buffers
+        )
+        live = model.state_dict()
+        return {name: (live[name], buf) for name, buf in shadow.items() if name in live}
 
     def _copy_buffers(self, model: nn.Module, *, decay: float) -> None:
         buffers = (

@@ -59,6 +59,7 @@ from priml.baselines.craftax.world_model.testing import (
 from priml.model.attention.flash4 import Flash4UnavailableError, Flash4Varlen
 from priml.model.attention.kernel import SdpaNaive, SdpaVarlen
 from priml.model.attention.rope import RoPE
+from priml.model.linear import EnsembleLinear
 from priml.model.transformer.block import TransformerBlock
 
 
@@ -134,6 +135,48 @@ def test_steps_whose_contexts_share_a_start_share_one_pass() -> None:
         assert len(plan.batches) > 1
 
 
+def test_passes_fill_bins_longest_first_each_into_the_last_bin_while_it_fits() -> None:
+    """Passes of 4, 1, 1 and 3 tokens in bins of 5: [4] and [3, 1, 1], the last full.
+
+    Row 0 is one anchored pass of 2 decisions, row 1 two passes of 1, row 2 one
+    pass of 2; frames run row by row, two per row.
+    """
+    contexts = random_contexts(
+        torch.tensor(((1, 2), (1, 1), (1, 2))),
+        torch.tensor(((1, 1), (0, 0), (0, 0))).bool(),
+        schema=small_schema(),
+        slots=SLOTS,
+        counts=torch.zeros(3, dtype=torch.int64),
+        seed=7,
+    )
+    plan = plan_replay(contexts, bin_tokens=5, pass_tokens=10)
+    (batch,) = plan.batches
+    start, obs, act, pad = Kind.START, Kind.OBS, Kind.ACT, Kind.PAD
+    assert batch.kind.tolist() == [
+        [start, obs, act, obs, pad],
+        [obs, act, obs, obs, obs],
+    ]
+    assert batch.positions.tolist() == [[0, 1, 2, 3, 0], [0, 1, 2, 0, 0]]
+    # Equal passes keep their order: row 1's first decision, then its second.
+    assert batch.frame.tolist() == [[0, 0, 0, 1, 0], [4, 0, 5, 2, 3]]
+
+
+def test_equal_passes_keep_their_order_however_many() -> None:
+    """34 one-token passes in one bin, past where an unstable sort reorders ties."""
+    steps = 17
+    contexts = random_contexts(
+        torch.ones(2, steps, dtype=torch.int64),
+        torch.zeros(2, steps, dtype=torch.bool),
+        schema=small_schema(),
+        slots=SLOTS,
+        counts=torch.zeros(2, dtype=torch.int64),
+        seed=7,
+    )
+    plan = plan_replay(contexts, bin_tokens=2 * steps, pass_tokens=2 * steps)
+    (batch,) = plan.batches
+    assert batch.frame.tolist() == [list(range(2 * steps))]
+
+
 @pytest.mark.parametrize("bin_tokens", [1, 30], ids=["longest-pass", "wide"])
 @pytest.mark.parametrize("table", [REFILL, SLIDING], ids=["refill", "sliding"])
 def test_the_replay_is_the_training_forward_of_each_steps_context(
@@ -193,6 +236,48 @@ def test_the_backward_is_the_vector_jacobian_product_of_the_forward(
         )
     untrained = {name for name, _ in reference.named_parameters()} - set(names)
     assert all(reference.get_parameter(name).grad is None for name in untrained)
+
+
+def test_a_window_of_some_rows_replays_as_those_rows_of_the_whole(
+    model: WorldModel,
+) -> None:
+    contexts = _contexts(REFILL)
+    replay = _replay()
+    whole = replay.forward(model, contexts, layers=2).features
+    part = replay.forward(model, contexts.rows(1, 2), layers=2).features
+    torch.testing.assert_close(part, whole[1:3], rtol=0, atol=2e-6)
+
+
+def test_a_backward_through_no_pass_is_refused(model: WorldModel) -> None:
+    joint = JointWorldModel(model, layers=2, replay=_replay())
+    replayed = joint.forward(_contexts(REFILL))
+    passless = dataclasses.replace(
+        replayed,
+        plan=dataclasses.replace(replayed.plan, batches=[]),
+    )
+    with pytest.raises(ValueError, match="No pass read the window's frames"):
+        joint.backward(passless, torch.ones_like(replayed.features))
+
+
+def test_a_trained_ensemble_projection_with_a_bias_is_refused(
+    model: WorldModel,
+) -> None:
+    projection = model.get_submodule("transformer.blocks.0.attn.proj_qkv")
+    assert isinstance(projection, EnsembleLinear)
+    projection.bias = nn.Parameter(
+        projection.weight.new_zeros(projection.weight.shape[:-1]),
+    )
+    with pytest.raises(ValueError, match="must have no bias"):
+        JointWorldModel(model, layers=1, replay=_replay())
+
+
+def test_a_trained_weight_of_three_dimensions_outside_an_ensemble_is_refused(
+    model: WorldModel,
+) -> None:
+    projection = model.obs_proj
+    projection.weight = nn.Parameter(projection.weight.detach()[None].expand(2, -1, -1))
+    with pytest.raises(TypeError, match=r"obs_proj\.weight has more than two"):
+        JointWorldModel(model, layers=1, replay=_replay())
 
 
 class _Held:

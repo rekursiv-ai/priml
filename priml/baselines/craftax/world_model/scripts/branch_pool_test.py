@@ -123,6 +123,19 @@ def test_a_root_contributes_every_shard_its_manifests_list_once(
     assert len(from_root) == 6
 
 
+def test_a_pool_needs_a_corpus_or_a_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "pool.jsonl"
+    with pytest.raises(SystemExit) as error:
+        _run(monkeypatch, "--arm", "2", "--output", str(output))
+    assert error.value.code == 2
+    assert "Name a --corpus or a --root." in capsys.readouterr().err
+    assert not output.exists()
+
+
 def test_a_relative_root_writes_absolute_parent_directories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

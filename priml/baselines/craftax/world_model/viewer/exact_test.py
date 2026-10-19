@@ -9,7 +9,7 @@ back chosen hashes, since a stride hash needs 256 decisions.
 from collections.abc import Callable, Generator, Sequence
 from functools import partial
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import dataclasses
 import gzip
@@ -18,6 +18,7 @@ import shutil
 import subprocess
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 
@@ -35,6 +36,7 @@ from priml.baselines.craftax.game.state import (
     env_state,
     new_stats,
 )
+from priml.baselines.craftax.game.step import Rules, observe_numba
 from priml.baselines.craftax.lib.arrays import int_rows, ints, typed
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import Episode, Receipt
@@ -107,6 +109,67 @@ def test_the_facings_hold_each_projectile_shown_in_view_by_its_cell() -> None:
     enemy_directions[level, 0, 0], enemy_directions[level, 0, 1] = 1, 1
     with pytest.raises(ValueError, match="flies"):
         exact._before(frame, creatures, facings, states)
+
+
+def test_a_projectile_the_observation_does_not_show_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states, _ = replay.reset_world(4)
+    state = env_state(states, 0)
+    level = state.player_level
+    row, col = state.player_position
+    arrows = state.player_projectiles[level]
+    arrows.mask[0], arrows.type_id[0] = 1, 0
+    arrows.position[0, 0], arrows.position[0, 1] = row, col - 2
+    directions = state.player_projectile_directions
+    directions[level, 0, 0], directions[level, 0, 1] = 0, -1
+    frames, health = np.zeros(1, frame_dtype()), np.zeros(1, health_dtype())
+    frame, creatures = exact._record(frames, 0), exact._record(health, 0)
+    facings = np.zeros(99, np.uint8)
+    exact._before(frame, creatures, facings, states)
+
+    # The same arrow, but an observation that shows no projectile anywhere.
+    def blind(
+        state: EnvState,
+        obs: Array1[np.float32],
+        mask: Array1[int],
+        rules: Rules,
+    ) -> None:
+        observe_numba(state, obs, mask, rules)
+        assert isinstance(obs, np.ndarray)
+        # The kernel writes the float32 buffer it was handed; a view keeps the edit.
+        cells = cast("npt.NDArray[np.float32]", obs)[: exact.CELL_BYTES].reshape(99, 8)
+        cells[:, 6:8] = 0
+
+    monkeypatch.setattr(exact, "observe_numba", blind)
+    with pytest.raises(ValueError, match="player_projectiles are not where"):
+        exact._before(frame, creatures, facings, states)
+
+
+def test_frame_and_health_reads_refuse_another_dtype() -> None:
+    with pytest.raises(ValueError, match="frame_dtype"):
+        read_frame(np.zeros(1, health_dtype()), 0)
+    with pytest.raises(ValueError, match="health_dtype"):
+        read_health(np.zeros(1, frame_dtype()), 0)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Part:
+    frame_count: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Nested:
+    schema_name: str
+    part_list: list[_Part]
+
+
+def test_manifest_keys_inside_lists_are_renamed_both_ways() -> None:
+    manifest = _Nested(schema_name="s", part_list=[_Part(frame_count=2)])
+    text = exact.manifest_json(manifest)
+    assert '"partList": [\n    {\n      "frameCount": 2' in text
+    assert '"schema": "s"' in text
+    assert read_manifest(text, _Nested) == manifest
 
 
 def test_frame_and_health_records_keep_their_byte_layout() -> None:

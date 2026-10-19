@@ -29,7 +29,7 @@ from priml.baselines.mlsbench.dl.normalization.experiments import (
     exp011,
 )
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -76,7 +76,7 @@ FORKS: Final = {
 
 
 def test_exp000_is_the_vision_recipe() -> None:
-    assert changed_fields(vision.exp000(), exp000()) == {"study_name"}
+    assert changed_fields(vision_experiments.exp000(), exp000()) == {"study_name"}
 
 
 @pytest.mark.parametrize(

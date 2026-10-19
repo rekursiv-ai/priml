@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING, Final
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
+    capture_reference as vision_capture_reference,
 )
 from priml.baselines.mlsbench.tl.membership_inference_defense import reference
 from priml.baselines.mlsbench.tl.membership_inference_defense.scripts import (
@@ -61,8 +61,13 @@ def test_the_attack_matches_the_driver_on_scores_tied_within_each_half() -> None
     nonmember = expected["attack/scores/nonmember"]
     assert member.unique().numel() < member.numel()
     assert nonmember.unique().numel() < nonmember.numel()
-    assert not set(member.tolist()) & set(nonmember.tolist())
     assert_exact(expected, reference.attack_record())
+
+
+def test_no_stored_auc_ranks_a_score_both_halves_hold() -> None:
+    prefixes = ("attack", *(f"lockstep/{name}" for name in reference.DEFENSES))
+    pairs = {f"{p}/scores/member": f"{p}/scores/nonmember" for p in prefixes}
+    assert vision_capture_reference.shared_scores(stored(), pairs=pairs) == []
 
 
 def test_the_augmenting_pipeline_crops_and_mirrors_as_the_driver() -> None:
@@ -79,7 +84,8 @@ def test_the_rates_optimizer_and_split_match_the_driver() -> None:
     assert expected["recipe/lr"].shape == (reference.EPOCHS,)
     assert_exact(
         expected,
-        reference.recipe_record() | reference.split_record(vision.LOADER_IMAGES),
+        reference.recipe_record()
+        | reference.split_record(vision_reference.LOADER_IMAGES),
     )
 
 
@@ -96,7 +102,7 @@ def test_each_settings_network_initializes_and_runs_as_the_driver(key: str) -> N
     setting, factory = reference.SETTINGS[key]
     assert_exact(
         stored(f"settings/{key}/"),
-        vision.setting_record(setting, factory, key=key),
+        vision_reference.setting_record(setting, factory, key=key),
     )
 
 
@@ -107,7 +113,7 @@ def test_the_network_record_covers_every_setting(
         del factory
         return {f"settings/{key}/{setting}": torch.zeros(1)}
 
-    monkeypatch.setattr(vision, "setting_record", record)
+    monkeypatch.setattr(vision_reference, "setting_record", record)
     assert set(reference.network_record()) == {
         "settings/exp000/resnet20-cifar10",
         "settings/exp005/vgg16bn-cifar100",
@@ -177,16 +183,15 @@ def test_the_record_joins_every_component(
 
 
 def test_the_port_reaches_the_drivers_random_call_sites(tmp_path: Path) -> None:
-    sides: dict[str, dict[str, int]] = {"reference": {}, "port": {}}
-    for line in (_DATA / "reference_sites.txt").read_text().splitlines():
-        side, key, count = line.split()
-        sides[side][key] = int(count)
+    sides = vision_capture_reference.parse_sites(
+        (_DATA / "reference_sites.txt").read_text(),
+    )
     assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
     assert capture_reference.port_sites(tmp_path) == sides["port"]
 
 
 def test_the_captured_golden_fits_the_size_ceiling() -> None:
-    assert (_DATA / "reference.pt").stat().st_size <= vision_capture.CEILING
+    assert (_DATA / "reference.pt").stat().st_size <= vision_capture_reference.CEILING
 
 
 def test_the_golden_bites_on_one_ulp(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -12,12 +13,11 @@ from priml.baselines.mlsbench.dl.vision.experiments_test import (
 )
 from priml.baselines.mlsbench.tl.backdoor_defense.experiments import exp000
 from priml.baselines.mlsbench.tl.backdoor_defense.poison import PoisonedData
+from priml.train.checkpointer import Checkpointer
 
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def test_the_retrained_network_trains_on_the_kept_images_only(
@@ -43,6 +43,19 @@ def test_the_retrained_network_trains_on_the_kept_images_only(
     assert not torch.isin(kept, torch.from_numpy(loop.filtered.removed)).any()
     assert loop.report is not None
     assert loop.report.poison_recall == loop.filtered.poison_recall
+
+
+def test_a_checkpointer_would_resume_the_retraining_so_it_is_refused(
+    tmp_path: Path,
+) -> None:
+    write_dataset(tmp_path, classes=10)
+    cfg = shrink(exp000(), directory=tmp_path)
+    cfg.checkpointer = Checkpointer.Config()
+    with pytest.raises(
+        ValueError,
+        match=r"^BackdoorTrainLoop needs checkpointer=None\.$",
+    ):
+        cfg.make()
 
 
 if __name__ == "__main__":

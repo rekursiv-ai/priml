@@ -351,6 +351,22 @@ def test_a_window_longer_than_the_context_raises() -> None:
         model.logits(_batch())
 
 
+def test_a_table_sized_for_another_vocabulary_is_rejected() -> None:
+    config = FlatModel.Config()
+    config.schema = SCHEMA
+    config.lm.vocab_size = SCHEMA.vocab_size + 1
+    with pytest.raises(ValueError, match=f"rows for a schema of {SCHEMA.vocab_size}"):
+        config.make()
+
+
+def test_a_schema_without_the_reward_and_done_prefix_is_rejected() -> None:
+    config = FlatModel.Config()
+    config.schema = dataclasses.replace(SCHEMA, prefix_names=(), prefix_ranges=())
+    config.lm.vocab_size = SCHEMA.vocab_size
+    with pytest.raises(ValueError, match=r"Unsupported local prefix \(\)"):
+        config.make()
+
+
 def test_cost_counts_every_matmul_but_attention() -> None:
     model, batch = _flat(), _batch()
     with FlopCounterMode(display=False) as counter:

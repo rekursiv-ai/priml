@@ -12,6 +12,7 @@ import torch
 
 from priml import runtime
 from priml.runtime import (
+    CudnnSingleProcess,
     MultiProcess,
     RuntimeProtocol,
     SingleProcess,
@@ -1070,6 +1071,50 @@ def test_single_process_destroy_restores_the_torch_globals_it_applied(
     assert torch.get_float32_matmul_precision() == precision
     SingleProcess.Config(device="cpu").make().initialize()
     assert not torch.are_deterministic_algorithms_enabled()
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+def test_single_process_applies_and_restores_the_cudnn_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+    cudnn = torch.backends.cudnn
+    before = (cudnn.benchmark, cudnn.deterministic, cudnn.allow_tf32)
+
+    process = CudnnSingleProcess.Config(
+        device="cpu",
+        cudnn_benchmark=not before[0],
+        cudnn_deterministic=not before[1],
+        cudnn_allow_tf32=not before[2],
+    ).make()
+    process.initialize()
+    assert (cudnn.benchmark, cudnn.deterministic, cudnn.allow_tf32) == tuple(
+        not flag for flag in before
+    )
+    process.destroy()
+
+    assert (cudnn.benchmark, cudnn.deterministic, cudnn.allow_tf32) == before
+    SingleProcess.Config(device="cpu").make().initialize()
+    assert (cudnn.benchmark, cudnn.deterministic, cudnn.allow_tf32) == before
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+def test_cudnn_single_process_rejects_conflicting_cudnn_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+
+    CudnnSingleProcess.Config(device="cpu", cudnn_benchmark=True).make().initialize()
+
+    with pytest.raises(RuntimeError, match="different settings"):
+        CudnnSingleProcess.Config(
+            device="cpu",
+            cudnn_benchmark=False,
+        ).make().initialize()
 
 
 @pytest.mark.usefixtures("torch_globals_restored")

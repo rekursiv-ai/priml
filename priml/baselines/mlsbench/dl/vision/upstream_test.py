@@ -13,7 +13,8 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import functools
@@ -197,6 +198,60 @@ def get_dataloaders(dataset, data_root, batch_size=128, num_workers=4):
 """The stand-in with the reference's ``build_model`` and its Fashion-MNIST pipelines."""
 
 
+TINY_SCRIPT: Final = (
+    SETTINGS_SCRIPT
+    + """
+
+class VGG(nn.Module):
+    VGG16_CFG = [64, "M", 64, "M", 64, "M"]
+
+    def __init__(self, num_classes=100):
+        super().__init__()
+        self.seen = list(self.VGG16_CFG)
+
+
+class MobileNetV2(nn.Module):
+    CFG = [[1, 16, 1, 1]]
+
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.seen = [list(row) for row in self.CFG]
+
+
+def build_model(arch, num_classes):
+    if arch == "vgg16bn":
+        return VGG(num_classes)
+    if arch == "mobilenetv2":
+        return MobileNetV2(num_classes)
+    return ResNet(BasicBlock, [9, 9, 9], num_classes)
+"""
+)
+"""The stand-in with architecture tables that record what they were built from."""
+
+LITERAL_SCRIPT: Final = """\
+import torch.nn as nn
+
+
+class CustomNorm(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        self.width = num_features
+
+
+def build():
+    return [
+        nn.Conv2d(3, 32, 3, padding=1, bias=False),
+        nn.Conv2d(320, 1280, 1, bias=False),
+        nn.BatchNorm2d(1280),
+        nn.Linear(512, 512),
+        nn.Linear(in_features=512, out_features=10),
+        CustomNorm(32),
+        nn.Conv2d(24, 40, 3),
+    ]
+"""
+"""A stand-in whose layers carry the reference's hardcoded widths."""
+
+
 def write_clone(root: Path) -> None:
     """Write the stand-in pristine script, with its settings, under ``root``.
 
@@ -374,6 +429,32 @@ def test_an_edit_replaces_exactly_the_lines_it_names(tmp_path: Path) -> None:
     )
 
 
+@runtime_checkable
+class _Loss(Protocol):
+    """A script member the stand-in has."""
+
+    def compute_loss(self, logits: object, targets: object, config: object) -> object:
+        """Return the loss."""
+        raise NotImplementedError
+
+
+@runtime_checkable
+class _Absent(Protocol):
+    """A script member the stand-in lacks."""
+
+    def no_such_function(self) -> None:
+        """Do nothing."""
+
+
+def test_a_script_is_narrowed_only_to_a_protocol_whose_members_it_has(
+    tmp_path: Path,
+) -> None:
+    script = upstream.load_script(clone(tmp_path) / upstream.PRISTINE)
+    assert upstream.narrowed(script, _Loss) is script
+    with pytest.raises(TypeError, match="lacks a member of _Absent"):
+        upstream.narrowed(script, _Absent)
+
+
 def test_the_reference_sees_a_cpu_only_machine() -> None:
     with upstream.hidden_accelerators():
         assert not torch.cuda.is_available()
@@ -535,37 +616,6 @@ def test_the_fmnist_pipelines_and_their_draws_are_seen(tmp_path: Path) -> None:
     )
 
 
-TINY_SCRIPT: Final = (
-    SETTINGS_SCRIPT
-    + """
-
-class VGG(nn.Module):
-    VGG16_CFG = [64, "M", 64, "M", 64, "M"]
-
-    def __init__(self, num_classes=100):
-        super().__init__()
-        self.seen = list(self.VGG16_CFG)
-
-
-class MobileNetV2(nn.Module):
-    CFG = [[1, 16, 1, 1]]
-
-    def __init__(self, num_classes=10):
-        super().__init__()
-        self.seen = [list(row) for row in self.CFG]
-
-
-def build_model(arch, num_classes):
-    if arch == "vgg16bn":
-        return VGG(num_classes)
-    if arch == "mobilenetv2":
-        return MobileNetV2(num_classes)
-    return ResNet(BasicBlock, [9, 9, 9], num_classes)
-"""
-)
-"""The stand-in with architecture tables that record what they were built from."""
-
-
 def test_the_tiny_model_patches_the_architecture_table_only_while_building(
     tmp_path: Path,
 ) -> None:
@@ -659,30 +709,6 @@ def test_a_setting_is_traced_at_its_arch_dataset_and_classes(tmp_path: Path) -> 
     )
 
 
-LITERAL_SCRIPT: Final = """\
-import torch.nn as nn
-
-
-class CustomNorm(nn.Module):
-    def __init__(self, num_features):
-        super().__init__()
-        self.width = num_features
-
-
-def build():
-    return [
-        nn.Conv2d(3, 32, 3, padding=1, bias=False),
-        nn.Conv2d(320, 1280, 1, bias=False),
-        nn.BatchNorm2d(1280),
-        nn.Linear(512, 512),
-        nn.Linear(in_features=512, out_features=10),
-        CustomNorm(32),
-        nn.Conv2d(24, 40, 3),
-    ]
-"""
-"""A stand-in whose layers carry the reference's hardcoded widths."""
-
-
 def test_narrowed_widths_shrinks_each_hardcoded_width_while_building(
     tmp_path: Path,
 ) -> None:
@@ -710,6 +736,17 @@ def test_narrowed_widths_shrinks_each_hardcoded_width_while_building(
     after = build()[0]
     assert isinstance(after, torch.nn.Conv2d)
     assert after.out_channels == 32
+
+
+def test_narrowed_widths_pass_non_integer_arguments_through() -> None:
+    with upstream.narrowed_widths(SimpleNamespace()):
+        norm = torch.nn.BatchNorm2d(1280, eps=0.5, affine=False)
+        conv = torch.nn.Conv2d(3, 32, 3, padding_mode="reflect", padding=1)
+    assert norm.num_features == reference.TINY_WIDTHS[1280]
+    assert norm.eps == 0.5
+    assert norm.affine is False
+    assert conv.padding_mode == "reflect"
+    assert conv.out_channels == reference.TINY_WIDTHS[32]
 
 
 def test_a_forked_loader_forks_only_a_loader_with_workers() -> None:

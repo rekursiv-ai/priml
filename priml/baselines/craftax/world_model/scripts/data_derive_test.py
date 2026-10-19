@@ -211,6 +211,56 @@ def test_an_archive_root_pools_every_published_training_episode(
     assert [len(by_arm[arm]) for arm in (0, 1)] == [12, 6]
 
 
+@pytest.mark.parametrize("shares", [(1, 1, 1), (1, -1, 1, 1), (0, 0, 0, 0)])
+def test_shares_must_weight_four_arms_nonnegatively(
+    tmp_path: Path,
+    shares: tuple[int, ...],
+) -> None:
+    source = _source(tmp_path)
+    with pytest.raises(ValueError, match="Expected four nonnegative shares"):
+        data_derive.derive(
+            [source],
+            tmp_path / "out",
+            decisions=20,
+            shares=shares,
+            max_decisions=0,
+            seed=0,
+            shard_decisions=100,
+        )
+
+
+def test_an_arm_short_of_its_share_is_refused(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    # Arm 1's six training episodes hold 46 decisions.
+    with pytest.raises(ValueError, match=r"holds 46 decisions; 47 needed"):
+        data_derive.derive(
+            [source],
+            tmp_path / "out",
+            decisions=47,
+            shares=(0, 1, 0, 0),
+            max_decisions=0,
+            seed=0,
+            shard_decisions=100,
+        )
+
+
+def test_an_arm_already_derived_is_not_overwritten(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    derive = partial(
+        data_derive.derive,
+        [source],
+        tmp_path / "out",
+        decisions=20,
+        shares=(1, 0, 0, 0),
+        max_decisions=0,
+        seed=0,
+        shard_decisions=100,
+    )
+    derive()
+    with pytest.raises(ValueError, match="already holds derived shards"):
+        derive()
+
+
 def test_the_seed_fixes_the_draw(tmp_path: Path) -> None:
     source = _source(tmp_path)
     draws = [

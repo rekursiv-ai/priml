@@ -99,6 +99,24 @@ def test_segments_beyond_s_max_are_dropped_and_padded() -> None:
     assert batch.cu_seqlens.tolist() == [0, 3, 6, 12]
 
 
+def test_a_full_window_takes_no_further_segment() -> None:
+    parts = [_segment(2, frames=2, starts=False, tag=i) for i in range(3)]
+    batch = pack_windows([parts], t_g=4, s_max=3)
+    assert batch.segment[0].tolist() == [0, 0, 0, 0]
+    assert batch.cu_seqlens.tolist() == [0, 4, 4, 4, 4]
+    assert len(batch.cells) == 2
+
+
+def test_a_moved_batch_carries_every_tensor() -> None:
+    batch = pack_windows([[_segment(2, frames=3, starts=True, tag=5)]], t_g=6, s_max=2)
+    moved = batch.to(torch.device("meta"), non_blocking=False)
+    for field in dataclasses.fields(PackedBatch):
+        tensor = cast("torch.Tensor", getattr(moved, field.name))
+        original = cast("torch.Tensor", getattr(batch, field.name))
+        assert tensor.device.type == "meta", field.name
+        assert (tensor.shape, tensor.dtype) == (original.shape, original.dtype)
+
+
 def test_an_empty_pack_keeps_the_documented_dtypes() -> None:
     batch = pack_windows([[]], t_g=4, s_max=1)
     assert (batch.cells.dtype, batch.cells.shape) == (torch.uint8, (0, 99, 8))

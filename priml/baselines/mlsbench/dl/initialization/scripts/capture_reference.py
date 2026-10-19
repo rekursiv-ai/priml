@@ -37,7 +37,7 @@ import tempfile
 
 from priml.baselines.mlsbench.dl.initialization import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -86,7 +86,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -127,7 +127,10 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         lockstep,
         run=reference.lockstep_record,
     )
-    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_loaders(
+        batches,
+        vision_reference.loader_batches(scratch),
+    )
     settings, settings_report = capture_reference.compare_task_settings(
         scripts,
         reference.SETTING_INITIALIZATIONS,
@@ -151,7 +154,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         setting_lockstep,
         run=reference.setting_lockstep_record,
     )
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record | settings,
         sites={},
         report=report + settings_report,
@@ -174,18 +177,18 @@ def compare_full_size(
       report: One line per tensor that differs.
 
     """
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = vision.full_step(reference.INITIALIZATIONS[name]).model
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        ours = vision_reference.full_step(reference.INITIALIZATIONS[name]).model
         theirs = script.ResNet(script.BasicBlock, [9, 9, 9], 100)
         theirs.load_state_dict(trace.state)
         report = capture_reference.compare_states(trace.state, ours.state_dict())
-        media = vision.fixed_media(0)
+        media = vision_reference.fixed_media(0)
         for mode in ("train", "eval"):
             ours.train(mode == "train")
             theirs.train(mode == "train")
             report += mismatches(
-                {"forward": vision.logits_of(theirs, media).detach()},
-                {"forward": vision.logits_of(ours, media).detach()},
+                {"forward": vision_reference.logits_of(theirs, media).detach()},
+                {"forward": vision_reference.logits_of(ours, media).detach()},
             )
     return [f"full/{name}/{line}" for line in report]
 

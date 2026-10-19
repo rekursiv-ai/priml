@@ -306,6 +306,35 @@ def _batch() -> Batch:
     )
 
 
+class _Restarts:
+    """Stand in for ``restart_donors_numba``: record the slots it finds and the calls."""
+
+    def __init__(self) -> None:
+        self.slots: list[tuple[list[int], list[int]]] = []
+
+    def __call__(self, batch: Batch, archive: Archive) -> None:
+        """Record both slot arrays as the kernel sees them."""
+        assert batch.stats.dtype == TRAINING_STATS_DTYPE
+        self.slots.append((archive.save_slots.tolist(), archive.restore_slots.tolist()))
+
+
+def test_reset_clears_both_slot_arrays_before_restarting_the_donors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restarts = _Restarts()
+    monkeypatch.setattr(
+        "priml.baselines.craftax.learners.practice.restart_donors_numba",
+        restarts,
+    )
+    practice = _practice(_config())
+    practice.archive.save_slots[:] = 3
+    practice.archive.restore_slots[:] = 5
+    practice.reset(_batch())
+    assert restarts.slots == [([-1] * NUM_ENVS, [-1] * NUM_ENVS)]
+    assert practice.archive.save_slots.tolist() == [-1] * NUM_ENVS
+    assert practice.archive.restore_slots.tolist() == [-1] * NUM_ENVS
+
+
 def test_prepare_sizes_each_rollout_toward_the_fraction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

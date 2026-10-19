@@ -315,6 +315,24 @@ def test_ema_apply_to_swaps_params_and_restores() -> None:
     torch.testing.assert_close(model.weight, pre)
 
 
+@pytest.mark.parametrize("shadow_kind", ["module", "param_dict"])
+def test_ema_apply_to_swaps_averaged_buffers_and_restores(
+    shadow_kind: Literal["module", "param_dict"],
+) -> None:
+    model = nn.BatchNorm1d(2)
+    assert model.running_mean is not None
+    config = EMA.Config(decay=0.0)
+    config.shadow_kind = shadow_kind
+    config.buffer_update_fn = ema_module.average_persistent_buffers
+    ema = config.make()
+    ema(model)
+    with torch.no_grad():
+        model.running_mean.fill_(9.0)
+    with ema.apply_to(model):
+        torch.testing.assert_close(model.running_mean, torch.zeros(2))
+    torch.testing.assert_close(model.running_mean, torch.full((2,), 9.0))
+
+
 def test_ema_apply_to_does_not_swap_buffers() -> None:
     """``apply_to`` must leave buffers at live-model values."""
     model = nn.BatchNorm1d(2)

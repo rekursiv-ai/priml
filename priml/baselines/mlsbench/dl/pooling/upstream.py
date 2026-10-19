@@ -10,7 +10,7 @@ runs on a GPU.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
 import torch
 
@@ -45,6 +45,7 @@ FEATURES: Final = (2, 3, 4, 5)
 """Batch, channels, height and width of the features each pool is run on."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``cv-pooling-aggregation`` script the capture uses."""
 
@@ -164,7 +165,7 @@ def upstream_lockstep(
         afterwards; and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
@@ -217,7 +218,7 @@ def upstream_record(
     """
     record: dict[str, Tensor] = {}
     for name, script in scripts.items():
-        record |= pooled(cast(Script, cast(object, script)).CustomPool(), name)
+        record |= pooled(upstream.narrowed(script, Script).CustomPool(), name)
     pristine = traces["avg"]
     record["schedule/lr"] = torch.tensor(pristine.rates, dtype=torch.float64)
     record["optimizer/settings"] = torch.tensor(

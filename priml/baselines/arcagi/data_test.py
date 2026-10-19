@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from array import array
+from dataclasses import replace
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, cast, override
 from unittest.mock import Mock
 
 import json
@@ -23,6 +25,7 @@ from priml.baselines.arcagi import data as arc_data
 from priml.baselines.arcagi.data import (
     ArcInstanceMetadata,
     ArcParquetData,
+    ArcParquetDataset,
     PairSource,
     ParquetSourceData,
     PuzzleBatches,
@@ -1613,6 +1616,141 @@ def test_iter_parquet_rows_streams_typed_v2_rows(tmp_path: Path) -> None:
     assert got[0]["offline_augs"] == ["", "dih|1||colorperm|0312456789"]
 
 
+def test_reader_counts_rows_and_stored_augmentation_descriptors(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path / "counts.parquet",
+        rows=[
+            _row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=["", "dih|1"]),
+            _row("b", train=[_pair([[3]], out=[[4]])], test=[], augs=["", "dih|1"]),
+            _row("c", train=[], test=[], augs=[""]),
+        ],
+    )
+
+    source = read_parquet_source(path)
+
+    assert source.num_rows == 3
+    assert source.num_augmentations == 5
+
+
+class _WideArray(array[int]):
+    """An ``array('I')`` reporting 8-byte items, as some platforms do."""
+
+    @property
+    @override
+    def itemsize(self) -> int:
+        return 8
+
+
+def test_reader_rejects_a_platform_whose_uint_array_is_not_uint32(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write(
+        tmp_path / "one.parquet",
+        rows=[_row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=[""])],
+    )
+    monkeypatch.setattr(arc_data, "array", _WideArray)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^array\('I'\) is not uint32-sized on this platform$",
+    ):
+        read_parquet_source(path)
+
+
+def test_get_pair_rejects_a_missing_input_grid(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "one.parquet",
+        rows=[_row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=[""])],
+    )
+    source = read_parquet_source(path)
+    shapes = source.train_inputs.shapes.copy()
+    shapes[0] = 0
+    damaged = replace(source, train_inputs=replace(source.train_inputs, shapes=shapes))
+
+    with pytest.raises(ValueError, match=r"^An ARC input grid cannot be missing\.$"):
+        damaged.get_pair(0, 0)
+
+
+def test_train_loader_requires_a_bound_sampler(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "one.parquet",
+        rows=[_row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=[""])],
+    )
+    data = _one_source_data(path)
+    data.train_dataset.sampler = None
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Training dataset has no distributed sampler\.$",
+    ):
+        data.train_dataloader()
+
+
+def test_set_epoch_without_a_sampler_only_records_the_epoch(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "one.parquet",
+        rows=[_row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=[""])],
+    )
+    dataset = _one_source_data(path).train_dataset
+    dataset.sampler = None
+
+    dataset.set_epoch(3)
+
+    assert dataset.epoch == 3
+
+
+class _AlwaysTraining(ArcParquetDataset):
+    """A subclass that trains whatever its translation probability says."""
+
+    @property
+    @override
+    def is_training(self) -> bool:
+        return True
+
+
+def test_training_view_rejects_a_dataset_without_a_translation_probability(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path / "one.parquet",
+        rows=[_row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=[""])],
+    )
+    trained = _one_source_data(path).train_dataset
+    dataset = _AlwaysTraining(
+        sources=trained.sources,
+        index=trained.index,
+        canvas_size=trained.canvas_size,
+        p_translate=None,
+        rng_for_sample=None,
+    )
+
+    with pytest.raises(ValueError, match=r"^Expected self\.p_translate is not None\.$"):
+        dataset[0]
+
+
+def test_training_view_rejects_a_pair_without_an_output(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "one.parquet",
+        rows=[_row("a", train=[_pair([[1]], out=[[2]])], test=[], augs=[""])],
+    )
+    dataset = _one_source_data(path).train_dataset
+    (source,) = dataset.sources
+    shapes = source.train_outputs.shapes.copy()
+    shapes[0] = 0
+    dataset.sources = [
+        replace(source, train_outputs=replace(source.train_outputs, shapes=shapes)),
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=r"^one\.parquet puzzle 'a' training pair 0 requires an output grid\.$",
+    ):
+        dataset[0]
+
+
 @pytest.mark.parametrize(
     ("aug", "dih", "slots"),
     [
@@ -2522,6 +2660,50 @@ def test_finalize_rejects_invalid_runtime_controls(
         finalized.make()
 
 
+@pytest.mark.parametrize("field_name", ["num_tasks", "num_instances"])
+def test_make_rejects_a_negative_expected_count(field_name: str) -> None:
+    cfg = ArcParquetData.Config()
+    cfg.train_sources = [PairSource.Config(path="missing-train.parquet")]
+    cfg.eval_source = "missing-eval.parquet"
+    setattr(cfg, field_name, -1)
+
+    with pytest.raises(ValueError, match=rf"^{field_name} cannot be negative\.$"):
+        cfg.finalize().make()
+
+
+@pytest.mark.parametrize("epochs_per_iter", [0, -1])
+def test_puzzle_data_rejects_a_nonpositive_epochs_per_iter(
+    tmp_path: Path,
+    epochs_per_iter: int,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"^epochs_per_iter must be positive, got {epochs_per_iter}\.$",
+    ):
+        _small_puzzle_data(tmp_path, epochs_per_iter=epochs_per_iter)
+
+
+def test_reader_drops_a_demonstration_whose_output_exceeds_the_canvas(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path / "wide-output.parquet",
+        rows=[
+            _row(
+                "task",
+                train=[_pair([[1]], out=[[2] * 3]), _pair([[3]], out=[[4]])],
+                test=[],
+                augs=[""],
+            ),
+        ],
+    )
+
+    source = read_parquet_source(path, max_grid_size=2)
+
+    assert source.row_train_counts.tolist() == [1]
+    assert source.train_original_indices.tolist() == [1]
+
+
 def test_arc_parquet_rejects_canvas_larger_than_hash_shape_byte() -> None:
     """Reject an unrepresentable canvas before opening any parquet source."""
     cfg = ArcParquetData.Config()
@@ -2751,6 +2933,18 @@ def _eval_task_ids(path: Path, *, rank: int) -> list[int]:
             list[int],
         )
     ]
+
+
+def _one_source_data(path: Path) -> ArcParquetData:
+    """Build single-rank data whose one parquet trains and evaluates."""
+    cfg = ArcParquetData.Config()
+    cfg.train_sources = [PairSource.Config(path=path)]
+    cfg.eval_source = path
+    cfg.batch_size = 1
+    cfg.num_workers = 0
+    cfg.rank = 0
+    cfg.num_replicas = 1
+    return cfg.make()
 
 
 def _make_rank_data(path: Path, *, rank: int) -> ArcParquetData:

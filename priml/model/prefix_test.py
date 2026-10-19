@@ -612,10 +612,59 @@ def test_composed_sparse_prefix_rejects_invalid_construction() -> None:
     assert ComposedSparsePrefix.Config(num_tokens=5).num_prefix_tokens == 5
 
 
+@pytest.mark.parametrize("residual_gate", [True, False])
+def test_composed_sparse_prefix_cost_matches_torch(residual_gate: bool) -> None:
+    config = _composed_config(residual_gate=residual_gate)
+    config.composition = CategorySlotFiLM.Config(
+        num_categories=3,
+        num_augmentations=2,
+        num_slots=2,
+    )
+    config.forward_dtype = torch.float32
+    config.residual.dtype = torch.float32
+    config.residual.dtype_scale = torch.float32
+
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.tensor([1, 2, 3, 4, 5]),
+        seq_len=1,
+        batch_size=5,
+        dtype=torch.float32,
+        run=_run_composed,
+    )
+
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized.composition, CategorySlotFiLM.Config)
+    assert finalized.composition.channels_out == 4
+    assert analytical.params == sum(p.numel() for p in finalized.make().parameters())
+
+
+def test_sparse_embedding_requires_a_positive_width() -> None:
+    config = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
+    with pytest.raises(ValueError, match="channels_out must be positive"):
+        config.make()
+
+
 def test_composed_sparse_prefix_requires_tensor_task_ids() -> None:
     module = _composed_config(residual_gate=False).make()
     with pytest.raises(TypeError, match="category_indices"):
         module(5, category_indices=[0, 1, 2, 0, 1])
+
+
+def _run_composed(module: nn.Module, identifiers: Tensor) -> Tensor:
+    """Call a composed prefix with task ids derived from the puzzle ids."""
+    out = cast(
+        object,
+        module(
+            identifiers.shape[0],
+            category_indices=identifiers % 3,
+            augmentation_indices=identifiers % 2,
+            slot_permutation=torch.stack([identifiers % 2, 1 - identifiers % 2], -1),
+            puzzle_identifiers=identifiers,
+        ),
+    )
+    assert isinstance(out, Tensor)
+    return out
 
 
 def _composed_config(*, residual_gate: bool) -> ComposedSparsePrefix.Config:

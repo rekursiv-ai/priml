@@ -38,7 +38,7 @@ import tempfile
 
 from priml.baselines.mlsbench.dl.pooling import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -85,7 +85,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -115,7 +115,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
                 script,
                 name,
                 traces["avg"],
-                arch=vision.SETTINGS[setting].arch,
+                arch=vision_reference.SETTINGS[setting].arch,
                 prefix=f"settings/{setting}/",
             )
             for setting in reference.SETTING_POOLS
@@ -135,7 +135,10 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         run=reference.setting_lockstep_record,
     )
     record |= lockstep_values
-    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_loaders(
+        batches,
+        vision_reference.loader_batches(scratch),
+    )
     settings, settings_report = capture_reference.compare_task_settings(
         scripts,
         reference.SETTING_POOLS,
@@ -143,7 +146,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         pristine="avg",
     )
     report += settings_report
-    return vision.Captured(record=record | settings, sites={}, report=report)
+    return vision_reference.Captured(record=record | settings, sites={}, report=report)
 
 
 class _Flags(Protocol):

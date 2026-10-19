@@ -143,6 +143,23 @@ def test_an_action_outside_the_schema_stops_recording(
     assert env.decisions(1) == 0
 
 
+def test_an_episode_past_max_decisions_is_dropped_and_stops_recording(
+    short: None,
+) -> None:
+    del short
+    config = CaptureEnv.Config(num_envs=2, max_decisions=1)
+    env = CaptureEnv(config, schedule=Schedule(budget=10**9))
+    env.actions[:, 0] = 0.0
+    env.step_buffer(0)
+    assert not env.failure
+    assert env.decisions(0) == 1
+    env.step_buffer(0)
+    assert env.failure == "An episode exceeds 1 decisions."
+    assert [env.receipt(row) for row in range(2)] == [None, None]
+    assert env.in_flight() == 0
+    assert env.finished()
+
+
 def test_a_recording_row_reads_its_decisions_and_achievement_return(
     short: None,
 ) -> None:

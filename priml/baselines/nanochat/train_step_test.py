@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import math
 
@@ -44,6 +44,10 @@ from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.fused_adamw import FusedAdamW
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.train.parallelism import NoParallel
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -303,7 +307,7 @@ def _no_update(step: train_step.NgramTrainStep) -> dict[str, float | Tensor]:
 class _EndpointTrajectory(nn.Module):
     """Three exp022 updates over all eight layers."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fused_ngram: bool = False) -> None:
         super().__init__()
         config = experiments.exp022().step
         assert isinstance(config, train_step.NgramTrainStep.Config)
@@ -318,7 +322,7 @@ class _EndpointTrajectory(nn.Module):
         model.rope.dtype = torch.float32
         # Portable replay widens Torch arithmetic; opaque fused operators require
         # fixed FP32 sinks. Native kernel coverage is separate from this CPU replay.
-        model.fused_ngram = False
+        model.fused_ngram = fused_ngram
         model.ngram_dirty_clear = False
         embedding = model.embedding
         assert isinstance(embedding, NarrowEmbedding.Config)
@@ -1070,6 +1074,67 @@ def test_fused_ngram_binding_routes_every_table_to_rmsprop() -> None:
         match=r"^Every fused n-gram table must route to RMSProp\.$",
     ):
         step._bind_ngram_gradients(step.model)
+
+
+def test_a_fused_ngram_step_binds_its_table_sinks_at_construction() -> None:
+    step = _EndpointTrajectory(fused_ngram=True)._step
+    assert isinstance(step.model, MemoryNanoChatLM)
+    assert isinstance(step.optimizer, CompositeOptimizer)
+    expected = {
+        part.weight: sink
+        for table in step.model._tables()
+        for part, sink in zip(table.tables, table.gradient_sinks, strict=True)
+    }
+    assert expected
+    bound = {
+        parameter: sink
+        for member in step.optimizer.optimizers
+        if isinstance(member, BiasCorrectedRMSProp)
+        for parameter, sink in member.gradient_sinks.items()
+    }
+    assert bound.keys() == expected.keys()
+    assert all(bound[parameter] is sink for parameter, sink in expected.items())
+
+
+def _doubling_compile(function: Callable[..., Tensor]) -> Callable[..., Tensor]:
+    """Stand in for a compiler whose output is visible: it doubles the loss."""
+    return lambda *args: 2 * function(*args)
+
+
+def test_an_injected_compiler_wraps_model_and_loss_together() -> None:
+    batch = _batch()
+    compiled = _step(compile=PartialConfig(_doubling_compile)).train_loss(**batch)
+    eager = _step().train_loss(**batch)
+    torch.testing.assert_close(compiled["loss"], 2 * eager["loss"], rtol=0, atol=0)
+
+
+def test_preprocess_moves_tensors_and_passes_other_values_through() -> None:
+    step = _step()
+    batch = _batch()
+    moved = step.preprocess_batch({**batch, "valid_count": 2})
+    assert moved["valid_count"] == 2
+    media = moved["media"]
+    assert isinstance(media, Tensor)
+    assert media.device == step.device
+    assert torch.equal(media, batch["media"])
+
+
+def _cuda_device(step: NanoChatTrainStep) -> torch.device:
+    del step
+    return torch.device("cuda")
+
+
+def test_a_cuda_step_waits_for_queued_device_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = _step()
+    synchronized: list[bool] = []
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: synchronized.append(True))
+    step._synchronize()
+    assert synchronized == []
+    monkeypatch.setattr(NanoChatTrainStep, "device", property(_cuda_device))
+    step._synchronize()
+    assert synchronized == [True]
 
 
 def test_ngram_train_step_runs_one_cpu_update() -> None:

@@ -13,8 +13,11 @@ from typing import TYPE_CHECKING, Final
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import CEILING
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
+from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import (
+    CEILING,
+    shared_scores,
+)
 from priml.baselines.mlsbench.tl.machine_unlearning import reference
 from priml.testing.golden import mismatches, read_tensors
 
@@ -54,6 +57,19 @@ def test_the_evaluation_and_auc_match_the_harness() -> None:
     assert_exact(stored("evaluation/"), reference.evaluation_record())
 
 
+def test_no_stored_auc_ranks_a_score_both_sets_hold() -> None:
+    member, nonmember = reference.fixed_scores()
+    record = stored("main/") | {
+        "fixed/member": torch.from_numpy(member),
+        "fixed/nonmember": torch.from_numpy(nonmember),
+    }
+    pairs = {"fixed/member": "fixed/nonmember"} | {
+        f"main/{name}/forget_train_confidence": f"main/{name}/forget_test_confidence"
+        for name in reference.VARIANTS
+    }
+    assert shared_scores(record, pairs=pairs) == []
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -78,9 +94,9 @@ def test_the_full_values_run_each_mode_from_the_seed() -> None:
     record = reference.full_size_values(model, draws, key="k")
     assert record.keys() == {"full/k/draws", "full/k/train", "full/k/eval"}
     assert record["full/k/draws"] is draws
-    media = vision.full_size_media().flatten(1)
+    media = vision_reference.full_size_media().flatten(1)
     assert torch.equal(record["full/k/eval"], media)
-    with vision.seeded(vision.SEED):
+    with vision_reference.seeded(vision_reference.SEED):
         mask = torch.nn.functional.dropout(torch.ones_like(media), 0.5)
     assert torch.equal(record["full/k/train"], media * mask)
     assert not model.training
@@ -169,6 +185,21 @@ def test_the_port_record_joins_every_component(
         *reference.VARIANTS,
     }
     assert set(states) == set(reference.SETTINGS)
+
+
+def test_the_end_to_end_run_passes_the_harness_its_tiny_flags() -> None:
+    assert reference.tiny_flags() == [
+        "--forget-class",
+        str(reference.FORGET_CLASS),
+        "--pretrain-epochs",
+        str(reference.TINY_PRETRAIN_EPOCHS),
+        "--unlearn-epochs",
+        str(reference.TINY_UNLEARN_EPOCHS),
+        "--batch-size",
+        str(reference.TINY_BATCH),
+        "--seed",
+        str(vision_reference.SEED),
+    ]
 
 
 def test_the_golden_fits_the_ceiling() -> None:

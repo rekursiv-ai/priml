@@ -110,10 +110,8 @@ BackdoorTrainLoop.Config(
             deterministic=False,
             float32_matmul_precision=None
         ),
-        eval_epochs=PartialConfig(
-            priml.baselines.mlsbench.dl.vision.train_loop.first_periodic_and_last,
-            every=10
-        ),
+        eval_epochs=PartialConfig(priml.train.epoch_loop.first_periodic_and_last, every=10),
+        early_stopping=None,
         defense=MaxConfidence.Config(),
         filter_multiplier=1.5
     )

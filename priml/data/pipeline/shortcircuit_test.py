@@ -170,10 +170,13 @@ def test_filter_stats_public_mutators():
     stats.record_skipped()
     stats.record_drop("ProcA", ["too_small", "blurry"])
     stats.record_drop("ProcA", ["too_small"])
+    stats.record_drop("ProcB", [])
 
+    assert stats.processor_drops["ProcB"] == 1
+    assert "ProcB" not in stats.drop_reasons
     assert stats.samples_processed == 2
     assert stats.samples_skipped == 1
-    assert stats.samples_dropped == 2
+    assert stats.samples_dropped == 3
     assert stats.processor_drops["ProcA"] == 2
     assert stats.drop_reasons["ProcA"]["too_small"] == 2
     assert stats.drop_reasons["ProcA"]["blurry"] == 1

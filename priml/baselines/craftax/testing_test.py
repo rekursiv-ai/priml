@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import hashlib
 import threading
 
+from configgle import InlineConfig
 from treekle import from_plain
 
 import numpy as np
@@ -290,6 +291,22 @@ def test_config_deltas_name_a_changed_field_and_a_swapped_slot_once() -> None:
     assert {"num_layers", "embedding"} <= deltas
     assert all(name == "num_layers" or name.startswith("embedding") for name in deltas)
     assert testing.config_fields(child)["embedding"] is BoardEncoder.Config
+
+
+@dataclass(slots=True, kw_only=True)
+class _Holder:
+    inline: InlineConfig[int]
+    plain: int
+
+
+def test_config_fields_keep_an_inline_slot_as_its_repr_not_its_fields() -> None:
+    holder = _Holder(inline=InlineConfig(int, "7", base=8), plain=3)
+    assert testing.config_fields(holder) == {
+        "inline": "InlineConfig(<class 'int'>, '7', base=8)",
+        "plain": "3",
+    }
+    other = _Holder(inline=InlineConfig(int, "7", base=9), plain=3)
+    assert testing.config_deltas(holder, other) == {"inline"}
 
 
 def test_a_golden_is_named_for_itself_in_testdata_beside_its_test(

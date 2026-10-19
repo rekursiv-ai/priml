@@ -25,7 +25,6 @@ import inspect
 import math
 import os
 import re
-import tempfile
 import traceback
 import zlib
 
@@ -41,7 +40,7 @@ from priml.testing import regenerate
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping
+    from collections.abc import Callable, Collection, Generator, Iterable, Mapping
 
     from configgle.fig import Maker
     from torch import nn
@@ -574,8 +573,8 @@ def assert_tensor_golden_part(
     One golden file holds several tests' records, each under its own prefix, so
     each test replays only its part. A missing part is written and the call
     fails; ``--regenerate-b4b`` rewrites the part and keeps the others. Every
-    read and write holds an exclusive lock on the file, so concurrent tests of
-    one golden never see a partial write or drop each other's parts.
+    read and write holds :func:`locked_directory` on the golden's directory, so
+    concurrent tests of one golden never drop each other's parts.
 
     Args:
       path: The ``.pt`` golden.
@@ -591,11 +590,7 @@ def assert_tensor_golden_part(
     if outside:
         raise ValueError(f"Golden part {prefix} holds keys outside it: {outside}.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # ``write_tensors`` renames a new file over ``path``, so a lock on ``path``
-    # would guard the replaced inode; one fixed lock outside the checkout
-    # serializes every part writer and leaves testdata clean.
-    with _part_lock().open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked_directory(path.parent):
         current = read_tensors(path) if path.is_file() else {}
         part = {k: v for k, v in current.items() if k.startswith(prefix)}
         missing = not part
@@ -608,6 +603,28 @@ def assert_tensor_golden_part(
     report = mismatches(part, record)
     if report:
         raise AssertionError(f"{len(report)} mismatches:\n" + "\n".join(report))
+
+
+# ``write_tensors`` renames a new file over a golden, so a lock on the golden would
+# guard the replaced inode; a lock file would be owned by whoever made it first,
+# locking out every other user of a shared host. The directory is neither.
+@contextmanager
+def locked_directory(directory: Path) -> Generator[None]:
+    """Hold an exclusive lock on ``directory`` for the block, across processes.
+
+    Args:
+      directory: An existing directory, typically a golden's.
+
+    Yields:
+      nothing: Control, with the lock held.
+
+    """
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def stored(value: Tensor) -> Tensor:
@@ -672,6 +689,45 @@ def put_steps(
     out.update(pending)
 
 
+def flatten_record(
+    value: object,
+    *,
+    prefix: str,
+    skip: Collection[object] = (),
+) -> dict[str, Tensor]:
+    """Flatten nested tensors and numbers into one name-to-tensor record.
+
+    Args:
+      value: Tensors, numbers, and ``None`` inside nested mappings, tuples, and
+        lists, such as an optimizer ``state_dict``.
+      prefix: Key of ``value``; each child appends ``/<key or index>``.
+      skip: Mapping keys whose values are dropped at any depth.
+
+    Returns:
+      record: Detached tensors in traversal order; a number becomes a scalar
+        tensor and ``None`` leaves no key.
+
+    Raises:
+      TypeError: A leaf is none of those types.
+
+    """
+    if isinstance(value, Tensor):
+        return {prefix: value.detach().clone()}
+    if isinstance(value, (int, float, bool)):
+        return {prefix: torch.tensor(value)}
+    record: dict[str, Tensor] = {}
+    if isinstance(value, dict):
+        for key, item in cast("Mapping[object, object]", value).items():
+            if key not in skip:
+                record |= flatten_record(item, prefix=f"{prefix}/{key}", skip=skip)
+    elif isinstance(value, (tuple, list)):
+        for index, item in enumerate(cast("list[object]", value)):
+            record |= flatten_record(item, prefix=f"{prefix}/{index}", skip=skip)
+    elif value is not None:
+        raise TypeError(f"Unsupported record value: {type(value).__name__}")
+    return record
+
+
 def rng_fingerprint() -> Tensor:
     """Return the global generator's next 8 draws without advancing it.
 
@@ -727,11 +783,6 @@ def _primitive_kind(func: OpOverload[..., object]) -> str:
         if token in name:
             return token
     raise AssertionError(f"Unpinned random primitive: {name}.")
-
-
-def _part_lock() -> Path:
-    """Return the file every :func:`assert_tensor_golden_part` call locks."""
-    return Path(tempfile.gettempdir()) / f"{__name__}.lock"
 
 
 def _max_ulp(a: Tensor, b: Tensor) -> int | str:

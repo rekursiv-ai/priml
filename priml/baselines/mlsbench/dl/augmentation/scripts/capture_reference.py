@@ -40,7 +40,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.augmentation import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.data import normalize
@@ -103,7 +103,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -132,7 +132,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     record = {
         "schedule/lr": torch.tensor(trace.rates, dtype=torch.float64),
         "optimizer/settings": torch.tensor(
-            [trace.settings[name] for name in vision.HYPERPARAMETERS],
+            [trace.settings[name] for name in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
         "draws/exp000": trace.draws,
@@ -142,7 +142,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         media = upstream.upstream_pipeline(
             train,
             reference.pipeline_images(reference.GOLDEN_IMAGES),
-            seed=vision.SEED,
+            seed=vision_reference.SEED,
         )
         record[f"augment/{name}/logits"] = reference.classified(media)
         record |= reference.stored(lockstep[name][0])
@@ -157,7 +157,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
             )
         ]
     report += census
-    return vision.Captured(record=record | settings, sites={}, report=report)
+    return vision_reference.Captured(record=record | settings, sites={}, report=report)
 
 
 def capture_settings(
@@ -185,7 +185,7 @@ def capture_settings(
     )
     with vision_upstream.hidden_accelerators():
         for setting, variants in reference.SETTINGS.items():
-            dataset = vision.SETTINGS[setting].dataset
+            dataset = vision_reference.SETTINGS[setting].dataset
             for name in variants:
                 key = f"settings/{setting}/{name}"
                 train, _ = upstream.pipelines(scripts[name], dataset=dataset)
@@ -194,7 +194,7 @@ def capture_settings(
                 media = upstream.upstream_pipeline(
                     train,
                     reference.source_images(setting, reference.GOLDEN_IMAGES),
-                    seed=vision.SEED,
+                    seed=vision_reference.SEED,
                 )
                 record[f"{key}/augment"] = reference.classified(media)
                 report += [
@@ -209,7 +209,7 @@ def capture_settings(
                     reference.setting_pipeline_record(setting, name),
                 )
             report += compare_test_pipeline(scripts["pad_crop_flip"], setting)
-            known = vision.SETTINGS[setting]
+            known = vision_reference.SETTINGS[setting]
             trace = vision_upstream.trace_main(
                 scripts["pad_crop_flip"],
                 arch=known.arch,
@@ -254,12 +254,12 @@ def compare_pipeline(
     key = f"settings/{setting}/{name}/pipeline"
     images = reference.source_images(setting, reference.PIPELINE_IMAGES)
     with upstream.op_census() as theirs:
-        want = upstream.upstream_pipeline(train, images, seed=vision.SEED)
+        want = upstream.upstream_pipeline(train, images, seed=vision_reference.SEED)
     with reference.op_census() as ours:
         got = reference.augmented(
             name,
             reference.prepared(setting, images),
-            seed=vision.SEED,
+            seed=vision_reference.SEED,
             factory=reference.SETTINGS[setting][name],
         )
     census: list[str] = []
@@ -283,12 +283,15 @@ def compare_test_pipeline(script: Upstream, setting: str) -> list[str]:
       report: A line if the pixels differ.
 
     """
-    _, test = upstream.pipelines(script, dataset=vision.SETTINGS[setting].dataset)
+    _, test = upstream.pipelines(
+        script,
+        dataset=vision_reference.SETTINGS[setting].dataset,
+    )
     images = reference.source_images(setting, reference.PIPELINE_IMAGES)
     config = reference.SETTINGS[setting]["pad_crop_flip"]().dataset
     key = f"settings/{setting}/test/pipeline"
     return mismatches(
-        {key: upstream.upstream_pipeline(test, images, seed=vision.SEED)},
+        {key: upstream.upstream_pipeline(test, images, seed=vision_reference.SEED)},
         {
             key: normalize(
                 reference.prepared(setting, images),
@@ -320,9 +323,9 @@ def compare_pipelines(
     for name, script in scripts.items():
         train, _ = upstream.pipelines(script)
         with upstream.op_census() as theirs:
-            want = upstream.upstream_pipeline(train, images, seed=vision.SEED)
+            want = upstream.upstream_pipeline(train, images, seed=vision_reference.SEED)
         with reference.op_census() as ours:
-            got = reference.augmented(name, images, seed=vision.SEED)
+            got = reference.augmented(name, images, seed=vision_reference.SEED)
         report += mismatches({f"pipeline/{name}": want}, {f"pipeline/{name}": got})
         if name in POLICIES:
             census += [
@@ -335,7 +338,7 @@ def compare_pipelines(
             census += [] if theirs == ours else [f"{name}: operation counts differ"]
     _, test = upstream.pipelines(scripts["pad_crop_flip"])
     config = reference.AUGMENTS["pad_crop_flip"]().dataset
-    want = upstream.upstream_pipeline(test, images, seed=vision.SEED)
+    want = upstream.upstream_pipeline(test, images, seed=vision_reference.SEED)
     got = normalize(
         images,
         mean=torch.tensor(config.mean),

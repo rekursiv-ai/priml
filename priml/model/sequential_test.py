@@ -220,6 +220,50 @@ def test_sequential_reset():
     m.reset_parameters()
 
 
+def test_the_last_element_takes_the_stacks_output_width() -> None:
+    config = Sequential.Config(
+        channels_in=4,
+        channels_out=6,
+        elements=[Linear.Config(channels_out=3), Linear.Config()],
+    )
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized.elements, list)
+    first, last = finalized.elements
+    assert isinstance(first, Linear.Config)
+    assert isinstance(last, Linear.Config)
+    assert (first.channels_in, first.channels_out) == (4, 3)
+    assert (last.channels_in, last.channels_out) == (3, 6)
+
+    single = Sequential.Config(channels_in=4, channels_out=6, elements=Linear.Config())
+    layer = single.make()[0]
+    assert isinstance(layer, Linear)
+    assert layer.weight.shape == (6, 4)
+
+
+def test_output_grid_refuses_an_element_without_declared_geometry() -> None:
+    config = Sequential.Config(elements=[SwiGLU.Config(channels_in=4)])
+    with pytest.raises(TypeError, match="declared spatial geometry"):
+        config.output_grid((4, 5))
+
+
+def test_spatial_cost_refuses_an_element_without_declared_geometry() -> None:
+    config = Sequential.Config(elements=[SwiGLU.Config(channels_in=4)])
+    config = config.copy_tree().finalize()
+    with pytest.raises(TypeError, match="declared spatial geometry"):
+        config.cost(seq_len=20, batch_size=2, dtype=None, input_grid=(4, 5))
+
+
+def test_output_grid_chains_declared_transformations() -> None:
+    config = Sequential.Config(
+        channels_in=3,
+        elements=[
+            Conv2d.Config(channels_out=5, kernel_size=2, stride=2, padding=0),
+            Conv2d.Config(channels_out=7, kernel_size=2, stride=2, padding=0),
+        ],
+    ).finalize()
+    assert config.output_grid((12, 20)) == (3, 5)
+
+
 def test_sequential_cost_sums_every_expanded_element() -> None:
     """``repeat`` is expanded by finalize, so each copy is costed once."""
     config = Sequential.Config(

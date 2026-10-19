@@ -176,6 +176,19 @@ def test_every_mismatched_identity_is_named(tmp_path: Path) -> None:
     assert "codec.stored_dtype" in message
 
 
+def test_a_corpus_without_a_receipt_is_refused(tmp_path: Path) -> None:
+    codec_config = FloatCodec.Config()
+    with pytest.raises(FileNotFoundError, match="receipt-only"):
+        verify_receipt(
+            tmp_path,
+            autoencoder=INVAE.Config(),
+            sample=True,
+            codec_config=codec_config,
+            codec=codec_config.make(),
+            table_sha256=None,
+        )
+
+
 def test_a_table_is_pinned_by_its_digest(tmp_path: Path) -> None:
     codec = ScalarTableCodec.Config().make()
     codec.fit(torch.randn(8, 2, 3, 5, generator=torch.Generator().manual_seed(0)))

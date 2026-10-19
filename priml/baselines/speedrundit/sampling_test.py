@@ -68,6 +68,27 @@ def test_sampler_runs_unconditional_then_cfg_branches_and_restores_mode() -> Non
     assert model.seen_dtypes == [(torch.float32, torch.float32, torch.float32)] * 4
 
 
+def test_sampler_shifts_times_by_the_latent_dimension_ratio() -> None:
+    plain, shifted = _TimedModel(), _TimedModel()
+    for model, shift_time in ((plain, False), (shifted, True)):
+        sample_latents(
+            model,
+            latents=torch.zeros(2, 3, 4),
+            cls_latents=torch.zeros(2, 5),
+            labels=torch.tensor([0, 2]),
+            num_steps=2,
+            shift_time=shift_time,
+            shift_base=3,
+        )
+    unshifted = torch.stack(plain.seen_times)
+    assert unshifted.shape == (2,)
+    # Shift = sqrt(12 / 3) = 2, so a grid time t becomes 2t / (1 + t).
+    torch.testing.assert_close(
+        torch.stack(shifted.seen_times),
+        2 * unshifted / (1 + unshifted),
+    )
+
+
 def test_sampler_rejects_one_step_before_changing_model_mode() -> None:
     model = _ZeroModel().train()
     with pytest.raises(ValueError, match="num_steps must be at least two"):
@@ -113,6 +134,35 @@ class _ZeroModel(nn.Module):
             velocity=torch.zeros_like(x),
             cls_velocity=torch.zeros_like(cls_token),
             projections=(),
+        )
+
+
+class _TimedModel(_ZeroModel):
+    """Record the flow time of each call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_times: list[Tensor] = []
+
+    @override
+    def forward(
+        self,
+        x: Tensor,
+        t: Tensor,
+        y: Tensor,
+        cls_token: Tensor,
+        *,
+        drop_sparse_path: bool,
+        route_tokens: bool,
+    ) -> ModelOutput:
+        self.seen_times.append(t[0].clone())
+        return super().forward(
+            x,
+            t,
+            y,
+            cls_token,
+            drop_sparse_path=drop_sparse_path,
+            route_tokens=route_tokens,
         )
 
 

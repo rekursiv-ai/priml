@@ -26,10 +26,10 @@ from priml.baselines.mlsbench.dl.vision.upstream_test import (
 from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
 if TYPE_CHECKING:
     from priml.baselines.mlsbench.dl.vision.upstream import Upstream
+
+_CWD: Final = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD / "testdata"
 

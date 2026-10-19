@@ -582,6 +582,29 @@ def test_channels_in_is_read_from_proj_in_or_falls_back_to_channels_out() -> Non
     assert bare.finalize().channels_in == 8
 
 
+def test_num_layers_is_the_length_of_an_explicit_block_list() -> None:
+    config = Transformer.Config(
+        channels_in=8,
+        channels_out=8,
+        block=[TransformerBlock.Config(), TransformerBlock.Config()],
+    )
+    assert config.num_layers == -1
+    assert config.finalize().num_layers == 2
+
+
+def test_a_projection_without_an_input_width_takes_the_stacks() -> None:
+    config = Transformer.Config(
+        channels_in=6,
+        channels_out=8,
+        num_layers=1,
+        proj_in=Linear.Config(channels_out=8),
+    )
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized.proj_in, Linear.Config)
+    assert finalized.proj_in.channels_in == 6
+    assert config.make()(torch.randn(2, 3, 6)).shape == (2, 3, 8)
+
+
 def test_transformer_rejects_a_block_that_does_not_build_a_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,7 +21,9 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT as VISION_SCRIPT,
+)
 
 
 if TYPE_CHECKING:
@@ -39,7 +41,7 @@ BLOCK: Final = (
 """The six lines of the stand-in's block, which the baselines' edits replace."""
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    VISION_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         "",

@@ -45,6 +45,7 @@ from priml.model.norm import (
 from priml.model.special import (
     Activation,
     Dropout,
+    Dropout2d,
     Identity,
     Skip,
     TiedLinear,
@@ -122,6 +123,31 @@ def test_dropout_cost_distinguishes_channel_masks_and_disabled_modes() -> None:
     assert config.cost(seq_len=4, batch_size=2, dtype=dtype) == per_element
     config.channels_in = -1
     assert config.cost(channels=3, seq_len=4, batch_size=2, dtype=dtype) == per_element
+
+
+def test_dropout2d_matches_torch_and_costs_one_mask_per_channel() -> None:
+    config = Dropout2d.Config()
+    config.p = 0.25
+    config.channels_out = 3
+    source = torch.arange(2 * 3 * 4 * 5, dtype=torch.float64).reshape(2, 3, 4, 5)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        expected = nn.Dropout2d(0.25)(source)
+        torch.manual_seed(17)
+        actual = config.make()(source, ignored=True)
+    assert torch.equal(actual, expected)
+    assert not torch.equal(actual, nn.Dropout(0.25).train()(source))
+    dtype = torch.float64
+    assert config.finalize().cost(
+        seq_len=20,
+        batch_size=2,
+        dtype=dtype,
+    ) == dropout_cost(
+        0.25,
+        elements=120,
+        masks=6,
+        dtype=dtype,
+    )
 
 
 def test_inplace_dropout_preserves_storage_and_complete_gradient() -> None:
@@ -312,6 +338,10 @@ def test_identity_invalid_widths_print_before_make_rejects() -> None:
     assert "channels_out=64" in rendered
     with pytest.raises(ValueError, match="channels_in=128 must equal channels_out=64"):
         config.make()
+
+
+def test_identity_preserves_the_spatial_extents() -> None:
+    assert Identity.Config(channels_in=4).output_grid((5, 7)) == (5, 7)
 
 
 def test_identity_reset():

@@ -516,6 +516,30 @@ def test_load_upstream_uses_the_supplied_reference_and_corpus(
     assert loaded.__file__ == str(root / "train.py")
 
 
+def test_rng_is_captured_once_after_their_cuda_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeds: list[int] = []
+    initialized: list[bool] = []
+
+    def cuda_seed(seed: int) -> None:
+        seeds.append(seed)
+
+    monkeypatch.setattr(torch.cuda, "manual_seed", cuda_seed)
+    monkeypatch.setattr(torch.cuda, "init", lambda: initialized.append(True))
+    rng: dict[str, object] = {}
+    with karpathy_parity._capture_rng_after_seeding(rng):
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        first = rng["state"]
+        torch.manual_seed(7)
+        torch.cuda.manual_seed(7)
+    assert torch.cuda.manual_seed is cuda_seed
+    assert seeds == [42, 7]
+    assert initialized == [True, True]
+    assert rng["state"] is first
+
+
 def _configure_load_upstream(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,

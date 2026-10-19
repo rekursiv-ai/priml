@@ -1562,6 +1562,8 @@ def test_interpolate_argument_processing_pins_modes_and_options() -> None:
         False,
         3,
     )
+    # Bare "linear" with nothing else to go on is the 1-D kernel.
+    assert _process_interpolate_args("linear") == (1, "linear", None, None, False, 1)
 
 
 def test_interpolate_pins_align_corners_values_and_aliases() -> None:

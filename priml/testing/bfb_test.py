@@ -2219,6 +2219,29 @@ def test_host_agnostic_one_term_matmul_keeps_the_sign_of_a_zero_product() -> Non
     assert torch.signbit(product).tolist() == [[True, False], [False, True]]
 
 
+def test_one_term_mm_leaves_non_tensor_operands_to_the_kernel() -> None:
+    func = torch.ops.aten.mm.default
+    left = torch.tensor([[-1.0], [1.0]])
+    assert bfb._one_term_mm(func, args=(left, 2.0)) is None
+    assert bfb._one_term_mm(func, args=(2.0, left)) is None
+
+
+def test_stale_post_states_rejects_a_load_that_drops_the_post_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "golden.pt"
+    torch.save({"state_dict": {}, "post_state": {}}, path)
+
+    def drop_post_state(golden: Path) -> dict[str, object]:
+        del golden
+        return {"state_dict": {}}
+
+    monkeypatch.setattr(bfb, "load_golden", drop_post_state)
+    with pytest.raises(ValueError, match=r'^Expected "post_state" in payload\.$'):
+        stale_post_states([path])
+
+
 # A single output column takes x86's vector kernel, which adds to +0.0 too.
 def test_host_agnostic_matmul_by_a_single_column_adds_to_positive_zero() -> None:
     left = torch.tensor([[-1.0], [1.0]])
@@ -4169,6 +4192,23 @@ _TIE_ARM: Final = (
     -1.573001742362976,
     -0.6825683116912842,
 )
+
+
+def test_group_norm_applies_affine_weight_and_bias() -> None:
+    # Batch 2, channels 4 in 2 groups, spatial 3: every dim distinct from its neighbor.
+    x = torch.randn(2, 4, 3, generator=torch.Generator().manual_seed(0))
+    weight = torch.tensor([0.5, -1.0, 2.0, 3.0])
+    bias = torch.tensor([1.0, 0.0, -2.0, 0.25])
+    expected = torch.nn.functional.group_norm(
+        x.double(),
+        2,
+        weight.double(),
+        bias.double(),
+        eps=1e-5,
+    ).float()
+    with host_agnostic_numerics():
+        out, _, _ = torch.native_group_norm(x, weight, bias, 2, 4, 3, 2, 1e-5)
+    torch.testing.assert_close(out, expected, rtol=0, atol=1e-6)
 
 
 @pytest.mark.parametrize("values", [_TIE_BOTH, _TIE_ARM], ids=["both", "arm"])

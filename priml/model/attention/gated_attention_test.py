@@ -83,6 +83,44 @@ def test_gated_attention_rejects_invalid_dropout(dropout: float) -> None:
         config.make()
 
 
+@pytest.mark.parametrize(
+    ("num_heads", "num_heads_kv", "channels_head", "match"),
+    [
+        (2, 1, 0, "head counts and widths must be positive"),
+        (3, 2, 4, "divisible by key/value heads"),
+    ],
+)
+def test_gated_attention_rejects_invalid_head_geometry(
+    num_heads: int,
+    num_heads_kv: int,
+    channels_head: int,
+    match: str,
+) -> None:
+    config = GatedAttention.Config()
+    config.channels_in = 8
+    config.num_heads = num_heads
+    config.num_heads_kv = num_heads_kv
+    config.channels_head = channels_head
+
+    with pytest.raises(ValueError, match=match):
+        config.make()
+
+
+def test_gated_attention_rejects_cache_overflow_before_mutation() -> None:
+    config = GatedAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.channels_head = 4
+    model = config.make()
+    cache = model.alloc_kv_cache(batch=2, max_seq=2)
+
+    with pytest.raises(ValueError, match="cache capacity would be exceeded"):
+        model.forward(torch.randn(2, 3, 8), cache=_layer_cache(model, cache))
+
+    assert cache.seen == 0
+
+
 def test_gated_attention_reset_resets_injected_rope() -> None:
     config = GatedAttention.Config()
     config.channels_in = 4

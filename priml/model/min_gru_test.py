@@ -50,6 +50,13 @@ def _min_gru(input_channels: int, channels: int, layers: int = 1) -> MinGRU:
     return config.make()
 
 
+def test_min_gru_hidden_width_defaults_to_the_input_width() -> None:
+    config = MinGRU.Config()
+    config.channels_in = 3
+
+    assert config.finalize().channels_hidden == 3
+
+
 def _allow_cpu_scan(combined: Tensor) -> None:
     del combined
 

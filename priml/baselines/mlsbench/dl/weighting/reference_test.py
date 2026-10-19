@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.baselines.mlsbench.dl.weighting import reference
@@ -64,7 +64,8 @@ def test_the_synthetic_cut_keeps_the_scripts_images_in_its_order() -> None:
 def test_the_schedule_and_optimizer_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),
-        vision.schedule_record(exp000) | vision.optimizer_record(exp000),
+        vision_reference.schedule_record(exp000)
+        | vision_reference.optimizer_record(exp000),
     )
 
 
@@ -73,7 +74,7 @@ def test_the_full_network_leaves_the_generator_where_the_script_does() -> None:
 
 
 def test_the_reported_accuracy_is_the_best_the_script_reports() -> None:
-    assert_exact(stored("best/"), vision.best_record())
+    assert_exact(stored("best/"), vision_reference.best_record())
 
 
 def test_the_loader_yields_the_scripts_images_in_its_order(tmp_path: Path) -> None:
@@ -88,7 +89,7 @@ def test_two_updates_with_each_weighting_match_the_script(name: str) -> None:
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def test_the_golden_bites_on_one_ulp() -> None:
@@ -187,11 +188,11 @@ def test_each_settings_full_network_and_recipe_match_the_script(name: str) -> No
 
 def shallow_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
     """Build ``factory``'s step at its lockstep size, in place of the full one."""
-    return vision.tiny_step(
+    return vision_reference.tiny_step(
         factory,
         blocks=(1, 1, 1),
-        classes=vision.CLASSES,
-        epochs=vision.EPOCHS,
+        classes=vision_reference.CLASSES,
+        epochs=vision_reference.EPOCHS,
     )
 
 
@@ -204,7 +205,7 @@ def test_a_lockstep_setting_adds_every_weightings_two_updates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shrinks the VGG setting's full step to its lockstep size, to stay fast."""
-    monkeypatch.setattr(vision, "full_step", shallow_step)
+    monkeypatch.setattr(vision_reference, "full_step", shallow_step)
     record = reference.setting_record("vgg16bn-cifar100lt")
     for name in reference.WEIGHTS:
         key = f"settings/vgg16bn-cifar100lt/lockstep/{name}/"
@@ -222,7 +223,7 @@ def test_settings_record_joins_every_setting(monkeypatch: pytest.MonkeyPatch) ->
 def test_lockstep_hands_back_the_state_after_each_update() -> None:
     states: list[dict[str, torch.Tensor]] = []
     record = reference.lockstep_record("uniform", states=states)
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
     assert_exact(stored("lockstep/uniform/"), record)
 

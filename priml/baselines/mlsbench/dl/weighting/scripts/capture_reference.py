@@ -40,7 +40,7 @@ import argparse
 import tempfile
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -94,7 +94,12 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path, *, cifar100: Path | None) -> vision.Captured:
+def capture(
+    root: Path,
+    scratch: Path,
+    *,
+    cifar100: Path | None,
+) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -140,7 +145,7 @@ def capture(root: Path, scratch: Path, *, cifar100: Path | None) -> vision.Captu
     if cifar100 is not None:
         report += compare_real(pristine, cifar100)
     settings, settings_report = capture_settings(scripts, scratch)
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record | settings,
         sites={},
         report=report + settings_report,
@@ -174,8 +179,13 @@ def capture_settings(
             lockstep |= steps
             _, indices = reference.setting_counts_record(name)
             for variant, trace in traces.items():
-                with vision.seeded(vision.SEED), host_agnostic_numerics():
-                    ours = vision.full_step(setting.experiments[variant]).model
+                with (
+                    vision_reference.seeded(vision_reference.SEED),
+                    host_agnostic_numerics(),
+                ):
+                    ours = vision_reference.full_step(
+                        setting.experiments[variant],
+                    ).model
                     draws = rng_fingerprint()
                 report += [
                     f"settings/{name}/{variant}/state: {line}"
@@ -235,18 +245,18 @@ def compare_full_size(script: upstream.Script, trace: upstream.Trace) -> list[st
 
     """
     state = trace.main.state
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = vision.full_step(exp000).model
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        ours = vision_reference.full_step(exp000).model
         theirs = script.ResNet(script.BasicBlock, [5, 5, 5], reference.CLASSES)
         theirs.load_state_dict(state)
         report = capture_reference.compare_states(state, ours.state_dict())
-        media = vision.fixed_media(0)
+        media = vision_reference.fixed_media(0)
         for mode in ("train", "eval"):
             ours.train(mode == "train")
             theirs.train(mode == "train")
             report += mismatches(
-                {f"forward/{mode}": vision.logits_of(theirs, media).detach()},
-                {f"forward/{mode}": vision.logits_of(ours, media).detach()},
+                {f"forward/{mode}": vision_reference.logits_of(theirs, media).detach()},
+                {f"forward/{mode}": vision_reference.logits_of(ours, media).detach()},
             )
     return report
 
@@ -267,7 +277,7 @@ def compare_real(script: upstream.Script, cifar100: Path) -> list[str]:
         label,
         imbalance_ratio=reference.RATIO,
         num_classes=reference.CLASSES,
-        seed=vision.SEED,
+        seed=vision_reference.SEED,
     )
     return mismatches(
         {"real/indices": indices, "real/counts": counts},

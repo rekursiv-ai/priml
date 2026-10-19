@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.initialization import reference
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
@@ -79,7 +79,7 @@ def test_two_updates_after_each_initialization_match_the_script(name: str) -> No
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def stored_settings(prefix: str) -> dict[str, torch.Tensor]:
@@ -110,7 +110,7 @@ def test_each_settings_full_network_with_each_initialization_matches_the_script(
         f"settings/{key}/{part}" for part in ("draws", "train", "eval")
     }
     factory = reference.SETTING_INITIALIZATIONS[setting][name]
-    assert_exact(expected, vision.setting_record(setting, factory, key=key))
+    assert_exact(expected, vision_reference.setting_record(setting, factory, key=key))
 
 
 @pytest.mark.parametrize(
@@ -145,7 +145,7 @@ def test_the_settings_record_holds_every_setting_lockstep(
 def test_a_lockstep_hands_back_the_state_after_each_update() -> None:
     states: list[dict[str, torch.Tensor]] = []
     _ = reference.setting_lockstep_record(f"{reference.FMNIST}/fixup", states=states)
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(
         next(iter(states[0].values())),
         next(iter(states[1].values())),
@@ -177,7 +177,7 @@ def test_the_fmnist_loader_shuffles_and_augments_like_the_script(
 ) -> None:
     assert_exact(
         stored_settings(f"settings/{reference.FMNIST}/loader/"),
-        vision.setting_loader_record(tmp_path, reference.FMNIST),
+        vision_reference.setting_loader_record(tmp_path, reference.FMNIST),
     )
 
 
@@ -185,7 +185,7 @@ def test_the_settings_golden_bites_on_one_ulp() -> None:
     key = f"settings/{reference.FMNIST}/orthogonal/eval"
     value = stored_settings(key)[key].clone()
     value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(torch.inf))
-    port = vision.setting_record(
+    port = vision_reference.setting_record(
         reference.FMNIST,
         reference.SETTING_INITIALIZATIONS[reference.FMNIST]["orthogonal"],
         key=f"{reference.FMNIST}/orthogonal",

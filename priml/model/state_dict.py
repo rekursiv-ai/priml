@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from torch import Tensor
 
@@ -39,3 +39,29 @@ def validate_state_dict(
         destination = expected[name]
         if value.shape != destination.shape or value.dtype != destination.dtype:
             raise ValueError(f"Checkpoint tensor shape or dtype differs: {name}.")
+
+
+def remap_state_dict(
+    state: Mapping[str, Tensor],
+    rename: Callable[[str], str],
+) -> dict[str, Tensor]:
+    """Rename every tensor of a checkpoint, refusing two names that land together.
+
+    Args:
+      state: Checkpoint state with its original names.
+      rename: Maps an original name to its destination name.
+
+    Returns:
+      mapped: The same tensors under their destination names.
+
+    Raises:
+      ValueError: Two source names map to one destination name.
+
+    """
+    mapped: dict[str, Tensor] = {}
+    for name, value in state.items():
+        target = rename(name)
+        if target in mapped:
+            raise ValueError(f"Checkpoint names collide at {target}.")
+        mapped[target] = value
+    return mapped

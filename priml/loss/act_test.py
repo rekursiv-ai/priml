@@ -169,6 +169,21 @@ def test_act_loss_rejects_mismatched_halt_shape() -> None:
         )
 
 
+def test_act_loss_rejects_mismatched_active_shape() -> None:
+    """Require one active flag for each batch row."""
+    objective = ACTLoss.Config().make()
+    with pytest.raises(
+        ValueError,
+        match=r"\AACTLoss expects active with shape \[B\]\.\Z",
+    ):
+        objective(
+            logits=torch.zeros(2, 3, 4),
+            labels=torch.zeros(2, 3, dtype=torch.long),
+            halt_logits=torch.zeros(2),
+            active=torch.ones(3, dtype=torch.bool),
+        )
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

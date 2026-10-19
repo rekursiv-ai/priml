@@ -48,7 +48,11 @@ from priml.model.conv import SequenceConv1d
 from priml.model.grid_embedding import GridEmbedding
 from priml.model.grid_solver import SingleLatentGridSolver
 from priml.model.norm import RMSNorm
-from priml.model.prefix import ComposedSparsePrefix, SparsePuzzleEmbedding
+from priml.model.prefix import (
+    ComposedSparsePrefix,
+    RegisterTokens,
+    SparsePuzzleEmbedding,
+)
 from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -907,6 +911,41 @@ def test_optional_prefix_and_checkpoint_branches() -> None:
     restored = PortSubject.from_config(config)
     restored.step.load_state_dict(state)
     assert restored.step.state_dict().keys() == state.keys()
+
+
+def test_a_prefix_without_a_task_table_needs_no_identifiers() -> None:
+    config = port_config("exp000")
+    config.model.prefix = RegisterTokens.Config(num_tokens=2)
+    step = PortSubject.from_config(config).step
+
+    assert step.puzzle_table is None
+    assert step._prefix_kwargs(None) == {}
+
+
+def test_bound_prefix_metadata_needs_identifiers() -> None:
+    step = PortSubject("exp003").step
+    step.bind_instance_metadata([None])
+
+    with pytest.raises(
+        TypeError,
+        match=r"^Source prefix metadata needs puzzle_identifiers\.$",
+    ):
+        step._prefix_kwargs(None)
+
+
+def test_label_free_evaluation_rejects_label_signals() -> None:
+    config = port_config("exp000")
+    config.signals = EvalSignals.Config()
+    step = PortSubject.from_config(config).step
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Label-free evaluation cannot produce label signals\.$",
+    ):
+        step.eval_loss(
+            media=torch.tensor([[1, 2, 3], [3, 2, 1]], dtype=torch.int32),
+            puzzle_identifiers=torch.tensor([0, 1]),
+        )
 
 
 def test_train_step_rejects_non_tensor_identifiers() -> None:

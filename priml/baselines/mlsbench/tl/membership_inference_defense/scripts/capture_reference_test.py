@@ -9,11 +9,14 @@ import sys
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
+from priml.baselines.mlsbench.dl.vision.scripts import (
+    capture_reference as vision_capture_reference,
+)
 from priml.baselines.mlsbench.tl.membership_inference_defense import (
-    reference as port,
+    reference,
     upstream,
 )
 from priml.baselines.mlsbench.tl.membership_inference_defense.scripts import (
@@ -58,7 +61,10 @@ def test_capture_assembles_both_sides_into_one_report(
     """Every run is a stand-in; the runs themselves are tested elsewhere."""
     variants = {"pristine": object(), "relaxloss": object()}
     zero = {"w": torch.zeros(1)}
-    lockstep = ({"lockstep/x/loss": torch.zeros(2)}, [zero] * port.LOCKSTEP_EPOCHS)
+    lockstep = (
+        {"lockstep/x/loss": torch.zeros(2)},
+        [zero] * reference.LOCKSTEP_EPOCHS,
+    )
     stand_ins: dict[tuple[object, str], object] = {
         (upstream, "variants"): returning_any(variants),
         (upstream, "trace_main"): returning_any(upstream.Trace()),
@@ -78,9 +84,14 @@ def test_capture_assembles_both_sides_into_one_report(
         (vision_upstream, "tiny_setting_record"): returning_any(
             {"settings/x/train": torch.zeros(2)},
         ),
-        (port, "pipeline_record"): returning_any({"pipeline/x": torch.ones(2)}),
-        (port, "port_record"): returning_any({"defense/x": torch.ones(2)}),
-        (port, "lockstep_record"): _states_of_zeros,
+        (reference, "pipeline_record"): returning_any(
+            {"pipeline/x": torch.ones(2)},
+        ),
+        (reference, "port_record"): returning_any(
+            {"defense/x": torch.ones(2)},
+        ),
+        (reference, "lockstep_record"): _states_of_zeros,
+        (vision_capture_reference, "shared_scores"): returning_any(["scores: shared"]),
     }
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, value)
@@ -93,12 +104,13 @@ def test_capture_assembles_both_sides_into_one_report(
     assert captured.sites == {"reference": {"a": 1}, "port": {"b": 2}}
     assert captured.report == [
         "recipe: differs",
-        *["initial: differs"] * len(port.SETTINGS),
+        *["initial: differs"] * len(reference.SETTINGS),
         "pipeline/x: 2/2 differ",
         "missing lockstep/x/loss",
         "missing settings/x/train",
         "defense/x: 2/2 differ",
         "sites: unreached",
+        "scores: shared",
     ]
 
 
@@ -107,7 +119,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     monkeypatch.setattr(
@@ -125,7 +137,7 @@ def test_main_writes_the_golden_and_the_sites(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(
+    result = vision_reference.Captured(
         record={"x": torch.arange(3)},
         sites={"port": {"a@b.py:c": 2}},
         report=[],
@@ -145,7 +157,7 @@ def test_main_writes_the_golden_and_the_sites(
 
 def test_the_recipe_check_names_each_way_main_could_differ() -> None:
     trace = upstream.Trace()
-    trace.epochs = list(range(port.EPOCHS))
+    trace.epochs = list(range(reference.EPOCHS))
     trace.loaders = [
         {"shuffle": shuffle, "batch_size": 128}
         for shuffle in (True, False, False, False)
@@ -175,8 +187,8 @@ def test_the_upstream_record_holds_every_fixed_input_key_the_golden_does(
     variants = scripts(tmp_path)
     # The recipe's trace is tested in ``upstream_test``; its 300 epochs are slow.
     recipe = upstream.Trace(
-        rates=[0.1] * port.EPOCHS,
-        settings=dict.fromkeys(reference.HYPERPARAMETERS, 0.0),
+        rates=[0.1] * reference.EPOCHS,
+        settings=dict.fromkeys(vision_reference.HYPERPARAMETERS, 0.0),
         subsets=[[0, 1], [0, 1], [2, 3]],
     )
     record = capture_reference.upstream_record(variants, recipe)
@@ -188,15 +200,17 @@ def test_the_upstream_record_holds_every_fixed_input_key_the_golden_does(
     }
     assert set(record) == fixed
     pipelines = capture_reference.upstream_pipelines(variants["pristine"])
-    assert set(pipelines) == set(port.pipeline_record())
+    assert set(pipelines) == set(
+        reference.pipeline_record(),
+    )
 
 
 def test_compare_initial_names_a_split_or_network_that_differs(
     tmp_path: Path,
 ) -> None:
     script = scripts(tmp_path)["pristine"]
-    key = next(iter(port.SETTINGS))
-    setting, factory = port.SETTINGS[key]
+    key = next(iter(reference.SETTINGS))
+    setting, factory = reference.SETTINGS[key]
     trace, _ = upstream.initial_main(
         script,
         setting,
@@ -224,7 +238,7 @@ def _states_of_zeros(
 ) -> dict[str, torch.Tensor]:
     """Stand in for a port lockstep run: one zero state per update."""
     del name, directory
-    states.extend({"w": torch.zeros(1)} for _ in range(port.LOCKSTEP_EPOCHS))
+    states.extend({"w": torch.zeros(1)} for _ in range(reference.LOCKSTEP_EPOCHS))
     return {}
 
 

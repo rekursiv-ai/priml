@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.model.linear import Linear
 from priml.model.softcap import SoftCap
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -82,6 +83,16 @@ def test_softcap_keeps_gradient_at_default_dtype() -> None:
     assert out.requires_grad
     out.sum().backward()
     assert all(p.grad is not None for p in m.parameters())
+
+
+def test_softcap_reset_reinitializes_the_wrapped_projection() -> None:
+    m = SoftCap.Config(cap=5.0, channels_in=4, channels_out=6).make()
+    inner = m.inner
+    assert isinstance(inner, Linear)
+    with torch.no_grad():
+        inner.weight.zero_()
+    m.reset_parameters()
+    assert inner.weight.count_nonzero() > 0
 
 
 def test_softcap_cost_separates_projection_and_squash() -> None:

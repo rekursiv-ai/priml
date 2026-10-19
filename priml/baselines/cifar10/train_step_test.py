@@ -26,7 +26,7 @@ from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -360,6 +360,32 @@ def test_gradient_clipping_shrinks_the_gradients() -> None:
 
     assert grad_norm(1e-4) == pytest.approx(1e-4, rel=1e-3)
     assert grad_norm(math.inf) > 1e-3
+
+
+def test_train_step_clips_with_the_configured_norm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    norms: list[float] = []
+    clip = nn.utils.clip_grad_norm_
+
+    def recording_clip(parameters: Iterable[Tensor], max_norm: float) -> Tensor:
+        norms.append(max_norm)
+        return clip(parameters, max_norm)
+
+    monkeypatch.setattr(nn.utils, "clip_grad_norm_", recording_clip)
+    config = tiny_step()
+    config.gradient_clip_norm = 0.5
+    step = config.make()
+
+    step.train_step(**tiny_batch())
+
+    assert norms == [0.5]
+
+
+def test_call_eval_rejects_positional_arguments() -> None:
+    step = tiny_step().make()
+    with pytest.raises(ValueError, match=r"^Expected not args\.$"):
+        step.call_eval(tiny_batch()["media"])
 
 
 def test_train_loss_scores_without_backward() -> None:

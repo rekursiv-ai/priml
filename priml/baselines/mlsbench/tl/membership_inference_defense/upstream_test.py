@@ -20,7 +20,7 @@ import types
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.tl.membership_inference_defense import (
@@ -214,19 +214,19 @@ def test_each_variant_imports_its_own_defense(tmp_path: Path) -> None:
 
 def test_main_is_traced_update_by_update(tmp_path: Path) -> None:
     script = scripts(tmp_path)["pristine"]
-    with vision.seeded(vision.SEED):
+    with vision_reference.seeded(vision_reference.SEED):
         trace = upstream.trace_main(
             script,
             upstream.lockstep_argv("resnet20-cifar10"),
             build=upstream.linear_model,
-            split=vision.synthetic_split(),
+            split=vision_reference.synthetic_split(),
         )
     # Three members at batch three: one update in each of two epochs.
     assert trace.epochs == [0, 1]
     assert trace.rates == [0.1, 0.1 * 0.1]
     assert len(trace.states) == len(trace.losses) == 2
-    indices = list(range(vision.LOADER_IMAGES))
-    random.Random(vision.SEED).shuffle(indices)  # noqa: S311 -- The driver's shuffle.
+    indices = list(range(vision_reference.LOADER_IMAGES))
+    random.Random(vision_reference.SEED).shuffle(indices)  # noqa: S311 -- The driver's shuffle.
     assert trace.subsets == [indices[:3], indices[:3], indices[3:]]
     assert [len(s) for s, _ in trace.scores] == [7, 3, 4]
     assert trace.loaders[0]["num_workers"] == 4

@@ -116,7 +116,7 @@ class Setting:
 
     Cut to one block per stage, a ResNet-32 over ten classes is the lockstep
     network ``lockstep/`` already proves, up to its class count, which the
-    lockstep runs fix at ``vision.CLASSES``."""
+    lockstep runs fix at ``reference.CLASSES``."""
 
     loader: bool
     """Whether its loader reads another dataset class than CIFAR-100's."""

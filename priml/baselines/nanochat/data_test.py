@@ -1718,6 +1718,34 @@ def test_prefetch_worker_propagates_packing_errors(
         next(stream._prefetched())
 
 
+def test_prefetch_worker_exits_when_the_consumer_stops_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = data.PackedTokenStream(
+        paths=[],
+        tokenizer=None,
+        token_bytes=torch.arange(7),
+        batch_size=2,
+        max_seq_len=3,
+        buffer_size=4,
+        device=torch.device("cpu"),
+        max_batches=None,
+    )
+    stream.prefetch = True
+    pair = (torch.arange(6).reshape(2, 3), torch.arange(6, 12).reshape(2, 3))
+
+    _patch_row_pairs(monkeypatch, [pair] * 8)
+    before = set(threading.enumerate())
+    batches = iter(stream)
+    next(batches)
+    (worker,) = set(threading.enumerate()) - before
+    # Dropping the last reference finalizes the generator, running its cleanup.
+    del batches
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert stream.served == 1
+
+
 def test_prefetched_stream_preserves_batches_and_worker_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

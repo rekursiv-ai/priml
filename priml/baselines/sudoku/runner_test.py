@@ -122,6 +122,18 @@ def test_to_device_moves_each_tensor_and_keeps_the_count() -> None:
     release()
 
 
+@pytest.mark.parametrize("initialized", [False, True])
+def test_release_empties_the_cache_only_once_cuda_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized: bool,
+) -> None:
+    emptied: list[bool] = []
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: initialized)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(True))
+    release()
+    assert emptied == [True] * initialized
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

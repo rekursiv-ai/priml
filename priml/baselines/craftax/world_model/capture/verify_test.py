@@ -409,6 +409,12 @@ def test_run_gives_up_when_a_started_worker_is_silent_for_the_longest_episode(
     assert 600 < timeline.now <= 660
 
 
+def test_run_refuses_positional_arguments(verifier: ReplayVerifier) -> None:
+    with pytest.raises(ValueError, match="Configgle --override"):
+        verifier.run("fraction=1")
+    assert not (verifier.config.root / "HALT.json").exists()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

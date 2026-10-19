@@ -16,6 +16,7 @@ from priml.model.conditioning import (
     SigmoidResidualGate,
     TimestepEmbedder,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def test_timestep_embedder_features_forward_and_cost() -> None:
@@ -199,6 +200,22 @@ def test_sigmoid_residual_gate_resets_with_bias_two_and_open_probability() -> No
     module.reset_parameters()
     output = module(torch.zeros(2, 4))
     assert torch.equal(output, torch.sigmoid(torch.full_like(output, 2.0)))
+
+
+def test_sigmoid_residual_gate_cost_is_one_projection_per_puzzle() -> None:
+    config = SigmoidResidualGate.Config(channels_out=4)
+    measured = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, 4, requires_grad=True),
+        seq_len=1,
+        batch_size=3,
+        dtype=None,
+    )
+    assert measured.params == 4 * 4 + 4
+    # The projection's bias add, then the sigmoid, one element each per puzzle.
+    assert measured["flops", "primal", "elementwise"].sum() == 2 * 3 * 4
+    assert measured["flops", "adjoint", "elementwise"].sum() == 2 * 3 * 4
+    assert config.cost(seq_len=5, batch_size=3, dtype=None) == measured
 
 
 if __name__ == "__main__":

@@ -35,6 +35,10 @@ from priml.baselines.mlsbench.dl.vision.settings import mobilenetv2_fmnist
 from priml.train.train_loop import TrainLoop
 
 
+type Dataset = Literal["cifar10", "cifar100", "fmnist"]
+"""A ``--dataset`` of the reference script."""
+
+
 def main() -> int:
     """Prepare the dataset; return the process exit code.
 
@@ -72,10 +76,6 @@ def default_directory(dataset: Dataset = "cifar100") -> Path:
         config.working_dir = "/datasets/cifar10"
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)
-
-
-type Dataset = Literal["cifar10", "cifar100", "fmnist"]
-"""A ``--dataset`` of the reference script."""
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

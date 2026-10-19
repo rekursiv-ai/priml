@@ -35,7 +35,7 @@ import argparse
 import tempfile
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
@@ -113,17 +113,12 @@ def main() -> int:
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
     capture_reference.write_records(flags.out, {"reference.pt": captured.record})
-    lines = [
-        f"{side} {key} {count}"
-        for side, counts in captured.sites.items()
-        for key, count in sorted(counts.items())
-    ]
-    (flags.out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
+    capture_reference.write_sites(flags.out, captured.sites)
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -136,12 +131,12 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     """
     scripts = upstream.variants(root, scratch)
     pristine = scripts["pristine"]
-    with vision.seeded(vision.SEED):
+    with vision_reference.seeded(vision_reference.SEED):
         recipe = upstream.trace_main(
             pristine,
             upstream.recipe_argv("resnet20-cifar10"),
             build=upstream.linear_model,
-            split=vision.synthetic_split(),
+            split=vision_reference.synthetic_split(),
         )
     record = upstream_record(scripts, recipe)
     report = compare_recipe(recipe)
@@ -154,7 +149,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         )
         record |= vision_upstream.tiny_setting_record(
             cast(vision_upstream.Upstream, pristine),
-            vision.SETTINGS[setting].arch,
+            vision_reference.SETTINGS[setting].arch,
             key,
         )
         report += compare_initial(initial, key=key, factory=factory)
@@ -172,7 +167,14 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         "port": port_sites(scratch),
     }
     report += check_sites(sites["reference"], sites["port"])
-    return vision.Captured(record=record, sites=sites, report=report)
+    report += capture_reference.shared_scores(
+        record,
+        pairs={
+            f"{prefix}/scores/member": f"{prefix}/scores/nonmember"
+            for prefix in ("attack", *(f"lockstep/{name}" for name in lockstep))
+        },
+    )
+    return vision_reference.Captured(record=record, sites=sites, report=report)
 
 
 def upstream_record(
@@ -204,11 +206,11 @@ def upstream_record(
     )
     record["recipe/lr"] = torch.tensor(recipe.rates, dtype=torch.float64)
     record["recipe/optimizer"] = torch.tensor(
-        [recipe.settings[name] for name in vision.HYPERPARAMETERS],
+        [recipe.settings[name] for name in vision_reference.HYPERPARAMETERS],
         dtype=torch.float64,
     )
     member, _, nonmember = recipe.subsets
-    count = vision.LOADER_IMAGES
+    count = vision_reference.LOADER_IMAGES
     record[f"split/{count}/member"] = torch.tensor(member)
     record[f"split/{count}/nonmember"] = torch.tensor(nonmember)
     return record
@@ -324,8 +326,8 @@ def compare_initial(
             f"split/{key}/nonmember": nonmember,
         },
     )
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = vision.full_step(factory).model
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        ours = vision_reference.full_step(factory).model
     return report + [
         f"settings/{key}/state: {line}"
         for line in capture_reference.compare_states(trace.initial, ours.state_dict())

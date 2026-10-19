@@ -26,13 +26,14 @@ from treekle import from_plain
 import numpy as np
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
 from priml.baselines.mlsbench.dl.vision.upstream import (
     Upstream,
     edited_script,
     forked_workers,
     load_script,
+    narrowed,
     narrowed_widths,
     tiny_model,
 )
@@ -210,18 +211,16 @@ def driver(root: Path) -> Driver:
       driver: ``run_unlearning.py``.
 
     """
-    method: object = load_script(root / METHOD)
-    assert isinstance(method, ModuleType)
+    method = narrowed(load_script(root / METHOD), ModuleType)
     # One key set and removed by hand: ``mock.patch.dict(sys.modules)`` restores
     # the whole table, evicting torchvision, whose next import then refuses to
     # register its kernels a second time.
     sys.modules["custom_unlearning"] = method
     try:
-        script: object = load_script(root / DRIVER)
+        script = load_script(root / DRIVER)
     finally:
         del sys.modules["custom_unlearning"]
-    assert isinstance(script, Driver)
-    return script
+    return narrowed(script, Driver)
 
 
 def variants(root: Path, scratch: Path) -> dict[str, MethodModule]:
@@ -235,14 +234,11 @@ def variants(root: Path, scratch: Path) -> dict[str, MethodModule]:
       modules: ``pristine`` and each of :data:`EDITED`, as :data:`reference.VARIANTS`.
 
     """
-    modules: dict[str, object] = {"pristine": load_script(root / METHOD)}
-    for name in EDITED:
-        modules[name] = edited_script(root, name, scratch, pristine=METHOD, edits=EDITS)
-    narrowed: dict[str, MethodModule] = {}
-    for name, module in modules.items():
-        assert isinstance(module, MethodModule)
-        narrowed[name] = module
-    return narrowed
+    modules = {"pristine": load_script(root / METHOD)} | {
+        name: edited_script(root, name, scratch, pristine=METHOD, edits=EDITS)
+        for name in EDITED
+    }
+    return {name: narrowed(module, MethodModule) for name, module in modules.items()}
 
 
 def upstream_recipe(script: Driver, root: Path) -> dict[str, Tensor]:
@@ -318,9 +314,13 @@ def upstream_method_lockstep(
       states: The student after each update, then each teacher after the last.
 
     """
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         with narrowed_widths(script):
-            model = script.ResNet(script.BasicBlock, [1, 1, 1], vision.CLASSES)
+            model = script.ResNet(
+                script.BasicBlock,
+                [1, 1, 1],
+                vision_reference.CLASSES,
+            )
         script.initialize_weights(model)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         method = module.UnlearningMethod()
@@ -351,9 +351,13 @@ def upstream_evaluation(script: Driver) -> dict[str, Tensor]:
 
     """
     cpu = torch.device("cpu")
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         with narrowed_widths(script):
-            model = script.ResNet(script.BasicBlock, [1, 1, 1], vision.CLASSES)
+            model = script.ResNet(
+                script.BasicBlock,
+                [1, 1, 1],
+                vision_reference.CLASSES,
+            )
         script.initialize_weights(model)
         accuracy, confidence = script.evaluate_accuracy(
             model,
@@ -382,7 +386,7 @@ def upstream_full_network(script: Driver, key: str) -> tuple[nn.Module, Tensor]:
 
     """
     arch, classes, _ = reference.SETTINGS[key]
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         model = script.build_model(arch, classes)
         script.initialize_weights(model)
         return model, rng_fingerprint()
@@ -405,10 +409,14 @@ def upstream_full_size(
     """
     model, draws = upstream_full_network(script, key)
     arch, _, _ = reference.SETTINGS[key]
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        tiny = tiny_model(cast(Upstream, cast(object, script)), arch, vision.CLASSES)
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        tiny = tiny_model(
+            cast(Upstream, script),
+            arch,
+            vision_reference.CLASSES,
+        )
         script.initialize_weights(tiny)
-    record = {f"full/{key}/draws": draws} | vision.setting_forward(tiny, key)
+    record = {f"full/{key}/draws": draws} | vision_reference.setting_forward(tiny, key)
     return record, reference.cloned(model)
 
 
@@ -438,16 +446,16 @@ def upstream_main(script: Driver, module: MethodModule) -> tuple[MainTrace, bool
         mock.patch.object(script, "auc_from_scores", spy.auc_from_scores),
         mock.patch.object(script.torchvision.datasets, "CIFAR10", _FakeCifar10),
         contextlib.redirect_stdout(io.StringIO()),
-        vision.seeded(vision.SEED),
-        vision.script_workers(),
+        vision_reference.seeded(vision_reference.SEED),
+        vision_reference.script_workers(),
         forked_workers(),
         recorded_draws() as sites,
         host_agnostic_numerics(),
     ):
         script.main()
         trace.draws = rng_fingerprint()
-    seeded = random.Random(vision.SEED).getstate()  # noqa: S311 -- A reproducible reference state, not a secret.
-    untouched = random.getstate() == seeded and _numpy_seeded(vision.SEED)
+    seeded = random.Random(vision_reference.SEED).getstate()  # noqa: S311 -- A reproducible reference state, not a secret.
+    untouched = random.getstate() == seeded and _numpy_seeded(vision_reference.SEED)
     trace.sites = dict(sites)
     trace.teachers = reference.teachers(spy.instance)
     return trace, untouched

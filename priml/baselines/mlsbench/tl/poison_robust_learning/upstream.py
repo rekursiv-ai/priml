@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import contextlib
@@ -103,6 +103,7 @@ class _Torchvision(Protocol):
     datasets: ModuleType
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the driver the capture uses."""
 
@@ -256,7 +257,7 @@ def driver(root: Path, loss: object) -> Script:
     previous = sys.modules.get(name)
     sys.modules[name] = cast("ModuleType", loss)
     try:
-        return cast(Script, cast(object, upstream.load_script(root / DRIVER)))
+        return upstream.narrowed(upstream.load_script(root / DRIVER), Script)
     finally:
         if previous is None:
             del sys.modules[name]

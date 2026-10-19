@@ -338,6 +338,21 @@ def test_linear_cost_is_the_matmul() -> None:
     }
 
 
+def test_linear_cost_forwards_input_grad_to_the_matmul() -> None:
+    execution = Linear.Config(4, 3).cost(
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
+        input_grad=False,
+    )
+    assert execution == matmul_cost(
+        channels_in=4,
+        channels_out=3,
+        rows=2,
+        input_grad=False,
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
 def test_linear_cost_prices_bytes_at_the_bus_dtype(dtype: torch.dtype) -> None:
     result = Linear.Config(4, 3).cost(seq_len=2, batch_size=1, dtype=dtype)

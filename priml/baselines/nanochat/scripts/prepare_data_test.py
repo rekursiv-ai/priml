@@ -1977,6 +1977,23 @@ def test_corpus_initialization_rejects_heldout_and_duplicate_training_shards() -
         CorpusPreparation(config)
 
 
+@pytest.mark.parametrize(
+    ("train_shard_indices", "donor_destination_shards"),
+    [((1, 2), 0), ((), 1)],
+)
+def test_corpus_initialization_rejects_donors_with_no_destination(
+    train_shard_indices: tuple[int, ...],
+    donor_destination_shards: int,
+) -> None:
+    config = CorpusPreparation.Config()
+    config.val_shard = 3
+    config.train_shard_indices = train_shard_indices
+    config.donor_source_ids = ("1:3",)
+    config.donor_destination_shards = donor_destination_shards
+    with pytest.raises(ValueError, match="Donors need at least one training shard"):
+        CorpusPreparation(config)
+
+
 def test_corpus_build_moves_donor_and_copies_validation(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()
@@ -3266,6 +3283,33 @@ def test_main_requires_the_output_location_of_a_writing_stage(
     assert error.value.code == 2
     assert f"--stage {stage} needs {flag}." in capsys.readouterr().err
     make.assert_not_called()
+
+
+def _error_returns(parser: argparse.ArgumentParser, message: str) -> None:
+    """Stand in for ``ArgumentParser.error``, returning where argparse would exit."""
+    del parser, message
+
+
+@pytest.mark.parametrize(
+    ("stage", "message"),
+    [
+        ("dump", "Expected args.output is not None"),
+        ("train", "Expected args.run_directory is not None"),
+    ],
+)
+def test_main_still_refuses_an_unset_location_when_parser_error_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    message: str,
+) -> None:
+    _main_config(monkeypatch, ["--stage", stage])
+    preparation = Mock()
+    monkeypatch.setattr(Preparation.Config, "make", Mock(return_value=preparation))
+    monkeypatch.setattr(argparse.ArgumentParser, "error", _error_returns)
+    with pytest.raises(ValueError, match=message):
+        prepare_data.main()
+    preparation.dump.assert_not_called()
+    preparation.training_config.assert_not_called()
 
 
 def test_main_keeps_the_factorys_root_without_a_directory_flag(

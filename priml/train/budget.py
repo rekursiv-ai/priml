@@ -2,29 +2,39 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from importlib.metadata import version
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from types import FrameType
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Protocol, Self, override
 
 import json
 import logging
 import math
 import os
+import platform
 import signal
 import time
 
-from configgle import Fig
+from configgle import Fig, Makeable
 from treekle import to_plain
 
 from priml.paths import validated_output_path
+from priml.train.train_loop import TrainLoop
+from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
     from types import TracebackType
+
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")
 
 
 logger = logging.getLogger(__name__)
@@ -214,6 +224,141 @@ class WallBudget:
             except BaseException as cleanup_error:
                 logger.exception("Failure receipt could not be invalidated.")
                 error.add_note(f"Receipt invalidation failed: {cleanup_error}")
+
+
+def provenance(*, packages: Iterable[str]) -> dict[str, object]:
+    """Describe the host a run measured on, for ``WallBudget.metadata``.
+
+    Args:
+      packages: Distribution names whose installed versions to record.
+
+    Returns:
+      record: Platform, Python version, accelerator name (``cpu`` without CUDA)
+        and a version per package.
+
+    Raises:
+      PackageNotFoundError: A package is not installed.
+
+    """
+    return {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "accelerator": torch.cuda.get_device_name()
+        if torch.cuda.is_available()
+        else "cpu",
+        "dependencies": {name: version(name) for name in packages},
+    }
+
+
+class Preparation(Protocol):
+    """Optional cold-data job charged to the budget before the loop is built."""
+
+    def cache_ready(self) -> bool:
+        """Verify every declared cache byte and input identity."""
+        ...
+
+    def run(self) -> None:
+        """Construct the complete cache."""
+        ...
+
+
+class Export(Protocol):
+    """Publishes a trained loop's artefacts inside the budget."""
+
+    def __call__(self, loop: TrainLoop, output: Path) -> None:
+        """Write the model artefacts of ``loop`` under ``output``."""
+        ...
+
+
+class BudgetedRun:
+    """Train one loop inside one wall budget and seal a receipt.
+
+    The budget clock starts when this is built, so a cold ``preparation``,
+    the loop's own construction, training, ``export`` and receipt publication
+    are all charged. The loop's time limit and the step's seconds horizon are
+    capped at the time left after preparation.
+    """
+
+    class Config(Fig["BudgetedRun"]):
+        loop: TrainLoop.Config = field(default_factory=TrainLoop.Config)
+        """The complete declared data, model, optimization and evaluation tree."""
+
+        budget: WallBudget.Config = field(default_factory=WallBudget.Config)
+        """Shared cold clock, evaluation reserve and durable receipt ownership."""
+
+        preparation: Makeable[Preparation] | None = None
+        """Optional staging job; cache verification and construction are charged."""
+
+        export: Makeable[Export] | None = None
+        """Optional publication of the trained artefacts, charged to the budget."""
+
+        protected: list[Path] = field(default_factory=list[Path])
+        """Input artifacts the run directory must not overwrite."""
+
+        @override
+        def finalize(self) -> Self:
+            self = super().finalize()
+            if self.budget.receipt_path is None:
+                self.budget.receipt_path = Path(self.loop.working_dir) / "budget.json"
+            return self
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.budget = config.budget.make()
+
+    def run(self, *args: str) -> None:
+        """Run preparation, the loop and the export, then seal the receipt.
+
+        Args:
+          *args: Forwarded to the loop's ``run``.
+
+        Raises:
+          ValueError: The loop resumed an earlier training budget.
+          TimeoutError: No time remained for a training update.
+
+        """
+        config, budget = self.config, self.budget
+        output = validated_output_path(
+            Path(config.loop.working_dir),
+            protected=config.protected,
+        )
+        output.mkdir(parents=True)
+        (output / "config.txt").write_text(
+            config.pformat(hide_default_values=False, finalize=False) + "\n",
+        )
+        budget.metadata.update(completed=False, steps=0)
+        with budget, budget.interruptible():
+            if config.preparation is not None:
+                preparation = config.preparation.make()
+                reused = preparation.cache_ready()
+                budget.metadata["cache_reused"] = reused
+                if not reused:
+                    preparation.run()
+            loop = config.loop.make()
+            try:
+                self._train(loop, output, args)
+            finally:
+                budget.metadata["steps"] = loop.step.global_step
+                loop.close()
+
+    def _train(self, loop: TrainLoop, output: Path, args: tuple[str, ...]) -> None:
+        """Cap the time limits at what the budget has left, train, and export."""
+        if loop.step.global_step:
+            raise ValueError("A budgeted run cannot resume an earlier training budget.")
+        seconds = self.budget.training_seconds()
+        loop.max_time = min(loop.max_time, seconds)
+        step = loop.step
+        if (
+            isinstance(step, TrainStep)
+            and seconds < step.config.train_budget_sec < math.inf
+        ):
+            step.config.train_budget_sec = seconds
+        loop.run(*args)
+        if step.global_step == 0:
+            raise TimeoutError("The budget left no time for a training update.")
+        if self.config.export is not None:
+            self.config.export.make()(loop, output)
+        self.budget.metadata["completed"] = True
 
 
 @dataclass(slots=True, kw_only=True)

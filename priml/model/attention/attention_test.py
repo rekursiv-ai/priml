@@ -291,6 +291,23 @@ def test_attention_accepts_flat_qkv_projection() -> None:
     assert torch.equal(unbatched_values, unbatched_expected[2])
 
 
+def test_attention_infers_head_count_and_injected_projection_widths() -> None:
+    config = Attention.Config(
+        channels_in=12,
+        num_heads=-1,
+        num_heads_kv=1,
+        channels_head=4,
+        proj_qkv=Linear.Config(),
+        proj_out=Linear.Config(),
+    ).finalize()
+
+    assert config.num_heads == 3
+    assert isinstance(config.proj_qkv, Linear.Config)
+    assert isinstance(config.proj_out, Linear.Config)
+    assert (config.proj_qkv.channels_in, config.proj_qkv.channels_out) == (12, 20)
+    assert (config.proj_out.channels_in, config.proj_out.channels_out) == (12, 12)
+
+
 def test_self_attention():
     m = Attention.Config(channels_in=64, num_heads=4, channels_head=16).make()
     x = torch.randn(2, 8, 64)

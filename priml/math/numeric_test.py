@@ -1776,6 +1776,44 @@ def test_matrix_signum_via_coefficients_preserves_ordered_float32_updates() -> N
     assert torch.equal(actual, expected)
 
 
+@pytest.mark.parametrize(
+    ("shape", "coefficients", "steps", "eps", "message"),
+    [
+        (
+            (2, 3, 4),
+            ((1.0, 0.0, 0.0),),
+            1,
+            1e-7,
+            r"rank-2 matrix, got shape \(2, 3, 4\)",
+        ),
+        ((2, 3), (), 1, 1e-7, "At least one coefficient triple"),
+        ((2, 3), ((1.0, 0.0, 0.0),), 0, 1e-7, "steps must be positive, got 0"),
+        (
+            (2, 3),
+            ((1.0, 0.0, 0.0),),
+            1,
+            0.0,
+            "eps must be finite and positive, got 0.0",
+        ),
+        ((2, 3), ((1.0, 0.0, 0.0),), 1, math.inf, "eps must be finite and positive"),
+    ],
+)
+def test_matrix_signum_via_coefficients_rejects_invalid_arguments(
+    shape: tuple[int, ...],
+    coefficients: tuple[tuple[float, float, float], ...],
+    steps: int,
+    eps: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        matrix_signum_via_coefficients(
+            torch.ones(shape),
+            coefficients=coefficients,
+            steps=steps,
+            eps=eps,
+        )
+
+
 def test_safe_xlogy_preserves_nan_with_zero_multiplier() -> None:
     assert safe_xlogy(torch.zeros(2), torch.full((2,), math.nan)).isnan().all()
 

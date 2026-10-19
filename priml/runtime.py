@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, override
 
 import math
 import os
 
-from configgle import Fig
+from configgle import Fig, Makes
 
 from priml.custom_types import Float32MatmulPrecision
 
@@ -31,6 +31,7 @@ else:
 
 
 __all__ = [
+    "CudnnSingleProcess",
     "MultiProcess",
     "RuntimeProtocol",
     "SingleProcess",
@@ -99,7 +100,7 @@ _device_mesh: DeviceMesh | None = None
 _runtime_initialized: bool = (
     False  # house-ignore[globals] -- Mutable process-init state flag, not a knob.
 )
-_single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = None
+_single_process_settings: tuple[object, ...] | None = None
 # Whether THIS module created the torch.distributed process group, as opposed
 # to entering a process where a launcher (torchrun, a job launcher's run body) or an
 # earlier lifecycle already initialized one. Experiment loops may
@@ -177,7 +178,7 @@ class SingleProcess:
         """
         global _runtime_initialized, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
         global _torch_globals_before  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
-        settings = (self.deterministic, self.float32_matmul_precision)
+        settings = self._settings()
         if _runtime_initialized:
             if _single_process_settings is None:
                 raise RuntimeError(
@@ -190,10 +191,7 @@ class SingleProcess:
                     f"{settings}. These apply process-globally.",
                 )
             return
-        _torch_globals_before = _apply_torch_globals(
-            deterministic=self.deterministic,
-            float32_matmul_precision=self.float32_matmul_precision,
-        )
+        _torch_globals_before = self._apply_settings()
         _single_process_settings = settings
         _runtime_initialized = True
 
@@ -211,6 +209,56 @@ class SingleProcess:
         _restore_torch_globals()
         _single_process_settings = None
         _runtime_initialized = False
+
+    def _settings(self) -> tuple[object, ...]:
+        """Return the process-global settings this runtime applies."""
+        return (self.deterministic, self.float32_matmul_precision)
+
+    def _apply_settings(self) -> _TorchGlobals:
+        """Apply :meth:`_settings`; return the torch globals they replaced."""
+        return _apply_torch_globals(
+            deterministic=self.deterministic,
+            float32_matmul_precision=self.float32_matmul_precision,
+        )
+
+
+class CudnnSingleProcess(SingleProcess):
+    """Single-process runtime that also sets cuDNN's process-global flags."""
+
+    class Config(Makes["CudnnSingleProcess"], SingleProcess.Config):
+        cudnn_benchmark: bool | None = None
+        """cuDNN algorithm benchmarking; None preserves PyTorch's default."""
+
+        cudnn_deterministic: bool | None = None
+        """Deterministic cuDNN algorithms alone; None preserves PyTorch's default."""
+
+        cudnn_allow_tf32: bool | None = None
+        """TF32 cuDNN convolution; None preserves PyTorch's default."""
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.cudnn_benchmark = config.cudnn_benchmark
+        self.cudnn_deterministic = config.cudnn_deterministic
+        self.cudnn_allow_tf32 = config.cudnn_allow_tf32
+
+    @override
+    def _settings(self) -> tuple[object, ...]:
+        return (
+            *super()._settings(),
+            self.cudnn_benchmark,
+            self.cudnn_deterministic,
+            self.cudnn_allow_tf32,
+        )
+
+    @override
+    def _apply_settings(self) -> _TorchGlobals:
+        return _apply_torch_globals(
+            deterministic=self.deterministic,
+            float32_matmul_precision=self.float32_matmul_precision,
+            cudnn_benchmark=self.cudnn_benchmark,
+            cudnn_deterministic=self.cudnn_deterministic,
+            cudnn_allow_tf32=self.cudnn_allow_tf32,
+        )
 
 
 class MultiProcess:
@@ -540,6 +588,7 @@ class _TorchGlobals:
     float32_matmul_precision: str
     cudnn_benchmark: bool
     cudnn_deterministic: bool
+    cudnn_allow_tf32: bool
     flash_sdp: bool
     mem_efficient_sdp: bool
     cublas_workspace_config: str | None
@@ -553,6 +602,7 @@ class _TorchGlobals:
         torch.set_float32_matmul_precision(self.float32_matmul_precision)
         torch.backends.cudnn.benchmark = self.cudnn_benchmark
         torch.backends.cudnn.deterministic = self.cudnn_deterministic
+        torch.backends.cudnn.allow_tf32 = self.cudnn_allow_tf32
         torch.backends.cuda.enable_flash_sdp(self.flash_sdp)
         torch.backends.cuda.enable_mem_efficient_sdp(self.mem_efficient_sdp)
         if self.cublas_workspace_config is None:
@@ -569,6 +619,7 @@ def _snapshot_torch_globals() -> _TorchGlobals:
         float32_matmul_precision=torch.get_float32_matmul_precision(),
         cudnn_benchmark=torch.backends.cudnn.benchmark,
         cudnn_deterministic=torch.backends.cudnn.deterministic,
+        cudnn_allow_tf32=torch.backends.cudnn.allow_tf32,
         flash_sdp=torch.backends.cuda.flash_sdp_enabled(),
         mem_efficient_sdp=torch.backends.cuda.mem_efficient_sdp_enabled(),
         cublas_workspace_config=os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
@@ -579,12 +630,21 @@ def _apply_torch_globals(
     *,
     deterministic: bool,
     float32_matmul_precision: Float32MatmulPrecision | None,
+    cudnn_benchmark: bool | None = None,
+    cudnn_deterministic: bool | None = None,
+    cudnn_allow_tf32: bool | None = None,
 ) -> _TorchGlobals:
     """Apply the runtime's torch settings; return what they replaced."""
     before = _snapshot_torch_globals()
     try:
         if float32_matmul_precision is not None:
             torch.set_float32_matmul_precision(float32_matmul_precision)
+        if cudnn_benchmark is not None:
+            torch.backends.cudnn.benchmark = cudnn_benchmark
+        if cudnn_deterministic is not None:
+            torch.backends.cudnn.deterministic = cudnn_deterministic
+        if cudnn_allow_tf32 is not None:
+            torch.backends.cudnn.allow_tf32 = cudnn_allow_tf32
         if deterministic:
             enable_determinism()
     except BaseException:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from configgle import Makes, PartialConfig
 
@@ -15,11 +15,9 @@ from priml.baselines.mlsbench.dl.vision.experiments_test import (
     shrink,
     write_dataset,
 )
-from priml.baselines.mlsbench.dl.vision.train_loop import (
-    EvalEpochsTrainLoop,
-    first_periodic_and_last,
-)
+from priml.baselines.mlsbench.dl.vision.train_loop import VisionLoop
 from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
+from priml.train.epoch_loop import EpochTrainLoop, first_periodic_and_last
 
 
 if TYPE_CHECKING:
@@ -60,8 +58,8 @@ class _DataConfig(Makes["Cifar100Data"], Cifar100Data.Config):
 
 
 class _NarrowStepLoop(
-    Makes["EvalEpochsTrainLoop"],
-    EvalEpochsTrainLoop.Config[_StepConfig, Cifar100Data.Config],
+    Makes["EpochTrainLoop"],
+    VisionLoop[_StepConfig, Cifar100Data.Config],
 ):
     """Narrows ``step``; the dataset stays CIFAR-100's."""
 
@@ -70,8 +68,8 @@ class _NarrowStepLoop(
 
 
 class _NarrowDataLoop(
-    Makes["EvalEpochsTrainLoop"],
-    EvalEpochsTrainLoop.Config[VisionTrainStep.Config, _DataConfig],
+    Makes["EpochTrainLoop"],
+    VisionLoop[VisionTrainStep.Config, _DataConfig],
 ):
     """Narrows ``dataset``; the step stays the vision step."""
 
@@ -79,25 +77,28 @@ class _NarrowDataLoop(
     """The narrowed dataset."""
 
 
-def evaluating_loop(directory: Path) -> EvalEpochsTrainLoop.Config:
+class _VisionLoop(
+    Makes["EpochTrainLoop"],
+    VisionLoop[VisionTrainStep.Config, Cifar100Data.Config],
+):
+    """The loop with its default step and dataset."""
+
+
+def evaluating_loop(directory: Path) -> _VisionLoop:
     """Return ``exp000``'s step and data in the evaluating loop, shrunk, over ``directory``."""
     source = exp000()
-    config = EvalEpochsTrainLoop.Config()
+    config = _VisionLoop()
     config.step = source.step
     config.dataset = source.dataset
     config.metrics_eval = source.metrics_eval
     config.seed = source.seed
     config.num_steps_eval = -1
-    shrink(config, directory=directory)
+    shrink(
+        cast("TrainLoop.Config[VisionTrainStep.Config, Cifar100Data.Config]", config),
+        directory=directory,
+    )
     config.step.train_budget_epochs = config.max_epochs = EPOCHS
     return config
-
-
-def test_the_reference_policy_picks_the_first_every_tenth_and_the_last() -> None:
-    picked = [
-        e for e in range(1, 26) if first_periodic_and_last(e, total_epochs=25, every=10)
-    ]
-    assert picked == [1, 10, 20, 25]
 
 
 def test_the_loop_evaluates_only_after_the_picked_epochs(
@@ -108,7 +109,6 @@ def test_the_loop_evaluates_only_after_the_picked_epochs(
     config = evaluating_loop(tmp_path)
     config.eval_epochs = PartialConfig(first_periodic_and_last, every=3)
     loop = config.make()
-    assert isinstance(loop, EvalEpochsTrainLoop)
     spy = EvalSpy(loop)
     monkeypatch.setattr(loop, "eval", spy)
     loop.train()
@@ -138,7 +138,7 @@ def test_a_loop_that_would_leave_the_references_draws_is_refused(
     field_name: str,
     value: object,
 ) -> None:
-    config = EvalEpochsTrainLoop.Config()
+    config = VisionLoop()
     config.step.train_budget_epochs = config.max_epochs = 200
     config.num_steps_eval = -1
     setattr(config, field_name, value)
@@ -149,22 +149,22 @@ def test_a_loop_that_would_leave_the_references_draws_is_refused(
 def test_a_subclass_narrows_the_step_or_the_dataset_slot(tmp_path: Path) -> None:
     assert _NarrowStepLoop().step.marker == 0
     assert _NarrowDataLoop().dataset.marker == 0
-    assert _NarrowStepLoop.parent_class is EvalEpochsTrainLoop
+    assert _NarrowStepLoop.parent_class is EpochTrainLoop
     assert isinstance(_NarrowDataLoop().step, VisionTrainStep.Config)
     write_dataset(tmp_path)
     config = _NarrowDataLoop()
     config.step = exp000().step
     config.num_steps_eval = -1
     shrink(config, directory=tmp_path)
-    loop: EvalEpochsTrainLoop = config.make()
+    loop: EpochTrainLoop = config.make()
     assert loop.eval_epochs(1, total_epochs=1)
 
 
 def test_the_loop_defaults_to_the_vision_step_and_cifar100() -> None:
-    config = EvalEpochsTrainLoop.Config()
+    config = VisionLoop()
     assert isinstance(config.step, VisionTrainStep.Config)
     assert isinstance(config.dataset, Cifar100Data.Config)
-    assert EvalEpochsTrainLoop.Config.parent_class is EvalEpochsTrainLoop
+    assert VisionLoop.parent_class is EpochTrainLoop
 
 
 if __name__ == "__main__":

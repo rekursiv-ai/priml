@@ -40,7 +40,7 @@ import tempfile
 
 from priml.baselines.mlsbench.dl.regularization import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -95,7 +95,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -113,7 +113,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         trace = upstream.trace_setting(scripts["zero"], argv)
         short = upstream.trace_setting(
             scripts["zero"],
-            upstream.with_epochs(argv, vision.EPOCHS),
+            upstream.with_epochs(argv, vision_reference.EPOCHS),
         )
         lockstep = {
             name: upstream.upstream_lockstep(script, name, short)
@@ -134,9 +134,12 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         lockstep,
         run=reference.lockstep_record,
     )
-    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_loaders(
+        batches,
+        vision_reference.loader_batches(scratch),
+    )
     settings, settings_report = capture_settings(root, scripts, scratch)
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record | settings,
         sites={},
         report=report + settings_report,
@@ -172,7 +175,7 @@ def capture_settings(
     pristine = scripts["zero"]
     with vision_upstream.hidden_accelerators():
         for setting, variants in reference.SETTING_REGULARIZERS.items():
-            spec = vision.SETTINGS[setting]
+            spec = vision_reference.SETTINGS[setting]
             argv = upstream.setting_argv(root, upstream.SETTING_SCRIPTS[setting])
             trace = upstream.trace_setting(pristine, argv, classes=spec.classes)
             report += [
@@ -207,7 +210,7 @@ def capture_settings(
             record |= upstream.upstream_setting_regularizers(scripts, setting, tiny)
             short = upstream.trace_setting(
                 pristine,
-                upstream.with_epochs(argv, vision.EPOCHS),
+                upstream.with_epochs(argv, vision_reference.EPOCHS),
                 classes=spec.classes,
             )
             for name, script in scripts.items():
@@ -225,7 +228,7 @@ def capture_settings(
                     pristine,
                     dataset=spec.dataset,
                 )
-                decoded = vision.decode_batches(
+                decoded = vision_reference.decode_batches(
                     batches[0],
                     config=spec.experiment().dataset,
                     source=spec.split()[0],
@@ -235,10 +238,10 @@ def capture_settings(
                     f"settings/{setting}/{line}"
                     for line in capture_reference.compare_loaders(
                         batches,
-                        vision.setting_batches(scratch, setting),
+                        vision_reference.setting_batches(scratch, setting),
                     )
                 ]
-    port = reference.settings_record() | vision.task_settings_record(
+    port = reference.settings_record() | vision_reference.task_settings_record(
         reference.SETTING_REGULARIZERS,
         scratch,
     )

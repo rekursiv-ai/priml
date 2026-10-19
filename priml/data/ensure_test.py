@@ -634,6 +634,15 @@ def test_archive_name_and_corrupt_archive_log(
     )
 
 
+def test_archive_of_a_missing_target_is_a_noop(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ensure._archive_dir(tmp_path / "absent")
+    assert list(tmp_path.iterdir()) == []
+    assert caplog.records == []
+
+
 def test_marker_has_utc_timestamp_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

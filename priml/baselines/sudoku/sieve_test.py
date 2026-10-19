@@ -37,7 +37,7 @@ from priml.baselines.sudoku.testing import (
     tiny_recursion_config,
     write_dataset,
 )
-from priml.baselines.sudoku.verifier import VerifierAcceptor
+from priml.baselines.sudoku.verifier import CommitteeLock, VerifierAcceptor
 from priml.baselines.sudoku.verifier_fit import VerifierFit
 from priml.baselines.sudoku.views import NINE_VIEWS, View
 from priml.data.arrays import load_array
@@ -178,6 +178,33 @@ def test_sieve_locks_per_round_and_takes_the_modal_tail(
     with open_npz(tmp_path / "runs" / "sieve" / "dumps" / "sieve_dump.npz") as dump:
         assert torch.equal(torch.from_numpy(dump["tail"]), torch.tensor([1, 2]))
         assert torch.equal(torch.from_numpy(dump["final_grids"][1]).long(), _LABELS[1])
+
+
+def _host_lock(acceptor: CommitteeLock, grids: Tensor, media: Tensor) -> Tensor:
+    return acceptor(grids, media)
+
+
+def _three_gigabytes(device: torch.device) -> float:
+    del device
+    return 3e9
+
+
+def test_a_cuda_sieve_reports_and_resets_each_rounds_peak_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sieve = _stubbed_sieve(tmp_path, monkeypatch, _StubRounds())
+    cuda = torch.device("cuda")
+    resets: list[torch.device] = []
+    monkeypatch.setattr(sieve, "device", cuda)
+    # The committee runs on the host; only the memory accounting sees the device.
+    monkeypatch.setattr(sieve, "_lock", _host_lock)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", _three_gigabytes)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", resets.append)
+    metrics = sieve.run()
+    rounds = from_plain(metrics["eval/rounds"], list[dict[str, object]])
+    assert [stat["peak_mem_gb"] for stat in rounds] == [3.0] * 3
+    assert resets == [cuda] * 3
 
 
 def test_sieve_refuses_a_round_misaligned_with_round_zero(

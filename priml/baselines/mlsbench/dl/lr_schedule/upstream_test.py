@@ -19,7 +19,9 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT as VISION_SCRIPT,
+)
 
 
 if TYPE_CHECKING:
@@ -31,7 +33,7 @@ GET_LR: Final = (
 """The two lines of the stand-in's schedule, which the baselines' edits replace."""
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    VISION_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         GET_LR,

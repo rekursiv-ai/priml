@@ -10,6 +10,7 @@ from priml.baselines.craftax.world_model.capture.seeds import (
     episode_seed,
     rollout_seed,
     sampling_seed,
+    splitmix64,
 )
 
 
@@ -115,6 +116,24 @@ def test_rollout_seeds_keep_every_buffer_stream_distinct() -> None:
     assert seeds[0] == 73
     buffers = {seed + buffer for seed in seeds for buffer in range(64)}
     assert len(buffers) == 16 * 10 * 64
+
+
+def test_splitmix64_matches_the_reference_stream_from_seed_zero() -> None:
+    # Vigna's reference splitmix64.c, state 0: its first three outputs.
+    state, first = splitmix64(0)
+    state, second = splitmix64(state)
+    state, third = splitmix64(state)
+    assert [first, second, third] == [
+        0xE220_A839_7B1D_CDAF,
+        0x6E78_9E6A_A1B9_65F4,
+        0x06C4_5D18_8009_454F,
+    ]
+    assert state == 3 * 0x9E37_79B9_7F4A_7C15 % (1 << 64)
+
+
+def test_splitmix64_wraps_its_state_at_64_bits() -> None:
+    state, _ = splitmix64((1 << 64) - 1)
+    assert state == 0x9E37_79B9_7F4A_7C14
 
 
 if __name__ == "__main__":

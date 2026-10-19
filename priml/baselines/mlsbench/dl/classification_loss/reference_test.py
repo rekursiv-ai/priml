@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.classification_loss import reference
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches, read_tensors
 
@@ -81,7 +81,7 @@ def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> N
     }
     assert_exact(
         expected,
-        vision.task_settings_record(reference.SETTING_LOSSES, tmp_path),
+        vision_reference.task_settings_record(reference.SETTING_LOSSES, tmp_path),
     )
 
 
@@ -107,11 +107,11 @@ def test_a_setting_lockstep_hands_back_the_state_after_each_update() -> None:
         "mobilenetv2-fmnist/focal",
         states=states,
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
     assert record["settings/mobilenetv2-fmnist/lockstep/focal/context"].tolist() == [
-        [vision.CLASSES, 0, vision.EPOCHS],
-        [vision.CLASSES, 1, vision.EPOCHS],
+        [vision_reference.CLASSES, 0, vision_reference.EPOCHS],
+        [vision_reference.CLASSES, 1, vision_reference.EPOCHS],
     ]
 
 
@@ -157,8 +157,29 @@ def test_the_comparison_sees_a_change_of_one_ulp() -> None:
 def test_a_lockstep_run_hands_back_the_state_after_each_update() -> None:
     states: list[dict[str, torch.Tensor]] = []
     _ = reference.lockstep_record("cross_entropy", states=states)
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(states[0]["stem.weight"], states[1]["stem.weight"])
+
+
+def test_the_settings_record_joins_the_losses_and_every_forks_lockstep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def losses() -> dict[str, torch.Tensor]:
+        return {"setting_loss_record": torch.zeros(2)}
+
+    def lockstep(name: str) -> dict[str, torch.Tensor]:
+        return {f"lockstep/{name}": torch.zeros(2)}
+
+    monkeypatch.setattr(reference, "setting_loss_record", losses)
+    monkeypatch.setattr(reference, "setting_lockstep_record", lockstep)
+    assert set(reference.settings_port_record()) == {
+        "setting_loss_record",
+        *(
+            f"lockstep/{setting}/{name}"
+            for setting, forks in reference.SETTING_LOSSES.items()
+            for name in forks
+        ),
+    }
 
 
 def test_the_loss_record_holds_a_value_and_a_gradient_per_loss() -> None:

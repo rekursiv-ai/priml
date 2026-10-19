@@ -358,12 +358,71 @@ def write_goldens(out: Path, captured: reference.Captured) -> None:
             },
         },
     )
+    write_sites(out, captured.sites)
+
+
+def shared_scores(
+    record: Mapping[str, Tensor],
+    *,
+    pairs: Mapping[str, str],
+) -> list[str]:
+    """Report each pair of score sets a rank AUC is taken over that share a value.
+
+    An AUC ranked by NumPy's default sort orders a value in both sets by the
+    host's SIMD kernel, so a golden of it holds on some hosts only.
+
+    Args:
+      record: A capture's values.
+      pairs: Key of each member score set to the key of its non-member set.
+
+    Returns:
+      report: One line per pair with a shared value.
+
+    """
+    report: list[str] = []
+    for member, nonmember in pairs.items():
+        shared = set(record[member].tolist()) & set(record[nonmember].tolist())
+        if shared:
+            report.append(
+                f"{member}: {len(shared)} scores also in {nonmember}; "
+                "their order is the host's",
+            )
+    return report
+
+
+def write_sites(out: Path, sites: Mapping[str, Mapping[str, int]]) -> None:
+    """Write each side's draw counts to ``reference_sites.txt``, one site a line.
+
+    Args:
+      out: The ``testdata`` directory.
+      sites: Side (``reference``, ``port``, ...) to its draw counts.
+
+    """
     lines = [
         f"{side} {key} {count}"
-        for side, counts in captured.sites.items()
+        for side, counts in sites.items()
         for key, count in sorted(counts.items())
     ]
     (out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
+
+
+# Callers read the file themselves: ``export_config_test`` finds which test owns
+# a ``testdata`` text file by its literal ``read_text`` call.
+def parse_sites(text: str) -> dict[str, dict[str, int]]:
+    """Parse the ``reference_sites.txt`` text :func:`write_sites` wrote.
+
+    Args:
+      text: The file's contents.
+
+    Returns:
+      sites: Side to its draw counts.
+
+    """
+    sites: dict[str, dict[str, int]] = {}
+    for line in text.splitlines():
+        side, key, count = line.split()
+        sites.setdefault(side, {})[key] = int(count)
+    return sites
 
 
 def write_records(out: Path, files: Mapping[str, Mapping[str, Tensor]]) -> None:

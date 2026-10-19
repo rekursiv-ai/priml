@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.experiments import (
     exp000 as vision_exp000,
 )
@@ -108,7 +108,12 @@ def test_a_step_whose_loss_takes_no_counts_is_left_alone(tmp_path: Path) -> None
     config.working_dir = tmp_path
     data = config.make()
     assert isinstance(data, LongTailCifar100Data)
-    step = vision.tiny_step(vision_exp000, blocks=(1, 1, 1), classes=3, epochs=1)
+    step = vision_reference.tiny_step(
+        vision_exp000,
+        blocks=(1, 1, 1),
+        classes=3,
+        epochs=1,
+    )
     data.bind_step(step)
     assert not isinstance(step.loss, BindsClassCounts)
     bound: list[Tensor] = []

@@ -38,7 +38,7 @@ import tempfile
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
@@ -114,17 +114,12 @@ def main() -> int:
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
     capture_reference.write_records(flags.out, {"reference.pt": captured.record})
-    lines = [
-        f"{side} {key} {count}"
-        for side, counts in captured.sites.items()
-        for key, count in sorted(counts.items())
-    ]
-    (flags.out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
+    capture_reference.write_sites(flags.out, captured.sites)
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -141,7 +136,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         pristine,
         upstream.recipe_argv("resnet20-cifar10"),
         build=upstream.linear_model,
-        split=vision.synthetic_split(),
+        split=vision_reference.synthetic_split(),
         serial=True,
     )
     record = upstream_record(scripts, recipe)
@@ -157,7 +152,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         )
         record |= vision_upstream.tiny_setting_record(
             cast(vision_upstream.Upstream, pristine),
-            vision.SETTINGS[setting].arch,
+            vision_reference.SETTINGS[setting].arch,
             key,
         )
         report += compare_initial(initial, key=key, factory=factory)
@@ -172,7 +167,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     report += compare_pristine_run(pristine, scratch)
     sites = {"reference": upstream_sites(pristine), "port": port_sites(scratch)}
     report += check_sites(sites["reference"], sites["port"])
-    return vision.Captured(record=record, sites=sites, report=report)
+    return vision_reference.Captured(record=record, sites=sites, report=report)
 
 
 def upstream_record(
@@ -210,7 +205,7 @@ def upstream_record(
     record |= upstream_evaluations(pristine)
     record["recipe/lr"] = torch.tensor(recipe.rates, dtype=torch.float64)
     record["recipe/optimizer"] = torch.tensor(
-        [recipe.settings[name] for name in vision.HYPERPARAMETERS],
+        [recipe.settings[name] for name in vision_reference.HYPERPARAMETERS],
         dtype=torch.float64,
     )
     return record
@@ -247,7 +242,7 @@ def upstream_evaluations(script: upstream.Script) -> dict[str, Tensor]:
     cpu = torch.device("cpu")
     with (
         host_agnostic_numerics(),
-        vision.script_workers(),
+        vision_reference.script_workers(),
         vision_upstream.forked_workers(),
         vision_upstream.hidden_accelerators(),
     ):
@@ -328,8 +323,8 @@ def compare_initial(
         },
         {f"flip/{key}/labels": label, f"flip/{key}/index": index},
     )
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = vision.full_step(factory).model
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        ours = vision_reference.full_step(factory).model
     return report + [
         f"settings/{key}/state: {line}"
         for line in capture_reference.compare_states(trace.initial, ours.state_dict())
@@ -352,7 +347,7 @@ def compare_pristine_run(script: upstream.Script, scratch: Path) -> list[str]:
         script,
         upstream.lockstep_argv(),
         build=upstream.tiny_model,
-        split=vision.synthetic_split(),
+        split=vision_reference.synthetic_split(),
     )
     ours: list[Tensor] = []
     _ = reference.lockstep_record("pristine", scratch, media=ours)
@@ -386,7 +381,7 @@ def upstream_sites(script: upstream.Script) -> dict[str, int]:
             script,
             upstream.lockstep_argv(),
             build=upstream.tiny_model,
-            split=vision.synthetic_split(),
+            split=vision_reference.synthetic_split(),
             serial=True,
         )
     return counts

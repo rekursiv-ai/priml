@@ -15,9 +15,14 @@ from priml.baselines.sudoku.search import (
     accepted_grids,
     run_learned_pin_search_fast,
     run_pin_search_fast,
+    run_search,
     select_pin_candidates,
 )
-from priml.baselines.sudoku.testing import sudoku_solution, tiny_recursion
+from priml.baselines.sudoku.testing import (
+    sudoku_solution,
+    tiny_recursion,
+    tiny_recursion_config,
+)
 from priml.baselines.sudoku.views import IDENTITY_DIGITS
 
 
@@ -121,6 +126,66 @@ def test_pin_search_engines_respect_budget_rows_and_chunks() -> None:
     assert all(set(rows) <= {0} for _, rows in rollout_batches)
 
 
+def test_learned_pin_search_accepts_the_first_row_over_threshold() -> None:
+    boards = torch.full((3, 81), 1, dtype=torch.long)
+    root_logits = torch.zeros(3, 81, 11)
+    root_logits[..., 4] = 1
+    active = torch.tensor([True, True, False])
+
+    def rollout(candidate: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        logits = torch.zeros(candidate.shape[0], 81, 11)
+        logits[..., 5] = 1
+        # Puzzle 0 accepts on its second candidate; puzzle 1 never does.
+        second = torch.arange(candidate.shape[0]) % 2 == 1
+        return logits, torch.where((rows == 0) & second, 6.0, 1.0)
+
+    result = run_learned_pin_search_fast(
+        rollout,
+        media=boards,
+        base_logits=root_logits,
+        active=active,
+        acceptance_threshold=5.0,
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=6,
+        max_rows=8,
+    )
+    assert torch.equal(result.accepted, torch.tensor([True, False, False]))
+    assert torch.equal(result.depth, torch.tensor([1, -1, -1]))
+    assert torch.equal(result.scores[:1], torch.tensor([6.0]))
+    assert torch.equal(result.grids[0], torch.full((81,), 5))
+    assert torch.equal(result.grids[1:], boards[1:])
+    # Puzzle 0 stops after its accepting level; puzzle 1 spends the budget.
+    assert torch.equal(result.nodes, torch.tensor([2, 6, 0]))
+
+
+def test_learned_pin_search_rolls_nothing_out_with_no_active_puzzle() -> None:
+    boards = torch.full((2, 81), 1, dtype=torch.long)
+    calls: list[int] = []
+
+    def rollout(candidate: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        calls.append(candidate.shape[0])
+        return torch.zeros(candidate.shape[0], 81, 11), torch.zeros(candidate.shape[0])
+
+    result = run_learned_pin_search_fast(
+        rollout,
+        media=boards,
+        base_logits=torch.zeros(2, 81, 11),
+        active=torch.zeros(2, dtype=torch.bool),
+        acceptance_threshold=0.0,
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=6,
+        max_rows=8,
+    )
+    assert calls == []
+    assert torch.equal(result.nodes, torch.zeros(2, dtype=torch.int64))
+    assert result.visited_predictions == []
+
+
 def test_search_config_rejects_invalid_policies() -> None:
     with pytest.raises(ValueError, match="max_act_steps"):
         HpsSearch.Config(max_act_steps=0).make()
@@ -198,6 +263,32 @@ def test_eval_search_run_branches_and_errors() -> None:
         accept_fn=lambda preds, _media: torch.zeros(preds.shape[0], dtype=torch.bool),
     )
     assert predicate.nodes.shape == (2,)
+
+
+def test_a_puzzle_embedding_model_reads_the_batch_identifiers() -> None:
+    model_config = tiny_recursion_config()
+    model_config.num_puzzle_identifiers = 3
+    model_config.puzzle_emb_len = 2
+    model = model_config.make().eval()
+    config = HpsSearch.Config(
+        max_act_steps=2,
+        acceptance_checkpoints=(1, 2),
+        search_depth=1,
+        search_candidates=2,
+        search_cell_attempts=2,
+        search_budget=4,
+        search_max_rows=4,
+    )
+    media = torch.full((2, 81), 1, dtype=torch.long)
+    with pytest.raises(KeyError, match="puzzle_identifiers"):
+        run_search(model, {"media": media, "valid_count": 2}, config)
+    batch = {
+        "media": media,
+        "valid_count": 2,
+        "puzzle_identifiers": torch.tensor([1, 2], dtype=torch.int32),
+    }
+    result = run_search(model, batch, config)
+    assert torch.equal(result.scored, torch.ones(2, dtype=torch.bool))
 
 
 def test_search_without_checkpoints_rolls_the_family_forward() -> None:

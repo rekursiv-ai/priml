@@ -10,18 +10,13 @@ own values by the parity suite (README, "Parity").
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
-import inspect
-
 from torch import Tensor
-from triton.runtime import interpreter, jit
 
 import pytest
 import torch
-import triton
 
 from priml.baselines.craftax.experiments import exp000
 from priml.baselines.craftax.lib import compat
@@ -41,18 +36,16 @@ from priml.optimizers.fused_muon import FusedMuon, clip_coefficient
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import assert_tensor_golden
 from priml.testing.policy_gradient import random_minibatch
+from priml.testing.triton_interpreter import is_jit, triton_interpreter
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
-    from typing_extensions import TypeIs
+    from collections.abc import Iterator, Mapping
 
-    from numpy.typing import NDArray
-
-    import numpy as np
+    from triton.runtime import jit
 
     from priml.baselines.craftax.model import MinGRUPolicy
 
@@ -284,91 +277,16 @@ def test_the_exact_rule_issues_pufferlibs_intrinsics() -> None:
 
 
 @pytest.fixture
-def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def interpreted_kernels() -> Iterator[None]:
     """Run the module's Triton kernels through Triton's CPU interpreter, uncached."""
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
-    monkeypatch.setattr(
-        jit,
-        "_normalize_ty",
-        partial(_normalize_bare_constexpr, normalize=jit._normalize_ty),
-    )
-    monkeypatch.setattr(
-        interpreter,
-        "_patch_lang_tensor",
-        partial(_patch_scalar_index, patch=interpreter._patch_lang_tensor),
-    )
-    # Triton jitted its library functions at import, compiled-mode, which the
-    # interpreter refuses to call.
-    for module in (triton.language, triton.language.standard):
-        for name, value in inspect.getmembers(module, _is_jit):
-            monkeypatch.setattr(
-                module,
-                name,
-                interpreter.InterpretedFunction(value.fn),
-            )
-    # Each library call patches ``triton.language.core``'s builtins and never
-    # restores them (``InterpretedFunction.__call__``), so a kernel compiled
-    # after this test would trace the interpreter's builtins and fail.
-    members: dict[str, object] = dict(vars(triton.language.core))
-    for name, value in members.items():
-        monkeypatch.setattr(triton.language.core, name, value)
-    compat._sum_squares_kernels.cache_clear()
-    compat._ordered_sum_kernel.cache_clear()
-    try:
+    with triton_interpreter(compat._sum_squares_kernels, compat._ordered_sum_kernel):
         yield
-    finally:
-        compat._sum_squares_kernels.cache_clear()
-        compat._ordered_sum_kernel.cache_clear()
-
-
-# The interpreter matches a constexpr only by its bare name; the module's postponed
-# annotations spell it ``language.constexpr``.
-def _normalize_bare_constexpr(
-    ty: object,
-    *,
-    normalize: Callable[[object], str],
-) -> str:
-    return normalize(
-        ty.strip("'").removeprefix("language.") if isinstance(ty, str) else ty,
-    )
-
-
-# The interpreter holds a scalar as a one-element array, which numpy 2.5 no longer
-# converts with ``int``; a runtime loop bound such as ``range(passes)`` needs it.
-def _patch_scalar_index(
-    tensor: type,
-    scope: _PatchScope,
-    *,
-    patch: Callable[[type, _PatchScope], None],
-) -> None:
-    patch(tensor, scope)
-    scope.set_attr(tensor, "__index__", _scalar_index)
-
-
-def _scalar_index(tensor: _InterpretedTensor) -> int:
-    return int(tensor.handle.data.item())
-
-
-def _is_jit(value: object) -> TypeIs[jit.JITFunction[..., object]]:
-    return isinstance(value, jit.JITFunction)
 
 
 def _jit_global(scope: Mapping[str, object], name: str) -> jit.JITFunction[..., object]:
     helper = scope[name]
-    assert _is_jit(helper)
+    assert is_jit(helper)
     return helper
-
-
-class _PatchScope(Protocol):
-    def set_attr(self, obj: object, name: str, value: object) -> None: ...
-
-
-class _InterpretedHandle(Protocol):
-    data: NDArray[np.integer]
-
-
-class _InterpretedTensor(Protocol):
-    handle: _InterpretedHandle
 
 
 def _muon_record(

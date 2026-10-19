@@ -29,7 +29,7 @@ from priml.baselines.mlsbench.dl.residual.experiments import (
     exp010,
     exp011,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments as vision_experiments
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
     changed_fields,
     shrink,
@@ -75,7 +75,7 @@ BLOCK_DELTAS: Final = {
 
 
 def test_exp000_is_the_vision_recipe() -> None:
-    assert changed_fields(vision.exp000(), exp000()) == {"study_name"}
+    assert changed_fields(vision_experiments.exp000(), exp000()) == {"study_name"}
 
 
 @pytest.mark.parametrize(

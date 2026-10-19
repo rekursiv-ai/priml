@@ -313,6 +313,27 @@ def test_a_kernel_writes_nested_fields_at_their_c_offsets() -> None:
     assert states[0:1].tobytes() == bytes(80_248)
 
 
+def test_byte_offset_is_the_c_offsetof() -> None:
+    expected = _layout("State")
+    assert byte_offset("timestep") == expected["timestep"][0]
+    assert byte_offset("potion_mapping") == expected["potion_mapping"][0]
+    assert byte_offset("mask", MOBS_DTYPE) == _layout("Mobs")["mask"][0]
+
+
+def test_record_readers_return_writable_views_into_the_array() -> None:
+    states = new_states(3)
+    env_state(states, 2).timestep = 9
+    assert states["timestep"].tolist() == [0, 0, 9]
+
+    logs = new_logs(3)
+    env_log(logs, 1).achievements[4] = 2.5
+    assert logs["achievements"][:, 4].tolist() == [0.0, 2.5, 0.0]
+
+    stats = new_stats(3, TRAINING_STATS_DTYPE)
+    training_stats(stats, 0).stall_limit = 7
+    assert stats["stall_limit"].tolist() == [7, 0, 0]
+
+
 def test_layout_helpers_refuse_an_unstructured_dtype() -> None:
     with pytest.raises(ValueError, match="a structured dtype is required"):
         _ = byte_offset("x", np.dtype(np.void))

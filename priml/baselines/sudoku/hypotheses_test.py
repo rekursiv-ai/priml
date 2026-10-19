@@ -25,6 +25,7 @@ from priml.baselines.sudoku.hypotheses import (
 )
 from priml.baselines.sudoku.latent_recursion import LatentRecursion, recipe_block
 from priml.baselines.sudoku.losses import token_cross_entropy
+from priml.model.special import Identity
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
@@ -146,6 +147,14 @@ def test_hypothesis_recursion_keeps_the_deployed_row_and_the_ambient_stream() ->
     single.num_hypotheses = 1
     with pytest.raises(ValueError, match="num_hypotheses"):
         single.make()
+
+
+def test_hypothesis_recursion_requires_a_swiglu_ffn_to_align_on() -> None:
+    config = tiny_config()
+    assert config.block is not None
+    config.block.ffn = Identity.Config()
+    with pytest.raises(TypeError, match="TransformerBlock with a SwiGLU FFN"):
+        config.make()
 
 
 def test_fresh_fast_states_are_seeded_per_draw() -> None:

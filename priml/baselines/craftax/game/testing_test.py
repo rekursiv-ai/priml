@@ -9,22 +9,29 @@ from llvmlite import ir
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game import testing
 from priml.baselines.craftax.game.jit import (
     jit,
     jit_parallel,
 )
+from priml.baselines.craftax.game.rng import rand_r_numba
 from priml.baselines.craftax.game.rules import LAND_BLOCKS
 from priml.baselines.craftax.game.state import (
     MAP_SIZE,
     STATE_DTYPE,
     Action,
     BlockType,
+    env_state,
+    new_states,
 )
 from priml.baselines.craftax.game.testing import (
     _inspectable,
     _kernel_llvm,
+    build_small_pool,
+    generate_small_world,
     ir_builder,
+    kernel_assembly,
     kernel_llvm,
     small_worlds,
 )
@@ -155,6 +162,37 @@ def test_kernel_inspection_reuses_one_twin_for_every_signature(
     assert llvm.count("define ") >= len(twin.signatures)
     assert "cpython" not in llvm
     assert "cfunc" not in llvm
+
+
+def test_a_small_pool_is_zeroed_then_marked_by_each_worlds_seed() -> None:
+    pool = new_states(2)
+    pool_bytes = pool.view(np.uint8).reshape(2, -1)
+    pool_bytes[:] = 7
+    build_small_pool(pool, pool_bytes, None, None, first_seed=MAP_SIZE - 1)
+    assert pool.tobytes() == small_worlds(MAP_SIZE)[[MAP_SIZE - 1, 0]].tobytes()
+
+
+def test_a_generated_small_world_is_marked_by_one_draw_of_its_stream() -> None:
+    states = new_states(1)
+    rng = np.array([5], np.uint32)
+    with eager():
+        draw = int(rand_r_numba(np.array([5], np.uint32)))
+        generate_small_world(env_state(states, 0), rng, None, None)
+    assert rng.tolist() != [5]
+    assert states.tobytes() == small_worlds(MAP_SIZE)[[draw % MAP_SIZE]].tobytes()
+
+
+def test_kernel_assembly_reads_every_compiled_overload_with_its_wrappers() -> None:
+    @jit
+    def twice(x: np.ndarray) -> np.ndarray:
+        return x * 2
+
+    values = np.arange(4, dtype=np.float32)
+    twice(values)
+    twice(values.astype(np.int32))
+    assembly = kernel_assembly(twice)
+    assert assembly.count(".file") == len(twice.signatures) == 2
+    assert "cpython" in assembly
 
 
 def test_inspecting_an_uncalled_kernel_fails_loudly() -> None:

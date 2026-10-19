@@ -30,6 +30,7 @@ from priml.baselines.craftax.ghosts.layout import (
     encode_keeps,
     encode_sleep,
     encode_table,
+    encode_timeline,
     encode_window,
     interaction_targets,
     maps_before,
@@ -37,6 +38,7 @@ from priml.baselines.craftax.ghosts.layout import (
     read_keeps,
     read_sleep,
     read_table,
+    read_timeline,
     read_window,
     read_world,
     world_bytes,
@@ -102,6 +104,20 @@ def test_a_time_map_keeps_each_episodes_runs_and_refuses_a_mismatch() -> None:
     ) + encode_table(np.concatenate(runs), columns=KEEP_COLUMNS)
     with pytest.raises(ValueError, match=mismatch):
         read_keeps(miscounted)
+
+
+def test_a_timeline_reads_back_its_activity_and_segments_and_nothing_after() -> None:
+    activity = np.array([0, 3, 9_000, 1])
+    segments = np.array([[0, 2], [3, 4]])
+    data = encode_timeline(activity, segments=segments)
+    back, kept = read_timeline(data)
+    np.testing.assert_array_equal(back, activity)
+    np.testing.assert_array_equal(kept, segments)
+    with pytest.raises(
+        ValueError,
+        match=r"^A timeline has 4 bytes after its tables\.$",
+    ):
+        read_timeline(data + bytes(4))
 
 
 def test_a_window_keeps_each_run_and_its_empty_ones() -> None:

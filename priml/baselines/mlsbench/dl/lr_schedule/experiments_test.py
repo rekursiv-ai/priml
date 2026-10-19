@@ -29,7 +29,7 @@ from priml.baselines.mlsbench.dl.lr_schedule.experiments import (
     exp011,
 )
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -83,7 +83,7 @@ SCHEDULE_DELTAS: Final = [
 
 
 def test_exp000_is_the_vision_recipe_with_a_constant_rate() -> None:
-    assert changed_fields(vision.exp000(), exp000()) == {
+    assert changed_fields(vision_experiments.exp000(), exp000()) == {
         "study_name",
         "step.schedule.func",
     }

@@ -38,11 +38,12 @@ import argparse
 import tempfile
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import (
     compare_states,
+    shared_scores,
     write_records,
 )
 from priml.baselines.mlsbench.tl.machine_unlearning import reference, upstream
@@ -101,7 +102,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -147,7 +148,14 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         for line in compare_states(state, our_states[key])
     ]
     report += mismatches(record, port)
-    return vision.Captured(record=record, sites=sites, report=report)
+    report += shared_scores(
+        record,
+        pairs={
+            f"main/{name}/forget_train_confidence": f"main/{name}/forget_test_confidence"
+            for name in modules
+        },
+    )
+    return vision_reference.Captured(record=record, sites=sites, report=report)
 
 
 def compare_full_forward(script: upstream.Driver, key: str) -> list[str]:

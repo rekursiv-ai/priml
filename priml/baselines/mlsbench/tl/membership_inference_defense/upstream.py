@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import contextlib
@@ -30,9 +30,12 @@ from torch import Tensor, nn
 import numpy as np
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference, upstream
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision_reference,
+    upstream,
+)
 from priml.baselines.mlsbench.tl.membership_inference_defense import (
-    reference as port,
+    reference,
 )
 from priml.baselines.mlsbench.tl.membership_inference_defense.data import SPLITS
 from priml.testing.bfb import host_agnostic_numerics
@@ -92,6 +95,7 @@ class _Torchvision(Protocol):
     datasets: ModuleType
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the driver the capture uses."""
 
@@ -239,7 +243,7 @@ def driver(root: Path, defense: object) -> Script:
     previous = sys.modules.get(name)
     sys.modules[name] = cast("ModuleType", defense)
     try:
-        return cast(Script, cast(object, upstream.load_script(root / DRIVER)))
+        return upstream.narrowed(upstream.load_script(root / DRIVER), Script)
     finally:
         if previous is None:
             del sys.modules[name]
@@ -329,12 +333,12 @@ def upstream_lockstep(
       states: The network's whole state after each update.
 
     """
-    with reference.seeded(reference.SEED):
+    with vision_reference.seeded(vision_reference.SEED):
         trace = trace_main(
             script,
             lockstep_argv("resnet20-cifar10"),
             build=tiny_model,
-            split=reference.synthetic_split(),
+            split=vision_reference.synthetic_split(),
         )
         draws = rng_fingerprint()
     (test, test_acc), (member, member_acc), (nonmember, nonmember_acc) = trace.scores
@@ -380,7 +384,7 @@ def recipe_argv(name: str, *, epochs: int = 300) -> list[str]:
         *("--epochs", str(epochs), "--batch-size", "128", "--lr", "0.1"),
         *("--momentum", "0.9", "--weight-decay", "1e-4"),
         *("--schedule-milestones", "150", "225", "--schedule-gamma", "0.1"),
-        *("--seed", str(reference.SEED)),
+        *("--seed", str(vision_reference.SEED)),
     ]
 
 
@@ -395,10 +399,15 @@ def lockstep_argv(name: str) -> list[str]:
         and milestones.
 
     """
-    argv = recipe_argv(name, epochs=port.LOCKSTEP_EPOCHS)
-    argv[argv.index("--batch-size") + 1] = str(port.LOCKSTEP_BATCH)
+    argv = recipe_argv(
+        name,
+        epochs=reference.LOCKSTEP_EPOCHS,
+    )
+    argv[argv.index("--batch-size") + 1] = str(
+        reference.LOCKSTEP_BATCH,
+    )
     start = argv.index("--schedule-milestones") + 1
-    argv[start : start + 2] = [str(m) for m in port.LOCKSTEP_MILESTONES]
+    argv[start : start + 2] = [str(m) for m in reference.LOCKSTEP_MILESTONES]
     return argv
 
 
@@ -488,7 +497,7 @@ def pipelines(
         _Splits(split),
     ):
         train_set, test_set, _ = script.get_dataset(dataset, "unused", augment=augment)
-    with reference.seeded(reference.SEED):
+    with vision_reference.seeded(vision_reference.SEED):
         train = torch.stack([train_set.transform(_pil(image)) for image in images])
     test = torch.stack([test_set.transform(_pil(image)) for image in images])
     return train, test
@@ -610,7 +619,8 @@ class _Schedulers:
         scheduler = self.scheduler(optimizer, milestones=milestones, gamma=gamma)
         group = cast(dict[str, object], optimizer.param_groups[0])
         self.trace.settings = {
-            name: float(cast(float, group[name])) for name in reference.HYPERPARAMETERS
+            name: float(cast(float, group[name]))
+            for name in vision_reference.HYPERPARAMETERS
         }
         self.trace.initial = {
             k: v.clone() for k, v in self.models[0].state_dict().items()

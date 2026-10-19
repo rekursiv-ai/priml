@@ -9,7 +9,7 @@ repeats ``main``'s epoch loop on the shallowest network. Nothing runs on a GPU.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import torch
 
@@ -55,6 +55,7 @@ CONFIG: Final = {"arch": "resnet56", "dataset": "cifar100"}
 """What ``main`` tells ``get_lr`` in the ``resnet56-cifar100`` setting."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``dl-lr-schedule`` script the capture uses."""
 
@@ -136,7 +137,7 @@ def upstream_lockstep(
         afterwards; and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     criterion = _CriterionSpy()
     rates: list[float] = []
     probes: list[Tensor] = []

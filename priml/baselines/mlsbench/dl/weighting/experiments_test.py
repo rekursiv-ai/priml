@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -81,7 +81,7 @@ FORKS: Final = {
 
 
 def test_exp000_is_the_vision_recipe_at_resnet32_on_the_long_tail() -> None:
-    assert changed_fields(vision.exp000(), exp000()) == {
+    assert changed_fields(vision_experiments.exp000(), exp000()) == {
         "study_name",
         *(f"step.model.blocks_per_stage[{stage}]" for stage in range(3)),
         "step.loss",
@@ -120,7 +120,8 @@ def test_exp004_is_exp000_on_cifar10() -> None:
         *(f"dataset.{name}[{index}]" for name in ("mean", "std") for index in range(3)),
     }
     assert (
-        exp004().dataset.mean == settings.resnet20_cifar10(vision.exp000()).dataset.mean
+        exp004().dataset.mean
+        == settings.resnet20_cifar10(vision_experiments.exp000()).dataset.mean
     )
 
 

@@ -5,11 +5,14 @@ from __future__ import annotations
 import torch
 
 from priml.baselines.tmax.objective import (
+    INVALID_LOGPROB,
     binary_divergence,
     binary_kl,
     binary_total_variation,
     dppo_mask,
+    dppo_token_loss,
     importance_ratio,
+    mask_logprobs,
     masked_mean,
 )
 
@@ -91,6 +94,24 @@ def test_the_divergence_is_injected_into_the_mask() -> None:
 def _no_divergence(rollout: torch.Tensor, policy: torch.Tensor) -> torch.Tensor:
     del policy
     return torch.zeros_like(rollout)
+
+
+def test_mask_logprobs_invalidates_unsampled_and_nan_positions() -> None:
+    """Prompt, tool, and missing values all read as the invalid marker."""
+    logprobs = torch.tensor([[-0.5, -1.0, float("nan"), -2.0]])
+    response_mask = torch.tensor([[True, False, True, True]])
+    masked = mask_logprobs(logprobs, response_mask)
+    assert masked.tolist() == [[-0.5, INVALID_LOGPROB, INVALID_LOGPROB, -2.0]]
+
+
+def test_dppo_token_loss_is_the_masked_advantage_weighted_ratio() -> None:
+    """Eq. 11: ``-A * ratio`` per token, zero where the mask blocks it."""
+    loss = dppo_token_loss(
+        advantages=torch.tensor([[2.0, -3.0, 5.0]]),
+        ratio=torch.tensor([[0.5, 2.0, 4.0]]),
+        policy_mask=torch.tensor([[1.0, 1.0, 0.0]]),
+    )
+    assert loss.tolist() == [[-1.0, 6.0, -0.0]]
 
 
 def test_masked_mean_uses_the_global_denominator() -> None:

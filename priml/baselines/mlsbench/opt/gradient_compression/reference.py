@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, cast
 
+from configgle import PartialConfig
 from torch import Tensor
 from treekle import from_plain
 
@@ -180,14 +181,14 @@ def tiny_step(
     factory: Callable[[], CompressionTrainLoop.Config],
     *,
     epochs: int,
-    warmup: int | None = None,
+    warmup: int,
 ) -> CompressedTrainStep:
     """Build the step of ``factory`` with one block per stage and three classes.
 
     Args:
       factory: The experiment whose recipe is kept.
       epochs: Schedule horizon.
-      warmup: The schedule's warmup epochs; the recipe's when None.
+      warmup: The schedule's warmup epochs; :func:`warmup_epochs` is the recipe's.
 
     Returns:
       step: A CPU step with the experiment's optimizer, schedule and compressor.
@@ -203,11 +204,17 @@ def tiny_step(
     model.init_conv = model.init_head = model.init_bias = keep_default
     config.parallelism = NoParallel.Config(device="cpu")
     config.train_budget_epochs = epochs
-    if warmup is not None:
-        config.schedule = config.schedule.copy_tree().update(warmup_epochs=warmup)
+    config.schedule = config.schedule.copy_tree().update(warmup_epochs=warmup)
     step = config.make()
     assert isinstance(step, CompressedTrainStep)
     return step
+
+
+def warmup_epochs(factory: Callable[[], CompressionTrainLoop.Config]) -> int:
+    """Return the warmup epochs of ``factory``'s schedule."""
+    schedule = factory().step.schedule
+    assert isinstance(schedule, PartialConfig)
+    return from_plain(cast(object, schedule.warmup_epochs), int)
 
 
 def full_step(
@@ -256,7 +263,8 @@ def schedule_record(name: str) -> dict[str, Tensor]:
       record: The rates and :data:`SGD_SETTINGS`, as float64.
 
     """
-    step = tiny_step(SETTINGS[name], epochs=EPOCHS)
+    factory = SETTINGS[name]
+    step = tiny_step(factory, epochs=EPOCHS, warmup=warmup_epochs(factory))
     group = cast("Mapping[str, object]", step.optimizer.param_groups[0])
     base_lr = from_plain(group["lr"], float)
     rates = [
@@ -328,7 +336,7 @@ def metric_record() -> dict[str, Tensor]:
     accuracy = BestAccuracy.Config().make()
     loss = MeanCrossEntropy.Config().make()
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        step = tiny_step(exp000, epochs=EPOCHS)
+        step = tiny_step(exp000, epochs=EPOCHS, warmup=warmup_epochs(exp000))
         for media, label in metric_batches():
             evaluated = step.call_eval(media=media)
             assert isinstance(evaluated, Tensor)

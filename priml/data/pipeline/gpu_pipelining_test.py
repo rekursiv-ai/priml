@@ -790,6 +790,28 @@ def test_spec_skips_fields_held_by_an_object_attribute(
     assert holder.value == 3
 
 
+def test_spec_stops_descending_at_an_attribute_step(
+    gpu_processor_class: type[
+        PipelinedGPUProcessor2Stream | PipelinedGPUProcessor3Stream
+    ],
+) -> None:
+    """A path that steps through an attribute is matched but never written."""
+    config = gpu_processor_class.Config()
+    config.processors.append(PassthroughProcessor.Config())
+    config.input_spec = {"outer.inner.value": _times_ten}
+    config.input_require_tensor = False
+    inner = {"value": 3}
+    outer = _Holder(4)
+    outer.inner = inner
+
+    with patch("torch.cuda.is_available", return_value=False):
+        processor = _make(gpu_processor_class, config)
+        result = list(processor(iter([{"outer": outer}])))
+
+    assert result[0] == {"outer": outer}
+    assert inner == {"value": 3}
+
+
 def test_3stream_enters_each_phase_on_its_own_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -863,6 +885,7 @@ def _record_entry(
 class _Holder:
     def __init__(self, value: int) -> None:
         self.value = value
+        self.inner: dict[str, int] = {}
 
 
 def test_inference_mode() -> None:

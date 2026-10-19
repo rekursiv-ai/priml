@@ -871,6 +871,29 @@ def test_train_raises_when_no_finite_stop_condition() -> None:
         config.make()
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "max_steps",
+        "max_epochs",
+        "max_time",
+        "max_eval_time",
+        "num_steps_eval",
+        "num_steps_garbage_collect",
+    ],
+)
+def test_construction_rejects_a_nan_limit(name: str) -> None:
+    config = TrainLoop.Config(
+        step=_eval_only_step_config(),
+        dataset=_BinaryDataset.Config(),
+    )
+    config.max_steps = 3
+    setattr(config, name, math.nan)
+
+    with pytest.raises(ValueError, match=f"^{name} must not be NaN"):
+        config.make()
+
+
 def _resume_table_config(checkpoint_dir: Path):
     """Return a minimal trainable config writing into ``checkpoint_dir``."""
     cfg = TrainLoop.Config(
@@ -2913,6 +2936,23 @@ def test_cpu_timing_metric_does_not_synchronize_an_accelerator(
         loop._destroy_runtime_once()
 
 
+def test_device_timing_synchronizes_the_runtime_device_around_each_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_step_logging_loop_config()
+    loop = config.make()
+    calls: list[torch.device] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", calls.append)
+    loop._requires_device_timing = True
+    try:
+        loop._do_train_step(
+            {"media": torch.randn(4, 2), "label": torch.zeros(4, dtype=torch.long)},
+        )
+        assert calls == [loop.runtime.device, loop.runtime.device]
+    finally:
+        loop._destroy_runtime_once()
+
+
 @pytest.mark.gpu_torch_cuda
 def test_loop_without_device_timing_metric_does_not_synchronize(
     monkeypatch: pytest.MonkeyPatch,
@@ -3338,6 +3378,34 @@ class _LegacyFetchingLoop(TrainLoop):
             return super()._get_next_batch()
         finally:
             self._training = True
+
+
+class _ClosingDuringTrainLoop(TrainLoop):
+    class Config(Makes["_ClosingDuringTrainLoop"], TrainLoop.Config):
+        pass
+
+    @override
+    def _get_next_batch(self) -> dict[str, object]:
+        self.close()
+        return super()._get_next_batch()
+
+
+def test_close_refuses_while_train_is_active() -> None:
+    config = _ClosingDuringTrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_ScopedEvalDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_epochs = 1
+    config.num_steps_eval = 0
+    config.eval_every_epoch = False
+    loop = config.make()
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Cannot close a TrainLoop while train\(\) is active\.$",
+    ):
+        loop.train()
+    assert loop.local_step == 0
 
 
 def test_legacy_epoch_fetch_override_cannot_train_past_cap() -> None:
@@ -5372,6 +5440,29 @@ def test_phase_heartbeat_uses_fault_dump_interval_verbatim(
     ):
         pass
     assert armed == [23.0]
+
+
+def test_phase_heartbeat_rejects_a_fault_dump_inside_the_interval() -> None:
+    with (
+        pytest.raises(ValueError, match=r"^fault_dump_interval_sec must exceed"),
+        _phase_heartbeat("p", interval_sec=17.0, fault_dump_interval_sec=17.0),
+    ):
+        pass
+
+
+def test_phase_heartbeat_disables_the_fault_dump_at_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed: list[float] = []
+
+    def arm(timeout: float, **kwargs: object) -> None:
+        del kwargs
+        armed.append(timeout)
+
+    monkeypatch.setattr(faulthandler, "dump_traceback_later", arm)
+    with _phase_heartbeat("p", interval_sec=17.0, fault_dump_interval_sec=0.0):
+        pass
+    assert armed == []
 
 
 class _FakeCudaEvent:

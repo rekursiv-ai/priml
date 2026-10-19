@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.sudoku import harvest
 from priml.baselines.sudoku.harvest import (
     Harvest,
     _exhaustive_pin_trace,
@@ -26,6 +27,7 @@ from priml.testing.bfb import host_agnostic_numerics
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from priml.baselines.sudoku.latent_recursion import LatentRecursion
@@ -290,6 +292,55 @@ def test_harvest_publishes_the_corpus_training_froze(tmp_path: Path) -> None:
         random_corruption_strengths=(1,),
         random_starts_per_strength=1,
     )
+
+
+def _short_trace(
+    rollout: Callable[[Tensor, Tensor], LearnedCheckpointRollout],
+    *,
+    media: Tensor,
+    base_logits: Tensor,
+    active: Tensor,
+    depth: int,
+    candidates: int,
+    cell_attempts: int,
+    budget: int,
+    max_rows: int,
+    checkpoint_count: int,
+) -> _PinTrace:
+    """Stand in for the HPS census, dropping its last node: one row short a view."""
+    trace = _exhaustive_pin_trace(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=active,
+        depth=depth,
+        candidates=candidates,
+        cell_attempts=cell_attempts,
+        budget=budget,
+        max_rows=max_rows,
+        checkpoint_count=checkpoint_count,
+    )
+    return _PinTrace(
+        puzzle_rows=trace.puzzle_rows[:-1],
+        node_index=trace.node_index[:-1],
+        boards=trace.boards[:-1],
+        q_scores=trace.q_scores[:-1],
+        predictions=trace.predictions[:-1],
+    )
+
+
+def test_harvest_refuses_a_census_short_of_rows_per_view(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = Harness(tmp_path, train=False)
+    write_dataset(stored.data)
+    source = stored.generator("gen_a", seed=0)
+    monkeypatch.setattr(harvest, "_exhaustive_pin_trace", _short_trace)
+    live = Harness(tmp_path / "live", train=True)
+    live.scratch = tmp_path
+    with pytest.raises(ValueError, match="exactly rows_per_view rows"):
+        live.harvest(source)
 
 
 def test_harvest_needs_a_source_checkpoint() -> None:

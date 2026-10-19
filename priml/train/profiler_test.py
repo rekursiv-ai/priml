@@ -1235,6 +1235,15 @@ class TestPhaseTimerCudaPaths:
         assert summary["outer"] >= summary["outer/inner"]
         assert timer._self_phases["outer"] <= summary["outer"] - summary["outer/inner"]
 
+    def test_phases_closed_out_of_order_raise(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        outer = timer.measure("outer")
+        inner = timer.measure("inner")
+        outer.__enter__()
+        inner.__enter__()
+        with pytest.raises(ValueError, match=r"^Expected popped is frame\.$"):
+            outer.__exit__(None, None, None)
+
 
 class TestTorchProfilerCleanup:
     def test_completed_window_cleanup_does_not_stop_again(

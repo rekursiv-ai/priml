@@ -501,6 +501,20 @@ def test_sequence_conv1d_config_adopts_explicit_child_widths() -> None:
     assert (config.conv.channels_in, config.conv.channels_out) == (3, 4)
 
 
+@pytest.mark.parametrize(
+    ("channels_in", "channels_out"),
+    [(3, -1), (-1, 3)],
+)
+def test_sequence_conv1d_pushes_one_wrapper_width_to_both_sides(
+    channels_in: int,
+    channels_out: int,
+) -> None:
+    config = SequenceConv1d.Config(channels_in, channels_out).finalize()
+
+    assert (config.channels_in, config.channels_out) == (3, 3)
+    assert (config.conv.channels_in, config.conv.channels_out) == (3, 3)
+
+
 def test_sequence_conv1d_rejects_conflicting_wrapper_and_child_widths() -> None:
     """Reject explicit child widths that disagree with the wrapper."""
     config = SequenceConv1d.Config(

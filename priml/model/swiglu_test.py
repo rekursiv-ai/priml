@@ -30,6 +30,7 @@ from priml.model.norm import RMSNorm
 from priml.model.swiglu import (
     SwiGLU,
     SwiGLUReluSquared,
+    elu,
     gelu,
     relu,
     relu_squared,
@@ -63,6 +64,14 @@ def test_exact_gelu_keeps_native_values_gradients_and_attached_cost(
     assert execution["flops", "primal"].sum() == 5 * value.numel()
     assert execution["flops", "adjoint"].sum() == 11 * value.numel()
     assert from_plain(to_plain(gelu), object, allow_imports=True) is gelu
+
+
+def test_elu_keeps_native_values_and_attached_cost() -> None:
+    value = torch.tensor([-3.0, -0.125, 0.0, 2.0])
+    assert torch.equal(elu(value), nn.functional.elu(value))
+    execution = cost(elu, channels=value.numel(), dtype=torch.float32)
+    assert execution["flops", "primal"].sum() == 3 * value.numel()
+    assert execution["flops", "adjoint"].sum() == 3 * value.numel()
 
 
 def test_costed_activation_round_trips_as_an_imported_function() -> None:
@@ -220,6 +229,47 @@ def test_swiglu_injects_projections_and_sequence_mixer() -> None:
         "down_proj.weight",
         "down_proj.bias",
     ]
+
+
+@pytest.mark.parametrize(("gate", "up_width"), [(True, 10), (False, 5)])
+def test_swiglu_finalize_sizes_injected_projections(
+    *,
+    gate: bool,
+    up_width: int,
+) -> None:
+    config = SwiGLU.Config(
+        channels_in=3,
+        channels_out=4,
+        channels_hidden=5,
+        gate=gate,
+        up_proj=Linear.Config(),
+        down_proj=Linear.Config(),
+    ).finalize()
+
+    assert isinstance(config.up_proj, Linear.Config)
+    assert isinstance(config.down_proj, Linear.Config)
+    assert (config.up_proj.channels_in, config.up_proj.channels_out) == (3, up_width)
+    assert (config.down_proj.channels_in, config.down_proj.channels_out) == (5, 4)
+
+
+def test_swiglu_reset_reinitializes_the_middle_mixer() -> None:
+    config = SwiGLU.Config(channels_in=3, channels_hidden=5)
+    config.middle = SequenceConv1d.Config(conv=Conv1d.Config(kernel_size=1, padding=0))
+    module = config.make()
+    assert isinstance(module.middle, SequenceConv1d)
+    weight = module.middle.conv.weight
+    with torch.no_grad():
+        weight.zero_()
+
+    module.reset_parameters()
+
+    assert torch.count_nonzero(weight)
+
+
+def test_shifted_relu_squared_shifts_before_squaring() -> None:
+    x = torch.tensor([-1.0, 0.5, 0.75, 2.0])
+    actual = shifted_relu_squared(x, threshold=0.75)
+    assert torch.equal(actual, torch.tensor([0.0, 0.0, 0.0, 1.5625]))
 
 
 def test_swiglu_sequence_mixer_can_change_hidden_width() -> None:

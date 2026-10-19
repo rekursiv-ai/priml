@@ -26,11 +26,13 @@ from priml.baselines.craftax.ghosts.endings import (
     unlocked_at,
 )
 from priml.baselines.craftax.world_model.archive import (
+    Episode,
     FloorTrace,
     Receipt,
     Record,
     ReplayEpisode,
     write_replay_shard,
+    write_shard,
 )
 from priml.baselines.craftax.world_model.capture.seeds import TRAIN, VALIDATION
 from priml.baselines.craftax.world_model.capture.worker import shard_directory
@@ -127,6 +129,25 @@ def test_a_claimed_win_is_timed_by_replay_from_the_last_floor(
         Ending(ordinal=1, decisions=50, outcome="death", end=50),
         Ending(ordinal=2, decisions=30, outcome="timeout", end=30),
     ]
+
+
+def test_a_frame_shard_without_a_floor_trace_is_refused(tmp_path: Path) -> None:
+    record = _record(3)
+    directory = shard_directory(tmp_path, split=TRAIN, arm=3, worker=0)
+    directory.mkdir(parents=True)
+    episode = Episode(
+        receipt=record.receipt,
+        actions=record.actions,
+        hashes=record.hashes,
+        cells=torch.zeros(3, 99, 8, dtype=torch.uint8),
+        aux=torch.zeros(3, 51, dtype=torch.int16),
+        reward=torch.zeros(3, dtype=torch.int16),
+        done=torch.zeros(3, dtype=torch.bool),
+        summary={"episode": 0, "death": 0, "achievements": []},
+    )
+    write_shard(directory, index=0, episodes=[episode], provenance={})
+    with pytest.raises(ValueError, match=r"summary\.floors"):
+        episode_endings(tmp_path, arm=3)
 
 
 def test_summary_counts_endings_within_the_limit_and_their_quantiles() -> None:

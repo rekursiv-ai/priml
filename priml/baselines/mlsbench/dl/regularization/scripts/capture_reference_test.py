@@ -17,11 +17,11 @@ from priml.baselines.mlsbench.dl.regularization import reference, upstream
 from priml.baselines.mlsbench.dl.regularization.scripts import capture_reference
 from priml.baselines.mlsbench.dl.regularization.upstream_test import write_clone
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as shared,
+    capture_reference as vision_capture_reference,
 )
 from priml.testing.golden import read_tensors
 
@@ -56,7 +56,7 @@ def stand_in_lockstep(
     states: list[dict[str, Tensor]],
 ) -> dict[str, Tensor]:
     """Stand in for a port lockstep: a one-tensor state per update, a loss."""
-    states += [{"w": torch.ones(2)} for _ in range(vision.STEPS)]
+    states += [{"w": torch.ones(2)} for _ in range(vision_reference.STEPS)]
     return {f"{name}/loss": torch.ones(2)}
 
 
@@ -67,7 +67,7 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
     """Every run is a stand-in; the runs themselves are tested elsewhere."""
     scripts = dict.fromkeys(reference.REGULARIZERS, object())
     zero = {"w": torch.zeros(2)}
-    lockstep: vision_upstream.Lockstep = ({}, [zero] * vision.STEPS)
+    lockstep: vision_upstream.Lockstep = ({}, [zero] * vision_reference.STEPS)
     batch = {"media": torch.zeros(2), "label": torch.arange(2)}
     moved = {"media": torch.ones(2), "label": torch.arange(2)}
     tiny = torch.nn.Linear(2, 3)
@@ -81,22 +81,22 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
         (upstream, "upstream_record"): {"regularizer/x": torch.zeros(2)},
         (reference, "setting_batch_size"): torch.ones(2),
         (vision_upstream, "upstream_batches"): ([[batch]], [[batch]]),
-        (shared, "compare_wiring"): ["wiring: differs"],
-        (shared, "compare_full_size"): ["state: 1 tensors against 2"],
+        (vision_capture_reference, "compare_wiring"): ["wiring: differs"],
+        (vision_capture_reference, "compare_full_size"): ["state: 1 tensors against 2"],
         (reference, "port_record"): {
             "regularizer/x": torch.ones(2),
             "setting/batch_size": torch.ones(2),
         },
-        (vision, "loader_batches"): ([[moved]], [[batch]]),
+        (vision_reference, "loader_batches"): ([[moved]], [[batch]]),
         (upstream, "upstream_setting_recipe"): {"settings/s/recipe": torch.zeros(2)},
-        (shared, "compare_setting"): [],
+        (vision_capture_reference, "compare_setting"): [],
         (upstream, "tiny_network"): tiny,
         (reference, "tiny_network"): tiny,
         (upstream, "upstream_setting_regularizers"): {},
-        (vision, "decode_batches"): {"loader/index": torch.zeros(2)},
-        (vision, "setting_batches"): ([[batch]], [[batch]]),
+        (vision_reference, "decode_batches"): {"loader/index": torch.zeros(2)},
+        (vision_reference, "setting_batches"): ([[batch]], [[batch]]),
         (reference, "settings_record"): {},
-        (vision, "task_settings_record"): {},
+        (vision_reference, "task_settings_record"): {},
     }
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, returning(value))
@@ -105,7 +105,7 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
     monkeypatch.setattr(reference, "setting_lockstep_record", stand_in_lockstep)
     captured = capture_reference.capture(tmp_path, tmp_path)
     settings = list(reference.SETTING_REGULARIZERS)
-    fmnist = [s for s in settings if vision.SETTINGS[s].dataset != "cifar100"]
+    fmnist = [s for s in settings if vision_reference.SETTINGS[s].dataset != "cifar100"]
     assert set(captured.record) == {
         "regularizer/x",
         "setting/batch_size",
@@ -124,7 +124,7 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
         *(
             f"lockstep/{name}/{step}: w: 2/2 differ"
             for name in reference.REGULARIZERS
-            for step in range(1, vision.STEPS + 1)
+            for step in range(1, vision_reference.STEPS + 1)
         ),
         "loader/train/0: 0/media: 2/2 differ",
         *(f"settings/{s}/wiring: differs" for s in settings),
@@ -133,7 +133,7 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
             f"lockstep/{s}/{name}/{step}: w: 2/2 differ"
             for s in settings
             for name in reference.REGULARIZERS
-            for step in range(1, vision.STEPS + 1)
+            for step in range(1, vision_reference.STEPS + 1)
         ),
     ]
 
@@ -159,7 +159,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = vision.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -175,7 +175,7 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     tmp_path: Path,
 ) -> None:
     record = {"x": torch.arange(3)}
-    result = vision.Captured(record=record, sites={}, report=[])
+    result = vision_reference.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]

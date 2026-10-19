@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, Self, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, Self, cast, override
 
 import contextlib
 import fcntl
 import functools
 import math
+import os
 import subprocess
 import sys
 import textwrap
@@ -33,6 +34,7 @@ from priml.testing.golden import (
     assert_tensor_golden_part,
     assert_text_golden,
     expect_golden_mismatch,
+    flatten_record,
     joined,
     mismatches,
     put_steps,
@@ -41,6 +43,10 @@ from priml.testing.golden import (
     stored,
     write_tensors,
 )
+
+
+_THIS: Final = Path(__file__).resolve()
+_CWD: Final = _THIS.parent
 
 
 class _Load(Protocol):
@@ -479,6 +485,21 @@ def test_stored_detaches_and_copies() -> None:
     assert copy.data_ptr() != value.data_ptr()
 
 
+def test_flatten_record_walks_nested_state_and_skips_named_keys() -> None:
+    leaf = torch.ones(2)
+    value = {"a": [leaf, 3, 0.5, None], "b": {"c": True, "initial_lr": 1}}
+    record = flatten_record(value, prefix="p", skip={"initial_lr"})
+    assert list(record) == ["p/a/0", "p/a/1", "p/a/2", "p/b/c"]
+    assert record["p/a/0"] is not leaf
+    assert [record[k].dtype for k in list(record)[1:]] == [
+        torch.int64,
+        torch.float32,
+        torch.bool,
+    ]
+    with pytest.raises(TypeError, match="Unsupported record value: str"):
+        flatten_record({"x": "no"}, prefix="p")
+
+
 def test_put_steps_stacks_uniform_quantities() -> None:
     out: dict[str, Tensor] = {}
     put_steps(
@@ -723,13 +744,28 @@ def test_a_golden_part_waits_for_the_lock_another_writer_holds(tmp_path: Path) -
         args=(path, done),
         daemon=True,
     )
-    with golden._part_lock().open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with golden.locked_directory(tmp_path):
         writer.start()
         assert not done.wait(0.05)
     writer.join(timeout=5)
     assert done.is_set()
     assert read_tensors(path).keys() == {"a/x"}
+
+
+def test_a_directory_lock_leaves_no_file_another_user_could_own(tmp_path: Path) -> None:
+    with golden.locked_directory(tmp_path):
+        assert list(tmp_path.iterdir()) == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_directory_lock_excludes_a_second_holder(tmp_path: Path) -> None:
+    with golden.locked_directory(tmp_path):
+        descriptor = os.open(tmp_path, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
 
 
 def test_expect_golden_mismatch_blocks_regeneration(
@@ -766,6 +802,17 @@ def test_expect_golden_mismatch_requires_the_message_to_match(
         expect_golden_mismatch(match=r"1 mismatches"),
     ):
         raise AssertionError("different failure")
+
+
+def test_expect_golden_mismatch_fails_when_the_comparison_passes() -> None:
+    with (
+        pytest.raises(
+            AssertionError,
+            match=r"^Expected a golden mismatch, but the comparison passed\.$",
+        ),
+        expect_golden_mismatch(match=r"1 mismatches"),
+    ):
+        pass
 
 
 def test_assert_text_golden_overwrites_only_when_requested(
@@ -1013,6 +1060,19 @@ def test_pinned_random_records_model_initializer_sites() -> None:
         nn.Linear(2, 3)
     assert sum(pins.calls.values()) == 2
     assert all("/linear.py:" in key for key in pins.calls)
+
+
+def test_pinned_random_refuses_a_draw_whose_caller_it_cannot_find(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every frame reads as torch's own, so none names a site to key the draw by.
+    monkeypatch.setattr(golden, "_THIS", _THIS)
+    monkeypatch.setattr(torch, "__file__", str(Path("/").joinpath("torch.py")))
+    with (
+        pytest.raises(ValueError, match=r"^Cannot identify the random primitive's"),
+        PinnedRandom(),
+    ):
+        torch.empty(2).uniform_()
 
 
 def test_pinned_random_preserves_distinct_direct_call_sites() -> None:

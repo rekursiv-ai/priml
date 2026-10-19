@@ -25,6 +25,81 @@ HEIGHT: Final = 5
 WIDTH: Final = 7
 
 
+GRAY_CASES: Final[
+    list[tuple[Callable[[Tensor], Tensor], Callable[[Image.Image], Image.Image]]]
+] = [
+    (
+        lambda x: ops.affine(
+            x,
+            ops.inverse_affine([0, 0], translate=[0, 0], shear=[30.0, 0.0]),
+        ),
+        lambda p: pillow(functional.affine)(
+            p,
+            angle=0.0,
+            translate=[0, 0],
+            scale=1.0,
+            shear=[30.0, 0.0],
+            center=[0, 0],
+        ),
+    ),
+    (
+        lambda x: ops.affine(
+            x,
+            ops.inverse_affine([0, 0], translate=[0, 0], shear=[0.0, -40.0]),
+        ),
+        lambda p: pillow(functional.affine)(
+            p,
+            angle=0.0,
+            translate=[0, 0],
+            scale=1.0,
+            shear=[0.0, -40.0],
+            center=[0, 0],
+        ),
+    ),
+    (
+        lambda x: ops.affine(
+            x,
+            ops.inverse_affine(
+                [WIDTH * 0.5, HEIGHT * 0.5],
+                translate=[3, -2],
+                shear=[0.0, 0.0],
+            ),
+        ),
+        lambda p: pillow(functional.affine)(
+            p,
+            angle=0.0,
+            translate=[3, -2],
+            scale=1.0,
+            shear=[0.0, 0.0],
+        ),
+    ),
+    (lambda x: ops.rotate(x, 17.0), lambda p: p.rotate(17.0)),
+    (lambda x: ops.rotate(x, 180.0), lambda p: p.rotate(180.0)),
+    (
+        lambda x: ops.blend(torch.zeros_like(x), x, 1.6),
+        lambda p: ImageEnhance.Brightness(p).enhance(1.6),
+    ),
+    (
+        lambda x: ops.blend(ops.grayscale(x).expand_as(x), x, 0.4),
+        lambda p: ImageEnhance.Color(p).enhance(0.4),
+    ),
+    (
+        lambda x: ops.blend(ops.smooth(x), x, 1.6),
+        lambda p: ImageEnhance.Sharpness(p).enhance(1.6),
+    ),
+    (ops.smooth, lambda p: p.filter(ImageFilter.SMOOTH)),
+    (lambda x: ops.grayscale(x)[None], lambda p: p.convert("L")),
+    (lambda x: ops.posterize(x, 3), lambda p: ImageOps.posterize(p, 3)),
+    (
+        lambda x: ops.solarize(x, 127.5),
+        lambda p: pillow(functional.solarize)(p, 127.5),
+    ),
+    (ops.autocontrast, ImageOps.autocontrast),
+    (ops.equalize, ImageOps.equalize),
+]
+"""Each Pillow operation the policies reach, and the port's, on an ``L`` image."""
+
+
 def image(seed: int = 0, *, low: int = 0, high: int = 256) -> Tensor:
     """Return a ``(3, HEIGHT, WIDTH)`` uint8 image of random pixels."""
     generator = torch.Generator().manual_seed(seed)
@@ -239,81 +314,6 @@ def test_enhancers_are_blends_from_pillows_degenerate_images() -> None:
         lambda p: ImageEnhance.Sharpness(p).enhance(1.6),
         source,
     )
-
-
-GRAY_CASES: Final[
-    list[tuple[Callable[[Tensor], Tensor], Callable[[Image.Image], Image.Image]]]
-] = [
-    (
-        lambda x: ops.affine(
-            x,
-            ops.inverse_affine([0, 0], translate=[0, 0], shear=[30.0, 0.0]),
-        ),
-        lambda p: pillow(functional.affine)(
-            p,
-            angle=0.0,
-            translate=[0, 0],
-            scale=1.0,
-            shear=[30.0, 0.0],
-            center=[0, 0],
-        ),
-    ),
-    (
-        lambda x: ops.affine(
-            x,
-            ops.inverse_affine([0, 0], translate=[0, 0], shear=[0.0, -40.0]),
-        ),
-        lambda p: pillow(functional.affine)(
-            p,
-            angle=0.0,
-            translate=[0, 0],
-            scale=1.0,
-            shear=[0.0, -40.0],
-            center=[0, 0],
-        ),
-    ),
-    (
-        lambda x: ops.affine(
-            x,
-            ops.inverse_affine(
-                [WIDTH * 0.5, HEIGHT * 0.5],
-                translate=[3, -2],
-                shear=[0.0, 0.0],
-            ),
-        ),
-        lambda p: pillow(functional.affine)(
-            p,
-            angle=0.0,
-            translate=[3, -2],
-            scale=1.0,
-            shear=[0.0, 0.0],
-        ),
-    ),
-    (lambda x: ops.rotate(x, 17.0), lambda p: p.rotate(17.0)),
-    (lambda x: ops.rotate(x, 180.0), lambda p: p.rotate(180.0)),
-    (
-        lambda x: ops.blend(torch.zeros_like(x), x, 1.6),
-        lambda p: ImageEnhance.Brightness(p).enhance(1.6),
-    ),
-    (
-        lambda x: ops.blend(ops.grayscale(x).expand_as(x), x, 0.4),
-        lambda p: ImageEnhance.Color(p).enhance(0.4),
-    ),
-    (
-        lambda x: ops.blend(ops.smooth(x), x, 1.6),
-        lambda p: ImageEnhance.Sharpness(p).enhance(1.6),
-    ),
-    (ops.smooth, lambda p: p.filter(ImageFilter.SMOOTH)),
-    (lambda x: ops.grayscale(x)[None], lambda p: p.convert("L")),
-    (lambda x: ops.posterize(x, 3), lambda p: ImageOps.posterize(p, 3)),
-    (
-        lambda x: ops.solarize(x, 127.5),
-        lambda p: pillow(functional.solarize)(p, 127.5),
-    ),
-    (ops.autocontrast, ImageOps.autocontrast),
-    (ops.equalize, ImageOps.equalize),
-]
-"""Each Pillow operation the policies reach, and the port's, on an ``L`` image."""
 
 
 @pytest.mark.parametrize(

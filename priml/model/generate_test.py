@@ -425,6 +425,16 @@ def test_generate_rejects_a_block_without_cache_argument() -> None:
         )
 
 
+def test_generate_rejects_a_model_without_an_embedding_table() -> None:
+    with pytest.raises(TypeError, match="proj_in with embedding weights"):
+        generate(
+            model=_TransformerWithoutEmbedding(),
+            prompt_ids=torch.tensor([[0, 1]]),
+            max_new_tokens=1,
+            max_seq_len=4,
+        )
+
+
 def test_generate_returns_prompt_when_no_tokens_requested() -> None:
     model = _Transformer()
     prompt = torch.tensor([[0, 1]])
@@ -615,6 +625,18 @@ class _TransformerWithBlock(nn.Module):
         super().__init__()
         self.proj_in = _Lookup()
         self.blocks = nn.ModuleList([block])
+
+    def project_to_logits(self, hidden: Tensor, /) -> Tensor:
+        return torch.zeros(*hidden.shape[:-1], 4)
+
+
+class _TransformerWithoutEmbedding(nn.Module):
+    """A model whose input projection is absent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj_in = None
+        self.blocks = nn.ModuleList([_Block()])
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:
         return torch.zeros(*hidden.shape[:-1], 4)

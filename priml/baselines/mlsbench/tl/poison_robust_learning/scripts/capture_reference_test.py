@@ -16,11 +16,11 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.tl.poison_robust_learning import (
-    reference as port,
+    reference,
     upstream,
 )
 from priml.baselines.mlsbench.tl.poison_robust_learning.scripts import (
@@ -81,7 +81,7 @@ def test_capture_assembles_both_sides_into_one_report(
     model = torch.nn.Linear(3, 2)
     initial = upstream.Trace(draws=torch.arange(2), models=[model])
     recipe = upstream.Trace(epochs=[0])
-    traces = _Calls(recipe, *[initial] * len(port.SETTINGS))
+    traces = _Calls(recipe, *[initial] * len(reference.SETTINGS))
     lockstep = _Calls(({"lockstep/x/loss": torch.zeros(2)}, [zero, zero]))
     stand_ins: dict[tuple[object, str], object] = {
         (upstream, "variants"): returning(variants),
@@ -93,8 +93,10 @@ def test_capture_assembles_both_sides_into_one_report(
         ),
         (capture_reference, "compare_initial"): returning_any(["initial: differs"]),
         (upstream, "upstream_lockstep"): lockstep,
-        (port, "port_record"): returning({"loss/x": torch.ones(2)}),
-        (port, "lockstep_record"): stand_in_lockstep,
+        (reference, "port_record"): returning(
+            {"loss/x": torch.ones(2)},
+        ),
+        (reference, "lockstep_record"): stand_in_lockstep,
         (capture_reference, "compare_pristine_run"): returning(["pixels: differ"]),
         (capture_reference, "upstream_sites"): returning({"a": 1}),
         (capture_reference, "port_sites"): returning({"b": 2}),
@@ -108,7 +110,7 @@ def test_capture_assembles_both_sides_into_one_report(
     # ``mismatches`` names the stand-in port's missing keys first, sorted.
     assert captured.report == [
         "recipe: differs",
-        *["initial: differs"] * len(port.SETTINGS),
+        *["initial: differs"] * len(reference.SETTINGS),
         *(f"missing {key}" for key in ("lockstep/x/loss", "settings/x/train")),
         "loss/x: 2/2 differ",
         *(
@@ -126,9 +128,11 @@ def test_capture_assembles_both_sides_into_one_report(
         "split": first["split"],
         "serial": True,
     }
-    assert [kwargs["stop"] for _, kwargs in settings] == [True] * len(port.SETTINGS)
+    assert [kwargs["stop"] for _, kwargs in settings] == [True] * len(
+        reference.SETTINGS,
+    )
     assert [args[1] for args, _ in settings] == [
-        upstream.recipe_argv(setting) for setting, _ in port.SETTINGS.values()
+        upstream.recipe_argv(setting) for setting, _ in reference.SETTINGS.values()
     ]
     assert [args[1] for args, _ in lockstep.calls] == list(variants)
 
@@ -156,26 +160,28 @@ def test_the_upstream_record_holds_every_fixed_input_quantity(
 ) -> None:
     recipe = upstream.Trace(
         rates=[0.1, 0.05],
-        settings=dict.fromkeys(reference.HYPERPARAMETERS, 0.5),
+        settings=dict.fromkeys(vision_reference.HYPERPARAMETERS, 0.5),
     )
     record = capture_reference.upstream_record(stand_in, recipe)
-    flip = port.flip_record()
+    flip = reference.flip_record()
     assert mismatches({k: record[k] for k in flip}, flip) == []
     assert torch.equal(record["flip/items"], flip["flip/labels"])
     # The stand-in's evaluations are the driver's, so they score as the port does.
     assert (
         mismatches(
             {k: record[k] for k in ("evaluate/test_acc", "evaluate/poison_fit")},
-            port.evaluate_record(),
+            reference.evaluate_record(),
         )
         == []
     )
     assert record["recipe/lr"].tolist() == [0.1, 0.05]
-    assert record["recipe/optimizer"].tolist() == [0.5] * len(reference.HYPERPARAMETERS)
+    assert record["recipe/optimizer"].tolist() == [0.5] * len(
+        vision_reference.HYPERPARAMETERS,
+    )
     assert {k for k in record if k.startswith("loss/")} == {
         f"loss/{name}/{case}/{kind}"
         for name in stand_in
-        for case in port.loss_cases()
+        for case in reference.loss_cases()
         for kind in ("value", "grad")
     }
 
@@ -187,8 +193,8 @@ def loader_kwargs(*, shuffle: bool, workers: int, batch: int) -> dict[str, objec
 
 def test_a_recipe_run_like_the_ports_reports_nothing() -> None:
     trace = upstream.Trace(
-        epochs=list(range(port.EPOCHS)),
-        t_max=port.EPOCHS,
+        epochs=list(range(reference.EPOCHS)),
+        t_max=reference.EPOCHS,
         loaders=[
             loader_kwargs(shuffle=shuffle, workers=4, batch=128)
             for shuffle in (True, False, False)
@@ -216,7 +222,7 @@ def test_every_way_a_recipe_run_can_differ_is_named() -> None:
 def test_the_initial_run_compares_the_flip_and_the_state(
     stand_in: dict[str, upstream.Script],
 ) -> None:
-    setting, factory = port.SETTINGS["exp000"]
+    setting, factory = reference.SETTINGS["exp000"]
     trace = upstream.trace_main(
         stand_in["pristine"],
         upstream.recipe_argv(setting),
@@ -227,7 +233,7 @@ def test_the_initial_run_compares_the_flip_and_the_state(
     )
     report = capture_reference.compare_initial(trace, key="exp000", factory=factory)
     # The stand-in flips as the driver does but builds a two-layer network.
-    ours = len(reference.full_step(factory).model.state_dict())
+    ours = len(vision_reference.full_step(factory).model.state_dict())
     assert report == [f"settings/exp000/state: state: {ours} tensors against 4"]
 
 
@@ -240,6 +246,17 @@ def test_the_pristine_run_compares_pixels_and_generators(
     # Python's and NumPy's generators and never draws from them.
     assert report
     assert all(line.startswith("evaluate/media/") for line in report)
+
+
+def test_a_pristine_run_that_never_finished_is_refused(
+    stand_in: dict[str, upstream.Script],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A run ended before ``main`` returned records no generator states.
+    monkeypatch.setattr(upstream, "trace_main", returning_any(upstream.Trace()))
+    with pytest.raises(ValueError, match="Expected after is not None"):
+        capture_reference.compare_pristine_run(stand_in["pristine"], tmp_path)
 
 
 def test_a_pristine_run_that_draws_from_python_and_numpy_is_named(
@@ -274,7 +291,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     monkeypatch.setattr(
@@ -292,7 +309,7 @@ def test_main_writes_the_golden_and_the_sites(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(
+    result = vision_reference.Captured(
         record={"x": torch.arange(3)},
         sites={"port": {"a@b.py:c": 2}},
         report=[],

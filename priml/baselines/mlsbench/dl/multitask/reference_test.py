@@ -7,8 +7,9 @@ edit produced, written by ``scripts/capture_reference.py``. Equality is exact.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, override
 
+from torch import nn
 from treekle import from_plain
 
 import pytest
@@ -16,7 +17,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.multitask import reference
 from priml.baselines.mlsbench.dl.multitask.data import COARSE_OF_FINE
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
@@ -63,7 +64,7 @@ def test_the_superclass_map_matches_the_script() -> None:
 
 def test_the_schedule_and_best_accuracy_match_the_script() -> None:
     assert_exact(stored("schedule/"), reference.schedule_record())
-    assert_exact(stored("best/"), vision.best_record())
+    assert_exact(stored("best/"), vision_reference.best_record())
 
 
 @pytest.mark.parametrize("name", list(reference.COMBINATIONS))
@@ -74,7 +75,7 @@ def test_two_updates_with_each_combination_match_the_script(name: str) -> None:
 def test_lockstep_hands_back_the_state_after_each_update() -> None:
     states: list[dict[str, torch.Tensor]] = []
     _ = reference.lockstep_record("sum", states=states)
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(
         states[0]["trunk.head.weight"],
         states[1]["trunk.head.weight"],
@@ -83,7 +84,7 @@ def test_lockstep_hands_back_the_state_after_each_update() -> None:
 
 def test_the_loader_batches_carry_superclasses(tmp_path: Path) -> None:
     train, evaluation = reference.loader_batches(tmp_path)
-    assert len(train) == len(evaluation) == vision.LOADER_PASSES
+    assert len(train) == len(evaluation) == vision_reference.LOADER_PASSES
     for batch in train[0]:
         labels = from_plain(batch["label"].tolist(), list[int])
         expected = [COARSE_OF_FINE[c] for c in labels]
@@ -159,7 +160,7 @@ def test_each_settings_full_networks_and_recipe_match_the_script(
 
 def shallow_step(factory: Callable[[], MultiTaskTrainLoop]) -> MultiTaskStep:
     """Build ``factory``'s step at its lockstep size, in place of the full one."""
-    return reference.tiny_step(factory, epochs=vision.EPOCHS)
+    return reference.tiny_step(factory, epochs=vision_reference.EPOCHS)
 
 
 def placeholder_record(setting: str) -> dict[str, torch.Tensor]:
@@ -200,7 +201,7 @@ def test_the_port_record_joins_every_component_and_each_lockstep(
     )
     for name in components:
         monkeypatch.setattr(reference, name, named_record(name))
-    monkeypatch.setattr(vision, "best_record", named_record("best_record"))
+    monkeypatch.setattr(vision_reference, "best_record", named_record("best_record"))
     monkeypatch.setattr(reference, "lockstep_record", placeholder_record)
     record = reference.port_record()
     assert list(record) == [
@@ -210,6 +211,33 @@ def test_the_port_record_joins_every_component_and_each_lockstep(
         *reference.COMBINATIONS,
     ]
     assert torch.equal(record["data/coarse_of_fine"], torch.tensor(COARSE_OF_FINE))
+
+
+class _Sum(nn.Module):
+    """A combination that adds its two losses."""
+
+    @override
+    def forward(
+        self,
+        loss_fine: torch.Tensor,
+        loss_coarse: torch.Tensor,
+        epoch: int,
+        total_epochs: int,
+    ) -> torch.Tensor:
+        del epoch, total_epochs
+        return loss_fine + loss_coarse
+
+
+def test_the_spy_runs_before_first_on_the_first_fine_loss_only() -> None:
+    seen: list[torch.Tensor] = []
+    spy = reference.CombinationSpy(_Sum(), before_first=seen.append)
+    first, second = torch.tensor(1.0), torch.tensor(2.0)
+    assert spy(first, torch.tensor(10.0), 0, 5).item() == 11.0
+    assert spy(second, torch.tensor(20.0), 1, 5).item() == 22.0
+    assert len(seen) == 1
+    assert seen[0] is first
+    assert [loss.item() for loss in spy.losses] == [11.0, 22.0]
+    assert spy.epochs == [[0, 5], [1, 5]]
 
 
 def test_settings_record_joins_every_setting(monkeypatch: pytest.MonkeyPatch) -> None:

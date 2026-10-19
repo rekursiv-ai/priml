@@ -11,12 +11,18 @@ Run regeneration through pytest so Priml's deterministic math setup applies.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, override
+
+import math
+
+from configgle import Makes
+from torch import Tensor
 
 import pytest
 import torch
 
 from priml.cost import cost
+from priml.math import gated_delta_rule
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.special import Identity
 from priml.testing.bfb import (
@@ -158,6 +164,127 @@ def test_gated_delta_net_never_initializes_a_closed_gate():
     for _ in range(20):
         model.reset_parameters()
         assert bool(torch.isfinite(model.A_log).all())
+
+
+class _Ungated(GatedDeltaNet):
+    """The base forward under a config that declines the output gate."""
+
+    class Config(Makes["_Ungated"], GatedDeltaNet.Config):
+        @override
+        def uses_output_gate(self) -> bool:
+            return False
+
+
+def test_gated_delta_net_forward_requires_the_output_gate() -> None:
+    model = _Ungated.Config(
+        channels_in=8,
+        num_heads_k=1,
+        num_heads_v=1,
+        channels_k_head=2,
+        channels_v_head=2,
+    ).make()
+    assert model.proj_z is None
+    with pytest.raises(ValueError, match="requires an output gate projection"):
+        model(torch.randn(2, 3, 8))
+
+
+def test_default_decay_init_is_the_log_of_a_draw_from_zero_to_sixteen() -> None:
+    torch.manual_seed(0)
+    weight = torch.empty(4096)
+
+    GatedDeltaNet.Config().init_decay(weight)
+
+    assert float(weight.max()) <= math.log(16)
+    assert float(weight.max()) > math.log(15.9)
+    assert float(weight.min()) < math.log(0.1)
+
+
+@pytest.mark.gpu_triton
+# fla's NSA module warns and falls back to its own kernels when flash_attn is absent.
+@pytest.mark.filterwarnings("ignore:Flash Attention is not installed:ImportWarning")
+def test_gated_delta_net_cuda_kernel_matches_the_torch_fallback() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    torch.manual_seed(0)
+    model = GatedDeltaNet.Config(
+        channels_in=16,
+        num_heads_k=2,
+        num_heads_v=4,
+        channels_k_head=16,
+        channels_v_head=8,
+    ).make()
+    x = torch.randn(2, 5, 16)
+    with torch.no_grad():
+        expected = model(x)
+        actual = model.cuda()(x.cuda()).cpu()
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
+
+
+class _CudaInput(Tensor):
+    """CPU storage with the CUDA flag set, to reach the fla dispatch."""
+
+    is_cuda = True
+
+
+def test_gated_delta_net_routes_cuda_input_through_the_fla_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = GatedDeltaNet.Config(
+        channels_in=8,
+        num_heads_k=1,
+        num_heads_v=2,
+        channels_k_head=2,
+        channels_v_head=2,
+    ).make()
+    x = torch.randn(2, 3, 8)
+    calls: list[dict[str, object]] = []
+
+    def fla_kernel(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        *,
+        g: Tensor,
+        beta: Tensor,
+        initial_state: Tensor | None,
+        output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> tuple[Tensor, Tensor | None]:
+        calls.append(
+            {
+                "initial_state": initial_state,
+                "output_final_state": output_final_state,
+                "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
+            },
+        )
+        return gated_delta_rule.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+    monkeypatch.setattr(
+        "priml.model.attention.gated_delta_net.chunk_gated_delta_rule",
+        fla_kernel,
+    )
+
+    with torch.no_grad():
+        actual = model(_CudaInput(x))
+        expected = model(x)
+
+    assert calls == [
+        {
+            "initial_state": None,
+            "output_final_state": False,
+            "use_qk_l2norm_in_kernel": True,
+        },
+    ]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

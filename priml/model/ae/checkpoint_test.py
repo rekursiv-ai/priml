@@ -19,6 +19,7 @@ from priml.model.ae.checkpoint import (
     LocalFile,
     UrlFile,
     hub_or_local,
+    read_json,
     read_state,
     sha256_file,
 )
@@ -299,6 +300,12 @@ def test_hub_or_local_names_a_hub_file_when_no_directory_exists(
         filename="config.json",
         revision="0" * 40,
     )
+
+
+def test_read_json_parses_the_object_a_source_names(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    _ = path.write_text('{"hidden": 8, "name": "ae"}')
+    assert read_json(LocalFile.Config(path=path)) == {"hidden": 8, "name": "ae"}
 
 
 if __name__ == "__main__":

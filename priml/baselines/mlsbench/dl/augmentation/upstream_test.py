@@ -24,7 +24,9 @@ from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT as VISION_SCRIPT,
+)
 
 
 if TYPE_CHECKING:
@@ -105,14 +107,14 @@ def get_dataloaders(dataset, data_root, batch_size=128, num_workers=4):
 """
 
 SCRIPT: Final = (
-    LOSS_SCRIPT.replace(
+    VISION_SCRIPT.replace(
         "def compute_loss(logits, targets, config):\n"
         "    return F.cross_entropy(logits, targets)\n",
         TRANSFORM,
     )
     .replace(
-        LOSS_SCRIPT[
-            LOSS_SCRIPT.index("def get_dataloaders") : LOSS_SCRIPT.index(
+        VISION_SCRIPT[
+            VISION_SCRIPT.index("def get_dataloaders") : VISION_SCRIPT.index(
                 "def train_epoch",
             )
         ],

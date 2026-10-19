@@ -40,7 +40,7 @@ import tempfile
 
 from priml.baselines.mlsbench.dl.residual import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -96,7 +96,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -129,9 +129,12 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         lockstep,
         run=reference.lockstep_record,
     )
-    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_loaders(
+        batches,
+        vision_reference.loader_batches(scratch),
+    )
     report += check_branches(record)
-    return vision.Captured(record=record | settings, sites={}, report=report)
+    return vision_reference.Captured(record=record | settings, sites={}, report=report)
 
 
 def capture_settings(
@@ -160,7 +163,7 @@ def capture_settings(
         record[f"settings/{setting}/stochastic_depth/positions"] = (
             upstream.block_positions(scripts["stochastic_depth"], setting)
         )
-        known = vision.SETTINGS[setting]
+        known = vision_reference.SETTINGS[setting]
         trace = vision_upstream.trace_main(
             scripts["basic"],
             arch=known.arch,
@@ -172,7 +175,8 @@ def capture_settings(
             f"settings/{setting}/{line}"
             for line in mismatches(
                 _recipe(trace),
-                vision.schedule_record(factory) | vision.optimizer_record(factory),
+                vision_reference.schedule_record(factory)
+                | vision_reference.optimizer_record(factory),
             )
         ]
         lockstep = {
@@ -242,7 +246,7 @@ def compare_full_network(
     config = reference.VARIANTS[name]().step
     config.parallelism = NoParallel.Config(device="cpu")
     task = cast(upstream.Script, cast(object, script))
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         step = config.make()
         # Built after the port, so a block that reads a class-wide counter in
         # its forward sees this network's count.
@@ -250,14 +254,22 @@ def compare_full_network(
     ours = step.model
     theirs.load_state_dict(trace.state)
     report = capture_reference.compare_states(trace.state, ours.state_dict())
-    media = vision.fixed_media(0)
+    media = vision_reference.fixed_media(0)
     for mode in ("train", "eval"):
         outputs: list[dict[str, Tensor]] = []
         for model in (theirs, ours):
             model.train(mode == "train")
-            with vision.seeded(vision.SEED), host_agnostic_numerics():
+            with (
+                vision_reference.seeded(vision_reference.SEED),
+                host_agnostic_numerics(),
+            ):
                 outputs.append(
-                    {f"forward/{mode}": vision.logits_of(model, media).detach()},
+                    {
+                        f"forward/{mode}": vision_reference.logits_of(
+                            model,
+                            media,
+                        ).detach(),
+                    },
                 )
         report += mismatches(*outputs)
     return [f"full/{name}: {line}" for line in report]
@@ -291,7 +303,7 @@ def _recipe(trace: vision_upstream.MainTrace) -> dict[str, Tensor]:
     return {
         "schedule/lr": torch.tensor(trace.rates, dtype=torch.float64),
         "optimizer/settings": torch.tensor(
-            [trace.settings[name] for name in vision.HYPERPARAMETERS],
+            [trace.settings[name] for name in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
     }

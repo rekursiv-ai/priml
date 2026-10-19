@@ -1,26 +1,16 @@
-"""The presolver must reduce a ConvexTok program exactly as PSLP 0.0.8 does.
+"""``presolve`` must sequence PSLP 0.0.8's main loop over the ``core`` kernels.
 
-cuOpt runs PDLP on the problem PSLP returns, so the reduced program, its objective
-offset and the postsolved primal point are compared bit for bit with PSLP's own,
-recorded while the C library was vendored: the fixture program, small ConvexTok
-programs, and general random LPs (infinite bounds, inequalities, parallel rows and
-columns). The fuzz programs were chosen so that, with the fixture, they execute
-every reachable line of the port; those PSLP proved infeasible or unbounded must
-raise likewise.
-
-The kernels run as the Python Numba compiles (``conftest.py``'s ``kernels``), so
-each test takes milliseconds rather than paying a JIT compile. Only what needs
-the compiled code asks for it: that every kernel compiles and still matches PSLP,
-and that a kernel keeps a single specialization.
+That the reduced program, its offset and the postsolved primal match PSLP's own
+bit for bit is ``core_test``'s golden suite; this file tests the wiring around
+it -- state construction, phase order, sort devices, postsolve validation, the
+32-bit guard -- with the kernels run as Python (``conftest.py``'s ``kernels``).
 """
 
 from collections.abc import Iterator
 from dataclasses import replace
-from pathlib import Path
 from typing import Final, cast
 
 from numpy.typing import NDArray
-from treekle import json_loads
 
 import numpy as np
 import pytest
@@ -34,7 +24,6 @@ from priml.baselines.convextok.presolver.numba_api import (
     set_num_threads,
 )
 from priml.baselines.convextok.presolver.presolve import (
-    Presolved,
     _fast,
     _kernel_array,
     _positions_overflow,
@@ -42,37 +31,16 @@ from priml.baselines.convextok.presolver.presolve import (
     new_state,
     presolve,
 )
-from priml.baselines.convextok.program import LinearProgram, build_program
+from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.convextok.testing import (
     TESTDATA,
-    Candidates,
-    Corpus,
-    Pretokens,
+    fixture_program,
+    input_program,
+    npz,
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
-_TESTDATA: Final = _CWD.parent / "testdata"
 _CPU: Final = torch.device("cpu")
-_ERRORS: Final = {"2": "infeasible", "6": "unbounded"}
-_FUZZ: Final = sorted((_TESTDATA / "presolve_fuzz").glob("*.npz"))
-
-
-def test_presolve_matches_pslp_on_fixture() -> None:
-    with _npz(_TESTDATA / "presolve.npz") as golden:
-        _assert_reduced_like(presolve(fixture_program(), _CPU), golden)
-
-
-def test_postsolve_matches_pslp_on_fixture() -> None:
-    presolved = presolve(fixture_program(), _CPU)
-    with _npz(_TESTDATA / "presolve.npz") as golden:
-        primal = presolved.postsolve(torch.from_numpy(golden["point_x"]))
-        assert torch.equal(primal, torch.from_numpy(golden["post_x"]))
-
-
-@pytest.mark.parametrize("path", [pytest.param(path, id=path.stem) for path in _FUZZ])
-def test_presolve_and_postsolve_match_pslp_on_fuzz_program(path: Path) -> None:
-    _assert_matches_pslp(path)
 
 
 @pytest.fixture
@@ -80,10 +48,8 @@ def two_numba_threads() -> Iterator[None]:
     """Run the parallel kernels on two threads, leaving torch's thread count alone.
 
     Numba sizes its pool to every core, and on these few-row programs the
-    parallel kernels then spend their time synchronizing threads: the compiled
-    sweep below took 2.2-4.4 s at 128 threads and 0.13 s at two (measured on a
-    loaded 128-core host). Two still run each ``prange`` concurrently, and the
-    kernels' results do not depend on the count -- the goldens check that.
+    parallel kernels then spend their time synchronizing threads. Two still run
+    each ``prange`` concurrently.
     """
     # Read first: launching Numba's OpenMP pool, which ``get_num_threads`` does,
     # raises the process's OpenMP thread count to every core, and torch reads
@@ -95,27 +61,6 @@ def two_numba_threads() -> Iterator[None]:
     yield
     set_num_threads(numba_threads)
     torch.set_num_threads(torch_threads)
-
-
-# Compiled, so marked: the first case in a process JIT-compiles every kernel it
-# reaches, about 45 s on x86 with a cold Numba cache. Later cases, and every case
-# under a warm cache, take milliseconds. The fuzz programs with the fixture execute
-# every reachable kernel line, so together these cases compile every kernel the
-# presolve can call.
-@pytest.mark.compute_large_fixture
-@pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
-@pytest.mark.usefixtures("two_numba_threads")
-def test_compiled_kernels_match_pslp_on_fixture() -> None:
-    with _npz(_TESTDATA / "presolve.npz") as golden:
-        _assert_reduced_like(presolve(fixture_program(), _CPU), golden)
-
-
-@pytest.mark.compute_large_fixture
-@pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
-@pytest.mark.parametrize("path", [pytest.param(path, id=path.stem) for path in _FUZZ])
-@pytest.mark.usefixtures("two_numba_threads")
-def test_compiled_kernels_match_pslp_on_fuzz_program(path: Path) -> None:
-    _assert_matches_pslp(path)
 
 
 @pytest.mark.compute_large_fixture
@@ -138,8 +83,8 @@ def test_index_dtypes_share_one_kernel_specialization() -> None:
 def test_index_dtypes_reduce_to_the_same_program() -> None:
     # A 121-entry fuzz program that presolve cuts to 51: the fixture's 2,553
     # entries cost 0.12 s for the two presolves on x86.
-    with _npz(_TESTDATA / "presolve_fuzz" / "general_00801.npz") as golden:
-        wide = _input_program(golden)
+    with npz(TESTDATA / "presolve_fuzz" / "general_00801.npz") as golden:
+        wide = input_program(golden)
     narrow = replace(
         wide,
         crow_indices=wide.crow_indices.int(),
@@ -401,69 +346,6 @@ def test_program_beyond_int32_positions_raises() -> None:
         presolve(program, _CPU)
 
 
-def fixture_program() -> LinearProgram:
-    """Build the eight-document fixture's program from upstream's pretokens."""
-    pretokens = json_loads((TESTDATA / "pretokens.json").read_text(), Pretokens)
-    return build_program(
-        dict(
-            zip(pretokens["pretokens"], pretokens["frequencies"], strict=True),
-        ),
-        json_loads((TESTDATA / "candidates.json").read_text(), Candidates)["tokens"],
-        budget=json_loads((TESTDATA / "corpus.json").read_text(), Corpus)["budget"],
-    ).program
-
-
-def _assert_matches_pslp(path: Path) -> None:
-    """Presolve a fuzz program and postsolve its point as PSLP did, or raise as it did."""
-    with _npz(path) as golden:
-        if "error" in golden.files:
-            # PSLP's status 2 is INFEASIBLE; 6 (UNBNDORINFEAS) comes from its
-            # unboundedness exits.
-            status = str(golden["error"]).removesuffix(").").rsplit("status ", 1)[-1]
-            with pytest.raises(ValueError, match=_ERRORS[status]):
-                presolve(_input_program(golden), _CPU)
-            return
-        presolved = presolve(_input_program(golden), _CPU)
-        _assert_reduced_like(presolved, golden)
-        primal = presolved.postsolve(torch.from_numpy(golden["point_x"]))
-        assert torch.equal(primal, torch.from_numpy(golden["post_x"]))
-
-
-def _assert_reduced_like(presolved: Presolved, golden: np.lib.npyio.NpzFile) -> None:
-    """Assert the reduced program equals PSLP's, array for array and bit for bit."""
-    reduced = presolved.program
-    for got, key in (
-        (reduced.crow_indices, "Ap"),
-        (reduced.col_indices, "Ai"),
-        (reduced.values, "Ax"),
-        (reduced.row_lower, "lhs"),
-        (reduced.row_upper, "rhs"),
-        (reduced.objective, "c"),
-        (reduced.lower, "lbs"),
-        (reduced.upper, "ubs"),
-    ):
-        assert np.array_equal(got.numpy(), golden[key]), key
-    assert reduced.num_columns == len(golden["c"])
-    assert reduced.objective_offset == float(golden["offset"])
-
-
-def _input_program(golden: np.lib.npyio.NpzFile) -> LinearProgram:
-    def tensor(key: str) -> torch.Tensor:
-        return torch.from_numpy(golden[f"in_{key}"])
-
-    return LinearProgram(
-        crow_indices=tensor("crow_indices"),
-        col_indices=tensor("col_indices"),
-        values=tensor("values"),
-        num_columns=int(golden["in_num_columns"]),
-        row_lower=tensor("row_lower"),
-        row_upper=tensor("row_upper"),
-        objective=tensor("objective"),
-        lower=tensor("lower"),
-        upper=tensor("upper"),
-    )
-
-
 def _wide_indices(program: LinearProgram) -> LinearProgram:
     """Return ``program`` with 64-bit row and column indices."""
     return replace(
@@ -471,12 +353,6 @@ def _wide_indices(program: LinearProgram) -> LinearProgram:
         crow_indices=program.crow_indices.long(),
         col_indices=program.col_indices.long(),
     )
-
-
-def _npz(path: Path) -> np.lib.npyio.NpzFile:
-    loaded = cast(object, np.load(path))
-    assert isinstance(loaded, np.lib.npyio.NpzFile)
-    return loaded
 
 
 def _stub_trivial_core(

@@ -808,6 +808,35 @@ def test_enable_determinism_turns_off_the_nondeterministic_sdpa_kernels(
     efficient.assert_called_once_with(False)
 
 
+@pytest.mark.parametrize(
+    ("cudnn_available", "expected_benchmark", "expected_deterministic"),
+    [(True, False, True), (False, True, False)],
+)
+def test_enable_determinism_configures_cudnn_only_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cudnn_available: bool,
+    expected_benchmark: bool,
+    expected_deterministic: bool,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.backends.cudnn, "is_available", lambda: cudnn_available)
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", True)
+    monkeypatch.setattr(torch.backends.cudnn, "deterministic", False)
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        enable_determinism(cudnn=True, sdpa=False)
+    finally:
+        torch.use_deterministic_algorithms(
+            algorithms_enabled,
+            warn_only=warn_only_enabled,
+        )
+    assert torch.backends.cudnn.benchmark is expected_benchmark
+    assert torch.backends.cudnn.deterministic is expected_deterministic
+
+
 def test_cuda_entries_are_droppable_by_the_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

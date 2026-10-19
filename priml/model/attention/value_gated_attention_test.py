@@ -183,6 +183,42 @@ def test_value_gated_attention_ungated_reset() -> None:
     assert attention.value_gate is None
 
 
+def test_value_gated_attention_ungated_rejects_a_value_embedding() -> None:
+    attention = ValueGatedAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        gate_channels=-1,
+        gated=False,
+    ).make()
+    x = torch.randn(2, 4, 16)
+    cos_sin = RoPE.Config(channels_head=8).make()(torch.arange(4))
+
+    with pytest.raises(ValueError, match="value_gate"):
+        attention(x, cos_sin=cos_sin, value_embedding=x)
+
+
+@pytest.mark.parametrize(("depth", "window"), [(0, 4), (3, 8)])
+def test_value_gated_attention_window_follows_the_layer_pattern(
+    depth: int,
+    window: int,
+) -> None:
+    config = ValueGatedAttention.Config(
+        channels_out=16,
+        channels_head=8,
+        gate_channels=4,
+        max_seq_len=8,
+        depth_index=((depth, 4),),
+    ).finalize()
+
+    assert (config.channels_in, config.num_heads, config.window) == (16, 2, window)
+
+
+def test_value_gated_attention_with_no_width_stays_unset() -> None:
+    config = ValueGatedAttention.Config(channels_head=8).finalize()
+    assert (config.channels_in, config.channels_out) == (-1, -1)
+
+
 def test_value_gated_attention_reset_initializes_affine_qk_norms() -> None:
     config = ValueGatedAttention.Config(
         channels_in=16,

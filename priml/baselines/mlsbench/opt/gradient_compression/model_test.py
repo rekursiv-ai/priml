@@ -10,6 +10,13 @@ from priml.baselines.mlsbench.opt.gradient_compression.model import VGG
 from priml.testing.cost import assert_cost_matches_torch
 
 
+BATCH: Final = 2
+"""Images of the cost run."""
+
+SIDE: Final = 4
+"""Side of the cost run's images: two stages halve it to 1."""
+
+
 def tiny() -> VGG:
     """Return a two-stage VGG with three classes."""
     config = VGG.Config()
@@ -18,13 +25,6 @@ def tiny() -> VGG:
     config.channels_hidden = ((4,), (6, 7))
     config.channels_head = (8, 9)
     return config.make()
-
-
-BATCH: Final = 2
-"""Images of the cost run."""
-
-SIDE: Final = 4
-"""Side of the cost run's images: two stages halve it to 1."""
 
 
 # A real image carries no gradient, so torch would skip the first layer's input

@@ -387,6 +387,47 @@ def test_segmented_rollout_feedback_uses_per_cell_predictions() -> None:
     assert torch.equal(model.feedback[9], torch.tensor([[1, 2, 3], [1, 2, 3]]))
 
 
+def test_checkpoint_rollout_gathers_puzzle_identifiers_by_row() -> None:
+    boards = torch.tensor([[2, 1, 1], [1, 1, 3]])
+    seen: list[Tensor] = []
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            del feedback_ids
+            assert puzzle_identifiers is not None
+            seen.append(puzzle_identifiers.clone())
+            return {
+                "logits": torch.zeros(len(input_ids), 3, 4),
+                "q_halt": torch.ones(len(input_ids)),
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    learned_checkpoint_rollout_rows(
+        cast("latent_recursion.LatentRecursion", RecordingModel()),
+        {"puzzle_identifiers": torch.tensor([17, 29, 41])},
+        2,
+        boards,
+        torch.tensor([2, 0]),
+        checkpoints=(2,),
+    )
+
+    assert [ids.tolist() for ids in seen] == [[41, 17], [41, 17]]
+
+
 def test_family_rollout_reads_q8_at_the_cap_and_needs_a_step() -> None:
     """Below eight ACT steps the UNSAT probe reads the last step's halt logit."""
     torch.manual_seed(0)

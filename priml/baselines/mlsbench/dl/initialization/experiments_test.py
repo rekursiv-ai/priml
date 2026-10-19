@@ -29,7 +29,7 @@ from priml.baselines.mlsbench.dl.initialization.experiments import (
     exp011,
 )
 from priml.baselines.mlsbench.dl.vision import (
-    experiments as vision,
+    experiments as vision_experiments,
     settings,
 )
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
@@ -115,7 +115,10 @@ def test_fixup_off_a_resnet_is_kaiming_alone_as_upstream_gates_it(
 
 
 def test_exp000_is_the_vision_recipe_with_small_normal_weights() -> None:
-    assert changed_fields(vision.exp000(), exp000()) == {"study_name", *PER_TENSOR}
+    assert changed_fields(vision_experiments.exp000(), exp000()) == {
+        "study_name",
+        *PER_TENSOR,
+    }
 
 
 @pytest.mark.parametrize(

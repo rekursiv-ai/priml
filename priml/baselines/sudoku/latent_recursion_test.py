@@ -119,6 +119,11 @@ def test_config_finalizes_recipe_and_rejects_invalid_geometry() -> None:
         _config(pos2d_box_shape=(0, 1)).make()
 
 
+def test_puzzle_embedding_width_defaults_to_the_model_width() -> None:
+    config = _config(puzzle_emb_ndim=-1).finalize()
+    assert config.puzzle_emb_ndim == config.channels_in == 12
+
+
 def test_constructor_rejects_unfinalized_block_with_exact_message() -> None:
     config = _config()
     config.block = None

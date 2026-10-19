@@ -43,7 +43,7 @@ import tempfile
 
 from priml.baselines.mlsbench.dl.multitask import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -92,7 +92,7 @@ def main() -> int:
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -123,7 +123,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         reference.loader_batches(scratch),
     )
     settings, settings_report = capture_settings(scripts)
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record | settings,
         sites={},
         report=report + settings_report,
@@ -156,7 +156,10 @@ def capture_settings(
             lockstep |= steps
             report += [f"settings/{setting}/{line}" for line in compare_wiring(traces)]
             report += compare_setting(scripts, traces, setting)
-            with vision.seeded(vision.SEED), host_agnostic_numerics():
+            with (
+                vision_reference.seeded(vision_reference.SEED),
+                host_agnostic_numerics(),
+            ):
                 theirs = scripts["sum"].build_model(arch)
             theirs.load_state_dict(traces["sum"].state)
             report += [
@@ -165,7 +168,7 @@ def capture_settings(
                     scripts["pcgrad"],
                     theirs.train(),
                     coarse="classifier_coarse." if arch == "vgg16bn" else "fc_coarse.",
-                    media=vision.full_size_media(),
+                    media=vision_reference.full_size_media(),
                 )
             ]
     report += mismatches(record, reference.settings_record())
@@ -194,7 +197,7 @@ def compare_setting(
     """
     report: list[str] = []
     for name in scripts:
-        with vision.seeded(vision.SEED), host_agnostic_numerics():
+        with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
             ours = reference.full_step(
                 reference.SETTING_COMBINATIONS[setting][name],
             ).model
@@ -243,12 +246,12 @@ def compare_full_size(
 
     """
     pristine = scripts["sum"]
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         ours = reference.full_step(reference.COMBINATIONS["sum"]).model
         theirs = pristine.ResNet(pristine.BasicBlock, [9, 9, 9])
         theirs.load_state_dict(trace.state)
         report = capture_reference.compare_states(trace.state, ours.state_dict())
-        media = vision.fixed_media(0)
+        media = vision_reference.fixed_media(0)
         for mode in ("train", "eval"):
             getattr(ours, mode)()
             getattr(theirs, mode)()

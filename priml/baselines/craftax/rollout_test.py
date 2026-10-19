@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Final,
-    Protocol,
     cast,
     override,
 )
@@ -30,17 +29,14 @@ import contextlib
 import copy
 import ctypes
 import functools
-import inspect
 import threading
 
 from configgle import Fig
 from torch import Tensor, nn
-from triton.runtime import interpreter, jit
 
 import numpy as np
 import pytest
 import torch
-import triton
 
 from priml.baselines.craftax import rollout as rollout_module
 from priml.baselines.craftax.game.state import OBS_SIZE
@@ -105,6 +101,7 @@ from priml.loss import policy_gradient_kernel
 from priml.loss.policy_gradient import TorchPPO
 from priml.model.linear import Linear
 from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.triton_interpreter import is_jit, triton_interpreter
 
 
 if TYPE_CHECKING:
@@ -116,9 +113,8 @@ if TYPE_CHECKING:
         Sequence,
     )
     from types import FunctionType
-    from typing_extensions import TypeIs
 
-    from numpy.typing import NDArray
+    from triton.runtime import jit
 
     from priml.baselines.craftax.rollout import FeatureStep
     from priml.baselines.craftax.world_model.feature import (
@@ -488,7 +484,7 @@ def _bound(
 
 def _jit_global(scope: Mapping[str, object], name: str) -> jit.JITFunction[..., object]:
     helper = scope[name]
-    assert _is_jit(helper)
+    assert is_jit(helper)
     return helper
 
 
@@ -630,85 +626,10 @@ def _accept_any_device(decoded: Tensor) -> None:
 
 
 @pytest.fixture
-def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def interpreted_kernels() -> Iterator[None]:
     """Run the module's Triton kernels through Triton's CPU interpreter, uncached."""
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
-    monkeypatch.setattr(
-        jit,
-        "_normalize_ty",
-        functools.partial(_normalize_bare_constexpr, normalize=jit._normalize_ty),
-    )
-    monkeypatch.setattr(
-        interpreter,
-        "_patch_lang_tensor",
-        functools.partial(_patch_scalar_index, patch=interpreter._patch_lang_tensor),
-    )
-    # Triton jitted its library functions at import, compiled-mode, which the
-    # interpreter refuses to call.
-    for module in (triton.language, triton.language.standard):
-        for name, value in inspect.getmembers(module, _is_jit):
-            monkeypatch.setattr(
-                module,
-                name,
-                interpreter.InterpretedFunction(value.fn),
-            )
-    # Each library call patches ``triton.language.core``'s builtins and never
-    # restores them (``InterpretedFunction.__call__``), so a kernel compiled
-    # after this test would trace the interpreter's builtins and fail.
-    members: dict[str, object] = dict(vars(triton.language.core))
-    for name, value in members.items():
-        monkeypatch.setattr(triton.language.core, name, value)
-    _kernels.cache_clear()
-    _sample_kernel.cache_clear()
-    try:
+    with triton_interpreter(_kernels, _sample_kernel):
         yield
-    finally:
-        _kernels.cache_clear()
-        _sample_kernel.cache_clear()
-
-
-# The interpreter matches a constexpr only by its bare name; the module's postponed
-# annotations spell it ``language.constexpr``.
-def _normalize_bare_constexpr(
-    ty: object,
-    *,
-    normalize: Callable[[object], str],
-) -> str:
-    return normalize(
-        ty.strip("'").removeprefix("language.") if isinstance(ty, str) else ty,
-    )
-
-
-# The interpreter holds a scalar as a one-element array, which numpy 2.5 no longer
-# converts with ``int``; a runtime loop bound needs it.
-def _patch_scalar_index(
-    tensor: type,
-    scope: _PatchScope,
-    *,
-    patch: Callable[[type, _PatchScope], None],
-) -> None:
-    patch(tensor, scope)
-    scope.set_attr(tensor, "__index__", _scalar_index)
-
-
-def _scalar_index(tensor: _InterpretedTensor) -> int:
-    return int(tensor.handle.data.item())
-
-
-def _is_jit(value: object) -> TypeIs[jit.JITFunction[..., object]]:
-    return isinstance(value, jit.JITFunction)
-
-
-class _PatchScope(Protocol):
-    def set_attr(self, obj: object, name: str, value: object) -> None: ...
-
-
-class _InterpretedHandle(Protocol):
-    data: NDArray[np.integer]
-
-
-class _InterpretedTensor(Protocol):
-    handle: _InterpretedHandle
 
 
 def test_a_one_step_rollout_is_accepted() -> None:

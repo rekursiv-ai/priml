@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
+import warnings
+
 import pytest
 import torch
 
@@ -19,7 +21,11 @@ from priml.baselines.mlsbench.dl.vision import reference
 from priml.baselines.mlsbench.dl.vision.data import Cifar100Data, normalize
 from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop, exp000
 from priml.baselines.mlsbench.dl.vision.mobilenet import MobileNetV2
-from priml.baselines.mlsbench.dl.vision.model import GlobalAvgPool, ResNet
+from priml.baselines.mlsbench.dl.vision.model import (
+    BasicBlock,
+    GlobalAvgPool,
+    ResNet,
+)
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.testing.golden import mismatches, read_tensors
@@ -83,26 +89,16 @@ def test_the_loader_shuffles_and_augments_like_the_reference(tmp_path: Path) -> 
 
 
 def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    lines = (_DATA / "reference_sites.txt").read_text().splitlines()
-    expected = {
-        key: int(count)
-        for side, key, count in (line.split() for line in lines)
-        if side == "port"
-    }
+    expected = capture_reference.parse_sites(
+        (_DATA / "reference_sites.txt").read_text(),
+    )["port"]
     assert expected
     assert reference.draw_sites(tmp_path) == expected
 
 
 def test_the_reference_reached_its_random_call_sites() -> None:
-    sides: dict[str, dict[str, int]] = {
-        "reference": {},
-        "port": {},
-        "reference-fmnist": {},
-        "port-fmnist": {},
-    }
-    for line in (_DATA / "reference_sites.txt").read_text().splitlines():
-        side, key, count = line.split()
-        sides[side][key] = int(count)
+    sides = capture_reference.parse_sites((_DATA / "reference_sites.txt").read_text())
+    assert sides.keys() == {"reference", "port", "reference-fmnist", "port-fmnist"}
     assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
     assert (
         capture_reference.check_sites(sides["reference-fmnist"], sides["port-fmnist"])
@@ -362,12 +358,9 @@ def test_the_fmnist_pipelines_match_the_reference_on_fixed_images() -> None:
 
 
 def test_the_fmnist_path_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    lines = (_DATA / "reference_sites.txt").read_text().splitlines()
-    expected = {
-        key: int(count)
-        for side, key, count in (line.split() for line in lines)
-        if side == "port-fmnist"
-    }
+    expected = capture_reference.parse_sites(
+        (_DATA / "reference_sites.txt").read_text(),
+    )["port-fmnist"]
     assert expected
     assert reference.fmnist_draw_sites(tmp_path) == expected
 
@@ -421,6 +414,40 @@ def test_decoding_rejects_an_image_that_is_no_crop_of_its_source() -> None:
             config=Cifar100Data.Config(),
             source=reference.synthetic_split()[0],
         )
+
+
+class _WidthKeyedBlock(BasicBlock.Config):
+    """A basic block template that keys on one of the reference's widths."""
+
+    reset_width: int = 16
+
+
+def test_tiny_model_narrows_the_width_a_block_keys_on() -> None:
+    model = exp000().step.model
+    assert isinstance(model, ResNet.Config)
+    model.block = block = _WidthKeyedBlock()
+    reference.tiny_model(model)
+    assert block.reset_width == reference.TINY_WIDTHS[16]
+
+
+def test_script_workers_silence_only_the_worker_count_warning() -> None:
+    worker_count = "This DataLoader will create 4 worker processes in total."
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        with reference.script_workers():
+            warnings.warn(worker_count, stacklevel=1)
+            warnings.warn("another warning", stacklevel=1)
+        warnings.warn(worker_count, stacklevel=1)
+    assert [str(w.message) for w in seen] == ["another warning", worker_count]
+
+
+def test_full_size_media_is_two_reference_sized_images_in_eighths() -> None:
+    media = reference.full_size_media()
+    assert media.shape == (2, 3, 32, 32)
+    assert media.flatten()[:3].tolist() == [-1.0, -0.375, 0.25]
+    assert bool(((media * 8) % 1 == 0).all())
+    assert media.min().item() == -1.0
+    assert media.max().item() == 1.0
 
 
 def test_seeding_is_scoped_to_the_block() -> None:

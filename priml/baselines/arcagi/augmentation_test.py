@@ -160,6 +160,37 @@ def test_single_grid_pack_reuses_canvas_eos_at_nonzero_origin() -> None:
     assert np.array_equal(crop_grid(packed, spec=spec, row=2, col=1), grid)
 
 
+@pytest.mark.parametrize(
+    ("shape", "tag", "message"),
+    [
+        ((2, 3), (0, 0, 0), "tag needs scale >= 1 and offsets >= 0; got (0, 0, 0)."),
+        ((2, 3), (1, -1, 0), "tag needs scale >= 1 and offsets >= 0; got (1, -1, 0)."),
+        ((2, 3), (1, 0, -1), "tag needs scale >= 1 and offsets >= 0; got (1, 0, -1)."),
+        ((2, 4), (1, 0, 0), "grid shape exceeds max_grid=3: grid=(2, 4)."),
+        ((2, 3), (2, 0, 0), "tag (2, 0, 0) places the grid outside max_grid=3."),
+        ((2, 3), (1, 2, 0), "tag (1, 2, 0) places the grid outside max_grid=3."),
+        ((3, 2), (1, 0, 2), "tag (1, 0, 2) places the grid outside max_grid=3."),
+    ],
+)
+def test_single_grid_pack_rejects_tags_outside_the_square(
+    shape: tuple[int, int],
+    tag: tuple[int, int, int],
+    message: str,
+) -> None:
+    spatial = SpatialAugmentation.Config(spec=ArcSpec(max_grid=3)).make()
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        spatial.pack_one_at(np.zeros(shape, dtype=np.uint8), tag=tag)
+
+
+@pytest.mark.parametrize(("row", "col"), [(-1, 0), (0, -1), (2, 0), (0, 2)])
+def test_crop_grid_rejects_an_origin_outside_the_square(row: int, col: int) -> None:
+    with pytest.raises(
+        ValueError,
+        match=f"^{re.escape(f'crop origin ({row}, {col}) is outside side 2.')}$",
+    ):
+        crop_grid(np.full(4, 2, dtype=np.uint8), spec=ArcSpec(), row=row, col=col)
+
+
 def test_canonicalize_uses_configured_transform_separator() -> None:
     config = ColorDihedral.Config(separator="::", transforms=(1,))
     augmentation = config.make()

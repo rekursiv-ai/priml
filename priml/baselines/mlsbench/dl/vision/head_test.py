@@ -31,6 +31,9 @@ OTHER: Final = 3
 type NetworkConfig = ResNet.Config | VGG16BN.Config | MobileNetV2.Config
 
 
+IDS: Final = ["resnet", "vgg16bn", "mobilenetv2"]
+
+
 def configs() -> list[NetworkConfig]:
     """Return one config of each network, its features ``WIDTH`` wide."""
     resnet = ResNet.Config(channels_in=3, channels_out=CLASSES)
@@ -47,9 +50,6 @@ def configs() -> list[NetworkConfig]:
     mobilenet.strides = (1,)
     mobilenet.channels_last = WIDTH
     return [resnet, vgg, mobilenet]
-
-
-IDS: Final = ["resnet", "vgg16bn", "mobilenetv2"]
 
 
 class HeadOnly(nn.Module):

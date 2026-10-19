@@ -360,7 +360,7 @@ def fixed_batches(index: int) -> tuple[Batch, Batch]:
       index: Which update of :data:`SCHEDULE`.
 
     Returns:
-      retain: Two images of :data:`vision.PROBE_SHAPE` and their classes.
+      retain: Two images of :data:`reference.PROBE_SHAPE` and their classes.
       forget: Three images and the forget class.
 
     """

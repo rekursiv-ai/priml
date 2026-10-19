@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.game.observation import compute_observations_numba
 from priml.baselines.craftax.game.state import (
     ATN_DIM,
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
+
+    from priml.baselines.craftax.game.state import Array1, EnvState
 
 
 @pytest.fixture(scope="module")
@@ -447,6 +450,20 @@ def test_replay_raises_on_a_frame_outside_the_schema(episode: Episode) -> None:
     )
     with pytest.raises(ValueError, match="outside the schema"):
         replay.segment(branch, start=0, stop=1)
+
+
+def _overstocked_world(state: EnvState, rng: Array1[np.uint32]) -> None:
+    """Fill the tiny world, the player holding one more wood than the schema can say."""
+    tiny_world(state, rng)
+    state.inventory.wood = replay.AUX_HIGH[0] + 1
+
+
+def test_record_refuses_a_world_whose_first_frame_is_outside_the_schema() -> None:
+    with (
+        eager(world=_overstocked_world),
+        pytest.raises(ValueError, match="A token value lies outside the schema"),
+    ):
+        replay.record(world_seed=6, sampling_seed=2, max_decisions=8)
 
 
 def _frame(

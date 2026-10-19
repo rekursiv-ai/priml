@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.nn import functional
+from treekle import from_plain
 
 import torch
 
@@ -85,19 +86,20 @@ class Linear(nn.Linear):
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
-              **kwargs: The open bus, forwarded to every child.
+              **kwargs: The open bus, forwarded to every child. ``input_grad=False``
+                drops the input gradient, as for a first layer.
 
             Returns:
               cost: Integer FLOPs and logical bytes for every input row.
 
             """
-            del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 bias=self.bias,
                 rows=seq_len * batch_size,
                 dtype=self.dtype if self.dtype is not None else dtype,
+                input_grad=from_plain(kwargs.get("input_grad", True), bool),
             )
 
     def __init__(self, config: Config) -> None:

@@ -185,6 +185,17 @@ def test_a_corpus_frozen_from_a_relative_root_reads_from_anywhere(
     assert [directory.is_absolute() for directory, _ in shards] == [True] * 3
 
 
+def test_a_corpus_naming_no_shard_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="names no shard"):
+        coverage_report.build_report(
+            tmp_path,
+            corpus="empty",
+            freeze=True,
+            cache_dir=tmp_path / "index",
+            workers=1,
+        )
+
+
 def test_freezing_a_halted_archive_is_refused(tmp_path: Path) -> None:
     _archive(tmp_path)
     halt(tmp_path, shard="train/arm3/w0/shard-000000", reason="State hash mismatch.")

@@ -1718,6 +1718,8 @@ def test_distributed_overwrite_invalidates_old_marker_for_fresh_readers(
     path.mkdir()
     marker = path / ".metadata"
     marker.write_bytes(b"prior snapshot")
+    (path / "stale_shard").mkdir()
+    (path / "stale_shard" / "0.distcp").write_bytes(b"prior payload")
     state: StateDict = {
         "x": distribute_tensor(
             torch.ones(2),
@@ -1801,6 +1803,7 @@ def _start_replacement_payloads(
     assert Path(checkpoint_id) == path
     assert agreed == [True]
     complete_during_write.append(SyncLocalStateDictStorer().is_complete(path))
+    assert list(path.iterdir()) == []
     (path / "0.distcp").write_bytes(b"partial replacement")
 
 
@@ -2143,6 +2146,42 @@ def test_async_failed_join_releases_pending_state(tmp_path: Path) -> None:
     assert storage._pending is None
     assert storage._pending_path is None
     assert callbacks == []
+
+
+def test_async_failed_after_write_surfaces_at_flush(tmp_path: Path) -> None:
+    storage = AsyncLocalStateDictStorer()
+    future: Future[object] = Future()
+    future.set_result(None)
+    storage._pending = future
+    storage._pending_path = tmp_path / "checkpoint"
+    storage._pending_path.mkdir()
+
+    def fail() -> None:
+        raise OSError("retention failed")
+
+    storage._after_write = fail
+    with pytest.raises(OSError, match=r"^retention failed$"):
+        storage.flush()
+    storage.flush()
+    assert storage._pending is None
+
+
+def test_sync_plain_write_failure_removes_its_temp_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "step_0.pt"
+    temp = path.with_suffix(".pt.tmp")
+
+    def fail_rename(self: Path, target: Path) -> Path:
+        del self, target
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(Path, "rename", fail_rename)
+    with pytest.raises(OSError, match="rename failed"):
+        SyncLocalStateDictStorer().write(path, {"x": torch.tensor([1])})
+    assert not temp.exists()
+    assert not path.exists()
 
 
 def test_checkpoint_paths_have_one_canonical_identity(

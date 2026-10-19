@@ -273,6 +273,61 @@ def test_qk_forward_preserves_reference_bits_and_declared_layout(
         assert result.stride() == fake.stride()
 
 
+class _CudaLooking(torch.Tensor):
+    """A CPU tensor whose ``is_cuda`` is patched on, to reach the CUDA dispatch."""
+
+
+def _reports_cuda(self: Tensor) -> bool:
+    del self
+    return True
+
+
+def test_qk_ops_dispatch_cuda_tensors_to_the_cuda_launchers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = torch.full((2, 3, 4, 8), 7.0), torch.full((2, 3, 4, 8), 9.0)
+    calls: list[str] = []
+
+    def forward_cuda(
+        q: Tensor,
+        k: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        del k, cos, sin
+        calls.append(f"forward{q.is_cuda}")
+        return first, second
+
+    def backward_cuda(
+        dq: Tensor,
+        dk: Tensor,
+        q: Tensor,
+        k: Tensor,
+        *,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        del dq, dk, k, cos, sin
+        calls.append(f"backward{q.is_cuda}")
+        return first, second
+
+    monkeypatch.setattr(_CudaLooking, "is_cuda", property(_reports_cuda))
+    monkeypatch.setattr(attention, "_qk_forward_cuda", forward_cuda)
+    monkeypatch.setattr(attention, "_qk_backward_cuda", backward_cuda)
+    q = torch.randn(2, 3, 4, 8).as_subclass(_CudaLooking)
+    k = torch.randn(2, 3, 4, 8)
+    cos, sin = torch.ones(3, 4), torch.zeros(3, 4)
+
+    forward = fused_qk_norm_rope(q, k, cos, sin)
+    backward = _qk_backward(k, k, q, k, [cos, sin])
+
+    assert calls == ["forwardTrue", "backwardTrue"]
+    assert torch.equal(forward[0], first)
+    assert torch.equal(forward[1], second)
+    assert torch.equal(backward[0], first)
+    assert torch.equal(backward[1], second)
+
+
 @pytest.mark.gpu_torch_cuda
 @pytest.mark.gpu_triton
 def test_cuda_qk_forward_and_backward_match_fp32_math() -> None:
@@ -536,6 +591,58 @@ def test_a_fused_source_without_its_gate_is_refused() -> None:
     cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
     with pytest.raises(ValueError, match="fused source 2 has no gate"):
         causal(torch.randn(2, 3, 16), cos_sin=cos_sin, fused_tables=[source])
+
+
+def test_fused_ngram_source_matches_the_unfused_value_memory() -> None:
+    torch.manual_seed(37)
+    config = CausalAttention.Config()
+    config.channels_in = 16
+    config.channels_head = 4
+    config.num_heads = 4
+    config.gate_channels = 5
+    config.bigram = True
+    config.kernel = SdpaNaive.Config()
+    causal = config.make()
+    assert causal.bigram_gate is not None
+    nn.init.normal_(causal.bigram_gate.weight)
+    nn.init.normal_(causal.proj_out.weight)
+    tables = HashedNgramTables.Config(
+        channels_out=16,
+        num_embeddings=7,
+        hash_multipliers=((1, 3), (5, 2)),
+    ).make()
+    tables.prepare_gradient_sinks()
+    tokens = torch.tensor([[1, 4, 2], [6, 0, 3]])
+    x = torch.randn(2, 3, 16)
+    # Rotary factors by position and half-channel, one row broadcast over heads.
+    cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
+    fused = causal(
+        x,
+        cos_sin=cos_sin,
+        fused_tables=[NgramSource(1, tables, tables.indices(tokens))],
+    )
+    unfused = causal(x, cos_sin=cos_sin, bigram_value=tables(tokens))
+    torch.testing.assert_close(fused, unfused)
+    assert not torch.allclose(fused, causal(x, cos_sin=cos_sin))
+
+
+def test_reset_parameters_redraws_every_memory_gate() -> None:
+    config = CausalAttention.Config()
+    config.channels_in = 12
+    config.channels_head = 4
+    config.gate_channels = 4
+    config.bigram = config.trigram = True
+    config.head_gate = Linear.Config()
+    causal = config.make()
+    gates = (causal.bigram_gate, causal.trigram_gate, causal.head_gate)
+    with torch.no_grad():
+        for gate in gates:
+            assert gate is not None
+            gate.weight.fill_(float("nan"))
+    causal.reset_parameters()
+    for gate in gates:
+        assert gate is not None
+        assert not bool(gate.weight.isnan().any())
 
 
 def _unjitted(function: Callable[..., object]) -> Callable[..., object]:

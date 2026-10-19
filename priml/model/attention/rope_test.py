@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast, override
+from typing import Final, Literal, cast, override
 
 import math
 
@@ -26,6 +26,7 @@ from priml.model.attention.rope import (
     _yarn_correction_dim,
     _yarn_correction_range,
     _yarn_mscale,
+    rotate_activation_dtype,
     rotate_conjugate,
     rotation_cost,
 )
@@ -1148,6 +1149,25 @@ def test_geometric_and_yarn_build_on_requested_meta_device(
     assert torch.equal(collapsed, torch.tensor([1.0] * 5 + [0.25] * 3))
 
 
+def test_rotate_activation_dtype_rounds_each_product_and_keeps_the_tail() -> None:
+    q = torch.linspace(-1, 1, 2 * 3 * 4 * 6, dtype=torch.bfloat16).reshape(2, 3, 4, 6)
+    k = q.flip(-1) * 3
+    cos = torch.linspace(0.1, 0.9, 3 * 4 * 2, dtype=torch.bfloat16).reshape(3, 4, 2)
+    sin = cos.flip(-1) / 3
+    q_embed, k_embed = rotate_activation_dtype(q, k, cos, sin)
+    for x, got in ((q, q_embed), (k, k_embed)):
+        first, second = x[..., :2], x[..., 2:4]
+        full_cos, full_sin = torch.cat((cos, cos), -1), torch.cat((sin, sin), -1)
+        expected = x[..., :4] * full_cos + torch.cat((-second, first), -1) * full_sin
+        assert got.dtype == torch.bfloat16
+        assert torch.equal(got[..., :4], expected)
+        assert torch.equal(got[..., 4:], x[..., 4:])
+    float32_rotation = RoPE.rotate(q, k, cos, sin)[0]
+    assert not torch.equal(q_embed, float32_rotation)
+    with pytest.raises(ValueError, match="exceeds attention head width"):
+        rotate_activation_dtype(q[..., :2], k[..., :2], cos, sin)
+
+
 def test_rope_conjugate_and_rotation_cost_are_exact() -> None:
     x = torch.tensor([[[[1.0, 2.0, 3.0, 4.0]]]])
     cos = torch.tensor([[[2.0, 3.0]]])
@@ -1516,6 +1536,42 @@ def test_rope_mixed_reset_on_cuda_default_device() -> None:
 def test_rope_mixed_double_keeps_parameter_dtype() -> None:
     model = RoPEMixed.Config(4, num_heads=3, learnable=True).make().double()
     assert all(parameter.dtype == torch.float64 for parameter in model.parameters())
+
+
+@pytest.mark.parametrize(
+    ("channels_head", "reduction_mode", "expected"),
+    [(6, "cat", 6), ([4, 2], "cat", 6), ([4, 4], "sum", 4)],
+)
+def test_rope_rotated_channels_follow_the_reduction(
+    channels_head: int | list[int],
+    reduction_mode: Literal["cat", "sum"],
+    expected: int,
+) -> None:
+    config = RoPE.Config(channels_head, reduction_mode=reduction_mode)
+    assert config.rotated_channels(16) == expected
+
+
+def test_rope_rejects_an_unknown_reduction_mode_at_forward() -> None:
+    model = RoPE.Config(4).make()
+    # The constructor accepts only the Literal; a mode from unchecked data reaches here.
+    model.reduction_mode = _unchecked_mode("max")
+    with pytest.raises(ValueError, match=r"Unknown self\.reduction_mode='max'"):
+        model(torch.arange(3))
+
+
+def _unchecked_mode(mode: str) -> Literal["cat", "sum"]:
+    """Return ``mode`` as a reduction mode without checking it."""
+    return cast(Literal["cat", "sum"], mode)
+
+
+def test_frozen_rope_mixed_materializes_its_fixed_frequencies_from_meta() -> None:
+    model = RoPEMixed.Config([4, 0], num_heads=3).make().to("meta")
+    model.to_empty(device="cpu")
+    assert all(f.device == torch.device("cpu") for f in model._inv_freqs)
+    assert model._inv_freqs[0].shape == (3, 2)
+    assert not model._inv_freqs[0].requires_grad
+    model.reset_parameters()
+    assert torch.isfinite(model._inv_freqs[0]).all()
 
 
 def test_rope_mixed_materialization_resets_valid_frequencies() -> None:

@@ -138,6 +138,17 @@ def test_the_dataset_cuts_both_splits_and_scores_forget_training_images_augmente
     assert torch.equal(test_media, normalize(data.eval_media[1:2], mean=mean, std=std))
     assert len(data.full_loader()) == 1
     assert len(data.retain_loader()) == 1
+    torch.manual_seed(0)
+    ((_, forgotten),) = list(data.forget_loader())
+    assert forgotten.tolist() == [0, 0]
+    # A shuffled pass draws the stream seed, then the shuffle seed.
+    after = torch.get_rng_state()
+    torch.manual_seed(0)
+    for _ in range(2):
+        _ = torch.empty((), dtype=torch.int64).random_()
+    assert torch.equal(torch.get_rng_state(), after)
+    ((_, retain_label),) = list(data.retain_test_loader())
+    assert retain_label.tolist() == [1, 2]
 
 
 if __name__ == "__main__":

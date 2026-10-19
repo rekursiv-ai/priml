@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
+from configgle import Fig
 from torch import Tensor, nn
 
 import pytest
 import torch
 
+from priml.model.embedding import Embedding
 from priml.model.grid_embedding import (
     FactoredPositions,
     GridChannel,
@@ -65,6 +67,20 @@ def test_channels_inherit_the_models_width() -> None:
     assert feedback.channels_out == 8
     # The vocabulary reaches the one channel that is sized by it.
     assert feedback.channels_in == config.channels_in
+
+
+def test_finalize_fills_the_token_table_and_grid_sized_channels() -> None:
+    config = GridEmbedding.Config(channels_in=11, channels_out=8, grid_shape=(3, 4))
+    config.token_table = Embedding.Config()
+    config.channels = [_GridSized.Config()]
+
+    final = config.copy_tree().finalize()
+
+    assert final.token_table is not None
+    assert (final.token_table.channels_in, final.token_table.channels_out) == (11, 8)
+    (channel,) = final.channels
+    assert isinstance(channel, _GridSized.Config)
+    assert (channel.channels_in, channel.channels_out, channel.grid_len) == (11, 8, 12)
 
 
 def test_unfilled_position_geometry_is_rejected() -> None:
@@ -396,6 +412,24 @@ def test_factored_position_cost_broadcasts_the_complete_batch() -> None:
     assert batch["flops", "adjoint", "reduction"].sum() == 16 * 8 * (2 - 1)
     assert batch["bytes", "adjoint", "reduction"].sum() == 2 * (2 * 16 * 8 + 16 * 8)
     assert batch.params == single.params
+
+
+class _GridSized(nn.Module):
+    """A channel sized by vocabulary, width, and grid-token count."""
+
+    class Config(Fig["_GridSized"]):
+        channels_in: int = -1
+        channels_out: int = -1
+        grid_len: int = -1
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.table = nn.Parameter(torch.zeros(config.grid_len, config.channels_out))
+
+    @override
+    def forward(self, tokens: Tensor, embeddings: Tensor) -> Tensor:
+        del tokens, embeddings
+        return self.table
 
 
 def _run_feedback(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:

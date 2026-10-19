@@ -11,7 +11,7 @@ runs on a GPU.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 from unittest import mock
 
 import re
@@ -20,8 +20,13 @@ import sys
 
 import torch
 
-from priml.baselines.mlsbench.dl.regularization import reference as port
-from priml.baselines.mlsbench.dl.vision import reference, upstream
+from priml.baselines.mlsbench.dl.regularization import (
+    reference,
+)
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision_reference,
+    upstream,
+)
 from priml.testing.bfb import host_agnostic_numerics
 
 
@@ -66,6 +71,7 @@ type Regularization = Callable[
 """The script's ``compute_regularization``: model, inputs, outputs, targets, config."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``dl-regularization`` script the capture uses."""
 
@@ -107,7 +113,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
 
     """
     pristine = upstream.load_script(root / PRISTINE)
-    cast(Script, cast(object, pristine)).compute_regularization = no_regularization
+    upstream.narrowed(pristine, Script).compute_regularization = no_regularization
     return {"zero": pristine} | {
         name: upstream.edited_script(
             root,
@@ -142,12 +148,12 @@ def pristine_raises(root: Path) -> bool:
       raises: True when the body raises ``NotImplementedError``.
 
     """
-    script = cast(Script, cast(object, upstream.load_script(root / PRISTINE)))
-    logits, label = reference.fixed_logits()
+    script = upstream.narrowed(upstream.load_script(root / PRISTINE), Script)
+    logits, label = vision_reference.fixed_logits()
     try:
         script.compute_regularization(
-            port.ProbeNet(),
-            reference.fixed_media(0),
+            reference.ProbeNet(),
+            vision_reference.fixed_media(0),
             logits,
             label,
             {"num_classes": 4, "epoch": 0, "total_epochs": 1},
@@ -222,13 +228,16 @@ def upstream_regularizers(scripts: dict[str, Upstream]) -> dict[str, Tensor]:
         is skipped.
 
     Returns:
-      record: Keyed as :func:`port.regularizer_record`.
+      record: Keyed as :func:`reference.regularizer_record`.
 
     """
     record: dict[str, Tensor] = {}
     for name in EDITED:
-        task = cast(Script, cast(object, scripts[name]))
-        record |= port.regularizer_run(name, _ScriptCall(task.compute_regularization))
+        task = upstream.narrowed(scripts[name], Script)
+        record |= reference.regularizer_run(
+            name,
+            _ScriptCall(task.compute_regularization),
+        )
     return record
 
 
@@ -258,17 +267,17 @@ def upstream_lockstep(
         and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
+    task = upstream.narrowed(script, Script)
     spy = _RegularizationSpy(task.compute_regularization)
     criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with (
-        reference.seeded(reference.SEED),
+        vision_reference.seeded(vision_reference.SEED),
         host_agnostic_numerics(),
         mock.patch.object(task, "compute_regularization", spy),
     ):
-        model = upstream.tiny_model(script, arch, reference.CLASSES)
+        model = upstream.tiny_model(script, arch, vision_reference.CLASSES)
         task.initialize_weights(model)
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -279,15 +288,20 @@ def upstream_lockstep(
             nesterov=bool(trace.settings["nesterov"]),
         )
         config = {
-            "num_classes": reference.CLASSES,
+            "num_classes": vision_reference.CLASSES,
             "epoch": 0,
-            "total_epochs": reference.EPOCHS,
+            "total_epochs": vision_reference.EPOCHS,
         }
-        for index in range(reference.STEPS):
+        for index in range(vision_reference.STEPS):
             config["epoch"] = index
             for group in optimizer.param_groups:
                 group["lr"] = trace.rates[index]
-            batch = [(reference.fixed_media(index), reference.fixed_label(index))]
+            batch = [
+                (
+                    vision_reference.fixed_media(index),
+                    vision_reference.fixed_label(index),
+                ),
+            ]
             task.train_epoch(
                 model,
                 batch,
@@ -299,7 +313,10 @@ def upstream_lockstep(
             model.eval()
             with torch.no_grad():
                 probes.append(
-                    reference.logits_of(model, reference.fixed_media(reference.STEPS)),
+                    vision_reference.logits_of(
+                        model,
+                        vision_reference.fixed_media(vision_reference.STEPS),
+                    ),
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
         # The script adds the two terms and keeps no sum; this repeats its one
@@ -334,16 +351,16 @@ def upstream_setting_regularizers(
         :func:`tiny_network` builds it; each run reads a copy.
 
     Returns:
-      record: Keyed as :func:`port.setting_regularizer_record`.
+      record: Keyed as :func:`reference.setting_regularizer_record`.
 
     """
     record: dict[str, Tensor] = {}
     for name in EDITED:
-        task = cast(Script, cast(object, scripts[name]))
-        record |= port.regularizer_run(
+        task = upstream.narrowed(scripts[name], Script)
+        record |= reference.regularizer_run(
             name,
             _ScriptCall(task.compute_regularization),
-            network=port.Copies(model),
+            network=reference.Copies(model),
             prefix=f"settings/{setting}/",
         )
     return record
@@ -357,12 +374,12 @@ def tiny_network(script: Upstream, arch: str) -> nn.Module:
       arch: The setting's ``--arch``.
 
     Returns:
-      model: Built under the task's seed, as :func:`port.tiny_network` is.
+      model: Built under the task's seed, as :func:`reference.tiny_network` is.
 
     """
-    with reference.seeded(reference.SEED), host_agnostic_numerics():
-        model = upstream.tiny_model(script, arch, reference.CLASSES)
-        cast(Script, cast(object, script)).initialize_weights(model)
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
+        model = upstream.tiny_model(script, arch, vision_reference.CLASSES)
+        upstream.narrowed(script, Script).initialize_weights(model)
     return model
 
 
@@ -379,16 +396,16 @@ def upstream_setting_recipe(
       argv: The setting's :func:`setting_argv`.
 
     Returns:
-      record: Keyed as :func:`port.setting_recipe_record`.
+      record: Keyed as :func:`reference.setting_recipe_record`.
 
     """
     record = {
         "schedule/lr": torch.tensor(trace.rates, dtype=torch.float64),
         "optimizer/settings": torch.tensor(
-            [trace.settings[name] for name in reference.HYPERPARAMETERS],
+            [trace.settings[name] for name in vision_reference.HYPERPARAMETERS],
             dtype=torch.float64,
         ),
-        "setting/batch_size": port.setting_batch_size(argv),
+        "setting/batch_size": reference.setting_batch_size(argv),
     }
     return {f"settings/{setting}/{key}": value for key, value in record.items()}
 
@@ -406,13 +423,13 @@ def upstream_record(
       lockstep: Each variant's :func:`upstream_lockstep`.
 
     Returns:
-      record: Keyed as :func:`port.port_record`.
+      record: Keyed as :func:`reference.port_record`.
 
     """
     record = dict(regularizers)
     record["schedule/lr"] = torch.tensor(trace.rates, dtype=torch.float64)
     record["optimizer/settings"] = torch.tensor(
-        [trace.settings[name] for name in reference.HYPERPARAMETERS],
+        [trace.settings[name] for name in vision_reference.HYPERPARAMETERS],
         dtype=torch.float64,
     )
     record["draws/exp000"] = trace.draws

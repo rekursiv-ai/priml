@@ -29,6 +29,7 @@ from priml.baselines.craftax.world_model.capture.source import (
     CaptureError,
     PolicySource,
     RandomSource,
+    make_source,
 )
 
 
@@ -127,6 +128,22 @@ def test_random_play_draws_every_environment_from_its_own_stream(
     assert played[0] != played[1]
 
 
+def test_random_play_names_its_policy_and_the_seed_start_derived(
+    tmp_path: Path,
+    short: None,
+) -> None:
+    del short
+    config = RandomSource.Config(action_seed=5)
+    config.env.num_envs = 2
+    source = config.make()
+    assert source.provenance() == {"policy": "uniform-legal", "rollout_seed": "0"}
+    source.start(schedule=Schedule(arm=1, worker=2, budget=1), run_dir=tmp_path)
+    assert source.provenance() == {
+        "policy": "uniform-legal",
+        "rollout_seed": str(5 + 1_000_000 * (4 + 2)),
+    }
+
+
 def test_random_play_takes_one_step_per_poll_but_not_none() -> None:
     RandomSource.Config(steps_per_poll=1).make()
     with pytest.raises(ValueError, match="positive steps_per_poll"):
@@ -180,6 +197,32 @@ def test_an_empty_branch_pool_records_nothing_and_closes_its_feeder(
         # A closed feeder's pool takes no more work.
         with pytest.raises(RuntimeError, match="shutdown"):
             source.feeder._replay.submit(int)
+
+
+def _meta_device() -> torch.device:
+    return torch.device("meta")
+
+
+def test_make_source_builds_under_the_best_devices_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "priml.baselines.craftax.world_model.capture.source.best_device",
+        _meta_device,
+    )
+    init = RandomSource.__init__
+    seen: list[torch.device] = []
+
+    def noting(built: RandomSource, config: RandomSource.Config) -> None:
+        seen.append(torch.empty(0).device)
+        init(built, config)
+
+    monkeypatch.setattr(RandomSource, "__init__", noting)
+    built = make_source(RandomSource.Config(steps_per_poll=2))
+    assert isinstance(built, RandomSource)
+    assert built.config.steps_per_poll == 2
+    assert seen == [torch.device("meta")]
+    assert torch.empty(0).device == torch.device("cpu")
 
 
 def _policy_source(directory: Path, *, board: bool) -> PolicySource.Config:

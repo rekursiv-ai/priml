@@ -16,15 +16,18 @@ import sys
 import torch
 
 from priml.baselines.mlsbench.dl.residual import (
-    reference as residual,
-    upstream as residual_upstream,
+    reference,
+    upstream,
 )
 from priml.baselines.mlsbench.dl.residual.scripts import capture_reference
 from priml.baselines.mlsbench.dl.residual.upstream_test import write_clone
-from priml.baselines.mlsbench.dl.vision import reference, upstream
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision_reference,
+    upstream as vision_upstream,
+)
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
+    capture_reference as vision_capture_reference,
 )
 from priml.testing.golden import mismatches, read_tensors
 
@@ -66,7 +69,7 @@ def port_lockstep(
     states: list[dict[str, Tensor]],
 ) -> dict[str, Tensor]:
     """Stand in for the port's lockstep: one tensor per state."""
-    states += [{"w": torch.zeros(2)} for _ in range(reference.STEPS)]
+    states += [{"w": torch.zeros(2)} for _ in range(vision_reference.STEPS)]
     return {f"lockstep/{name}/loss": torch.zeros(2)}
 
 
@@ -92,17 +95,17 @@ def test_capture_assembles_both_sides_into_one_report(
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     stored = read_tensors(_DATA / "reference.pt")
-    monkeypatch.setattr(residual, "port_record", returning(stored))
-    monkeypatch.setattr(residual, "lockstep_record", port_lockstep)
+    monkeypatch.setattr(reference, "port_record", returning(stored))
+    monkeypatch.setattr(reference, "lockstep_record", port_lockstep)
     monkeypatch.setattr(
-        residual,
+        reference,
         "VARIANTS",
-        {name: shallow(factory) for name, factory in residual.VARIANTS.items()},
+        {name: shallow(factory) for name, factory in reference.VARIANTS.items()},
     )
-    monkeypatch.setattr(reference, "loader_batches", returning(passes(1.0)))
-    monkeypatch.setattr(upstream, "upstream_batches", returning(passes(0.0)))
+    monkeypatch.setattr(vision_reference, "loader_batches", returning(passes(1.0)))
+    monkeypatch.setattr(vision_upstream, "upstream_batches", returning(passes(0.0)))
     monkeypatch.setattr(
-        vision_capture,
+        vision_capture_reference,
         "compare_full_size",
         returning(["full size differs"]),
     )
@@ -113,7 +116,7 @@ def test_capture_assembles_both_sides_into_one_report(
         "capture_settings",
         returning((settings, ["settings differ"])),
     )
-    monkeypatch.setattr(residual, "settings_record", returning(settings))
+    monkeypatch.setattr(reference, "settings_record", returning(settings))
     captured = capture_reference.capture(root, scratch)
     assert settings.items() <= captured.record.items()
     report = captured.report
@@ -162,39 +165,45 @@ def test_capture_settings_joins_every_settings_comparison(
 ) -> None:
     """The runs are tested elsewhere; here they are stubbed, to test the glue."""
     calls = Calls()
-    trace = upstream.MainTrace(
+    trace = vision_upstream.MainTrace(
         rates=[0.25],
-        settings=dict.fromkeys(reference.HYPERPARAMETERS, 0.5),
+        settings=dict.fromkeys(vision_reference.HYPERPARAMETERS, 0.5),
     )
     positions = torch.arange(3)
-    lockstep: upstream.Lockstep = ({"lockstep/x/loss": torch.ones(2)}, [])
+    lockstep: vision_upstream.Lockstep = ({"lockstep/x/loss": torch.ones(2)}, [])
     stubs: list[tuple[object, str, object]] = [
-        (vision_capture, "compare_task_settings", ({"shared": positions}, ["shared"])),
-        (residual_upstream, "block_positions", positions),
-        (upstream, "trace_main", trace),
         (
-            reference,
+            vision_capture_reference,
+            "compare_task_settings",
+            ({"shared": positions}, ["shared"]),
+        ),
+        (upstream, "block_positions", positions),
+        (vision_upstream, "trace_main", trace),
+        (
+            vision_reference,
             "schedule_record",
             {"schedule/lr": torch.tensor([0.25], dtype=torch.float64)},
         ),
         (
-            reference,
+            vision_reference,
             "optimizer_record",
             {
                 "optimizer/settings": torch.zeros(
-                    len(reference.HYPERPARAMETERS),
+                    len(vision_reference.HYPERPARAMETERS),
                     dtype=torch.float64,
                 ),
             },
         ),
-        (residual_upstream, "upstream_lockstep", lockstep),
-        (vision_capture, "compare_lockstep", ["lockstep differs"]),
+        (upstream, "upstream_lockstep", lockstep),
+        (vision_capture_reference, "compare_lockstep", ["lockstep differs"]),
     ]
     for module, name, value in stubs:
         monkeypatch.setattr(module, name, calls.returning(name, value))
-    scripts = {name: cast("upstream.Upstream", object()) for name in residual.VARIANTS}
+    scripts = {
+        name: cast("vision_upstream.Upstream", object()) for name in reference.VARIANTS
+    }
     record, report = capture_reference.capture_settings(scripts, tmp_path)
-    settings = residual.SETTINGS
+    settings = reference.SETTINGS
     expected = {"shared": positions, "lockstep/x/loss": torch.ones(2)} | {
         f"settings/{s}/stochastic_depth/positions": positions for s in settings
     }
@@ -205,7 +214,7 @@ def test_capture_settings_joins_every_settings_comparison(
         for line in (
             (
                 f"settings/{s}/optimizer/settings: "
-                f"{len(reference.HYPERPARAMETERS)}/{len(reference.HYPERPARAMETERS)} differ"
+                f"{len(vision_reference.HYPERPARAMETERS)}/{len(vision_reference.HYPERPARAMETERS)} differ"
             ),
             f"settings/{s}/lockstep differs",
         )
@@ -220,9 +229,9 @@ def test_capture_settings_joins_every_settings_comparison(
         (
             (scripts["basic"],),
             {
-                "arch": reference.SETTINGS[s].arch,
-                "dataset": reference.SETTINGS[s].dataset,
-                "classes": reference.SETTINGS[s].classes,
+                "arch": vision_reference.SETTINGS[s].arch,
+                "dataset": vision_reference.SETTINGS[s].dataset,
+                "classes": vision_reference.SETTINGS[s].classes,
             },
         )
         for s in settings
@@ -234,16 +243,16 @@ def test_capture_settings_joins_every_settings_comparison(
         (
             (scripts[n], n, trace),
             {
-                "classes": reference.SETTINGS[s].classes,
-                "key": residual.lockstep_key(n, setting=s),
+                "classes": vision_reference.SETTINGS[s].classes,
+                "key": reference.lockstep_key(n, setting=s),
             },
         )
         for s in settings
-        for n in residual.VARIANTS
+        for n in reference.VARIANTS
     ]
     runs = [k["run"] for _, k in calls.named("compare_lockstep")]
     assert [(r.func, r.keywords) for r in runs if isinstance(r, functools.partial)] == [
-        (residual.lockstep_record, {"setting": s}) for s in settings
+        (reference.lockstep_record, {"setting": s}) for s in settings
     ]
 
 
@@ -272,7 +281,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -288,7 +297,7 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     tmp_path: Path,
 ) -> None:
     record = {"x": torch.arange(3)}
-    result = reference.Captured(record=record, sites={}, report=[])
+    result = vision_reference.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]

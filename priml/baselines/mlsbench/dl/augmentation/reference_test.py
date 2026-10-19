@@ -17,17 +17,17 @@ import torch
 
 from priml.baselines.mlsbench.dl.augmentation import reference
 from priml.baselines.mlsbench.dl.augmentation.experiments import exp000
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from torch import Tensor
+
+_CWD: Final = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD / "testdata"
 
@@ -56,12 +56,13 @@ def test_the_test_pipeline_only_normalizes_as_the_script_does() -> None:
 def test_the_schedule_and_optimizer_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),
-        vision.schedule_record(exp000) | vision.optimizer_record(exp000),
+        vision_reference.schedule_record(exp000)
+        | vision_reference.optimizer_record(exp000),
     )
 
 
 def test_the_full_network_leaves_the_generator_where_the_script_does() -> None:
-    assert_exact(stored("draws/"), vision.draws_record())
+    assert_exact(stored("draws/"), vision_reference.draws_record())
 
 
 @pytest.mark.parametrize("name", list(reference.AUGMENTS))
@@ -74,11 +75,11 @@ def test_two_updates_on_each_augmentation_match_the_script(name: str) -> None:
 
 def test_the_golden_bites_on_one_wrong_mirror() -> None:
     images = reference.pipeline_images(reference.GOLDEN_IMAGES)
-    media = reference.augmented("trivialaugment", images, seed=vision.SEED)
+    media = reference.augmented("trivialaugment", images, seed=vision_reference.SEED)
     media[0] = media[0].flip(-1)
     key = "augment/trivialaugment/logits"
     assert mismatches(stored(key), {key: reference.classified(media)}) == [
-        f"{key}: {vision.CLASSES}/{vision.CLASSES * reference.GOLDEN_IMAGES} differ",
+        f"{key}: {vision_reference.CLASSES}/{vision_reference.CLASSES * reference.GOLDEN_IMAGES} differ",
     ]
 
 
@@ -86,7 +87,7 @@ def test_the_stored_lockstep_omits_only_the_batches_and_can_keep_states() -> Non
     states: list[dict[str, Tensor]] = []
     record = reference.lockstep_record("cutout", states=states)
     assert set(record) - set(reference.stored(record)) == {"lockstep/cutout/media"}
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
     assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
 
 
@@ -104,7 +105,7 @@ def test_the_whole_port_record_holds_every_part_the_golden_does(
         StoredPart(lockstep, "lockstep/{}/"),
     )
     monkeypatch.setattr(reference, "test_record", StoredPart(golden, "augment/test/"))
-    monkeypatch.setattr(vision, "draws_record", StoredPart(golden, "draws/"))
+    monkeypatch.setattr(vision_reference, "draws_record", StoredPart(golden, "draws/"))
     assert_exact(golden, reference.port_record())
 
 
@@ -112,7 +113,7 @@ def test_the_port_record_joins_every_part(monkeypatch: pytest.MonkeyPatch) -> No
     for name in ("pipeline_record", "lockstep_record", "test_record"):
         monkeypatch.setattr(reference, name, labeled(name))
     for name in ("schedule_record", "optimizer_record", "draws_record"):
-        monkeypatch.setattr(vision, name, labeled(name))
+        monkeypatch.setattr(vision_reference, name, labeled(name))
     assert set(reference.port_record()) == {
         "schedule_record/exp000",
         "optimizer_record/exp000",
@@ -130,8 +131,18 @@ def test_loaders_run_each_augmentation_over_the_synthetic_split(
     tmp_path: Path,
 ) -> None:
     train, evaluation = reference.loader_batches("cutout", tmp_path)
-    assert len(train) == len(evaluation) == vision.LOADER_PASSES
+    assert len(train) == len(evaluation) == vision_reference.LOADER_PASSES
     assert train[0][0]["media"].dtype == torch.float32
+
+
+def test_setting_loaders_run_each_augmentation_over_the_settings_split(
+    tmp_path: Path,
+) -> None:
+    setting = next(iter(reference.SETTINGS))
+    train, evaluation = reference.setting_loader_batches(setting, "cutout", tmp_path)
+    assert len(train) == len(evaluation) == vision_reference.LOADER_PASSES
+    media, _ = vision_reference.SETTINGS[setting].split()
+    assert train[0][0]["media"].shape[1:] == media.shape[1:]
 
 
 def stored_settings(prefix: str) -> dict[str, Tensor]:
@@ -153,7 +164,7 @@ def test_each_settings_network_builds_and_runs_like_the_script(
     assert set(expected) == {f"{prefix}{key}" for key in ("draws", "train", "eval")}
     assert_exact(
         expected,
-        vision.setting_record(
+        vision_reference.setting_record(
             setting,
             reference.SETTINGS[setting][name],
             key=f"{setting}/{name}",
@@ -178,7 +189,7 @@ def test_each_settings_pristine_loader_matches_the_script(
 ) -> None:
     assert_exact(
         stored_settings(f"settings/{setting}/loader/"),
-        vision.setting_loader_record(tmp_path, setting),
+        vision_reference.setting_loader_record(tmp_path, setting),
     )
 
 
@@ -197,7 +208,7 @@ def test_two_updates_on_each_augmentation_match_the_script_at_each_setting(
             reference.lockstep_record(name, states=states, setting=setting),
         ),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def labeled(label: str) -> Callable[..., dict[str, Tensor]]:
@@ -216,7 +227,7 @@ def test_the_settings_record_joins_every_settings_parts(
 ) -> None:
     for name in ("setting_pipeline_record", "lockstep_record"):
         monkeypatch.setattr(reference, name, labeled(name))
-    monkeypatch.setattr(vision, "task_settings_record", labeled("networks"))
+    monkeypatch.setattr(vision_reference, "task_settings_record", labeled("networks"))
     record = reference.settings_record(tmp_path)
     assert set(record) == {
         f"networks/{reference.SETTINGS}/{tmp_path}",
@@ -242,13 +253,13 @@ def test_the_fmnist_golden_bites_on_one_wrong_grayscale_mirror() -> None:
     media = reference.augmented(
         "randaugment",
         images,
-        seed=vision.SEED,
+        seed=vision_reference.SEED,
         factory=reference.SETTINGS[setting]["randaugment"],
     )
     media[0] = media[0].flip(-1)
     key = f"settings/{setting}/randaugment/augment"
     assert mismatches(stored_settings(key), {key: reference.classified(media)}) == [
-        f"{key}: {vision.CLASSES}/{vision.CLASSES * reference.GOLDEN_IMAGES} differ",
+        f"{key}: {vision_reference.CLASSES}/{vision_reference.CLASSES * reference.GOLDEN_IMAGES} differ",
     ]
 
 
@@ -271,7 +282,7 @@ def test_the_census_counts_the_ports_operations_by_sign() -> None:
         _ = reference.augmented(
             "trivialaugment",
             reference.pipeline_images(40),
-            seed=vision.SEED,
+            seed=vision_reference.SEED,
         )
     assert sum(counts.values()) == 40
     assert any(key.endswith("-") for key in counts)

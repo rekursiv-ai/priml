@@ -35,7 +35,7 @@ import argparse
 import tempfile
 
 from priml.baselines.mlsbench.dl.vision import (
-    reference as vision,
+    reference as vision_reference,
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
@@ -93,17 +93,12 @@ def main() -> int:
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
     capture_reference.write_records(flags.out, {"reference.pt": captured.record})
-    lines = [
-        f"{side} {key} {count}"
-        for side, counts in captured.sites.items()
-        for key, count in sorted(counts.items())
-    ]
-    (flags.out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
+    capture_reference.write_sites(flags.out, captured.sites)
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
 
-def capture(root: Path, scratch: Path) -> vision.Captured:
+def capture(root: Path, scratch: Path) -> vision_reference.Captured:
     """Run both sides and compare them.
 
     Args:
@@ -138,10 +133,10 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
             name: upstream.upstream_batches(pristine, upstream.SETTINGS[name][1])
             for name in ("exp000", "exp004")
         }
-        record |= vision.decode_batches(
+        record |= vision_reference.decode_batches(
             batches["exp004"][0],
             config=reference.SETTINGS["exp004"]().dataset,
-            source=vision.synthetic_split()[0],
+            source=vision_reference.synthetic_split()[0],
         )
         sites = upstream.upstream_sites(pristine, scripts["qsgd"])
     port = reference.port_record(scratch)
@@ -160,7 +155,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         ]
     port_sites = reference.draw_sites(scratch)
     report += check_sites(sites, port_sites)
-    return vision.Captured(
+    return vision_reference.Captured(
         record=record,
         sites={"reference": sites, "port": port_sites},
         report=report,
@@ -178,7 +173,7 @@ def compare_full_size(name: str, theirs: dict[str, Tensor]) -> list[str]:
       report: One line per tensor that differs.
 
     """
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
+    with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
         ours = reference.full_step(reference.SETTINGS[name]).model.state_dict()
     return [f"{name}/{line}" for line in capture_reference.compare_states(theirs, ours)]
 

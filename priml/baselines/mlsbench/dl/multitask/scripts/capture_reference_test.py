@@ -17,12 +17,12 @@ from torch import nn
 import torch
 
 from priml.baselines.mlsbench.dl.multitask import (
-    reference as port,
+    reference,
     upstream,
 )
 from priml.baselines.mlsbench.dl.multitask.scripts import capture_reference
 from priml.baselines.mlsbench.dl.multitask.upstream_test import write_clone
-from priml.baselines.mlsbench.dl.vision import reference
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import read_tensors
 
@@ -54,7 +54,9 @@ def returning[T](value: T) -> Callable[..., T]:
     return call
 
 
-def passes(fill: float) -> tuple[port.Batches, port.Batches]:
+def passes(
+    fill: float,
+) -> tuple[reference.Batches, reference.Batches]:
     """Return one training and one test pass of a single ``(2, 3)`` batch."""
     batch = {"media": torch.full((2, 3), fill), "label": torch.arange(2)}
     return [[batch]], [[batch]]
@@ -66,13 +68,13 @@ def port_lockstep(
     states: list[dict[str, Tensor]],
 ) -> dict[str, Tensor]:
     """Stand in for the port's lockstep: one tensor per state."""
-    states += [{"w": torch.zeros(2)} for _ in range(reference.STEPS)]
+    states += [{"w": torch.zeros(2)} for _ in range(vision_reference.STEPS)]
     return {f"lockstep/{name}/loss": torch.zeros(2)}
 
 
 def shallow(factory: Callable[[], MultiTaskTrainLoop]) -> MultiTaskStep:
     """Build ``factory``'s step one block per stage, in place of the full network."""
-    return port.tiny_step(factory, epochs=reference.EPOCHS)
+    return reference.tiny_step(factory, epochs=vision_reference.EPOCHS)
 
 
 def test_the_full_size_comparison_names_the_stand_ins_other_network(
@@ -85,7 +87,7 @@ def test_the_full_size_comparison_names_the_stand_ins_other_network(
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     scripts = upstream.variants(root, scratch)
-    monkeypatch.setattr(port, "full_step", shallow)
+    monkeypatch.setattr(reference, "full_step", shallow)
     trace = upstream.trace_main(scripts["sum"])
     report = capture_reference.compare_full_size(scripts, trace)
     (state,) = (line for line in report if line.startswith("state: "))
@@ -152,22 +154,24 @@ def test_capture_settings_joins_every_settings_runs(
     monkeypatch.setattr(upstream, "check_walk", walks)
     monkeypatch.setattr(capture_reference, "compare_setting", setting_differs)
     monkeypatch.setattr(
-        port,
+        reference,
         "settings_record",
-        returning({f"settings/{s}/x": torch.ones(2) for s in port.SETTINGS}),
+        returning(
+            {f"settings/{s}/x": torch.ones(2) for s in reference.SETTINGS},
+        ),
     )
     monkeypatch.setattr(
-        port,
+        reference,
         "setting_lockstep_record",
         LockstepRun({"w": torch.ones(2)}),
     )
     record, report = capture_reference.capture_settings(scripts)
-    assert record.keys() == {f"settings/{s}/x" for s in port.SETTINGS}
-    assert builder.archs == list(port.SETTINGS.values())
+    assert record.keys() == {f"settings/{s}/x" for s in reference.SETTINGS}
+    assert builder.archs == list(reference.SETTINGS.values())
     assert walks.coarse == ["fc_coarse.", "classifier_coarse."]
     per_setting = [
         line
-        for s in port.SETTINGS
+        for s in reference.SETTINGS
         for line in (
             f"settings/{s}/main/sum: epoch arguments differ",
             f"{s} state differs",
@@ -176,8 +180,8 @@ def test_capture_settings_joins_every_settings_runs(
     ]
     assert report == [
         *per_setting,
-        *(f"settings/{s}/x: 2/2 differ" for s in sorted(port.SETTINGS)),
-        *(f"lockstep/{s}/sum/1: w: 2/2 differ" for s in port.SETTINGS),
+        *(f"settings/{s}/x: 2/2 differ" for s in sorted(reference.SETTINGS)),
+        *(f"lockstep/{s}/sum/1: w: 2/2 differ" for s in reference.SETTINGS),
     ]
 
 
@@ -204,7 +208,10 @@ def test_capture_joins_both_sides_and_every_setting(
     """The runs are tested elsewhere; here they are stubbed, to test the glue."""
     calls = Calls()
     trace = upstream.Trace(epochs=[(e, 200) for e in range(200)])
-    no_batches: tuple[port.Batches, port.Batches] = ([], [])
+    no_batches: tuple[reference.Batches, reference.Batches] = (
+        [],
+        [],
+    )
     root, scratch = tmp_path / "root", tmp_path / "scratch"
     sum_script, dwa_script = object(), object()
     scripts = {"sum": sum_script, "dwa": dwa_script}
@@ -216,8 +223,8 @@ def test_capture_joins_both_sides_and_every_setting(
         (upstream, "upstream_record", {"theirs": torch.ones(2)}),
         (upstream, "upstream_batches", no_batches),
         (capture_reference, "compare_full_size", ["full size differs"]),
-        (port, "port_record", {"theirs": torch.zeros(2)}),
-        (port, "loader_batches", no_batches),
+        (reference, "port_record", {"theirs": torch.zeros(2)}),
+        (reference, "loader_batches", no_batches),
         (
             capture_reference,
             "capture_settings",
@@ -225,7 +232,11 @@ def test_capture_joins_both_sides_and_every_setting(
         ),
     ):
         monkeypatch.setattr(module, name, calls.returning(name, value))
-    monkeypatch.setattr(port, "lockstep_record", LockstepRun({"w": torch.ones(2)}))
+    monkeypatch.setattr(
+        reference,
+        "lockstep_record",
+        LockstepRun({"w": torch.ones(2)}),
+    )
     captured = capture_reference.capture(root, scratch)
     assert captured.record.keys() == {"theirs", "settings/x"}
     assert captured.sites == {}
@@ -276,12 +287,12 @@ class LockstepRun:
 def test_compare_setting_names_each_combinations_state_that_differs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(port, "full_step", shallow)
-    setting = next(iter(port.SETTINGS))
-    combinations = port.SETTING_COMBINATIONS[setting]
+    monkeypatch.setattr(reference, "full_step", shallow)
+    setting = next(iter(reference.SETTINGS))
+    combinations = reference.SETTING_COMBINATIONS[setting]
     states: dict[str, dict[str, Tensor]] = {}
     for name, factory in combinations.items():
-        with reference.seeded(reference.SEED), host_agnostic_numerics():
+        with vision_reference.seeded(vision_reference.SEED), host_agnostic_numerics():
             states[name] = shallow(factory).model.state_dict()
     moved = {k: v + 1 if v.is_floating_point() else v for k, v in states["dwa"].items()}
     traces = {name: upstream.Trace(state=s) for name, s in states.items()}
@@ -305,7 +316,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={}, sites={}, report=["a differs"])
+    result = vision_reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     monkeypatch.setattr(
@@ -323,7 +334,11 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = reference.Captured(record={"x": torch.arange(3)}, sites={}, report=[])
+    result = vision_reference.Captured(
+        record={"x": torch.arange(3)},
+        sites={},
+        report=[],
+    )
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     monkeypatch.setattr(

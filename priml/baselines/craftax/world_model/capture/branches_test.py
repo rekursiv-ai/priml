@@ -111,6 +111,59 @@ def test_a_parent_missing_from_the_pools_node_is_named(tmp_path: Path) -> None:
         feeder.close()
 
 
+@pytest.mark.parametrize(("ahead", "threads"), [(0, 1), (1, 0)])
+def test_a_feeder_needs_a_start_ahead_and_a_thread(
+    tmp_path: Path,
+    ahead: int,
+    threads: int,
+) -> None:
+    config = BranchFeeder.Config(pools=tmp_path, ahead=ahead, threads=threads)
+    with pytest.raises(ValueError, match="must be positive"):
+        BranchFeeder(config, arm=0, worker=0, first_episode=0)
+
+
+def test_a_parent_that_is_itself_a_branch_is_refused(tmp_path: Path) -> None:
+    shard = tmp_path / "train" / "arm2" / "w0"
+    shard.mkdir(parents=True)
+    parent = _stored(3, ((0, 0),), arm=2)
+    branch = ReplayEpisode(
+        receipt=parent.receipt,
+        actions=parent.actions,
+        hashes=parent.hashes,
+        snapshots=parent.snapshots,
+        floors=parent.floors,
+        summary=parent.summary,
+        origin=bytes(replay.SNAPSHOT_BYTES),
+    )
+    line = write_replay_shard(
+        shard,
+        index=0,
+        episodes=[branch],
+        stride=256,
+        provenance={},
+    )
+    point = BranchPoint(
+        directory=shard,
+        shard=line.shard,
+        episode=0,
+        decision=1,
+        floor=0,
+        kind="time",
+    )
+    write_pool(tmp_path / "pools" / "arm2-w1.jsonl", [point])
+    feeder = BranchFeeder(
+        BranchFeeder.Config(pools=tmp_path / "pools"),
+        arm=2,
+        worker=1,
+        first_episode=0,
+    )
+    try:
+        with pytest.raises(ValueError, match="start at their reset"):
+            feeder.start(0)
+    finally:
+        feeder.close()
+
+
 def test_the_feeder_hands_out_each_parents_state_then_none(tmp_path: Path) -> None:
     # The parent is built, not played: 258 NOOPs on the tiny world, its state
     # before decision 256 that world 256 ticks on, stored as its one snapshot.

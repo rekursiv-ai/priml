@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
+import dataclasses
 import sys
 
 from treekle import PlainTree, from_plain, json_loads
@@ -15,6 +16,7 @@ from priml.baselines.craftax.world_model.archive import (
     Episode,
     ManifestLine,
     Receipt,
+    read_summaries,
     write_corpus,
     write_shard,
 )
@@ -188,6 +190,44 @@ def test_main_scores_the_runs_corpus_and_writes_the_report(
         "seed": 3,
         "tiles_available": 9,
     }
+
+
+def test_score_refuses_more_arm_classes_than_strata(tmp_path: Path) -> None:
+    episode = _episode(3)
+    seventh = dataclasses.replace(
+        episode,
+        receipt=dataclasses.replace(episode.receipt, arm=6),
+    )
+    entry = _publish(tmp_path, [seventh], split=1)
+    shards = [(entry, read_summaries(*entry))]
+    with pytest.raises(ValueError, match="7 arms have more class labels than 27"):
+        data_eval.score(
+            torch.nn.Linear(1, 1),
+            shards,
+            [(0, 0, 0)],
+            t_g=8,
+            s_max=2,
+            cached_decisions=100,
+        )
+
+
+def test_score_refuses_a_validation_episode_that_starts_from_a_branch(
+    tmp_path: Path,
+    scored: None,
+) -> None:
+    del scored
+    branch = dataclasses.replace(_episode(3), origin=b"\x01")
+    entry = _publish(tmp_path, [branch], split=1)
+    shards = [(entry, read_summaries(*entry))]
+    with pytest.raises(ValueError, match=r"\(0, 0\) starts from a branch"):
+        data_eval.score(
+            torch.nn.Linear(1, 1),
+            shards,
+            [(0, 0, 0)],
+            t_g=8,
+            s_max=2,
+            cached_decisions=100,
+        )
 
 
 def test_frame_ids_ignore_light_and_repeats_look_back_a_window() -> None:

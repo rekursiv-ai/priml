@@ -438,6 +438,40 @@ def test_signal_dump_tracker_omits_empty_rank_and_writes_for_remote_data(
     assert written == [SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=())]
 
 
+def test_signal_dump_tracker_writes_nothing_when_no_rank_reports_a_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_rank(has_payload: bool) -> bool:
+        del has_payload
+        return False
+
+    monkeypatch.setattr(signal_dump, "_any_rank", no_rank)
+    tracker = SignalDumpTracker.Config(working_dir=tmp_path / "signals.npz").make()
+    payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=(1,))
+
+    tracker.log_metrics({"extras": {"signal_dump": payload}}, 1, prefix="eval/")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_signal_dump_writes_and_prunes_only_on_rank_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=(1,))
+    (tmp_path / "signals_1.npz").write_bytes(b"old")
+    monkeypatch.setattr(signal_dump, "is_rank_zero", lambda: False)
+    tracker = SignalDumpTracker.Config(
+        working_dir=str(tmp_path / "signals_{global_step}.npz"),
+        keep_last_n=1,
+    ).make()
+
+    tracker.log_metrics({"extras": {"signal_dump": payload}}, 2, prefix="eval/")
+
+    assert [path.name for path in tmp_path.iterdir()] == ["signals_1.npz"]
+
+
 def test_keep_one_signal_dump_and_archive_every_step(
     tmp_path: Path,
 ) -> None:

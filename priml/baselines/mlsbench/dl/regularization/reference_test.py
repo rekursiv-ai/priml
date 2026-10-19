@@ -16,7 +16,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.regularization import reference
 from priml.baselines.mlsbench.dl.regularization.experiments import exp000
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.vision.train_step import LossContext
 from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
@@ -70,7 +70,8 @@ def test_a_port_call_hands_on_every_input_and_states_its_context() -> None:
 def test_the_schedule_and_optimizer_match_the_setting() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),
-        vision.schedule_record(exp000) | vision.optimizer_record(exp000),
+        vision_reference.schedule_record(exp000)
+        | vision_reference.optimizer_record(exp000),
     )
 
 
@@ -86,7 +87,7 @@ def test_the_full_step_leaves_the_generator_where_the_script_does() -> None:
 
 
 def test_the_best_accuracy_is_reported_as_the_script_does() -> None:
-    assert_exact(stored("best/"), vision.best_record())
+    assert_exact(stored("best/"), vision_reference.best_record())
 
 
 @pytest.mark.parametrize("name", list(reference.REGULARIZERS))
@@ -96,7 +97,7 @@ def test_two_updates_with_each_regularizer_match_the_script(name: str) -> None:
         stored(f"lockstep/{name}/"),
         reference.lockstep_record(name, states=states),
     )
-    assert len(states) == vision.STEPS
+    assert len(states) == vision_reference.STEPS
 
 
 def test_the_golden_bites_on_one_ulp() -> None:
@@ -125,6 +126,11 @@ def test_each_settings_recipe_matches_its_launch_script(setting: str) -> None:
     }
     assert len(expected) == 3
     assert_exact(expected, reference.setting_recipe_record(setting))
+
+
+def test_the_batch_size_of_a_setting_is_read_from_its_command_line() -> None:
+    argv = ["python", "main.py", "--epochs", "3", "--batch-size", "64", "--lr", "0.1"]
+    assert reference.setting_batch_size(argv).tolist() == [64, 64]
 
 
 def test_the_vgg_setting_warms_up_as_the_script_does() -> None:
@@ -183,7 +189,7 @@ def test_each_variants_full_network_at_each_setting_matches_the_script(
     assert len(expected) == 3
     assert_exact(
         expected,
-        vision.setting_record(
+        vision_reference.setting_record(
             setting,
             reference.SETTING_REGULARIZERS[setting][name],
             key=key,
@@ -194,7 +200,7 @@ def test_each_variants_full_network_at_each_setting_matches_the_script(
 def test_the_fmnist_loader_matches_the_script(tmp_path: Path) -> None:
     assert_exact(
         stored_settings("settings/mobilenetv2-fmnist/loader/"),
-        vision.setting_loader_record(tmp_path, "mobilenetv2-fmnist"),
+        vision_reference.setting_loader_record(tmp_path, "mobilenetv2-fmnist"),
     )
 
 

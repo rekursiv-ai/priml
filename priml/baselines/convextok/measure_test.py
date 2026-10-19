@@ -29,6 +29,7 @@ from priml.baselines.convextok.measure import (
     MeasuredFit,
     Metrics,
 )
+from priml.baselines.convextok.prepare import ConvexTokPreparation, Fit
 from priml.baselines.convextok.prepare_test import fixture_config
 from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.convextok.testing import (
@@ -232,6 +233,45 @@ def test_cuda_fit_reports_peak_device_memory(tmp_path: Path) -> None:
     )["peak_gpu_bytes"]
     assert peak is not None
     assert peak > 0
+
+
+def test_cuda_peak_memory_is_reset_before_the_fit_and_read_after(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CUDA branch, driven on a CPU host with the memory counters faked."""
+    config = _measured_config(tmp_path)
+    config.preparation.device = "cuda"
+    config.preparation.presolve = None
+    config.preparation.solver = _Zeros.Config()
+    events: list[str] = []
+    solve_on_cpu = ConvexTokPreparation.fit
+
+    def reset_peak(device: torch.device) -> None:
+        assert device == torch.device("cuda")
+        events.append("reset")
+
+    def max_allocated(device: torch.device) -> int:
+        assert device == torch.device("cuda")
+        events.append("read")
+        return 4096
+
+    def fit_on_cpu(self: ConvexTokPreparation) -> Fit:
+        events.append("fit")
+        self.config.device = "cpu"
+        return solve_on_cpu(self)
+
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", reset_peak)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", max_allocated)
+    monkeypatch.setattr(ConvexTokPreparation, "fit", fit_on_cpu)
+    config.make().run()
+
+    assert events == ["reset", "fit", "read"]
+    metrics = json_loads(
+        (tmp_path / "runs/convextok/exp000/metrics.json").read_text(),
+        Metrics,
+    )
+    assert metrics["peak_gpu_bytes"] == 4096
 
 
 def test_existing_run_directory_fails_before_fitting(tmp_path: Path) -> None:

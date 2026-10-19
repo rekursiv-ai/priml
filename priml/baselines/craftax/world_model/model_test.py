@@ -7,6 +7,7 @@ from typing import override
 from unittest.mock import Mock, patch
 
 import copy
+import dataclasses
 import math
 
 from torch import Tensor, nn
@@ -40,6 +41,8 @@ from priml.baselines.craftax.world_model.model import (
     gathered_board,
     keep_attention,
     multi_hot_board,
+    prefix_ids,
+    slot_loss_cost,
     to_autocast_dtype,
 )
 from priml.baselines.craftax.world_model.schema import (
@@ -51,6 +54,7 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
 )
 from priml.cost import cost
+from priml.loss import simple_loss
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
 from priml.model.embedding import Embedding
@@ -864,6 +868,117 @@ def test_the_world_model_costs_the_products_torch_runs(
         jobs=len(batch.job_at),
         dtype=None,
     )
+
+
+def test_a_decoder_block_must_keep_its_width() -> None:
+    with pytest.raises(ValueError, match="must equal channels_out=12"):
+        DecoderBlock.Config(channels_in=8, channels_out=12).make()
+
+
+def test_a_decoder_block_needs_its_memory() -> None:
+    block = DecoderBlock.Config(channels_in=8).make()
+    with pytest.raises(ValueError, match="needs memory"):
+        block(torch.randn(2, 3, 8))
+
+
+def test_the_max_attention_logit_is_read_only_after_a_forward() -> None:
+    torch.manual_seed(0)
+    model = _tiny_language_model_config().make()
+    with pytest.raises(ValueError, match="after a forward"):
+        model.transformer.max_attention_logit()
+
+
+def test_the_frame_encoder_counts_its_matrices_over_the_slots_and_pool() -> None:
+    config = FrameEncoder.Config(channels_in=16, num_slots=3)
+    _tiny_local(config.stack)
+    encoder = config.make()
+    matrices = sum(p.numel() for p in encoder.stack.parameters() if p.ndim >= 2)
+    # Three slots and the pooling token.
+    assert encoder.frame_macs() == 4 * matrices > 0
+
+
+def test_a_cast_stream_adds_its_cast_to_the_local_decoders_cost() -> None:
+    plain = LocalDecoder.Config(channels_in=16, num_slots=3)
+    _tiny_local(plain.stack)
+    cast = plain.copy_tree()
+    cast.cast_stream = to_autocast_dtype
+    priced = [
+        config.finalize().cost(batch_size=2, dtype=None, memory_len=5)
+        for config in (plain, cast)
+    ]
+    # Two jobs of three slots plus their five memory positions, 16 wide, each
+    # cast in forward and its gradient cast back: read and written each way.
+    assert priced[1].sum() - priced[0].sum() == 4 * (2 * 3 + 2 * 5) * 16 * 4
+    assert priced[1]["flops"].sum() == priced[0]["flops"].sum()
+
+
+def test_a_cast_stream_adds_its_cast_to_the_frame_encoders_cost() -> None:
+    plain = FrameEncoder.Config(channels_in=16, num_slots=3)
+    _tiny_local(plain.stack)
+    cast = plain.copy_tree()
+    cast.cast_stream = to_autocast_dtype
+    priced = [
+        config.finalize().cost(batch_size=2, dtype=None) for config in (plain, cast)
+    ]
+    # Two frames of three slots and the pooling token, 16 wide, cast as above.
+    assert priced[1].sum() - priced[0].sum() == 4 * (2 * 4) * 16 * 4
+    assert priced[1]["flops"].sum() == priced[0]["flops"].sum()
+
+
+def test_a_world_model_needs_one_local_width() -> None:
+    config = _tiny_world_model_config()
+    config.decoder.channels_in = 8
+    with pytest.raises(ValueError, match="share one table, so one width"):
+        config.make()
+
+
+def test_a_world_model_refuses_a_local_prefix_it_cannot_score() -> None:
+    config = _tiny_world_model_config()
+    config.schema = dataclasses.replace(config.schema, prefix_names=("reward",))
+    with pytest.raises(ValueError, match=r"Unsupported local prefix \('reward',\)"):
+        config.make()
+
+
+def test_the_action_rows_cost_priml_float32_summed_cross_entropy() -> None:
+    """One more position adds one row of 43 actions: float32 and summed.
+
+    Under a float64 default the rows stay float32: the loss runs on float32
+    logits whatever the default.
+    """
+    schema = small_schema()
+    row = cost(
+        simple_loss.cross_entropy,
+        dtype=torch.float32,
+        channels_out=43,
+        weighted=False,
+        rescale=0,
+    )
+    default = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        grown = slot_loss_cost(schema, positions=6, jobs=3, num_actions=43)
+        base = slot_loss_cost(schema, positions=5, jobs=3, num_actions=43)
+    finally:
+        torch.set_default_dtype(default)
+    for key, count in row.cells.items():
+        assert grown.cells.get(key, 0) - base.cells.get(key, 0) == count, key
+    assert grown.sum() - base.sum() == row.sum() > 0
+
+
+def test_a_schema_without_cell_fields_costs_no_board_loss() -> None:
+    schema = small_schema()
+    boardless = dataclasses.replace(schema, cell_fields=())
+    with_board = slot_loss_cost(schema, positions=5, jobs=3, num_actions=43)
+    without = slot_loss_cost(boardless, positions=5, jobs=3, num_actions=43)
+    assert 0 < without.sum() < with_board.sum()
+
+
+def test_a_schema_without_a_prefix_feeds_no_prefix_ids() -> None:
+    batch = _batch()
+    unprefixed = dataclasses.replace(small_schema(), prefix_names=(), prefix_ranges=())
+    ids = prefix_ids(batch, schema=unprefixed, scalar_offset=number_id(0))
+    assert ids.shape == (len(batch.job_at), 0)
+    assert ids.dtype == torch.int64
 
 
 def test_the_board_embeddings_cost_a_lookup_or_a_one_sided_product() -> None:
