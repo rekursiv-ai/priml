@@ -36,6 +36,9 @@ uv add priml
 - **data** -- the data pipeline and dataset utilities.
 - **inference** -- inference helpers.
 
+Modules, costs, and metrics pass open keyword arguments down the tree; see
+[the keyword bus](docs/kwargs_bus.md) for the rule and why it is sound.
+
 ### Training Loops
 
 ```python
