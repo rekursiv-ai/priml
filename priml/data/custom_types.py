@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypedDict, TypeVar, runtime_checkable
 
 from priml.custom_types import CheckpointableProtocol
 
@@ -14,9 +14,20 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DatasetProtocol",
+    "FilterableSample",
     "Processor",
     "Source",
 ]
+
+
+class FilterableSample(TypedDict, total=False):
+    """The one key every pipeline stage shares: why the sample was rejected.
+
+    Each stage's ``Input`` subclasses this, so every stage sample carries it.
+    """
+
+    filter_reasons: list[str]
+
 
 _InputSampleT_contra = TypeVar(
     "_InputSampleT_contra",

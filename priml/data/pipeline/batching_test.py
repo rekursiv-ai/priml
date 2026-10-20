@@ -889,7 +889,6 @@ def _tensor(batch: Batcher.Output, name: str) -> Tensor:
 def _raw(batch: Batcher.Output) -> list[dict[str, object]]:
     """Narrow the dynamic raw field to the records this test expects."""
     value = batch["raw"]
-    assert isinstance(value, list)
     records: list[dict[str, object]] = []
     for raw_record in cast(list[object], value):
         assert isinstance(raw_record, dict)

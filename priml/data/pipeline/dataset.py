@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, MutableMapping, Sized
+from collections.abc import Iterator, Sized
 from dataclasses import field
 from pathlib import Path
 from typing import (
     Any,
-    Final,
     Protocol,
     Self,
-    cast,
     override,
     runtime_checkable,
 )
@@ -26,6 +24,7 @@ import torch
 
 from priml.custom_types import HasNormalizedWorkingDirPattern
 from priml.data.custom_types import Processor, Source
+from priml.data.filtering import read_filter_reasons
 from priml.data.pipeline.batching import (
     Batcher,
     Unbatcher,
@@ -36,58 +35,6 @@ from priml.runtime import global_device_mesh
 
 
 logger = logging.getLogger(__name__)
-
-
-# Once an image fails to decode, no further filter reasons are meaningful and
-# logging each one floods the logs; this sentinel short-circuits both.
-_DECODE_FAILED_REASON: Final = "CropDuringDecodeImage:decode_failed"
-
-
-def add_filter_reason(
-    sample: MutableMapping[str, object],
-    filter: str,
-    reason: str,
-) -> None:
-    """Add filter reason to sample.
-
-    Args:
-      sample: Mutable sample dict to mark for filtering; short-circuits on
-        decode failure to avoid log spam.
-      filter: Stage name that produced the rejection.
-      reason: Specific condition causing rejection (appended to stage name).
-
-    """
-    filter_reasons_value = sample.get("filter_reasons")
-    if not isinstance(filter_reasons_value, list):
-        filter_reasons_value = []
-    filter_reasons = [
-        value
-        for value in cast(list[object], filter_reasons_value)
-        if isinstance(value, str)
-    ]
-    if _DECODE_FAILED_REASON in filter_reasons:
-        return
-    full_reason = f"{filter}:{reason}"
-    filter_reasons.append(full_reason)
-    sample["filter_reasons"] = filter_reasons
-    if full_reason != _DECODE_FAILED_REASON:
-        logger.debug("Filter: %s", full_reason)
-
-
-def add_filter_reason_typed(
-    sample: Mapping[str, object],
-    filter: str,
-    reason: str,
-) -> None:
-    """Add filter reason to sample (accepts TypedDict).
-
-    Args:
-      sample: Sample.
-      filter: Filter.
-      reason: Reason.
-
-    """
-    add_filter_reason(cast(MutableMapping[str, object], sample), filter, reason)
 
 
 class _DummySource:
@@ -248,13 +195,7 @@ class DataPipeline:
 
             # Track filter reasons if present. Deduplicate so the same reason
             # accumulated twice on one sample is not counted twice.
-            filter_reasons_value = sample.get("filter_reasons", [])
-            assert isinstance(filter_reasons_value, list)
-            filter_reasons = [
-                reason
-                for reason in cast(list[object], filter_reasons_value)
-                if isinstance(reason, str)
-            ]
+            filter_reasons = read_filter_reasons(sample)
             if filter_reasons:
                 self.samples_filtered += 1
                 for reason in dict.fromkeys(filter_reasons):

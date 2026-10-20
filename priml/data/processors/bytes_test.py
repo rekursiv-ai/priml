@@ -472,8 +472,8 @@ def test_decode_video_filters_a_non_positive_target(video_tar: Path) -> None:
     out = _run(video_tar, target_frames=0, target_height=32, target_width=32)
 
     assert "media_tensor" not in out[0]
-    reasons = cast(dict[str, object], out[0]).get("filter_reasons", [])
-    assert any("invalid_target" in str(r) for r in cast(list[object], reasons))
+    reasons = out[0].get("filter_reasons", [])
+    assert any("invalid_target" in str(r) for r in reasons)
 
 
 @pytest.mark.cli_python_subprocess
@@ -687,7 +687,7 @@ def test_an_unreadable_sample_records_why_but_a_rerouted_one_does_not(
         ["GetBytesFromTarHandle:missing: key"],
         ["GetBytesFromTarHandle:missing: _tar_handle"],
     ]
-    assert not cast(dict[str, object], rerouted).get("filter_reasons")
+    assert "filter_reasons" not in rerouted
     assert "_tar_handle" in rerouted
 
 
@@ -896,7 +896,8 @@ def test_image_decode_names_the_backend_that_rejected_the_bytes() -> None:
         )
 
         assert "media_tensor" not in out[0], fmt
-        reasons = cast(list[str], cast(dict[str, object], out[0])["filter_reasons"])
+        reasons = out[0].get("filter_reasons")
+        assert reasons is not None
         assert "decode_failed" in reasons[0], (fmt, reasons)
         # WHICH decoder failed and how, not just that one did. ``_process_image``
         # builds that detail (``jpg_OSError:...``) and the caller used to unpack
@@ -1016,8 +1017,9 @@ def test_tar_reader_skips_what_it_cannot_or_need_not_read(tmp_path: Path) -> Non
     assert out[0].get("media") == b"already", "existing bytes were overwritten"
     assert "media" not in out[1], "read without a key"
     assert "media" not in out[2], "read a format it does not claim"
-    assert not cast(dict[str, object], out[2]).get("filter_reasons")
-    missing = cast(list[str], cast(dict[str, object], out[3])["filter_reasons"])
+    assert "filter_reasons" not in out[2]
+    missing = out[3].get("filter_reasons")
+    assert missing is not None
     assert "member_not_found" in missing[0]
 
 
@@ -1058,7 +1060,8 @@ def test_image_decode_falls_through_to_pil_and_reports_a_corrupt_payload() -> No
 
     # Undecodable bytes are reported, and the sample survives.
     assert "media_tensor" not in out[1]
-    reasons = cast(list[str], cast(dict[str, object], out[1])["filter_reasons"])
+    reasons = out[1].get("filter_reasons")
+    assert reasons is not None
     assert "decode_failed" in reasons[0]
 
 
@@ -1093,7 +1096,7 @@ def test_image_decode_skips_a_format_it_does_not_claim() -> None:
     )
 
     assert "media_tensor" not in out[0]
-    assert not cast(dict[str, object], out[0]).get("filter_reasons")
+    assert "filter_reasons" not in out[0]
 
 
 def test_image_decode_reports_a_sample_it_cannot_size() -> None:
@@ -1118,10 +1121,11 @@ def test_image_decode_reports_a_sample_it_cannot_size() -> None:
         ),
     )
 
-    sized = cast(list[str], cast(dict[str, object], out[0])["filter_reasons"])
+    sized = out[0].get("filter_reasons")
+    assert sized is not None
     assert "missing_dimensions" in sized[0]
     # No bytes yet: nothing to report, the reader simply has not run.
-    assert not cast(dict[str, object], out[1]).get("filter_reasons")
+    assert "filter_reasons" not in out[1]
 
 
 def test_get_dimensions_remeasures_a_non_positive_cached_value() -> None:
@@ -1197,7 +1201,7 @@ def test_get_dimensions_passes_through_what_it_cannot_measure() -> None:
     for sample in out:
         assert "height" not in sample
         assert "width" not in sample
-        assert not cast(dict[str, object], sample).get("filter_reasons")
+        assert "filter_reasons" not in sample
 
 
 def test_get_bytes_from_file_skips_a_sample_that_already_has_bytes(
@@ -1256,15 +1260,15 @@ def test_get_bytes_from_file_reports_an_unreadable_path(tmp_path: Path) -> None:
 
     assert len(out) == 5, "no sample may be dropped"
     assert out[0].get("media") == b"preserved"
-    assert not cast(dict[str, object], out[0]).get("filter_reasons")
-    assert not cast(dict[str, object], out[1]).get("filter_reasons")
+    assert "filter_reasons" not in out[0]
+    assert "filter_reasons" not in out[1]
     assert out[2].get("media") == b"payload"
     assert "media" not in out[3]
-    reasons = cast(list[str], cast(dict[str, object], out[3])["filter_reasons"])
+    reasons = out[3]["filter_reasons"]
     assert len(reasons) == 1
     assert reasons[0].startswith("GetBytesFromFile:unreadable: ")
     assert str(absent) in reasons[0]
-    assert not cast(dict[str, object], out[4]).get("filter_reasons")
+    assert "filter_reasons" not in out[4]
 
 
 def test_decode_video_field_validation_and_handle_cleanup() -> None:
@@ -1472,7 +1476,8 @@ def test_image_decode_reports_corrupt_jpeg_with_filter_identity() -> None:
 
     result = next(processor(iter([sample])))
 
-    reasons = cast(list[str], cast(dict[str, object], result)["filter_reasons"])
+    reasons = result.get("filter_reasons")
+    assert reasons is not None
     assert reasons == [
         "CropDuringDecodeImage:decode_failed: jpg_decode_failed",
     ]

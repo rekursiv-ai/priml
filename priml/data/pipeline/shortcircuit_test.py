@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import gc
@@ -11,6 +11,7 @@ from configgle import Fig
 
 import pytest
 
+from priml.data.filtering import read_filter_reasons
 from priml.data.pipeline.shortcircuit import (
     FilterStats,
     ShortCircuitProcessor,
@@ -46,13 +47,10 @@ class MockProcessor:
                 sample["filter_reasons"] = ["removed"]
                 continue
             # Add filter reason to passed samples.
-            filter_reasons_val = sample.get("filter_reasons")
-            if isinstance(filter_reasons_val, list):
-                filter_reasons = cast(list[str], filter_reasons_val)
-            else:
-                filter_reasons: list[str] = []
-            filter_reasons.append(self.add_reason)
-            sample["filter_reasons"] = filter_reasons
+            sample["filter_reasons"] = [
+                *read_filter_reasons(sample),
+                self.add_reason,
+            ]
             yield sample
 
 
@@ -199,8 +197,8 @@ def test_short_circuit_processor_pass_through():
     assert result[0]["key"] == "sample1"
     assert result[1]["key"] == "sample2"
     # Should have added filter reasons.
-    filter_reasons_0 = cast(list[str], result[0]["filter_reasons"])
-    filter_reasons_1 = cast(list[str], result[1]["filter_reasons"])
+    filter_reasons_0 = read_filter_reasons(result[0])
+    filter_reasons_1 = read_filter_reasons(result[1])
     assert "test_reason" in filter_reasons_0
     assert "test_reason" in filter_reasons_1
 
@@ -249,9 +247,9 @@ def test_short_circuit_processor_skip_filtered():
 
     assert len(result) == 3
     # Sample 2 should not have test_reason added (skipped)
-    filter_reasons_0 = cast(list[str], result[0]["filter_reasons"])
-    filter_reasons_1 = cast(list[str], result[1]["filter_reasons"])
-    filter_reasons_2 = cast(list[str], result[2]["filter_reasons"])
+    filter_reasons_0 = read_filter_reasons(result[0])
+    filter_reasons_1 = read_filter_reasons(result[1])
+    filter_reasons_2 = read_filter_reasons(result[2])
     assert "test_reason" in filter_reasons_0
     assert "test_reason" not in filter_reasons_1
     assert "already_filtered" in filter_reasons_1

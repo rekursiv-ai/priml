@@ -5,7 +5,9 @@ This module contains type definitions used across media processing components.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
+
+from priml.data.custom_types import FilterableSample
 
 
 if TYPE_CHECKING:
@@ -20,7 +22,7 @@ __all__ = [
 ]
 
 
-class Sample(TypedDict, total=False):
+class Sample(FilterableSample, total=False):
     """Sample dictionary schema.
 
     All fields are optional to support progressive enrichment through pipeline.
@@ -84,14 +86,15 @@ class Sample(TypedDict, total=False):
     max_bg_flow: float
     foreground_percent: float
 
-    # Quality and content scores (Tensor during GPU pipeline, dict after unbatch)
+    # Quality and content scores: Tensor during the GPU pipeline, dict after
+    # unbatch, list after a parquet round trip.
     aesthetic_score: float
-    aesthetic_scores: Tensor | dict[int, float]
+    aesthetic_scores: Tensor | dict[int, float] | list[float]
     qalign_score: float
-    qalign_scores: Tensor | dict[int, float]
-    nsfw_scores: Tensor | dict[int, float]
-    nsfw_scores_v2: Tensor | dict[int, float]
-    watermark_scores: Tensor | dict[int, float]
+    qalign_scores: Tensor | dict[int, float] | list[float]
+    nsfw_scores: Tensor | dict[int, float] | list[float]
+    nsfw_scores_v2: Tensor | dict[int, float] | list[float]
+    watermark_scores: Tensor | dict[int, float] | list[float]
 
     # FirstFrameLastFrameSimilarityScore / KenBurnsScore.
     first_frame_last_frame_similarity: float
@@ -104,7 +107,5 @@ class Sample(TypedDict, total=False):
     text_bbox_detections: dict[int, list[list[float]]]
     text_bbox_best_crops: dict[int, tuple[tuple[int, int], tuple[int, int]]]
 
-    # Tradeoff: Mixes infrastructure with data, but keeps pipeline simple.
-    filter_reasons: list[str]
     _filter_counts: dict[str, int]
     _tar_handle: TarFileProtocol

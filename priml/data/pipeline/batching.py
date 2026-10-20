@@ -20,6 +20,8 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.data.filtering import read_filter_reasons
+
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +345,7 @@ class Unbatcher:
         batch_filter_reasons = sample.get("filter_reasons")
         if batch_filter_reasons and not isinstance(batch_filter_reasons, Iterable):
             raise TypeError("filter_reasons must be iterable")
+        batch_reasons = read_filter_reasons(sample)
         batched_value = sample.get(BATCHED_FIELDS_KEY, [])
         message = f"{BATCHED_FIELDS_KEY} must be a list of strings"
         if not isinstance(batched_value, list):
@@ -356,12 +359,17 @@ class Unbatcher:
         for idx, raw_sample in enumerate(typed_raw_samples):
             output_sample = dict(raw_sample)
 
-            # Copy batch-level filter_reasons.
-            if isinstance(batch_filter_reasons, Iterable):
-                self._merge_filter_reasons(
-                    output_sample,
-                    cast(Iterable[object], batch_filter_reasons),
-                )
+            if batch_reasons:
+                # A malformed sample-level field is replaced, not merged.
+                existing = output_sample.get("filter_reasons")
+                output_sample["filter_reasons"] = [
+                    *(
+                        read_filter_reasons(output_sample)
+                        if isinstance(existing, list)
+                        else ()
+                    ),
+                    *batch_reasons,
+                ]
 
             for key, value in list(sample.items()):
                 if key in reserved:
@@ -374,20 +382,6 @@ class Unbatcher:
                 )
 
             yield output_sample
-
-    def _merge_filter_reasons(
-        self,
-        output_sample: dict[str, object],
-        batch_filter_reasons: Iterable[object],
-    ) -> None:
-        """Merge batch-level filter reasons into output sample."""
-        existing_reasons = output_sample.get("filter_reasons")
-        if isinstance(existing_reasons, list):
-            output_sample["filter_reasons"] = existing_reasons + list(
-                batch_filter_reasons,
-            )
-        else:
-            output_sample["filter_reasons"] = list(batch_filter_reasons)
 
     def _distribute_field(
         self,

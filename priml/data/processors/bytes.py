@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, NotRequired, cast
 
 import subprocess
 import tempfile
@@ -19,7 +19,8 @@ from turbojpeg import TurboJPEG
 import imageio_ffmpeg
 import torch
 
-from priml.data.pipeline.dataset import add_filter_reason_typed
+from priml.data.custom_types import FilterableSample
+from priml.data.filtering import add_filter_reason
 from priml.image import get_dimensions
 from priml.math.pixel import (
     decode_image_pil,
@@ -55,7 +56,7 @@ class GetDimensionsFromBytes:
     def __init__(self, config: Config):
         pass
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         media: bytes
 
         height: int
@@ -117,7 +118,7 @@ class GetBytesFromFile:
     def __init__(self, config: Config):
         pass
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input required by GetBytesFromFile."""
 
         file_path: str
@@ -158,7 +159,7 @@ class GetBytesFromFile:
                 # Yielded with a reason rather than dropped: every sibling
                 # reports what it could not handle, and a silently vanished
                 # sample is missing from the filter accounting too.
-                add_filter_reason_typed(
+                add_filter_reason(
                     sample,
                     "GetBytesFromFile",
                     f"unreadable: {error}",
@@ -181,7 +182,7 @@ class GetBytesFromTarHandle:
         known_formats: list[str] = field(default_factory=lambda: ["jpg", "webp", "mp4"])
         """Extensions tried in order when the sample names no ``format``."""
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input required by GetBytesFromTarHandle."""
 
         _tar_handle: TarFileProtocol
@@ -242,7 +243,7 @@ class GetBytesFromTarHandle:
         key = sample.get("key")
         if tar_handle is None or key is None:
             missing = "_tar_handle" if tar_handle is None else "key"
-            add_filter_reason_typed(sample, type(self).__name__, f"missing: {missing}")
+            add_filter_reason(sample, type(self).__name__, f"missing: {missing}")
             return True
 
         # NOT reported: a format outside this reader's allowlist is ROUTING,
@@ -267,7 +268,7 @@ class GetBytesFromTarHandle:
                     return True
             except (KeyError, OSError):
                 continue
-        add_filter_reason_typed(sample, type(self).__name__, f"member_not_found: {key}")
+        add_filter_reason(sample, type(self).__name__, f"member_not_found: {key}")
         return True
 
 
@@ -318,7 +319,7 @@ class CropDuringDecodeImage:
         range ``DecodeVideo`` emits, so one downstream consumer can read
         ``media_tensor`` from either decoder."""
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input required by CropDuringDecodeImage."""
 
         media: bytes
@@ -351,7 +352,6 @@ class CropDuringDecodeImage:
     class Output(Input):
         """Output produced by CropDuringDecodeImage."""
 
-        filter_reasons: NotRequired[list[str]]
         media_tensor: NotRequired[Tensor]
         """``(C, F, H, W)``: uint8 in ``[0, 255]``, or the configured
         floating-point ``dtype`` in ``[-1, 1]``. An image has ``F=1``, but
@@ -433,7 +433,7 @@ class CropDuringDecodeImage:
                     # exactly this. Dropping it reported a truncated file, an
                     # unreadable codec, and a mislabeled extension identically,
                     # so a bad shard gave the operator nothing to act on.
-                    add_filter_reason_typed(
+                    add_filter_reason(
                         sample,
                         type(self).__name__,
                         f"decode_failed: {error}"
@@ -466,7 +466,7 @@ class CropDuringDecodeImage:
 
     def _extract_fields(
         self,
-        sample: CropDuringDecodeImage.Input,
+        sample: CropDuringDecodeImage.Output,
     ) -> (
         tuple[
             bytes,
@@ -495,7 +495,7 @@ class CropDuringDecodeImage:
         # reported rather than passed on silently -- the filter accounting is
         # the only place a vanished sample shows up.
         if height is None or width is None:
-            add_filter_reason_typed(sample, type(self).__name__, "missing_dimensions")
+            add_filter_reason(sample, type(self).__name__, "missing_dimensions")
             return None
 
         return (media_bytes, fmt, height, width, crop)
@@ -660,12 +660,11 @@ class DecodeVideo:
         not change which executable another decoder or library call uses.
         """
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input required by DecodeVideo."""
 
         _tar_handle: TarFileProtocol
         media: bytes
-        filter_reasons: list[str]
         key: str
         format: str
         """Extension such as ``mp4``; empty tries every known one."""
@@ -763,7 +762,7 @@ class DecodeVideo:
             )
 
             if media_tensor is None:
-                add_filter_reason_typed(sample, type(self).__name__, "decode_failed")
+                add_filter_reason(sample, type(self).__name__, "decode_failed")
             else:
                 sample["media_tensor"] = media_tensor
             # Decoded or not, the archive is no longer needed: keeping the
@@ -811,7 +810,7 @@ class DecodeVideo:
             return None
         name = type(self).__name__
         if height is None or width is None:
-            add_filter_reason_typed(sample, name, "missing_dimensions")
+            add_filter_reason(sample, name, "missing_dimensions")
             return None
 
         # If any resize dimension is present, all three must be present.
@@ -821,7 +820,7 @@ class DecodeVideo:
             target_width is not None,
         ]
         if any(resize_present) and not all(resize_present):
-            add_filter_reason_typed(sample, name, "partial_target")
+            add_filter_reason(sample, name, "partial_target")
             return None
 
         # A non-positive target is a planner bug, not a request for an empty
@@ -833,7 +832,7 @@ class DecodeVideo:
             or (target_height is not None and target_height < 1)
             or (target_width is not None and target_width < 1)
         ):
-            add_filter_reason_typed(
+            add_filter_reason(
                 sample,
                 name,
                 f"invalid_target:f={target_frames}_h={target_height}_w={target_width}",

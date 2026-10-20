@@ -279,7 +279,7 @@ class QuantizedActivationStorage:
             with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                 return original_forward(*args, **kwargs)
 
-        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- PyTorch stores this replacement as a bound module method even though ty checks the unbound instance signature.
+        model.forward = wrapped_forward
 
         logger.info(
             "Applied QuantizedActivationStorage: dtype_storage=%s, dtype_compute=%s, min_size=%s",

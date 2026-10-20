@@ -1199,7 +1199,7 @@ class TrainLoop:
             metric_only = bool(batch.pop("metric_only", False))
             extra_votes: list[tuple[Tensor, dict[str, object]]] = []
             if metric_only:
-                model_output: object = torch.empty(0)
+                model_output: Tensor = torch.empty(0)
             else:
                 with _phase_heartbeat(
                     f"eval batch {num_batches + 1} eval_loss",

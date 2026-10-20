@@ -13,9 +13,9 @@ import threading
 import time
 
 from configgle import Fig, Makeable
-from treekle import from_plain
 
 from priml.data.custom_types import Processor
+from priml.data.filtering import read_filter_reasons
 
 
 if TYPE_CHECKING:
@@ -247,20 +247,14 @@ class ShortCircuitProcessor:
                 )
                 bypassed.append(sample)
                 continue
-            pending = (sample, len(_reasons(sample)))
+            pending = (sample, len(read_filter_reasons(sample)))
             yield sample
         if pending is not None:
             self._record_if_dropped(*pending)
 
     def _record_if_dropped(self, sample: dict[str, object], count_before: int) -> None:
         """Record a drop when the processor added reasons to ``sample``."""
-        added = _reasons(sample)[count_before:]
+        added = read_filter_reasons(sample)[count_before:]
         if added:
             self.stats.record_drop(self.processor_name, added)
             logger.debug("%s: dropped a sample", self.processor_name)
-
-
-def _reasons(sample: dict[str, object]) -> list[str]:
-    """Return the string ``filter_reasons`` of ``sample``."""
-    reasons = from_plain(sample.get("filter_reasons"), list[object], default=[])
-    return [reason for reason in reasons if isinstance(reason, str)]

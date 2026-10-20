@@ -7,14 +7,15 @@ aspect-ratio bucketing.
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, cast
 
 import logging
 import math
 
 from configgle import Fig
 
-from priml.data.pipeline.dataset import add_filter_reason_typed
+from priml.data.custom_types import FilterableSample
+from priml.data.filtering import add_filter_reason
 from priml.data.processors.utils import (
     compute_keyframes_as_progressive_bisection,
 )
@@ -73,7 +74,7 @@ class ImageShapeStatistics:
         quantiles: int = 10
         """Buckets the reported distribution is split into (10 = deciles)."""
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input read by ImageShapeStatistics."""
 
         height: int
@@ -367,7 +368,7 @@ class CalcResizeDimensions:
         """Latent downsampling per (frame, height, width); target dims are
         rounded up to a multiple of it."""
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input required by CalcResizeDimensions."""
 
         frames: int | float
@@ -488,7 +489,7 @@ class CalcResizeDimensions:
 
         # Check for None values.
         if height is None or width is None:
-            add_filter_reason_typed(
+            add_filter_reason(
                 sample,
                 type(self).__name__,
                 "missing_dimensions",
@@ -497,7 +498,7 @@ class CalcResizeDimensions:
 
         # NaN and inf are checked before int conversion, which cannot handle them.
         if math.isnan(frames) or math.isnan(height) or math.isnan(width):
-            add_filter_reason_typed(
+            add_filter_reason(
                 sample,
                 type(self).__name__,
                 "nan_dimensions",
@@ -505,7 +506,7 @@ class CalcResizeDimensions:
             return None
 
         if math.isinf(frames) or math.isinf(height) or math.isinf(width):
-            add_filter_reason_typed(
+            add_filter_reason(
                 sample,
                 type(self).__name__,
                 "inf_dimensions",
@@ -516,7 +517,7 @@ class CalcResizeDimensions:
         # truncates to 0, which divides by zero in the aspect.
         dims = int(frames), int(height), int(width)
         if min(dims) <= 0:
-            add_filter_reason_typed(
+            add_filter_reason(
                 sample,
                 type(self).__name__,
                 f"invalid_dimensions:f={dims[0]}_h={dims[1]}_w={dims[2]}",
@@ -553,7 +554,7 @@ class SubsampleFramesViaBisection:
         max_num_keyframes: int = 5
         """Frames kept per clip, chosen by progressive bisection."""
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         """Input required by SubsampleFramesViaBisection."""
 
         media_tensor: Tensor
@@ -632,7 +633,7 @@ class SetCropFromTargetDimensions:
     def __init__(self, config: Config):
         del config
 
-    class Input(TypedDict, total=False):
+    class Input(FilterableSample, total=False):
         target_height: int
         target_width: int
 

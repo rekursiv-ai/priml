@@ -15,6 +15,7 @@ from torch.utils import data
 
 import pytest
 
+from priml.data.filtering import add_filter_reason
 from priml.data.pipeline.batching import Batcher
 from priml.data.pipeline.dataset import (
     DataPipeline,
@@ -25,8 +26,6 @@ from priml.data.pipeline.dataset import (
     _passthrough_collate,
     _pipeline_uses_cuda,
     _SingleWorkerDataset,
-    add_filter_reason,
-    add_filter_reason_typed,
 )
 from priml.data.processors.custom_types import Sample
 from priml.data.sources.sharding import shard_and_shuffle
@@ -766,53 +765,42 @@ def test_worker_dataset_with_nonexistent_data_dir():
 
 
 def test_add_filter_reason():
-    """Test add_filter_reason function (lines 75-77)."""
-    sample: dict[str, object] = {"key": "test"}
+    sample: Sample = {"key": "test"}
 
-    # First call - should create filter_reasons list.
     add_filter_reason(sample, "filter1", "reason1")
-    assert "filter_reasons" in sample
-    assert sample["filter_reasons"] == ["filter1:reason1"]
+    assert sample.get("filter_reasons") == ["filter1:reason1"]
 
-    # Second call - should append.
     add_filter_reason(sample, "filter2", "reason2")
-    assert sample["filter_reasons"] == ["filter1:reason1", "filter2:reason2"]
+    assert sample.get("filter_reasons") == ["filter1:reason1", "filter2:reason2"]
 
 
-def test_add_filter_reason_typed():
-    """Test add_filter_reason_typed function (line 84)."""
-    sample: Sample = {"key": "test"}  # TypedDict.
-
-    # This should work with TypedDict.
-    add_filter_reason_typed(sample, "filter1", "reason1")
-    assert "filter_reasons" in sample
-    assert sample["filter_reasons"] == ["filter1:reason1"]
-
-
-def test_add_filter_reason_normalizes_existing_value_and_logs(
+def test_add_filter_reason_does_not_mutate_a_shared_list_and_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    sample: dict[str, object] = {"filter_reasons": ("old", 3)}
+    shared = ["old"]
+    sample: Sample = {"filter_reasons": shared}
+    sibling: Sample = {"filter_reasons": shared}
 
     with caplog.at_level("DEBUG"):
         add_filter_reason(sample, "Resize", "too_small")
 
-    assert sample["filter_reasons"] == ["Resize:too_small"]
+    assert sample.get("filter_reasons") == ["old", "Resize:too_small"]
+    assert sibling.get("filter_reasons") == ["old"]
     assert caplog.records[0].getMessage() == "Filter: Resize:too_small"
 
 
 def test_add_filter_reason_skips_after_decode_failed():
     """Test that add_filter_reason skips adding reasons after decode_failed."""
-    sample: dict[str, object] = {"key": "test"}
+    sample: Sample = {"key": "test"}
 
     add_filter_reason(sample, "CropDuringDecodeImage", "decode_failed")
-    assert sample["filter_reasons"] == ["CropDuringDecodeImage:decode_failed"]
+    assert sample.get("filter_reasons") == ["CropDuringDecodeImage:decode_failed"]
 
     add_filter_reason(sample, "CLIPEmbedding", "missing_media_tensor")
     add_filter_reason(sample, "SigLIPEmbedding", "missing_media_tensor")
     add_filter_reason(sample, "DINOEmbedding", "missing_media_tensor")
 
-    assert sample["filter_reasons"] == ["CropDuringDecodeImage:decode_failed"]
+    assert sample.get("filter_reasons") == ["CropDuringDecodeImage:decode_failed"]
 
 
 def test_worker_dataset_multiworker_with_mock():

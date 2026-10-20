@@ -2,54 +2,31 @@
 
 The monorepo runs Python 3.14 and can use ``compression.zstd`` from the
 stdlib, while exported packages support Python 3.12 and must not depend on
-that 3.14-only module.  Backend selection happens once, memoized on first
-use, so callers use the same API and wire format in either environment.
+that 3.14-only module; there the ``zstandard`` wheel decodes the same frames.
 """
 
 from __future__ import annotations
 
-from functools import cache
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 
+try:
+    from compression import zstd
+except ImportError:  # Python < 3.14.
+    zstd = None
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import zstandard
+else:
+    from wrapt import lazy_import
 
-import importlib
-
-
-class _CompressionModule(Protocol):
-    ZstdError: type[Exception]
-
-    def compress(self, data: bytes, level: int = ...) -> bytes: ...
-
-    def decompress(self, data: bytes) -> bytes: ...
+    zstandard = lazy_import("zstandard")
 
 
-class _DecompressionObject(Protocol):
-    eof: bool
-    unused_data: bytes
-
-    def decompress(self, data: bytes) -> bytes: ...
-
-
-class _ZstdDecompressor(Protocol):
-    def decompressobj(self) -> _DecompressionObject: ...
-
-
-class _ZstandardModule(_CompressionModule, Protocol):
-    ZstdDecompressor: Callable[[], _ZstdDecompressor]
-
-
-class _Backend(Protocol):
-    def compress(self, data: bytes, level: int | None) -> bytes: ...
-
-    def decompress(self, data: bytes) -> bytes: ...
-
-
-def compress(data: bytes, *, level: int | None = None) -> bytes:
+def compress(data: bytes, *, level: int = 3) -> bytes:
     """Compress ``data`` as a zstandard frame."""
-    return _backend().compress(data, level=level)
+    if zstd is None:
+        return zstandard.compress(data, level=level)
+    return zstd.compress(data, level=level)
 
 
 def decompress(data: bytes) -> bytes:
@@ -65,80 +42,29 @@ def decompress(data: bytes) -> bytes:
       ValueError: The input is malformed or contains an incomplete frame.
 
     """
-    return _backend().decompress(data)
-
-
-class _StdlibBackend:
-    def __init__(self, module: _CompressionModule) -> None:
-        self._module = module
-
-    def compress(self, data: bytes, level: int | None) -> bytes:
-        if level is None:
-            return self._module.compress(data)
-        return self._module.compress(data, level=level)
-
-    def decompress(self, data: bytes) -> bytes:
-        try:
-            return self._module.decompress(data)
-        except self._module.ZstdError as error:
-            raise ValueError(str(error)) from None
-
-
-class _PackageBackend:
-    def __init__(self, module: _ZstandardModule) -> None:
-        self._module = module
-
-    def compress(self, data: bytes, level: int | None) -> bytes:
-        if level is None:
-            return self._module.compress(data)
-        return self._module.compress(data, level=level)
-
-    def decompress(self, data: bytes) -> bytes:
-        try:
-            decompressor = self._module.ZstdDecompressor()
-            chunks: list[bytes] = []
-            while True:
-                decoder = decompressor.decompressobj()
-                chunks.append(decoder.decompress(data))
-                if not decoder.eof:
-                    raise ValueError("Incomplete zstandard frame")
-                data = decoder.unused_data
-                if not data:
-                    return b"".join(chunks)
-        except self._module.ZstdError as error:
-            raise ValueError(str(error)) from None
-
-
-def _stdlib_backend() -> _Backend | None:
+    if zstd is None:
+        return _decompress_frames(data)
     try:
-        module = cast(_CompressionModule, importlib.import_module("compression.zstd"))
-    except ImportError:
-        return None
-    return _StdlibBackend(module)
+        return zstd.decompress(data)
+    except zstd.ZstdError as error:
+        raise ValueError(str(error)) from None
 
 
-def _package_backend() -> _Backend | None:
+def _decompress_frames(data: bytes) -> bytes:
+    """Decode every frame with the ``zstandard`` wheel."""
+    # ``ZstdDecompressor().decompress`` reads only the first frame and rejects
+    # frames lacking a content size, which streaming encoders (e.g. Cloudflare)
+    # emit; its ``read_across_frames`` raises "not yet implemented".
     try:
-        module = cast(
-            _ZstandardModule,
-            cast(object, importlib.import_module("zstandard")),
-        )
-    except ImportError:
-        return None
-    return _PackageBackend(module)
-
-
-class _MissingBackend:
-    def compress(self, data: bytes, level: int | None) -> bytes:
-        del data, level
-        raise ImportError("zstandard support requires Python 3.14 or zstandard")
-
-    def decompress(self, data: bytes) -> bytes:
-        del data
-        raise ImportError("zstandard support requires Python 3.14 or zstandard")
-
-
-@cache
-def _backend() -> _Backend:
-    """Select and memoize the available zstandard backend."""
-    return _stdlib_backend() or _package_backend() or _MissingBackend()
+        decompressor = zstandard.ZstdDecompressor()
+        chunks: list[bytes] = []
+        while True:
+            decoder = decompressor.decompressobj()
+            chunks.append(decoder.decompress(data))
+            if not decoder.eof:
+                raise ValueError("Incomplete zstandard frame")
+            data = decoder.unused_data
+            if not data:
+                return b"".join(chunks)
+    except zstandard.ZstdError as error:
+        raise ValueError(str(error)) from None
