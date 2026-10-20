@@ -66,6 +66,11 @@ if TYPE_CHECKING:
 
 _CWD: Final = Path(__file__).resolve().parent
 _SLOTS: Final = 3
+_ADD_ONE: Final = (
+    "from priml.baselines.craftax.game.jit import jit\n\n\n"
+    "@jit\ndef add_one(x: int) -> int:\n    return x + 1\n"
+)
+"""A kernel module the cache-locator tests write and load from a path."""
 
 TRIG_ANCHORS: Final = {
     1: (0x3CC9D9B5, 0x3F7FEC1B, 0x3CC9D47A),
@@ -88,7 +93,7 @@ class _Twice(Protocol):
 
 
 class _AddOne(Protocol):
-    """The module the read-only-tree test writes and loads from a path."""
+    """The :data:`_ADD_ONE` module, loaded from a path."""
 
     add_one: Callable[[int], int]
 
@@ -267,18 +272,10 @@ def test_a_kernel_in_a_read_only_tree_caches_in_the_user_wide_cache(
     tree = tmp_path / "tree"
     tree.mkdir()
     module = tree / "read_only.py"
-    module.write_text(
-        "from priml.baselines.craftax.game.jit import jit\n\n\n"
-        "@jit\ndef add_one(x: int) -> int:\n    return x + 1\n",
-    )
+    module.write_text(_ADD_ONE)
     tree.chmod(0o555)
     try:
-        spec = util.spec_from_file_location("read_only", module)
-        assert spec is not None
-        assert spec.loader is not None
-        loaded = util.module_from_spec(spec)
-        spec.loader.exec_module(loaded)
-        add_one = cast("_AddOne", loaded).add_one
+        add_one = _load_add_one(module)
         assert add_one(1) == 2
         assert isinstance(add_one, _Caching)
         locator = add_one._cache._impl.locator
@@ -496,6 +493,16 @@ def _imported_names(tree: ast.Module) -> dict[str, str]:
     }
 
 
+def _load_add_one(module: Path) -> Callable[[int], int]:
+    """Load the :data:`_ADD_ONE` source written at ``module`` and return its kernel."""
+    spec = util.spec_from_file_location(module.stem, module)
+    assert spec is not None
+    assert spec.loader is not None
+    loaded = util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return cast("_AddOne", loaded).add_one
+
+
 def test_a_kernel_in_a_writable_tree_caches_beside_its_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -503,19 +510,27 @@ def test_a_kernel_in_a_writable_tree_caches_beside_its_source(
     """With ``NUMBA_CACHE_DIR`` unset, Numba caches in the tree's ``__pycache__``."""
     monkeypatch.setattr(config, "CACHE_DIR", "")
     module = tmp_path / "writable.py"
-    module.write_text(
-        "from priml.baselines.craftax.game.jit import jit\n\n\n"
-        "@jit\ndef add_one(x: int) -> int:\n    return x + 1\n",
-    )
-    spec = util.spec_from_file_location("writable", module)
-    assert spec is not None
-    assert spec.loader is not None
-    loaded = util.module_from_spec(spec)
-    spec.loader.exec_module(loaded)
-    add_one = cast("_AddOne", loaded).add_one
+    module.write_text(_ADD_ONE)
+    add_one = _load_add_one(module)
     assert isinstance(add_one, _Caching)
     locator = add_one._cache._impl.locator
     assert Path(locator.get_cache_path()) == tmp_path / "__pycache__"
+    assert locator.get_source_stamp() == source_stamp(module)
+
+
+def test_a_kernel_under_numba_cache_dir_caches_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``NUMBA_CACHE_DIR`` set, the first locator of Numba's chain holds the cache."""
+    monkeypatch.setattr(config, "CACHE_DIR", str(tmp_path / "cache"))
+    module = tmp_path / "provided.py"
+    module.write_text(_ADD_ONE)
+    add_one = _load_add_one(module)
+    assert isinstance(add_one, _Caching)
+    locator = add_one._cache._impl.locator
+    assert isinstance(locator, _UserProvidedPackageLocator)
+    assert Path(locator.get_cache_path()).is_relative_to(tmp_path / "cache")
     assert locator.get_source_stamp() == source_stamp(module)
 
 

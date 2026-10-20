@@ -534,7 +534,6 @@ class _LinearModel(nn.Module):
         return self.linear(media)
 
 
-@pytest.mark.compute_training
 def test_train_loop_basic():
     """Test TrainLoop runs without errors."""
     torch.manual_seed(42)
@@ -551,30 +550,29 @@ def test_train_loop_basic():
         dataset=DummyDataset.Config(
             input_shape=(2,),
             num_classes=2,
-            num_samples=20,
+            num_samples=8,
             batch_size=4,
             device="cpu",
         ),
     )
     config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
-    config.max_steps = 10
-    config.num_steps_eval = 5
+    config.max_steps = 2
+    config.num_steps_eval = 1
     config.seed = 42
 
     with tempfile.TemporaryDirectory() as tmp:
         assert isinstance(config.checkpointer, Checkpointer.Config)
         config.checkpointer.base_dir = "/"
         config.checkpointer.working_dir = Path(tmp)
-        config.checkpointer.save_every = 5
+        config.checkpointer.save_every = 1
         loop = config.make()
         loop.train()
-        assert loop.step.global_step == 10
-        assert (Path(tmp) / "step_00000005.pt").exists()
-        assert (Path(tmp) / "step_00000010.pt").exists()
+        assert loop.step.global_step == 2
+        assert (Path(tmp) / "step_00000001.pt").exists()
+        assert (Path(tmp) / "step_00000002.pt").exists()
 
 
-@pytest.mark.compute_training
 def test_train_loop_with_max_epochs():
     """Test TrainLoop stops at max_epochs."""
     torch.manual_seed(42)
@@ -590,14 +588,14 @@ def test_train_loop_with_max_epochs():
         dataset=DummyDataset.Config(
             input_shape=(2,),
             num_classes=2,
-            num_samples=20,
+            num_samples=8,
             batch_size=4,
             device="cpu",
         ),
     )
     config.runtime = SingleProcess.Config(device="cpu")
     config.max_steps = 1000  # High limit.
-    config.max_epochs = 2  # Should stop after 2 epochs (10 steps)
+    config.max_epochs = 2  # Should stop after 2 epochs (4 steps).
     config.num_steps_eval = 5
     config.seed = 42
 
@@ -706,7 +704,6 @@ class _BinaryDataset:
         _ = state_dict
 
 
-@pytest.mark.compute_training
 def test_train_loop_comprehensive():
     """Comprehensive test with checkpointing and metrics."""
     torch.manual_seed(42)
