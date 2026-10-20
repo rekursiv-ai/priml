@@ -7,11 +7,15 @@ that 3.14-only module; there the ``zstandard`` wheel decodes the same frames.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
+
+import importlib
 
 
+# By name: a 3.12 checker has the stub but no source, so a static import fails
+# ``reportMissingModuleSource`` in an export that keeps that check on.
 try:
-    from compression import zstd
+    zstd = cast("_StdlibZstd", importlib.import_module("compression.zstd"))
 except ImportError:  # Python < 3.14.
     zstd = None
 if TYPE_CHECKING:
@@ -68,3 +72,13 @@ def _decompress_frames(data: bytes) -> bytes:
                 return b"".join(chunks)
     except zstandard.ZstdError as error:
         raise ValueError(str(error)) from None
+
+
+class _StdlibZstd(Protocol):
+    """The part of Python 3.14's ``compression.zstd`` this module calls."""
+
+    ZstdError: type[Exception]
+
+    def compress(self, data: bytes, /, *, level: int) -> bytes: ...
+
+    def decompress(self, data: bytes, /) -> bytes: ...

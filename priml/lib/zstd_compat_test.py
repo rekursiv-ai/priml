@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
 import importlib
 import re
 import sys
@@ -13,9 +16,18 @@ from priml.lib import zstd_compat
 
 
 try:
-    from compression import zstd
-except ImportError:  # Python < 3.14, where exported packages also run this file.
-    zstd = None
+    zstd = cast("zstd_compat._StdlibZstd", importlib.import_module("compression.zstd"))
+except ImportError:
+    # Python < 3.14, where exported packages run this file: the wheel stands in
+    # for the stdlib so the stdlib branch still runs, and its 100% floor holds.
+    zstd = cast(
+        "zstd_compat._StdlibZstd",
+        SimpleNamespace(
+            ZstdError=ValueError,
+            compress=zstandard.compress,
+            decompress=zstd_compat._decompress_frames,
+        ),
+    )
 
 
 _PAYLOAD = b"a durable zstandard payload" * 20
@@ -31,10 +43,7 @@ pytestmark = pytest.mark.parametrize("wheel", [False, True], ids=["stdlib", "whe
 
 @pytest.fixture(autouse=True)
 def _select_library(wheel: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    if zstd is None and not wheel:
-        pytest.skip("compression.zstd is not importable")
-    if wheel:
-        monkeypatch.setattr(zstd_compat, "zstd", None)
+    monkeypatch.setattr(zstd_compat, "zstd", None if wheel else zstd)
 
 
 @pytest.mark.parametrize("payload", [b"", _PAYLOAD])
@@ -85,7 +94,7 @@ def test_malformed_input_is_a_value_error(data: bytes) -> None:
 
 
 def test_library_error_message_is_preserved(wheel: bool) -> None:
-    if wheel or zstd is None:
+    if wheel:
         with pytest.raises(zstandard.ZstdError) as raw:
             zstandard.ZstdDecompressor().decompressobj().decompress(b"junk")
     else:
@@ -97,8 +106,6 @@ def test_library_error_message_is_preserved(wheel: bool) -> None:
 
 
 def test_wire_format_is_shared(wheel: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    if zstd is None:
-        pytest.skip("compression.zstd is not importable")
     encoded = zstd_compat.compress(_PAYLOAD)
     monkeypatch.setattr(zstd_compat, "zstd", zstd if wheel else None)
 
@@ -110,7 +117,9 @@ def test_import_without_stdlib_zstd_selects_the_wheel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Python 3.12 has no ``compression`` package; the module must still import."""
+    # Both entries: ``import_module`` returns a cached submodule without its parent.
     monkeypatch.setitem(sys.modules, "compression", None)
+    monkeypatch.setitem(sys.modules, "compression.zstd", None)
     try:
         _ = importlib.reload(zstd_compat)
         with pytest.raises(ValueError, match=r"^Incomplete zstandard frame$"):
