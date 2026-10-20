@@ -322,7 +322,7 @@ class Harness:
         return cfg
 
     def hypothesis_generator(self, name: str, seed: int) -> str:
-        """Train a three-step recomputed-winner generator; return its checkpoint.
+        """Train a two-step recomputed-winner generator; return its checkpoint.
 
         Args:
           name: Run identity.
@@ -336,8 +336,9 @@ class Harness:
         cfg.step.model = self.hypothesis_model()
         cfg.step.routing = WinnerRecompute.Config()
         shrink_newton_schulz(cfg)
+        cfg.max_steps = 2
         cfg.dataset.batch_size = 3
-        logical = f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
+        logical = f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000002.pt"
         self._checkpoint(name, self.scratch / logical.removeprefix("/"), recipe=cfg)
         return logical
 

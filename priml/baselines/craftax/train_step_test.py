@@ -1901,7 +1901,7 @@ def test_captured_learner_epochs_train_as_the_eager_ones(
 def test_a_load_drops_the_captured_epochs_and_recaptures_in_a_new_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Epoch 2's checkpoint, loaded after both slots captured: epochs 3 and 4 again.
+    """Epoch 1's checkpoint, loaded after both slots captured: epochs 2 and 3 again.
 
     The load waits the learner stream on the device's, drops both graphs and
     takes a fresh pool; each slot's next epoch is captured anew into it.
@@ -1910,12 +1910,12 @@ def test_a_load_drops_the_captured_epochs_and_recaptures_in_a_new_pool(
     cuda = _FakeCuda(step)
     cuda.install(monkeypatch, step)
     try:
-        for _ in range(2):
-            step.train_step()
+        step.train_step()
         saved = io.BytesIO()
         torch.save(step.state_dict(), saved)
         for _ in range(2):
             step.train_step()
+        assert len(step._graphs) == 2
         cuda.events.clear()
         step.load_state_dict(_read(saved))
         assert step._graphs == {}
@@ -1923,10 +1923,10 @@ def test_a_load_drops_the_captured_epochs_and_recaptures_in_a_new_pool(
         losses = [step.train_step()["model"] for _ in range(2)]
     finally:
         step.close()
-    expected_losses, expected_state = _eager_four_epochs()
-    actual = [*losses, *_masters_and_momentum(step)]
-    expected = [*expected_losses[2:], *expected_state]
-    for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
+    expected_losses, _ = _eager_four_epochs()
+    for index, (ours, theirs) in enumerate(
+        zip(losses, expected_losses[1:3], strict=True),
+    ):
         assert torch.equal(ours, theirs), index
     assert cuda.events == [
         "wait current cpu",

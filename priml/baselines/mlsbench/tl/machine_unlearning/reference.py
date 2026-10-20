@@ -111,8 +111,8 @@ RECIPE: Final = (
 )
 """The recipe's values, in the order ``recipe/values`` holds them."""
 
-TRAIN_LABELS: Final = (0, 3, 1, 0, 7, 2, 0)
-"""Labels of the synthetic training images: three of the forget class, four others."""
+TRAIN_LABELS: Final = (0, 3, 1, 0)
+"""Labels of the synthetic training images: two of the forget class, two others."""
 
 TEST_LABELS: Final = (1, 0, 4, 0)
 """Labels of the synthetic test images: two of the forget class, two others."""

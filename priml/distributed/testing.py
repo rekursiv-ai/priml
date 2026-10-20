@@ -69,7 +69,9 @@ class WorkerPool:
 
     def __init__(self, config: Config):
         self.mesh_dims: dict[str, int] = config.mesh_dims
-        self.processes = self.queue = self.ack_queue = None
+        self.processes: Sequence[PoolWorker] | None = None
+        self.queue: tm.Queue[bytes | None] | None = None
+        self.ack_queue: tm.Queue[bool] | None = None
 
     def __enter__(self) -> Self:
         """Enter the context manager, spawning worker processes."""
@@ -132,7 +134,7 @@ class WorkerPool:
             raise
         self.queue = queue
         self.ack_queue = ack_queue
-        self.processes: Sequence[PoolWorker] | None = processes
+        self.processes = processes
 
     # Polls the readiness queue against ``_RENDEZVOUS_TIMEOUT`` while watching the
     # worker processes: if any exits before acking (a port collision makes rank 0 raise

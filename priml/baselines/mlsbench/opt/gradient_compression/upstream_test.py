@@ -12,7 +12,9 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
+
+from treekle import from_plain
 
 import pytest
 import torch
@@ -285,8 +287,10 @@ def test_the_trace_runs_at_the_scripts_own_argument_defaults(
     root = tmp_path / "clone"
     write_clone(root, warmup=warmup)
     script = upstream.variants(root, tmp_path)["none"]
-    record = upstream.upstream_trace(script, epochs=12)
-    assert record["schedule/exp000"][0].item() == 0.1 / (warmup + 1)
+    args = upstream.script_arguments(script, [])
+    assert from_plain(cast(object, args.warmup_epochs), int) == warmup
+    run = upstream.run_train(script, epochs=1, scripted=True)
+    assert run.rates == [0.1 / (warmup + 1)]
 
 
 def test_metrics_run_the_scripts_evaluate(tmp_path: Path) -> None:

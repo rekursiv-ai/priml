@@ -8,7 +8,7 @@ is the eager step it captured.
 from __future__ import annotations
 
 from functools import partial, partialmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import copy
 import itertools
@@ -174,14 +174,14 @@ def test_a_graphed_step_captures_each_new_plan_on_first_replay(
     assert isinstance(sliding, Sliding.Config)
     sliding.fallback_rows = 1
     source = config.make()
-    rows, steps = 4, 12
+    rows, steps = 4, 9
     cells, aux, actions = _frames(rows, steps)
     obs = decode(cells, aux)
     starts: list[dict[int, bool]] = [
         {},
-        {3: True},
-        {3: True, 5: True},
-        {3: True, 5: False},
+        {2: True},
+        {2: True, 4: True},
+        {2: True, 4: False},
     ]
     runs: list[Tensor] = []
     graphed: GraphedStep | None = None
@@ -308,6 +308,8 @@ def test_main_writes_every_gate_and_exits_as_they_pass(
     loads: list[tuple[str, Path, list[str]]] = []
     for module in (feature, feature_gates):
         monkeypatch.setattr(module, "load_world_model", partial(_load, loads))
+    # The timing has its own test; here only that main times the right engine.
+    timed = _stub_timing(monkeypatch)
     checkpoint, output = tmp_path / "step.pt", tmp_path / "out" / "gates.json"
     monkeypatch.setattr(
         sys,
@@ -316,9 +318,9 @@ def test_main_writes_every_gate_and_exits_as_they_pass(
             "feature_gates.py",
             *(str(checkpoint), str(_corpus(tmp_path)), str(output)),
             *("--experiment", "exp.smoke", "--override", "a=1"),
-            *("--episodes", "2", "--decisions", "9", "--replicate", "2"),
+            *("--episodes", "1", "--decisions", "9", "--replicate", "2"),
             *("--hook", str(HOOK), "--t-max", str(T_MAX), "--layers", "2"),
-            *("--attention", attention, "--timing-rows", "2", "--compile"),
+            *("--attention", attention, "--timing-rows", "3", "--compile"),
         ],
     )
     status = feature_gates.main()
@@ -329,19 +331,20 @@ def test_main_writes_every_gate_and_exits_as_they_pass(
     ] * len(fake.compiled)
     assert fake.compiled
     report = json_loads(output.read_text(), dict[str, object])
-    assert report["rows"] == 4
+    # One episode replicated twice.
+    assert report["rows"] == 2
     # Every row re-prefills at the hook of step 8: steps 8.. come after it.
     assert report["reprefill_step"] == 2 * HOOK
     g2a = from_plain(report["g2a"], dict[str, dict[str, float]])
     assert list(g2a) == ["all", "before_reprefill", "after_reprefill"]
-    assert g2a["all"]["points"] == 4 * 9
-    assert g2a["before_reprefill"]["points"] == 4 * 8
-    assert g2a["after_reprefill"]["points"] == 4
+    assert g2a["all"]["points"] == 2 * 9
+    assert g2a["before_reprefill"]["points"] == 2 * 8
+    assert g2a["after_reprefill"]["points"] == 2
     assert g2a["all"]["argmax_agree"] == 1
     g2c = from_plain(report["g2c"], dict[str, float])
     assert (g2c["kernel_vs_sdpa"] == 0) is (attention == "masked")
-    timing = from_plain(report["timing"], dict[str, float])
-    assert (timing["rows"], timing["step_ms"]) == (2, 0.25)
+    assert timed == [3]
+    assert from_plain(report["timing"], dict[str, float]) == _TIMING
     gates = from_plain(report["gates"], dict[str, bool])
     summary = g2a["all"]
     assert gates == {
@@ -363,6 +366,7 @@ def test_main_exits_1_when_a_gate_fails(
     for module in (feature, feature_gates):
         monkeypatch.setattr(module, "load_world_model", partial(_load, loads))
     monkeypatch.setattr(feature_gates, "attention_gap", _failing_gap)
+    _stub_timing(monkeypatch)
     output = tmp_path / "gates.json"
     monkeypatch.setattr(
         sys,
@@ -433,6 +437,30 @@ def _counted_reprefill(
     """Note how many rows re-prefill, then re-prefill them."""
     counts.append(len(rows))
     original(engine, rows)
+
+
+_TIMING: Final = {"rows": 3.0, "step_ms": 0.25}
+"""What :func:`_stub_timing`'s ``time_step`` reports."""
+
+
+def _stub_timing(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Replace ``time_step``; return the rows of each engine it is asked to time."""
+    rows_timed: list[int] = []
+
+    def timed(
+        source: WorldModelFeature,
+        *,
+        rows: int,
+        frame: Tensor,
+    ) -> dict[str, float]:
+        # Timed on the source main built from the flags, one observation every row reads.
+        assert source.hook_interval == HOOK
+        assert frame.ndim == 1
+        rows_timed.append(rows)
+        return dict(_TIMING)
+
+    monkeypatch.setattr(feature_gates, "time_step", timed)
+    return rows_timed
 
 
 def _zero_attention(q: Tensor, keys: Tensor, values: Tensor, seqused: Tensor) -> Tensor:

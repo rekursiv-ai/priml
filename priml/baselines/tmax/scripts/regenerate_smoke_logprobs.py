@@ -67,6 +67,7 @@ def main() -> int:
     config.dataset.base_dir = fixture.parent
     config.dataset.working_dir = fixture.name
     step, _, rows = _packed_update(config)
+    weights = {name: value.clone() for name, value in step.model.state_dict().items()}
     for row in rows:
         # The scorer omits the first token, so shift the mask by one.
         scores = _scores(step, row)
@@ -80,9 +81,12 @@ def main() -> int:
             )
     _write_records(fixture, records)
 
-    # Reload the fixture through the same path used by training.
-    check_step, check_batch, _ = _packed_update(config)
-    ratio = _ratio_mean(check_step, check_batch)
+    # Reload the fixture through the same path used by training. Scoring ran
+    # under no_grad, so the seeded weights are untouched; they are restored all
+    # the same, so the check does not rest on that.
+    step.model.load_state_dict(weights)
+    check_batch = _batch(config)
+    ratio = _ratio_mean(step, check_batch)
     if abs(ratio - 1.0) > RATIO_TOLERANCE:
         raise SystemExit(f"Fixture ratio_mean differs from 1: {ratio!r}")
     print(f"ratio_mean={ratio!r} (verified through the training step)")
@@ -105,10 +109,10 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _write_records(fixture: Path, records: list[dict[str, object]]) -> None:
-    fixture.write_text(
-        "".join(f"{json.dumps(record, sort_keys=True)}\n" for record in records),
-        encoding="utf-8",
-    )
+    text = "".join(f"{json.dumps(record, sort_keys=True)}\n" for record in records)
+    # A test cannot change the process locale, and ``json.dumps`` writes ASCII, so
+    # no test tells this encoding from the default.
+    fixture.write_text(text, encoding="utf-8")  # pragma: no mutate
 
 
 def _tensor(row: dict[str, object], name: str) -> Tensor:
@@ -141,11 +145,16 @@ def _packed_update(
     set_seed_local(config.seed)
     step = config.step.make()
     assert isinstance(step, TMaxDPPOTrainStep)
-    dataset = config.dataset.make()
-    assert isinstance(dataset, TMaxRolloutData)
-    batch = next(iter(dataset.train_dataloader()))
+    batch = _batch(config)
     rows = cast(list[dict[str, object]], step.preprocess_batch(batch)["rows"])
     return step, batch, rows
+
+
+def _batch(config: TMaxTrainLoop.Config) -> dict[str, object]:
+    """Read the fixture's only batch as the training loop loads it."""
+    dataset = config.dataset.make()
+    assert isinstance(dataset, TMaxRolloutData)
+    return next(iter(dataset.train_dataloader()))
 
 
 def _scores(step: TMaxDPPOTrainStep, row: dict[str, object]) -> Tensor:

@@ -83,8 +83,14 @@ class _SilentStep:
 
 def test_ratio_mean_requires_step_metrics() -> None:
     step = cast("TMaxDPPOTrainStep", _SilentStep())
-    with pytest.raises(ValueError, match="reported no metrics"):
+    with pytest.raises(ValueError, match=r"^The training step reported no metrics\.$"):
         regenerate_smoke_logprobs._ratio_mean(step, {})
+
+
+def test_records_are_written_one_sorted_utf8_line_each(tmp_path: Path) -> None:
+    fixture = tmp_path / "f.jsonl"
+    regenerate_smoke_logprobs._write_records(fixture, [{"b": "é", "a": 1}, {"c": 2}])
+    assert fixture.read_bytes() == b'{"a": 1, "b": "\\u00e9"}\n{"c": 2}\n'
 
 
 def test_records_are_read_in_loader_order(tmp_path: Path) -> None:

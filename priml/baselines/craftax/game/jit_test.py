@@ -21,6 +21,7 @@ import re
 
 from llvmlite import ir
 from numba.core import config
+from numba.core.caching import UserProvidedCacheLocator
 from numba.core.registry import cpu_target
 from numba.np.numpy_support import from_dtype
 
@@ -28,12 +29,14 @@ import numba.core.types as nbtypes
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.game import jit as jit_module
 from priml.baselines.craftax.game.jit import (
     _Caching,
     _emit_prefetch,
     _popcount_signature,
     _prefetch_signature,
     _trailing_zeros_signature,
+    _UserProvidedPackageLocator,
     clampf_numba,
     clampi_numba,
     jit,
@@ -514,6 +517,36 @@ def test_a_kernel_in_a_writable_tree_caches_beside_its_source(
     locator = add_one._cache._impl.locator
     assert Path(locator.get_cache_path()) == tmp_path / "__pycache__"
     assert locator.get_source_stamp() == source_stamp(module)
+
+
+def test_a_copy_of_the_checkout_reads_the_kernel_cache_the_checkout_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under ``NUMBA_CACHE_DIR`` a kernel's directory is named by its path in the tree.
+
+    Each mutation-testing snapshot is a copy of the checkout elsewhere; named by
+    the absolute path, as Numba names it, every copy recompiled every kernel.
+    """
+    monkeypatch.setattr(config, "CACHE_DIR", str(tmp_path / "cache"))
+    copy = tmp_path / "snapshot" / _CWD.relative_to(jit_module._ROOT)
+    paths = [
+        _UserProvidedPackageLocator.get_suitable_cache_subpath(
+            str(directory / "step.py"),
+        )
+        for directory in (_CWD, copy)
+    ]
+    # The package path, wherever the tree is exported: ``priml.`` in public.
+    assert paths[0] == jit_module.__name__.rpartition(".")[0].replace(".", "_")
+    monkeypatch.setattr(jit_module, "_ROOT", tmp_path / "snapshot")
+    assert (
+        _UserProvidedPackageLocator.get_suitable_cache_subpath(str(copy / "step.py"))
+        == paths[0]
+    )
+    outside = tmp_path / "elsewhere" / "kernel.py"
+    assert _UserProvidedPackageLocator.get_suitable_cache_subpath(str(outside)) == (
+        UserProvidedCacheLocator.get_suitable_cache_subpath(str(outside))
+    )
 
 
 if __name__ == "__main__":

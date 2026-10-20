@@ -88,6 +88,8 @@ import numba.core.types as nbtypes
 import numpy as np
 
 
+_THIS: Final = Path(__file__).resolve()
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
@@ -229,8 +231,37 @@ class _Caching(Protocol):
     _cache: FunctionCache
 
 
+_ROOT: Final = _THIS.parents[len(__name__.split(".")) - 1]
+"""The directory holding the top-level package: the checkout, or an export's root."""
+
+
 class _UserProvidedPackageLocator(UserProvidedCacheLocator):
-    """Under ``NUMBA_CACHE_DIR``, stamped with :func:`source_stamp`."""
+    """Under ``NUMBA_CACHE_DIR``, stamped with :func:`source_stamp`.
+
+    Numba names a kernel's cache directory by a hash of its source directory's
+    absolute path, so a copy of the checkout (each mutation-testing snapshot)
+    found nothing and recompiled every kernel, 125 s of a 180 s run. Named by
+    the path inside the checkout instead, every copy reads one cache; an entry
+    still loads only for a matching :func:`source_stamp` and bytecode hash.
+    """
+
+    @classmethod
+    @override
+    def get_suitable_cache_subpath(cls, py_file: str) -> str:
+        """Return the cache subdirectory for ``py_file``, by its path in the checkout.
+
+        Args:
+          py_file: The kernel's source file.
+
+        Returns:
+          subpath: The checkout-relative directory with ``/`` as ``_``; a file
+            outside the checkout keeps Numba's absolute-path hash.
+
+        """
+        directory = Path(py_file).resolve().parent
+        if not directory.is_relative_to(_ROOT):
+            return super().get_suitable_cache_subpath(py_file)
+        return "_".join(directory.relative_to(_ROOT).parts)
 
     @override
     def get_source_stamp(self) -> str:
