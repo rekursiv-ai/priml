@@ -111,7 +111,13 @@ def test_owned_rotary_controls_outputs_and_gradients(supplied: bool) -> None:
         value.contiguous() for value in module.proj_qkv(x).split([4, 2, 2], dim=-2)
     )
     q, k = _OwnedRotary.rotate(q, k, *factors)
-    k, v = (value.repeat_interleave(2, dim=-2) for value in (k, v))
+    # Repeat head-major, as ``Attention._forward`` does. Repeating the
+    # sequence-major layout gives equal keys with other strides, and NVPL BLAS
+    # (aarch64) rounds the score matmul differently for them: ``equal`` fails.
+    k, v = (
+        value.movedim(-3, -2).repeat_interleave(2, dim=-3).movedim(-3, -2)
+        for value in (k, v)
+    )
     expected = module.proj_out(module.attn_kernel(q, k, v).flatten(-2))
     assert torch.equal(actual, expected)
     variables = (x, *module.parameters())

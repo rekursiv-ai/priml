@@ -33,8 +33,9 @@ def grouped_folds[T: np.generic](
     if count < 2 or count > len(sizes):
         raise ValueError("count must be between 2 and the number of groups.")
     loads = np.zeros(count)
-    assignments = np.empty(len(sizes), dtype=np.int64)
+    assignments = np.empty_like(sizes)
     # NumPy's default argsort tie order is part of the released fold assignment.
+    # It is per ISA: equal sizes fold differently on x86 and aarch64.
     for group in cast("list[int]", np.argsort(sizes)[::-1].tolist()):
         fold = int(np.argmin(loads))
         loads[fold] += sizes[group]

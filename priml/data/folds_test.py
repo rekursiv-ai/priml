@@ -11,12 +11,14 @@ from priml.data.folds import grouped_folds
 
 
 def test_greedy_grouped_folds_preserves_all_rows_and_first_minimum_bins() -> None:
-    groups = np.asarray(["b", "a", "c", "b", "d", "a", "b", "e", "d"])
+    # Group sizes are distinct: NumPy orders equal sizes differently on x86 and
+    # aarch64, which the next test pins against NumPy itself.
+    groups = np.asarray(["b", "a", "d", "b", "c", "a", "b", "d", "a", "b"])
     actual = grouped_folds(groups, count=3)
     expected = [
-        ([1, 2, 4, 5, 7, 8], [0, 3, 6]),
-        ([0, 2, 3, 4, 6, 8], [1, 5, 7]),
-        ([0, 1, 3, 5, 6, 7], [2, 4, 8]),
+        ([1, 2, 4, 5, 7, 8], [0, 3, 6, 9]),
+        ([0, 2, 3, 4, 6, 7, 9], [1, 5, 8]),
+        ([0, 1, 3, 5, 6, 8, 9], [2, 4, 7]),
     ]
     assert [(train.tolist(), valid.tolist()) for train, valid in actual] == expected
     for train, valid in actual:
@@ -37,6 +39,11 @@ def test_equal_size_groups_follow_numpy_reverse_argsort_even_for_long_ties() -> 
         assert np.array_equal(np.unique(groups[valid]), expected_groups)
         assert np.array_equal(valid, np.flatnonzero(np.isin(groups, expected_groups)))
         assert np.array_equal(train, np.flatnonzero(~np.isin(groups, expected_groups)))
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_fold_counts_from_two_to_the_group_count_are_accepted(count: int) -> None:
+    assert len(grouped_folds(np.asarray(["a", "b", "c"]), count=count)) == count
 
 
 @pytest.mark.parametrize("count", [-1, 0, 1, 4])

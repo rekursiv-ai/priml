@@ -1319,6 +1319,12 @@ def _run_unfused(
             return _unfused_convolution(func, args, kwargs, bias=bias)
     if name == "native_group_norm" and not kwargs:
         return _unfused_group_norm(args)
+    if (
+        name in {"native_batch_norm", "_native_batch_norm_legit"}
+        and len(args) == 8
+        and not kwargs
+    ):
+        return _unfused_batch_norm(func, args=args)
     if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
         return decomposition_table[func](*args, **kwargs)
     return func(*args, **kwargs)
@@ -1419,6 +1425,41 @@ def _unfused_group_norm(
     if bias is not None:
         out = out + bias.reshape(shape)
     return out, mean.reshape(batch, groups), rstd.reshape(batch, groups)
+
+
+def _unfused_batch_norm(
+    func: OpOverload[..., object],
+    *,
+    args: tuple[object, ...],
+) -> object:
+    """Return a training batch norm whose running update rounds each product apart."""
+    # The CPU kernel updates a running statistic as ``momentum * batch + (1 -
+    # momentum) * running`` in scalar code x86-64 compiles without FMA and aarch64
+    # contracts into one. A statistic one float64 ULP from a float32 tie then
+    # narrows differently on each host, and every evaluation-mode forward reads
+    # it. Momentum 1 over zeroed buffers makes the kernel store its unbiased batch
+    # variance exactly; the update then rounds as x86's does, on every host.
+    running_mean, running_var, training, momentum = cast(
+        "tuple[Tensor | None, Tensor | None, bool, float]",
+        args[3:7],
+    )
+    if not training or running_mean is None or running_var is None:
+        return func(*args)
+    variance = torch.zeros_like(running_var)
+    output, mean, invstd = cast(
+        tuple[Tensor, Tensor, Tensor],
+        func(
+            *args[:3],
+            torch.zeros_like(running_mean),
+            variance,
+            training,
+            1.0,
+            args[7],
+        ),
+    )
+    running_mean.mul_(1 - momentum).add_(mean * momentum)
+    running_var.mul_(1 - momentum).add_(variance * momentum)
+    return output, mean, invstd
 
 
 @out_wrapper(exact_dtype=True)

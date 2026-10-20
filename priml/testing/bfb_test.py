@@ -4228,6 +4228,68 @@ def test_group_norm_mean_rounds_a_float32_tie_to_even(
     assert mean.item() == expected.item()
 
 
+# A batch-norm channel of the MLS-Bench SCRUB lockstep and the running mean it
+# updated. Its 12 float32 values sum exactly in float64 in any order, so every host
+# computes the same batch mean.
+_RUNNING_TIE: Final = (
+    -0.8984993696212769,
+    -0.202734112739563,
+    -0.13628186285495758,
+    -0.14021262526512146,
+    1.206359624862671,
+    0.36113566160202026,
+    -0.5420063138008118,
+    -0.8923287391662598,
+    -0.3135857880115509,
+    -0.6958531141281128,
+    -0.739623486995697,
+    -0.8086782693862915,
+)
+_RUNNING_TIE_MEAN: Final = -0.03300672024488449
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        torch.ops.aten.native_batch_norm.default,
+        torch.ops.aten._native_batch_norm_legit.default,
+    ],
+)
+def test_batch_norm_running_statistics_round_both_products_apart(
+    func: OpOverload[..., object],
+) -> None:
+    momentum = 0.1
+    # The second channel, quarters, has mean 11/8 and unbiased variance 13/16 exactly.
+    media = torch.stack(
+        [
+            torch.tensor(_RUNNING_TIE).reshape(3, 4),
+            torch.arange(12.0).reshape(3, 4) / 4,
+        ],
+        dim=1,
+    )
+    running_mean = torch.tensor([_RUNNING_TIE_MEAN, 0.0])
+    running_var = torch.ones(2)
+    with host_agnostic_numerics():
+        func(media, None, None, running_mean, running_var, True, momentum, 1e-5)
+    mean = float(sum(Fraction(value) for value in _RUNNING_TIE) / 12)
+    # Python rounds both products and the sum, as x86-64's kernel does; one
+    # rounding of the exact sum is the FMA aarch64's kernel issues.
+    apart = momentum * mean + (1 - momentum) * _RUNNING_TIE_MEAN
+    fused = Fraction(momentum) * Fraction(mean) + Fraction(
+        (1 - momentum) * _RUNNING_TIE_MEAN,
+    )
+    assert torch.tensor(float(fused)).item() != torch.tensor(apart).item()
+    assert torch.equal(
+        running_mean,
+        torch.tensor([apart, momentum * (11 / 8) + (1 - momentum) * 0.0]),
+    )
+    # The first channel squares inexact deviations and sums them in the host's order.
+    assert torch.equal(
+        running_var[1:],
+        torch.tensor([momentum * (13 / 16) + (1 - momentum) * 1.0]),
+    )
+
+
 @pytest.mark.parametrize(
     "func",
     [torch.ops.aten.convolution.default, torch.ops.aten._convolution.default],
