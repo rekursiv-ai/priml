@@ -24,46 +24,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cross_entropy_logz",
-    "cross_entropy_off_target",
     "cross_entropy_with_batched_smoothing",
     "log_stablemax",
     "log_stablemax_via_probabilities",
     "stablemax_cross_entropy",
 ]
-
-
-def cross_entropy_off_target(
-    input: Tensor,
-    target: Tensor,
-    *,
-    smoothing: float = 0.0,
-    reduction: Literal["none", "mean", "sum"] = "none",
-) -> Tensor:
-    """Cross entropy allocating smoothing mass only to incorrect classes.
-
-    Args:
-      input: Class logits, shaped ``[batch, classes]``.
-      target: Integer class labels, shaped ``[batch]``.
-      smoothing: Total probability assigned to the incorrect classes.
-      reduction: Batch reduction; the default preserves each example.
-
-    Returns:
-      loss: One dense cross entropy per example, without a batch reduction.
-
-    """
-    log_probability = input.log_softmax(dim=-1)
-    with torch.no_grad():
-        probability = torch.zeros_like(log_probability)
-        probability.fill_(smoothing / (input.shape[-1] - 1))
-        probability.scatter_(1, target.unsqueeze(1), 1.0 - smoothing)
-    loss = (-probability * torch.where(probability != 0, log_probability, 0.0)).sum(
-        dim=-1,
-    )
-    if reduction == "mean":
-        return loss.mean()
-    if reduction == "sum":
-        return loss.sum()
-    return loss
 
 
 def cross_entropy_logz(
