@@ -143,7 +143,7 @@ class Benchmark:
                     "script_version_id": 358_565_580,
                     "config": config.serialize(),
                     **provenance(
-                        packages=["numpy", "scipy", "torch", "transformers", "pyarrow"],
+                        packages=["numpy", "torch", "transformers", "pyarrow"],
                     ),
                     "timing_scope": (
                         "run entry through durable result receipt publication; "

@@ -15,7 +15,8 @@ from priml.baselines.name_that_llm.model import (
     center,
     random_chunks,
 )
-from priml.baselines.name_that_llm.testing.fixtures_support_test import (
+from priml.baselines.name_that_llm.testing import (
+    NumericalTrace,
     capture_source,
     centred_branch,
     completed_record,
@@ -25,7 +26,7 @@ from priml.baselines.name_that_llm.testing.fixtures_support_test import (
     recipe,
     svm_branch,
 )
-from priml.baselines.name_that_llm.testing.trace_support_test import NumericalTrace
+from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -140,7 +141,7 @@ def test_centered_heads_fit_all_chunks_and_keep_singletons() -> None:
     reference = capture_source("centred")
     plain = reference["plain"].numpy()
     expected = read_tensors(_THIS.with_name("testdata") / "qwen_centred.pt")
-    with NumericalTrace() as trace:
+    with host_agnostic_numerics(), NumericalTrace() as trace:
         probabilities = model.predict(
             features,
             targets=targets,

@@ -95,15 +95,29 @@ def test_an_inspected_twin_compiles_with_its_kernels_options() -> None:
         assert kernel.targetoptions.items() <= twin.targetoptions.items(), kernel
 
 
-@pytest.mark.compute_large_fixture
-def test_kernel_llvm_drops_the_python_wrappers_and_survives_the_cache() -> None:
+def test_kernel_llvm_drops_the_python_wrappers_and_survives_the_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _mad(np.float32(1.5), np.float32(2.5), np.float32(0.5))
+
+    twins: list[Dispatcher[Callable[..., object]]] = []
+    inspectable = _inspectable
+
+    def record_twin(
+        dispatcher: Dispatcher[Callable[..., object]],
+    ) -> Dispatcher[Callable[..., object]]:
+        twin = inspectable(dispatcher)
+        twins.append(twin)
+        return twin
+
+    monkeypatch.setattr(testing, "_inspectable", record_twin)
     body = kernel_llvm(_mad)
     assert "define" in body
     assert "cpython" not in body
     # The twin, not the possibly cached dispatcher: Numba returns nothing from
     # inspect_llvm on cached code, which is why kernel_llvm recompiles.
-    assert "cpython" in "\n".join(_inspectable(_mad).inspect_llvm().values())
+    assert len(twins) == 1
+    assert "cpython" in "\n".join(twins[0].inspect_llvm().values())
 
 
 def test_kernel_llvm_judges_each_block_by_its_define_line_alone() -> None:
@@ -125,16 +139,108 @@ def test_kernel_llvm_judges_each_block_by_its_define_line_alone() -> None:
     assert _kernel_llvm(modules) == f"{kernel}\n{later}"
 
 
+@pytest.mark.parametrize(
+    ("definition", "kept"),
+    [
+        (
+            'define i8* @"cpython.__main__.kern"(i8* %py) {\nentry:\n  ret i8* null\n}',
+            False,
+        ),
+        (
+            'define ptr @"cpython.__main__.kern"(ptr %py) {\nentry:\n  ret ptr null\n}',
+            False,
+        ),
+        (
+            (
+                'define i8* @"_ZN7cpython3mod4kernEv"(i8* %py) {\n'
+                "entry:\n  ret i8* null\n}"
+            ),
+            False,
+        ),
+        (
+            "define ptr @_ZN7cpython3mod4kernEv(ptr %py) {\nentry:\n  ret ptr null\n}",
+            False,
+        ),
+        (
+            (
+                'define float @"cfunc._ZN8__main__4kern"(float %arg) {\n'
+                "entry:\n  ret float %arg\n}"
+            ),
+            False,
+        ),
+        (
+            (
+                'define i32 @"cfunc._ZN8__main__4kern"(i32 %arg) {\n'
+                "entry:\n  ret i32 %arg\n}"
+            ),
+            False,
+        ),
+        (
+            (
+                'define i8* @"cfunc._ZN8__main__4kern"(i8* %arg) {\n'
+                "entry:\n  ret i8* %arg\n}"
+            ),
+            False,
+        ),
+        (
+            (
+                'define ptr @"cfunc._ZN8__main__4kern"(ptr %arg) {\n'
+                "entry:\n  ret ptr %arg\n}"
+            ),
+            False,
+        ),
+        (
+            (
+                'define i32 @"_ZN7cpython3mod4kernEi"('
+                "ptr %retptr, ptr %excinfo, i32 %cpython, i32 %cfunc) {\n"
+                "entry:\n  ret i32 0\n}"
+            ),
+            True,
+        ),
+        (
+            (
+                'define float @"_ZN4test9cpythonX4kernEf"(float %cfunc_arg) {\n'
+                "entry:\n  call void @cpython_helper()\n"
+                "  ret float %cfunc_arg\n}"
+            ),
+            True,
+        ),
+        (
+            (
+                'define i8* @"_ZN4test8cfuncX4kern"(i8* %cpython_arg) {\n'
+                "entry:\n  ret i8* %cpython_arg\n}"
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "cpython_i8_wrapper",
+        "cpython_ptr_wrapper",
+        "mangled_cpython_i8_wrapper",
+        "mangled_cpython_ptr_wrapper",
+        "cfunc_float_wrapper",
+        "cfunc_i32_wrapper",
+        "cfunc_i8_wrapper",
+        "cfunc_ptr_wrapper",
+        "cpython_module_raw_kernel",
+        "raw_kernel_name_and_body_mentions",
+        "raw_pointer_helper_with_wrapper_words",
+    ],
+)
+def test_kernel_llvm_drops_only_actual_wrappers(definition: str, kept: bool) -> None:
+    assert _kernel_llvm([definition]) == (definition if kept else "")
+
+
 def test_kernel_inspection_reuses_one_twin_for_every_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @jit
-    def identity(x: np.ndarray) -> np.ndarray:
+    def identity(x: float) -> float:
         return x
 
-    values = np.arange(4, dtype=np.float32)
-    identity(values)
-    identity(values[::2])
+    identity(1)
+    identity(1.5)
+    assert len(identity.signatures) == 2
     twins: list[Dispatcher[Callable[..., object]]] = []
     inspectable = _inspectable
 

@@ -1017,7 +1017,7 @@ class RowPreparation:
                 "bos_token_id": encoder.bos_token_id,
                 "eval_batch_size": self.config.eval_batch_size,
                 "max_seq_len": self.config.max_seq_len,
-                "physical_positions": int(targets.size),
+                "physical_positions": int(targets.size),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                 "val_shard": self.config.val_shard,
                 "buffer_size": self.config.buffer_size,
                 "rows": len(targets),
@@ -1608,11 +1608,11 @@ def prepare_reference_rows(
         + [0] * (reference.n_vocab - bos),
         dtype=int64,
     )
-    output_bos = int(tokenizer.get_vocab_size()) if tokenizer is not None else bos
+    output_bos = int(tokenizer.get_vocab_size()) if tokenizer is not None else bos  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     output_vocab = (
         output_bos + reserved_count if tokenizer is not None else reference.n_vocab
     )
-    width = int(cast(int, inputs.shape[1]))
+    width = int(cast(int, inputs.shape[1]))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     output: list[tuple[ndarray, ndarray, ndarray]] = []
     reference_counts: list[int] = []
     literal_counts: list[int] = []
@@ -1640,7 +1640,8 @@ def prepare_reference_rows(
                 else row[ends[fragment_index - 1] + 1 : end]
             )
             raw = b"".join(
-                pieces[int(token)] for token in cast(list[int], fragment.tolist())
+                pieces[int(token)]  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+                for token in cast(list[int], fragment.tolist())
             )
             fragment_lengths.append(len(raw))
             literal_count += len(raw)

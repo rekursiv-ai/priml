@@ -7,7 +7,7 @@ edit produced, written by ``scripts/capture_reference.py``. Equality is exact.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import pytest
 import torch
@@ -21,12 +21,6 @@ from priml.baselines.mlsbench.dl.weighting import reference
 from priml.baselines.mlsbench.dl.weighting.experiments import exp000
 from priml.testing.golden import mismatches, read_tensors
 
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
-    from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 
 _CWD: Final = Path(__file__).resolve().parent
 
@@ -176,26 +170,16 @@ def test_the_cifar10_loader_yields_the_scripts_images_in_its_order(
     "name",
     [
         "resnet32-cifar10lt",
-        pytest.param("vgg16bn-cifar100lt", marks=pytest.mark.compute_training),
+        "vgg16bn-cifar100lt",
     ],
 )
-def test_each_settings_full_network_and_recipe_match_the_script(name: str) -> None:
+def test_each_settings_shallow_network_and_recipe_match_the_script(name: str) -> None:
     expected = {
         k: v
         for k, v in stored_settings(f"settings/{name}/").items()
-        if "/loader/" not in k
+        if "/loader/" not in k and "/lockstep/" not in k
     }
-    assert_exact(expected, reference.setting_record(name))
-
-
-def shallow_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
-    """Build ``factory``'s step at its lockstep size, in place of the full one."""
-    return vision_reference.tiny_step(
-        factory,
-        blocks=(1, 1, 1),
-        classes=vision_reference.CLASSES,
-        epochs=vision_reference.EPOCHS,
-    )
+    assert_exact(expected, reference.setting_record(name, include_lockstep=False))
 
 
 def placeholder_record(name: str) -> dict[str, torch.Tensor]:
@@ -203,18 +187,15 @@ def placeholder_record(name: str) -> dict[str, torch.Tensor]:
     return {name: torch.zeros(2)}
 
 
-def test_a_lockstep_setting_adds_every_weightings_two_updates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shrinks the VGG setting's full step to its lockstep size, to stay fast."""
-    monkeypatch.setattr(vision_reference, "full_step", shallow_step)
+def test_a_lockstep_setting_adds_every_weightings_two_updates() -> None:
+    """Compare the full VGG setting record, including every weighting lockstep."""
     record = reference.setting_record("vgg16bn-cifar100lt")
-    for name in reference.WEIGHTS:
-        key = f"settings/vgg16bn-cifar100lt/lockstep/{name}/"
-        assert_exact(
-            stored_settings(key),
-            {k: v for k, v in record.items() if k.startswith(key)},
-        )
+    expected = {
+        k: v
+        for k, v in stored_settings("settings/vgg16bn-cifar100lt/").items()
+        if "/loader/" not in k
+    }
+    assert_exact(expected, record)
 
 
 def test_settings_record_joins_every_setting(monkeypatch: pytest.MonkeyPatch) -> None:

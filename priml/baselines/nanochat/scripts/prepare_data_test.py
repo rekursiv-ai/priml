@@ -14,7 +14,8 @@ from functools import partial
 from pathlib import Path
 from threading import Event
 from types import ModuleType, SimpleNamespace
-from typing import Final, TypedDict, cast
+from typing import Final, cast
+from typing_extensions import TypedDict
 from unittest.mock import Mock, call, patch
 from urllib import request
 
@@ -60,6 +61,7 @@ from priml.baselines.nanochat.data import (
     token_bytes_fingerprint,
 )
 from priml.baselines.nanochat.experiments import NgramTrainLoop, exp022
+from priml.baselines.nanochat.model import MemoryNanoChatLM, _validate_memory
 from priml.baselines.nanochat.scripts import prepare_data
 from priml.baselines.nanochat.scripts.prepare_data import (
     BOS_TOKEN,
@@ -597,7 +599,7 @@ def test_fit_vocabulary_rebuilds_when_the_byte_table_is_missing(
     assert "nanochat vocabulary fitted: 272 tokens" in caplog.messages
 
 
-class PrepareOverrides(TypedDict, total=False):
+class PrepareOverrides(TypedDict, total=False, closed=True):
     num_train_shards: int
     vocab_size: int
     tokenizer_train_chars: int
@@ -858,7 +860,6 @@ def test_training_handoff_preserves_config_and_uses_priml(
     restored = experiment()
     if save_checkpoint is True:
         checkpoint = cast(Checkpointer.Config, restored.checkpointer)
-        assert isinstance(checkpoint, Checkpointer.Config)
         assert checkpoint.save_every == sys.maxsize
         assert checkpoint.resume is False
         restored.checkpointer = None
@@ -1115,11 +1116,40 @@ def test_preparation_builds_and_relocates(
     assert (moved / "reference-eval/unigram.npz").exists()
     preparation = config.make()
     training = preparation.training_config(
-        "exp022",
+        "priml.baselines.nanochat.scripts.prepare_data_test._small_exp022",
         run_directory=tmp_path / "training",
         seed=1102,
     )
-    original_recipe = exp022()
+    original_recipe = _small_exp022()
+    training_model = training.step.model
+    full_model = exp022().step.model
+    assert isinstance(training_model, MemoryNanoChatLM.Config)
+    assert isinstance(full_model, MemoryNanoChatLM.Config)
+    _validate_memory(training_model)
+    assert isinstance(training_model.block, list)
+    assert isinstance(full_model.block, list)
+    assert training_model.num_layers == full_model.num_layers - 1
+    assert len(training_model.block) == training_model.num_layers
+    assert training_model.num_pool_layers == full_model.num_pool_layers
+    assert training_model.num_pool_layers >= 2
+    assert (
+        training_model.attention_source_after_layer
+        == full_model.attention_source_after_layer
+    )
+    assert training_model.attention_source_layers == tuple(
+        layer
+        for layer in full_model.attention_source_layers
+        if layer < training_model.num_layers
+    )
+    assert len(training_model.attention_source_layers) >= 2
+    assert set(training_model.bigrams) == {
+        layer for layer in full_model.bigrams if int(layer) < training_model.num_layers
+    }
+    assert len(training_model.bigrams) >= 2
+    assert set(training_model.trigrams) == {
+        layer for layer in full_model.trigrams if int(layer) < training_model.num_layers
+    }
+    assert len(training_model.trigrams) >= 2
     assert training.step.copy_tree().finalize().serialize() == (
         original_recipe.step.copy_tree().finalize().serialize()
     )
@@ -1146,6 +1176,29 @@ def test_preparation_builds_and_relocates(
             assert bundled.read() == (_CWD / "prepare_data.py").read_bytes()
     with pytest.raises(FileExistsError):
         preparation.dump(exported)
+
+
+def _small_exp022() -> NgramTrainLoop.Config:
+    config = exp022()
+    model = config.step.model
+    assert isinstance(model, MemoryNanoChatLM.Config)
+    assert isinstance(model.block, list)
+    model.num_layers -= 1
+    model.block = model.block[:-1]
+    model.attention_source_layers = tuple(
+        layer for layer in model.attention_source_layers if layer < model.num_layers
+    )
+    model.bigrams = {
+        layer: table
+        for layer, table in model.bigrams.items()
+        if int(layer) < model.num_layers
+    }
+    model.trigrams = {
+        layer: table
+        for layer, table in model.trigrams.items()
+        if int(layer) < model.num_layers
+    }
+    return config
 
 
 def test_reference_archive_uses_recorded_batch_size_and_both_tokenizers(
@@ -1465,7 +1518,7 @@ def test_training_documents_read_in_a_fresh_interpreter(tmp_path: Path) -> None:
     )
     result = subprocess.run(  # noqa: S603 -- Fixed interpreter and test-owned program.
         [sys.executable, "-c", program],
-        env={**os.environ, "PYTHONPATH": str(_CWD.parents[4])},
+        env={**os.environ, "PYTHONPATH": str(_source_root())},
         capture_output=True,
         text=True,
         check=False,
@@ -1494,7 +1547,7 @@ def test_cli_prints_factory_without_preparing_inputs(tmp_path: Path) -> None:
             str(destination),
         ],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(_CWD.parents[4])},
+        env={**os.environ, "PYTHONPATH": str(_source_root())},
         capture_output=True,
         text=True,
         check=False,
@@ -1665,12 +1718,12 @@ def test_reference_replay() -> None:
         strict=True,
     ):
         expected = b"".join(
-            reference.decode_single_token_bytes(int(token))
+            reference.decode_single_token_bytes(token)
             for token in cast(list[int], original.tolist())
             if token < 257
         )
         pieces = [
-            backend.id_to_token(int(token))
+            backend.id_to_token(token)
             for token in cast(list[int], replay[mask].tolist())
         ]
         assert all(piece is not None for piece in pieces)
@@ -4325,6 +4378,14 @@ def test_direct_launches_read_the_default_preparation_layout() -> None:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _source_root() -> Path:
+    """Find the import root for this test's top-level package."""
+    package = importlib.import_module(__name__.partition(".")[0])
+    if package.__file__ is None:
+        raise ValueError("Expected package.__file__ is not None.")
+    return Path(package.__file__).resolve().parent.parent
 
 
 if __name__ == "__main__":

@@ -24,7 +24,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import field
-from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
+from typing import TYPE_CHECKING, NotRequired, Self, cast, override
+from typing_extensions import TypedDict
 
 import math
 
@@ -76,7 +77,7 @@ def _default_optimizer() -> CompositeOptimizer.Config:
     return config
 
 
-class _PrefixKwargs(TypedDict, total=False):
+class _PrefixKwargs(TypedDict, total=False, closed=True):
     puzzle_identifiers: object
 
 
@@ -177,7 +178,7 @@ class SudokuTrainStep(TrainStep):
             else NoEMA.Config()
         )
         super().__init__(config)
-        self.config: SudokuTrainStep.Config = config
+        self.config: SudokuTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.pool: ActPool | None = None if config.pool is None else config.pool.make()
         if self.pool is not None:
             self.pool.to(self.device)
@@ -365,7 +366,7 @@ class SudokuTrainStep(TrainStep):
         with the next batch rather than replaying interrupted ones. Its
         dedicated generators are carried, so exploration does not restart.
         """
-        state: SudokuTrainStep.StateDict = {**super().state_dict()}
+        state: SudokuTrainStep.StateDict = {**super().state_dict()}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
         shadow = self.ema_shadow
         if shadow is not None:
             state["ema"] = dict(shadow)

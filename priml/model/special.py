@@ -304,8 +304,9 @@ class Identity(nn.Identity):
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
 
+    # Narrower than ``nn.Identity``'s on purpose: an extra positional is a bug.
     @override
-    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:  # pyrefly: ignore[bad-override] -- Rejecting extra positionals is the contract ``test_identity`` pins.
         del kwargs
         return input
 

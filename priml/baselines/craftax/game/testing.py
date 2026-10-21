@@ -17,9 +17,9 @@ from typing import (
     TYPE_CHECKING,
     Final,
     Literal,
-    TypedDict,
     cast,
 )
+from typing_extensions import TypedDict
 
 import re
 
@@ -219,13 +219,19 @@ def _kernel_llvm(modules: Iterable[str]) -> str:
     for module in modules:
         for block in re.finditer(r"^define .*?^}", module, re.DOTALL | re.MULTILINE):
             header = block.group(0).partition("\n")[0]
-            if "cpython" in header or "cfunc" in header:
+            declaration, _, symbol = header.partition("@")
+            symbol = symbol.partition("(")[0].strip().strip('"')
+            # Dropping module cpython would discard its i32-status CPU kernel.
+            python_symbol = symbol.startswith(("cpython.", "_ZN7cpython"))
+            pointer_return = declaration.split()[-1] in {"ptr", "i8*"}
+            python_wrapper = python_symbol and pointer_return
+            if symbol.startswith("cfunc.") or python_wrapper:
                 continue
             bodies.append(block.group(0))
     return "\n".join(bodies)
 
 
-class _Options(TypedDict, total=False):
+class _Options(TypedDict, total=False, closed=True):
     """The ``targetoptions`` a ``jit`` kernel records, as ``njit`` takes them back."""
 
     nogil: bool

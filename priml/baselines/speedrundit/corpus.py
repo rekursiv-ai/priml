@@ -436,7 +436,7 @@ def _encoding_identity(config: object) -> object:
                 if entry.name not in _DECODE_FIELDS
             },
         }
-    if isinstance(config, list | tuple):
+    if isinstance(config, (list, tuple)):
         return [_encoding_identity(item) for item in cast("list[object]", config)]
     # ``pformat`` masks a function's address, so two lambdas, or two closures
     # over different captured state, would share one identity.

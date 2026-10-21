@@ -7,10 +7,12 @@ Standardization has no fitted state: each trial uses only its own samples.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self, cast, override
 
 import csv
+import math
 import re
 
 from configgle import Fig
@@ -31,12 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
     from numpy.typing import NDArray
-    from scipy import signal
-
-else:
-    from wrapt import lazy_import
-
-    signal = lazy_import("scipy.signal")
 
 
 NUM_CLASSES: Final = 2
@@ -100,17 +96,15 @@ class Preprocessing:
 
         """
         cfg = self.config
-        notch = signal.iirnotch(
-            w0=cfg.notch_hz,
-            Q=cfg.notch_quality,
-            fs=cfg.sample_rate,
+        notch = _notch(
+            cfg.notch_hz,
+            quality=cfg.notch_quality,
+            sample_rate=cfg.sample_rate,
         )
-        zeros, poles, gain = signal.butter(
-            N=cfg.filter_order,
-            Wn=cfg.band_hz,
-            btype="bandpass",
-            fs=cfg.sample_rate,
-            output="zpk",
+        zeros, poles, gain = _butterworth_bandpass(
+            cfg.band_hz,
+            order=cfg.filter_order,
+            sample_rate=cfg.sample_rate,
         )
         numerator = gain * _pole_polynomial(zeros).real
         denominator = _pole_polynomial(poles).real
@@ -354,14 +348,169 @@ def write_submission(
         )
 
 
-def _pole_polynomial(roots: NDArray[np.complex128]) -> NDArray[np.complex128]:
-    coefficients = np.ones(1, dtype=np.complex128)
-    for root in cast("list[complex]", roots.tolist()):
-        coefficients = np.convolve(
-            coefficients,
-            np.asarray([1, -root]),
+def _notch(
+    center_hz: float,
+    *,
+    quality: float,
+    sample_rate: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Design SciPy's second-order IIR notch in its operation order."""
+    center = 2 * center_hz / sample_rate
+    if center > 1.0 or center < 0.0:
+        raise ValueError("Notch frequency must lie between zero and Nyquist.")
+    gain = 1.0 / (1.0 + math.tan(center / quality * math.pi / 2.0))
+    cosine = math.cos(center * math.pi)
+    return (
+        np.asarray([gain, gain * (-2.0 * cosine), gain], dtype=np.float64),
+        np.asarray([1.0, -2.0 * gain * cosine, 2.0 * gain - 1.0], dtype=np.float64),
+    )
+
+
+# Operands stay complex: Python's mixed float-complex arithmetic keeps signed zeros
+# that NumPy's ufuncs replace, and a zero's sign orders each conjugate pole pair.
+def _butterworth_bandpass(
+    band_hz: tuple[float, float],
+    *,
+    order: int,
+    sample_rate: float,
+) -> tuple[NDArray[np.complex128], NDArray[np.complex128], float]:
+    """Design SciPy's digital Butterworth bandpass zeros, poles, and gain."""
+    nyquist = sample_rate / 2
+    low, high = (edge / nyquist for edge in band_hz)
+    if low <= 0 or high >= 1 or low >= high:
+        raise ValueError("Band edges must increase strictly between zero and Nyquist.")
+    warped_low, warped_high = (
+        4.0 * math.tan(math.pi * edge / 2.0) for edge in (low, high)
+    )
+    bandwidth = warped_high - warped_low
+    # np.sqrt rounds correctly, as SciPy's root does; `**0.5` goes through pow.
+    center = cast("float", np.sqrt(warped_low * warped_high))
+    # NumPy divides each angle by 2N through this reciprocal.
+    step = 1.0 / (2 * order)
+    lowpass = [
+        # SciPy's `p * bw / 2`: the complex division by 2 turns the real pole's
+        # -0.0 imaginary part into +0.0.
+        _quotient(
+            _product(
+                complex(
+                    -math.cos(math.pi * index * step),
+                    -math.sin(math.pi * index * step),
+                ),
+                complex(bandwidth),
+            ),
+            complex(2.0),
         )
-    return coefficients
+        for index in range(1 - order, order, 2)
+    ]
+    # SciPy squares the center with pow, which can round unlike center * center.
+    shifts = [
+        _square_root(_product(pole, pole) - complex(center**2)) for pole in lowpass
+    ]
+    analog = [pole + shift for pole, shift in zip(lowpass, shifts, strict=True)]
+    analog += [pole - shift for pole, shift in zip(lowpass, shifts, strict=True)]
+    # np.prod reduces through NumPy's scalar loop, which rounds both products
+    # of each part; only the vectorized loop fuses them as _product does.
+    denominator = complex(4.0) - analog[0]
+    for pole in analog[1:]:
+        factor = complex(4.0) - pole
+        denominator = complex(
+            denominator.real * factor.real - denominator.imag * factor.imag,
+            denominator.real * factor.imag + denominator.imag * factor.real,
+        )
+    return (
+        np.fromiter(
+            [complex(1.0)] * order + [complex(-1.0)] * order,
+            dtype=np.complex128,
+        ),
+        np.fromiter(
+            [_quotient(complex(4.0) + pole, complex(4.0) - pole) for pole in analog],
+            dtype=np.complex128,
+        ),
+        bandwidth**order * _quotient(complex(4.0**order), denominator).real,
+    )
+
+
+def _product(x: complex, y: complex) -> complex:
+    """Multiply as NumPy's vectorized loop does, rounding each part once."""
+    return complex(
+        fma64(x.real, y=y.real, addend=-(x.imag * y.imag)),
+        fma64(x.real, y=y.imag, addend=x.imag * y.real),
+    )
+
+
+def _quotient(x: complex, y: complex) -> complex:
+    """Divide by Smith's method, scaling by a reciprocal as NumPy does."""
+    if abs(y.real) >= abs(y.imag):
+        ratio = y.imag / y.real
+        scale = 1.0 / (y.real + y.imag * ratio)
+        return complex(
+            (x.real + x.imag * ratio) * scale,
+            (x.imag - x.real * ratio) * scale,
+        )
+    ratio = y.real / y.imag
+    scale = 1.0 / (y.imag + y.real * ratio)
+    return complex((x.real * ratio + x.imag) * scale, (x.imag * ratio - x.real) * scale)
+
+
+def _square_root(x: complex) -> complex:
+    """Take the principal root in glibc csqrt's operation order, as NumPy does."""
+    norm = _hypot(x.real, x.imag)
+    if x.real > 0:
+        real = cast("float", np.sqrt(0.5 * (norm + x.real)))
+        imag = 0.5 * (x.imag / real)
+    elif x.real < 0:
+        imag = cast("float", np.sqrt(0.5 * (norm - x.real)))
+        real = abs(0.5 * (x.imag / imag))
+    else:
+        real = imag = cast("float", np.sqrt(0.5 * abs(x.imag)))
+    return complex(real, math.copysign(imag, x.imag))
+
+
+def _hypot(x: float, y: float) -> float:
+    """Return glibc 2.39's generic hypot, the kernel x86-64 runs without FMA."""
+    # aarch64's fused kernel and the correctly rounded math.hypot each round
+    # some norms differently, and a one-ULP norm can move a pole's bits.
+    # The omitted overflow and underflow rescaling never applies to O(1) poles.
+    ax, ay = max(abs(x), abs(y)), min(abs(x), abs(y))
+    h = cast("float", np.sqrt(ax * ax + ay * ay))
+    if h <= 2.0 * ay:
+        delta = h - ay
+        t1 = ax * (2.0 * delta - ax)
+        t2 = (delta - 2.0 * (ax - ay)) * delta
+    else:
+        delta = h - ax
+        t1 = 2.0 * delta * (ax - 2.0 * ay)
+        t2 = (4.0 * delta - ay) * ay + delta * delta
+    return h - (t1 + t2) / (2.0 * h)
+
+
+def _pole_polynomial(roots: NDArray[np.complex128]) -> NDArray[np.complex128]:
+    """Expand the monic polynomial as x86 ``np.convolve`` rounds it."""
+    coefficients = [complex(1.0)]
+    for root in cast("list[complex]", roots.tolist()):
+        # np.convolve dots each coefficient pair with (-root, 1) through BLAS
+        # zdotu, whose summation order is per ISA. The reference filters came
+        # from x86 OpenBLAS; aarch64's order moves two exp000 terms by an ULP.
+        coefficients = [
+            coefficients[0],
+            *(
+                _complex_dot([(before, -root), (after, complex(1.0))])
+                for before, after in pairwise(coefficients)
+            ),
+            _complex_dot([(coefficients[-1], -root)]),
+        ]
+    return np.fromiter(coefficients, dtype=np.complex128)
+
+
+def _complex_dot(pairs: Sequence[tuple[complex, complex]]) -> complex:
+    """Sum products into x86 OpenBLAS zdotu's four real partials, then combine."""
+    rr = ii = ri = ir = 0.0
+    for x, y in pairs:
+        rr += x.real * y.real
+        ii += x.imag * y.imag
+        ri += x.real * y.imag
+        ir += x.imag * y.real
+    return complex(rr - ii, ri + ir)
 
 
 def _filter_initial_state(

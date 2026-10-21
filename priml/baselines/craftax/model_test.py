@@ -201,7 +201,9 @@ def _answers_cuda(tensor: Tensor) -> bool:
 def test_parameters_are_every_weight_in_pufferlibs_allocator_order() -> None:
     # FusedMuon's global norm reduces the gradients in this order, so exp000's
     # bits depend on it: proj_out comes before the blocks.
-    model = MinGRUPolicy.Config().make()
+    # Registration and parameter metadata do not require initialized storage.
+    with torch.device("meta"):
+        model = MinGRUPolicy.Config().make()
     names = [name for name, _ in model.named_parameters()]
     assert names == [
         "embedding.weight",
@@ -510,11 +512,12 @@ def test_the_board_policy_holds_the_references_live_weights() -> None:
     injection = config.injection = MLP.Config()
     injection.channels_hidden = 128
     config.auxiliary = FeasibilityLoss.Config()
-    model = config.make()
-    encoder = [
-        f"embedding.{name}"
-        for name, _ in BoardEncoder.Config().make().named_parameters()
-    ]
+    with torch.device("meta"):
+        model = config.make()
+        encoder = [
+            f"embedding.{name}"
+            for name, _ in BoardEncoder.Config().make().named_parameters()
+        ]
     shapes = [(name, tuple(weight.shape)) for name, weight in model.named_parameters()]
     assert [name for name, _ in shapes] == [
         *encoder,

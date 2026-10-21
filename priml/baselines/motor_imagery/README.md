@@ -26,6 +26,9 @@ not assert the contents of future data revisions.
 
 ## Stage and run
 
+[DATA.md](DATA.md) gives the one-time staging steps and describes the small
+test inputs.
+
 Stage the archive using existing Kaggle authentication. This does not log in,
 join the competition, accept terms or submit predictions.
 
@@ -172,9 +175,12 @@ only initial running variances to 0.9; other initial parameters/buffers retained
 their bits. Constructor regressions require the dummy pass to update every
 BatchNorm counter/variance. Complete old controls remain external.
 
-The x86 preprocessing implementation preserves source polynomial convolution,
-unfused IIR recurrence and row-major buffers. Layout fixes the subsequent
-NumPy reduction order; all 90 ingestion values match after standardization and
+Preprocessing designs both filters without SciPy, in plain Python arithmetic
+that repeats SciPy's NumPy operations with x86 glibc's hypot and x86 OpenBLAS's
+complex dot order, so coefficients and filtered records match on x86 and
+aarch64. It preserves the unfused IIR recurrence and row-major buffers. Layout
+fixes the subsequent NumPy reduction order; all 90 ingestion values match after
+standardization and
 window extraction. [Filtering provenance](testdata/filtering.md) records the
 original input cases, source definition hash and capture environment.
 

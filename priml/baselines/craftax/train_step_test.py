@@ -1557,9 +1557,7 @@ class _FreshnessLearner:
                 rollout.terminals,
             )
         self.fresh.append(
-            bool(
-                torch.allclose(decoded[..., -1], rollout.values, rtol=1e-5, atol=1e-6),
-            ),
+            torch.allclose(decoded[..., -1], rollout.values, rtol=1e-5, atol=1e-6),
         )
         return self.windows(step, rollout)
 

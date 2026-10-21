@@ -8,6 +8,7 @@ optimizer.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -18,7 +19,6 @@ import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.data import Cifar100Data, normalize
-from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.weighting import (
     reference,
     upstream,
@@ -77,18 +77,6 @@ def port_lockstep(
     return {f"lockstep/{name}/loss": torch.zeros(2)}
 
 
-def shallow(factory: Callable[[], VisionTrainLoop]) -> Callable[[], VisionTrainLoop]:
-    """Return ``factory`` with one block per stage, in place of ResNet-32."""
-
-    def build() -> VisionTrainLoop:
-        config = factory()
-        assert isinstance(config.step.model, ResNet.Config)
-        config.step.model.blocks_per_stage = (1, 1, 1)
-        return config
-
-    return build
-
-
 @pytest.mark.parametrize("cifar100", [None, Path("cifar")])
 def test_capture_assembles_both_sides_into_one_report(
     tmp_path: Path,
@@ -115,10 +103,11 @@ def test_capture_assembles_both_sides_into_one_report(
     )
     full_step = vision_reference.full_step
 
-    def shallow_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
-        return full_step(shallow(factory))
-
-    monkeypatch.setattr(vision_reference, "full_step", shallow_step)
+    monkeypatch.setattr(
+        vision_reference,
+        "full_step",
+        partial(_shallow_step, full_step=full_step),
+    )
     monkeypatch.setattr(upstream, "upstream_batches", returning(passes([0, 1])))
     monkeypatch.setattr(
         upstream,
@@ -362,6 +351,22 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     assert capture_reference.main() == 0
     assert f"0 mismatches; wrote 1 values to {out}." in capsys.readouterr().out
     assert read_tensors(out / "reference.pt").keys() == {"x"}
+
+
+def _shallow_step(
+    factory: Callable[[], VisionTrainLoop],
+    *,
+    full_step: Callable[[Callable[[], VisionTrainLoop]], VisionTrainStep],
+) -> VisionTrainStep:
+    """Build a full step from a factory narrowed to the shallow model."""
+    return full_step(partial(_shallow, factory))
+
+
+def _shallow(factory: Callable[[], VisionTrainLoop]) -> VisionTrainLoop:
+    """Return ``factory`` with the vision reference's shallow model widths."""
+    config = factory()
+    vision_reference.tiny_model(config.step.model, blocks=(1, 1, 1))
+    return config
 
 
 if __name__ == "__main__":

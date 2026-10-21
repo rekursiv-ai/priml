@@ -150,7 +150,10 @@ def test_the_record_joins_every_component(
     tmp_path: Path,
 ) -> None:
     def fake(name: str) -> Callable[..., dict[str, torch.Tensor]]:
-        return lambda *args: {f"{name}/{'/'.join(map(str, args))}": torch.zeros(2)}
+        def record(*args: object) -> dict[str, torch.Tensor]:
+            return {f"{name}/{'/'.join(map(str, args))}": torch.zeros(2)}
+
+        return record
 
     components = (
         "eval_epochs_record",

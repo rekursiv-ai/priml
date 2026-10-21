@@ -261,7 +261,7 @@ def test_evaluation_runs_eager_without_precision_cast_emulation(
     # compiled build would charge this test torch.compile's first import.
     step.net.config.compile = True
     with step._eval_compile_disabled():
-        assert step.net.config.compile is False
+        assert step.net.config.compile is False  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
     assert step.net.config.compile is True
     loop.close()
 

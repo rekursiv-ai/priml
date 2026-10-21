@@ -570,7 +570,7 @@ def test_a_boss_beaten_while_asleep_ends_the_step_at_that_tick() -> None:
         state.boss_progress = NUM_LEVELS - 1
         _step(batch, pool, Action.NOOP)
         assert batch.terminals[0] == (1.0 if end else 0.0)
-        ticks.append(int(env_stats(batch.stats, 0).last_ticks))
+        ticks.append(int(env_stats(batch.stats, 0).last_ticks))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         if end:
             assert (
                 batch.rewards[0]
@@ -596,8 +596,8 @@ def test_the_boss_fight_reward_pays_a_hit_on_top_of_the_games_reward() -> None:
         batch = _batch(1, pool, step.Rules(boss_fight_reward=shaping))
         state = env_state(batch.states, 0)
         state.player_level = NUM_LEVELS - 1
-        row = int(state.player_position[0]) - 1
-        col = int(state.player_position[1])
+        row = int(state.player_position[0]) - 1  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        col = int(state.player_position[1])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         state.map[NUM_LEVELS - 1, row, col] = BlockType.NECROMANCER
         state.melee_mobs[NUM_LEVELS - 1].mask[:] = 0
         state.ranged_mobs[NUM_LEVELS - 1].mask[:] = 0
@@ -778,8 +778,8 @@ def test_the_training_view_of_a_stats_record_is_the_record_itself() -> None:
 
 def _put_ahead(state: EnvState, block: BlockType) -> tuple[int, int]:
     """Write ``block`` on the tile the player faces, up; return the tile."""
-    row = int(state.player_position[0]) - 1
-    col = int(state.player_position[1])
+    row = int(state.player_position[0]) - 1  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+    col = int(state.player_position[1])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     state.map[0, row, col] = block
     return row, col
 

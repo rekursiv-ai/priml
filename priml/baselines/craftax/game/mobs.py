@@ -344,12 +344,10 @@ def floor_mob_type_numba(level: int, mob_class: int) -> int:
       type_id: The species.
 
     """
-    return int(
-        FLOOR_MOB_TYPES[
-            clampi_numba(level, 0, NUM_LEVELS - 1),
-            clampi_numba(mob_class, 0, 2),
-        ],
-    )
+    return FLOOR_MOB_TYPES[
+        clampi_numba(level, 0, NUM_LEVELS - 1),
+        clampi_numba(mob_class, 0, 2),
+    ]
 
 
 @jit

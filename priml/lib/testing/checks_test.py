@@ -11,7 +11,11 @@ import sys
 import pytest
 
 from priml.lib.testing import checks
-from priml.lib.testing.checks import assert_help_without_docstring, default_signals
+from priml.lib.testing.checks import (
+    assert_help_without_docstring,
+    default_signals,
+    smuggle,
+)
 
 
 @pytest.mark.cli_python_subprocess
@@ -91,6 +95,11 @@ def test_help_that_fails_without_a_docstring_is_reported(
 ) -> None:
     with pytest.raises(ValueError, match=r"^Expected exit_info\.value\.code == 0\.$"):
         assert_help_without_docstring(monkeypatch, checks, partial(sys.exit, 2))
+
+
+def test_smuggle_returns_the_value_itself() -> None:
+    value = object()
+    assert smuggle(value, int) is value
 
 
 if __name__ == "__main__":

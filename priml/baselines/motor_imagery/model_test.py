@@ -17,7 +17,7 @@ from priml.baselines.motor_imagery.model import (
     MultiScaleEEGNet,
     ShallowConvNet,
 )
-from priml.baselines.motor_imagery.testing.helpers_support_test import (
+from priml.baselines.motor_imagery.testing import (
     compare_record,
     model_record,
     read_source_record,

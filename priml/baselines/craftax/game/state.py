@@ -980,7 +980,7 @@ def byte_offset(name: LiteralString, dtype: np.dtype[np.void] = STATE_DTYPE) -> 
     """
     if dtype.fields is None:
         raise ValueError("a structured dtype is required")
-    return int(dtype.fields[name][1])
+    return dtype.fields[name][1]
 
 
 def semantic_bytes(dtype: np.dtype[np.void] = STATE_DTYPE) -> NDArray[np.bool]:

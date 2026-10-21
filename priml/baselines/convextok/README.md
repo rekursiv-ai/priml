@@ -179,14 +179,13 @@ them), a third of the columns, which keeps every check's iterates under the
 repository's 32 KB testdata limit while both solves still restart at the 200
 check. GPU kernels carry a CPU reference; GPU-only checks are marked `cuda`.
 
-The presolver's Numba kernels run as plain Python in tests (`conftest.py`'s
-`kernels` fixture), so each presolver test takes about 30 ms instead of paying
-a JIT compile of about 45 s per process. Only what needs machine code is
-compiled, in the slow tier: one test runs every golden program through the
-compiled kernels, which proves each kernel compiles and still matches PSLP, and
-one checks that a kernel keeps a single specialization. The interpreted run is
-also how the kernels' line coverage is measured, since coverage cannot trace
-compiled code.
+The presolver's Numba kernels run as plain Python in most tests (`conftest.py`'s
+`kernels` fixture), avoiding a cold JIT compile that can take about 78 s per
+process. The full fixture and fuzz sweep runs compiled kernels in the slow tier;
+together, those golden programs prove each kernel compiles and still matches
+PSLP. A separate tiny compiled test checks that converting both index arrays
+keeps one kernel specialization. The interpreted run is also how the kernels'
+line coverage is measured, since coverage cannot trace compiled code.
 
 ## Reproduce
 

@@ -180,5 +180,5 @@ def torch_reference(reference: nn.Module) -> nn.Module:
         closure=original.__closure__,
     )
     forward.__kwdefaults__ = original.__kwdefaults__
-    reference.forward = partial(forward, reference)
+    reference.forward = partial(forward, reference)  # ty: ignore[invalid-assignment] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.  # pyrefly: ignore[read-only] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.
     return reference

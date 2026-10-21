@@ -12,6 +12,9 @@ was checked on 16 October 2026.
 
 ## Acquire and prepare
 
+[DATA.md](DATA.md) gives the one-time commands and describes the small test
+fixtures.
+
 Run from the repository root after Kaggle authentication and rule acceptance.
 Preparation preserves CSV bytes and records input digests, row identifiers
 and the sorted 18-label vocabulary. It requires all 2,699 labelled passages
@@ -84,8 +87,12 @@ highest scored public code retrieved on 15 October 2026.
 
 Outer folds run sequentially; the notebook uses joblib for outer SVM fits.
 The native classifier implements the dual solver selected by this feature
-geometry. SciPy supplies sparse storage, L-BFGS-B, sigmoid evaluation and
-hierarchical clustering. Transformers supplies tokenizer I/O.
+geometry. `torch.optim.LBFGS` fits the dense heads and sigmoid calibration in
+place of scikit-learn's L-BFGS-B, so those fits are not bit-identical to the
+notebook's. Native NumPy sparse rows and average linkage replace SciPy's.
+They keep its stored summation order, merge order and tie-breaking, and round
+each product before adding it, as SciPy's x86 build does. Transformers
+supplies tokenizer I/O.
 
 The original notebook SHA256 is
 `509018093b5264c507f15333aa2c78d2baeab46efb727c1742157f3af6a6b139`;
@@ -100,7 +107,11 @@ nice -n 19 env UV_NO_SYNC=1 WORKERS_DEFAULT=1 uv --quiet run --frozen pytest -n 
 
 All 21 `.pt` records were minted externally from the pinned original on
 Linux x86_64: Python 3.14.7, PyTorch 2.11.0+cu128, Transformers 5.19.0,
-NumPy 2.5.3, SciPy 1.16.3, scikit-learn 1.9.1 and pandas 2.3.3.
+NumPy 2.5.3, SciPy 1.16.3, scikit-learn 1.9.1 and pandas 2.3.3. The values
+the L-BFGS fits determine were then re-minted from the port under
+`host_agnostic_numerics`: SciPy's L-BFGS-B calls OpenBLAS `dnrm2`, which
+rounds per ISA, so no golden minted from it replays on aarch64. Inputs keep
+the original's bits.
 The largest record is 31,773 bytes. Originals and minting runners remain
 outside this package. Native tests compare complete key sets, shapes, dtypes, values and random
 streams. One-ULP perturbations must fail.

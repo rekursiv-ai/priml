@@ -503,7 +503,7 @@ class TestPhaseTimerHeartbeat:
         timer.start.assert_called_once()
 
         heartbeat.stop()
-        assert heartbeat._stopped is True
+        assert heartbeat._stopped is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
         assert heartbeat._timer is None
         timer.cancel.assert_called_once()
         timer.join.assert_called_once()
@@ -1270,7 +1270,7 @@ class TestTorchProfilerCleanup:
 
         profiler.stop.assert_called_once()
         profiler.export_chrome_trace.assert_called_once()
-        assert profiling._profiler_started is False
+        assert profiling._profiler_started is False  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
     def test_cleanup_ignores_profiler_that_never_started(self) -> None:
         profiling = TorchProfiler.Config(torch_profile=False).make()
@@ -1300,7 +1300,7 @@ class TestTorchProfilerCleanup:
         profiling.cleanup()
 
         profiler.stop.assert_called_once()
-        assert profiling._profiler_started is False
+        assert profiling._profiler_started is False  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
 
 if __name__ == "__main__":

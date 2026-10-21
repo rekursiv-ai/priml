@@ -169,7 +169,7 @@ class Driver(Protocol):
         num_workers: int = ...,
     ) -> tuple[object, object, object, object, int]:
         """Return the datasets, their loaders and the class count."""
-        raise NotImplementedError
+        ...
 
     def main(self) -> None:
         """Run the whole driver."""

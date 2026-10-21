@@ -131,9 +131,12 @@ def test_the_combination_is_told_the_epoch() -> None:
     made = step(DynamicWeightAverage.Config())
     epochs: list[int] = []
     inner = made.mtl_loss
-    made.mtl_loss.register_forward_pre_hook(
-        lambda _, args: epochs.append(cast(int, args[2])),
-    )
+
+    def record_epoch(module: nn.Module, args: tuple[object, ...]) -> None:
+        del module
+        epochs.append(cast(int, args[2]))
+
+    made.mtl_loss.register_forward_pre_hook(record_epoch)
     for epoch in (0, 1):
         made.timer_epoch.global_count = epoch
         _ = made.train_step(**batch())

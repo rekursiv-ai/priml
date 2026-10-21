@@ -398,7 +398,7 @@ class _Trip:
           action: The action to play.
 
         """
-        floor = int(state.player_level)
+        floor = state.player_level
         if self.phase == 0 and floor == 1:
             self.phase = 1
         if self.phase == 1 and self.wandered == self.wander:
@@ -423,9 +423,9 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _toward(state: EnvState, *, ladder: Array1[int], take: Action) -> int:
     """Return the action that takes ``ladder`` or steps on the shortest path to it."""
-    floor = int(state.player_level)
-    row, col = (int(v) for v in state.player_position)
-    target = (int(ladder[0]), int(ladder[1]))
+    floor = state.player_level
+    row, col = (v for v in state.player_position)
+    target = (int(ladder[0]), int(ladder[1]))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     if (row, col) == target:
         return int(take)
     distance = _distances(state.map[floor], target=target)

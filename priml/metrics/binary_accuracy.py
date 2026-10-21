@@ -57,7 +57,7 @@ class BinaryAccuracy:
         # against [B] targets instead of broadcasting to [B, B].
         predictions = torch.sigmoid(logits.squeeze(-1)) > self.threshold
         self.correct += int((predictions == targets).sum().item())
-        self.total += int(batch_size)
+        self.total += batch_size
 
     def compute(self) -> dict[str, float]:
         """Compute binary accuracy.

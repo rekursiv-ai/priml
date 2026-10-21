@@ -382,7 +382,7 @@ def test_live_replays_committed_step_without_priming(
     data._next_step = 0
     data._first_missing_step = 1
     data._session = cast(CollectionSession, cast(object, SimpleNamespace()))
-    replayed = [cast("dict[str, object]", asdict(record)) for record in _records(0)]
+    replayed: list[dict[str, object]] = [{**asdict(r)} for r in _records(0)]
 
     def committed_live_steps(count: int) -> set[int]:
         del count
@@ -720,7 +720,7 @@ def test_rank_zero_broadcasts_the_records_it_returns(
 ) -> None:
     data = _live_data()
     data._session = cast(CollectionSession, cast(object, SimpleNamespace()))
-    replayed = [asdict(record) for record in _records(0)]
+    replayed: list[dict[str, object]] = [{**asdict(r)} for r in _records(0)]
     data._writer = cast(
         RolloutWriter,
         cast(object, _ReplayWriter(committed={0}, replayed=replayed)),

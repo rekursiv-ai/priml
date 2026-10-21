@@ -1178,7 +1178,7 @@ def test_one_rows_reset_leaves_the_other_rows_bit_for_bit() -> None:
     device = torch.device("cuda")
     obs, actions = decode(cells, aux).to(device), actions.to(device)
     runs: list[Tensor] = []
-    for resets in ({}, {6: [1]}):
+    for resets in (dict[int, list[int]](), {6: [1]}):
         engine = source.make_engine(rows=rows, device=device)
         runs.append(
             run_steps(

@@ -5,9 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from configgle import Fig
-from scipy.optimize import OptimizeResult
 
-import numpy as np
 import pytest
 import torch
 
@@ -19,13 +17,14 @@ from priml.baselines.oscillator.forces import (
     PowerForce,
     WeightedForce,
 )
+from priml.baselines.oscillator.search import SearchResult
 from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from numpy.typing import NDArray
+    from torch import Tensor
 
 
 def test_selects_both_missing_forces_and_rejects_a_distractor() -> None:
@@ -135,7 +134,7 @@ def test_validation_and_synthetic_data_never_enter_coefficient_fitting() -> None
     method = cfg.make()
     method.fit(train, validation=validation, synthetic=train, simulator=data.cheap)
     assert isinstance(method.search, _ScriptedSearch)
-    first = [row.copy() for row in method.search.residuals]
+    first = list(method.search.residuals)
     method.search.residuals.clear()
     unused = Windows(
         media=torch.full_like(train.media, float("nan")),
@@ -145,7 +144,7 @@ def test_validation_and_synthetic_data_never_enter_coefficient_fitting() -> None
     method.fit(train, validation=changed, synthetic=unused, simulator=data.cheap)
     assert len(first) == len(method.search.residuals)
     for before, after in zip(first, method.search.residuals, strict=True):
-        np.testing.assert_array_equal(before, after)
+        assert torch.equal(before, after)
 
 
 def test_test_data_cannot_change_selection_or_coefficients() -> None:
@@ -248,8 +247,9 @@ def test_existing_corrections_are_preserved_without_mutation() -> None:
         targets=targets,
         scale=torch.ones(2),
     )
-    assert np.array_equal(loss(np.zeros(1)), np.zeros(states.numel()))
-    corrected = loss.simulator(np.array([0.3]))
+    zero = torch.zeros(1, dtype=torch.float64)
+    assert torch.equal(loss(zero), torch.zeros(states.numel(), dtype=torch.float64))
+    corrected = loss.simulator(torch.tensor([0.3], dtype=torch.float64))
     assert [term.coefficient for term in corrected.corrections] == [0.2, 0.3]
     assert cfg == original
 
@@ -313,26 +313,23 @@ class _ScriptedSearch:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.residuals: list[NDArray[np.float64]] = []
+        self.residuals: list[Tensor] = []
 
     def __call__(
         self,
-        fun: Callable[[NDArray[np.float64]], NDArray[np.float64]],
-        x0: NDArray[np.float64],
+        fun: Callable[[Tensor], Tensor],
+        x0: Tensor,
         /,
-    ) -> OptimizeResult:
+    ) -> SearchResult[Tensor]:
         self.residuals.append(fun(x0))
-        return _SearchResult(
-            self.config.success,
-            coefficients=np.full(len(x0) + self.config.extra, self.config.value),
+        return SearchResult(
+            x=torch.full(
+                (len(x0) + self.config.extra,),
+                self.config.value,
+                dtype=torch.float64,
+            ),
+            success=self.config.success,
         )
-
-
-class _SearchResult(OptimizeResult):
-    def __init__(self, success: bool, *, coefficients: NDArray[np.float64]) -> None:
-        super().__init__()
-        self.success = success
-        self.x = coefficients
 
 
 def _data_config() -> ForecastData.Config:

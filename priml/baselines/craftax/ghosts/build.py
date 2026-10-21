@@ -384,10 +384,10 @@ def write_site(
         platform=platform_key(),
         world_seed=world_seed,
         start=(
-            int(state.player_level),
-            int(state.player_position[0]),
-            int(state.player_position[1]),
-            int(state.player_direction),
+            int(state.player_level),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(state.player_position[0]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(state.player_position[1]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(state.player_direction),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         ),
         creature_stride=stride,
         sleep_stride=SLEEP_STRIDE,

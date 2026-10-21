@@ -341,7 +341,7 @@ def insert_numba(archive: ArchiveView, level: int, world: np.uint64) -> int:
     """
     per_level = archive.per_level
     base = level * per_level
-    size = int(archive.sizes[level])
+    size = archive.sizes[level]
     same = 0
     for index in range(size):
         if archive.worlds[base + index] == world:

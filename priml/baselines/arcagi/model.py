@@ -278,11 +278,11 @@ class ConvSwiGLU(nn.Module):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             if self.channels_hidden == -1:
-                self.channels_hidden = int(
+                self.channels_hidden = int(  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                     ceil_multiple(self.channels_in * self.expansion, self.round_to),
                 )
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
-                self.norm.channels_in = self.channels_hidden
+                self.norm.channels_in = self.channels_hidden  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             return super().finalize()
 
         def cost(

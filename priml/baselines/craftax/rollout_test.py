@@ -1893,7 +1893,7 @@ def test_the_vectorized_stream_matches_the_scalar_reference() -> None:
     draws = np.array([0, 3, 9, 1], dtype=np.uint64)
     seed = 2**32 + 73
     expected = [
-        philox_uniforms(seed, int(a), int(d) + 1)[-1]
+        philox_uniforms(seed, int(a), int(d) + 1)[-1]  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         for a, d in zip(ints(agents), ints(draws), strict=True)
     ]
     assert np.array_equal(

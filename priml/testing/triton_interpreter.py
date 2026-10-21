@@ -106,7 +106,7 @@ def _patch_scalar_index(
 
 
 def _scalar_index(tensor: _InterpretedTensor) -> int:
-    return int(tensor.handle.data.item())
+    return int(tensor.handle.data.item())  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 @contextmanager

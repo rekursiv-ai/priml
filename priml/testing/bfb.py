@@ -1027,7 +1027,11 @@ def _downcast_result(
     kwargs: dict[str, object],
     fallback: torch.dtype,
 ) -> object:
-    """Downcast foreach results per element and ordinary results globally."""
+    """Downcast foreach results per element, unless an explicit ``dtype`` names it."""
+    # ``_foreach_norm([bf16], 2, dtype=torch.float32)`` returns float32 natively; the
+    # per-element rule below would narrow it to its bfloat16 input's width.
+    if isinstance(kwargs.get("dtype"), torch.dtype):
+        return _downcast_f64(result, fallback)
     if not isinstance(result, list):
         return _downcast_f64(result, fallback)
     typed_result = cast(list[object], result)
@@ -1270,6 +1274,8 @@ def _run_unfused(
     base = name.removesuffix("_")
     if str(func) == "aten.convolution_backward.default":
         return _pairwise_convolution_backward(func, args, kwargs)
+    if name in {"dot", "vdot"} and _real_vectors(args):
+        return cast("Callable[..., Tensor]", _pairwise_dot)(*args, **kwargs)
     if base in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
         matrix_names = (
             ("mat", "vec")
@@ -1374,6 +1380,30 @@ def _pairwise_convolution_backward(
     terms = (grad[:, :, None] * patches[:, None]).flatten(-2)
     gradient = fixed_pairwise_sum(terms).reshape(weight.shape)
     return outputs[0], gradient, outputs[2]
+
+
+# The unfused path skips the native checks, so anything else goes to the kernel: a
+# wrong rank or length raises there, and integers sum exactly anyway.
+def _real_vectors(args: tuple[object, ...]) -> bool:
+    """Whether ``args`` open with two equal-length nonempty real float vectors."""
+    left, right = cast(tuple[Tensor, Tensor], args[:2])
+    return (
+        left.ndim == 1
+        and left.shape == right.shape
+        and left.dtype == right.dtype
+        and left.dtype.is_floating_point
+        and bool(left.numel())
+    )
+
+
+# A BLAS dot fuses each product into its accumulator in the vendor's own order: x86
+# MKL and aarch64 NVPL round one two-element float64 dot one ULP apart, and float64
+# operands are never widened, so no round to float32 absorbs it. Products rounded
+# one by one and summed in a fixed tree give the same bits on every host.
+@out_wrapper(exact_dtype=True)
+def _pairwise_dot(self: Tensor, other: Tensor) -> Tensor:
+    """Sum the rounded products of two real vectors in a fixed adjacent-pair tree."""
+    return fixed_pairwise_sum(self * other)
 
 
 def _unfused_convolution(
@@ -1542,6 +1572,7 @@ class _Float64Compute(TorchDispatchMode):
         """Upcast, run, and narrow one op; see the class docstring."""
         if _passes_through(func) and not _scales_operand(func, args, kwargs):
             return func(*args, **kwargs)
+        args, kwargs = _dtype_as_keyword(func, args=args, kwargs=kwargs)
         input_tensors: list[Tensor] = []
         for value in (*args, *kwargs.values()):
             input_tensors.extend(_floating_tensors(value))
@@ -1620,6 +1651,36 @@ def _argument(
     name: str,
 ) -> object:
     return args[index] if index < len(args) else kwargs.get(name)
+
+
+# ``_dispatch`` widens an explicit ``dtype`` only as a keyword. A schema that takes it
+# positionally (``softmax.int``, ``log_softmax.int``, ``_safe_softmax``,
+# ``_foreach_norm.Scalar``) delivers it in ``args``: the op then casts its float64
+# input back to float32 and runs the native kernel, whose sum order differs between
+# x86 and aarch64. ``x.softmax(-1, dtype=torch.float32)`` reaches the harness this way
+# under ``inference_mode``, where the composite is not decomposed first.
+def _dtype_as_keyword(
+    func: OpOverload[..., object],
+    *,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> tuple[tuple[object, ...], dict[str, object]]:
+    """Pass a positional ``dtype``, and every argument after it, by name."""
+    index = _dtype_index(func)
+    if index is None or index >= len(args):
+        return args, kwargs
+    schema = func._schema  # noqa: SLF001 -- The harness reads the op schema to name positional arguments.
+    names = [argument.name for argument in schema.arguments[index : len(args)]]
+    return args[:index], {**kwargs, **dict(zip(names, args[index:], strict=True))}
+
+
+@cache
+def _dtype_index(func: OpOverload[..., object]) -> int | None:
+    """Return the position of a ``dtype`` argument callers may pass positionally."""
+    for index, argument in enumerate(func._schema.arguments):  # noqa: SLF001 -- The harness reads the op schema to find the dtype argument.
+        if argument.name == "dtype" and not argument.kwarg_only:
+            return index
+    return None
 
 
 def _module_device(module: nn.Module) -> str:

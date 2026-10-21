@@ -16,6 +16,7 @@ import torch
 
 from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.world_model.codec import (
+    _move_table,
     _tables,
     decode,
     encode,
@@ -362,6 +363,13 @@ def test_tables_off_the_cpu_are_the_cpus_moved_float64_included() -> None:
     _, cells, aux = _synthetic_frames()
     decoded = decode(cells[:2].to(meta), aux[:2].to(meta))
     assert (decoded.device, decoded.shape) == (meta, (2, 843))
+
+
+def test_an_mps_table_keeps_float64_on_the_cpu() -> None:
+    # MPS holds no float64, so those tables stay put; the rest move.
+    mps = torch.device("mps")
+    wide = torch.zeros(2, dtype=torch.float64)
+    assert _move_table(wide, device=mps) is wide
 
 
 @pytest.mark.gpu_torch_mps

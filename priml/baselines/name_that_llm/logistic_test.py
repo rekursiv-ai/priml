@@ -1,4 +1,4 @@
-"""Replay whole fitted heads after three updates and after convergence."""
+"""Replay whole torch-solver heads after three iterations and after convergence."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import torch
 
 from priml.baselines.name_that_llm import logistic
 from priml.baselines.name_that_llm.logistic import LBFGS, LogisticRegression
+from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -46,9 +47,10 @@ def test_logistic_replays_complete_fitted_state_and_probabilities(
     predict = np.cos(np.arange(20).reshape(4, 5) / 11).astype(np.float32)
     targets = np.tile(np.array([2, 5, 9], dtype=np.int64), reps=3)
     config = LogisticRegression.Config()
-    config.inverse_regularization = 0.002  # The C of the minted source records.
+    config.inverse_regularization = 0.002  # The embedding heads of exp000 use this C.
     config.optimizer.max_iter = max_iter
-    model = config.make().fit(fit, targets=targets)
+    with host_agnostic_numerics():
+        model = config.make().fit(fit, targets=targets)
     if corrupt:
         model.coef_[:1, :1] = np.nextafter(model.coef_[:1, :1], np.inf)
     actual = {"predict": torch.from_numpy(model.predict_proba(predict))}
@@ -128,6 +130,17 @@ def test_logistic_probabilities_keep_source_underflow_and_normal_tail_bits(
         actual={"probabilities": torch.from_numpy(actual)},
     )
     assert bool(report) is corrupt, report
+
+
+def test_probability_exponential_keeps_the_source_special_values() -> None:
+    actual = logistic._exp32(
+        np.array(
+            [np.nan, np.inf, 88.72283935546875, -np.inf, -103.97208404541015625, 0],
+            dtype=np.float32,
+        ),
+    )
+    expected = np.array([np.nan, np.inf, np.inf, 0, 0, 1], dtype=np.float32)
+    assert actual.tobytes() == expected.tobytes()
 
 
 @pytest.mark.parametrize(
@@ -228,32 +241,32 @@ def test_head_rejects_invalid_inverse_regularization(inverse: float) -> None:
         config.make()
 
 
-@pytest.mark.parametrize(("updates", "line_search"), argvalues=[(-1, 50), (5000, 0)])
-def test_solver_rejects_invalid_update_and_line_search_counts(
+@pytest.mark.parametrize(("updates", "history"), argvalues=[(-1, 10), (5000, 0)])
+def test_solver_rejects_invalid_update_and_history_counts(
     updates: int,
-    line_search: int,
+    history: int,
 ) -> None:
     config = LBFGS.Config()
     config.max_iter = updates
-    config.max_line_search = line_search
+    config.history_size = history
     with pytest.raises(
         ValueError,
-        match="nonnegative updates and a positive line search",
+        match="nonnegative updates and a positive history",
     ):
         config.make()
 
 
 @pytest.mark.parametrize(
-    ("gradient", "relative"),
+    ("gradient", "change"),
     argvalues=[(-1, 0), (np.nan, 0), (0, -1), (0, np.nan)],
 )
 def test_solver_rejects_invalid_stopping_tolerances(
     gradient: float,
-    relative: float,
+    change: float,
 ) -> None:
     config = LBFGS.Config()
     config.tolerance_gradient = gradient
-    config.tolerance_relative = relative
+    config.tolerance_change = change
     with pytest.raises(ValueError, match="nonnegative stopping tolerances"):
         config.make()
 
@@ -285,43 +298,68 @@ def test_solver_returns_an_initial_stationary_point() -> None:
     assert updates == 0
 
 
-def test_solver_accepts_a_valid_wolfe_search_warning_step() -> None:
-    result, updates = (
-        LBFGS.Config(max_iter=1, max_line_search=50)
-        .make()
-        .minimize(_linear, initial=np.zeros(2))
-    )
-    np.testing.assert_array_equal(result, [-1e10, -1e10])
-    assert updates == 1
-
-
-def test_solver_restores_a_point_with_no_representable_descent() -> None:
+def test_solver_keeps_a_point_with_no_representable_descent() -> None:
     initial = np.full(2, 1e20)
     result, updates = LBFGS.Config().make().minimize(_linear, initial=initial)
     np.testing.assert_array_equal(result, initial)
-    assert updates == 0
+    assert updates == 1
 
 
-@pytest.mark.parametrize("budget", [0, 1, 2])
-def test_solver_checks_update_budgets_after_accepting_a_step(budget: int) -> None:
+# Torch also stops once objective calls reach max_iter * 5 // 4: two iterations
+# allow two calls, the initial one and the first step's.
+@pytest.mark.parametrize(("budget", "expected"), [(0, 0), (1, 1), (2, 1), (3, 2)])
+def test_solver_stops_at_the_iteration_and_call_budgets(
+    budget: int,
+    expected: int,
+) -> None:
     result, updates = (
-        LBFGS.Config(max_iter=budget, tolerance_gradient=0, tolerance_relative=0)
+        LBFGS.Config(max_iter=budget, tolerance_gradient=0, tolerance_change=0)
         .make()
         .minimize(_quadratic, initial=np.zeros(2))
     )
-    assert updates == max(budget, 1)
-    assert _quadratic(result)[0] < _quadratic(np.zeros(2))[0]
+    assert updates == expected
+    if budget in {1, 2}:
+        # The first step is the steepest descent scaled by the gradient's L1 norm.
+        np.testing.assert_array_equal(result, np.array([4.0, -6.0]) * (1 / (4 + 6)))
+    assert (_quadratic(result)[0] < _quadratic(np.zeros(2))[0]) == bool(budget)
 
 
-def test_solver_restores_the_initial_point_when_search_fails() -> None:
+# From zero the quadratic's descent slope is -(4**2 + 6**2) = -52; a change
+# tolerance above it ends the first iteration before its step.
+@pytest.mark.parametrize(("change", "stepped"), [(52, True), (53, False)])
+def test_solver_stops_before_a_slope_within_the_change_tolerance(
+    change: float,
+    stepped: bool,
+) -> None:
+    result, updates = (
+        LBFGS.Config(tolerance_change=change)
+        .make()
+        .minimize(_quadratic, initial=np.zeros(2))
+    )
+    assert updates == 1
+    expected = np.array([4.0, -6.0]) * (1 / (4 + 6)) if stepped else np.zeros(2)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_solver_keeps_the_initial_point_when_search_fails() -> None:
     initial = np.array([2.0, -3.0])
     result, updates = (
-        LBFGS.Config(max_line_search=1)
-        .make()
-        .minimize(_inconsistent_objective, initial=initial)
+        LBFGS.Config().make().minimize(_inconsistent_objective, initial=initial)
     )
     np.testing.assert_array_equal(result, initial)
-    assert updates == 0
+    assert updates == 1
+
+
+def test_solver_history_size_changes_the_quasi_newton_path() -> None:
+    fits = [
+        LBFGS.Config(max_iter=100, tolerance_gradient=1e-8, history_size=history)
+        .make()
+        .minimize(_rosenbrock, initial=np.array([-1.2, 1.0]))
+        for history in (1, 10)
+    ]
+    (single, single_updates), (_, full_updates) = fits
+    assert _rosenbrock(single)[0] < 1e-12
+    assert single_updates != full_updates
 
 
 def test_solver_converges_through_a_full_correction_history() -> None:

@@ -183,7 +183,7 @@ class RoutedActTrainStep(TrainStep):
         # device, where the CUDA generator would draw different weights.
         with torch.device("cpu"):
             super().__init__(config)
-        self.config: RoutedActTrainStep.Config = config
+        self.config: RoutedActTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self._body_params = [p for p in self.model.parameters() if p.requires_grad]
         self.pool: AtomicPool = config.pool.make()
         self.pool.to(self.device)
@@ -438,7 +438,7 @@ class RoutedActTrainStep(TrainStep):
     @override
     def state_dict(self) -> StateDict:
         """Extend the base state; in-flight pool slots are deliberately excluded."""
-        state: RoutedActTrainStep.StateDict = {**super().state_dict()}
+        state: RoutedActTrainStep.StateDict = {**super().state_dict()}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
         if self.pool.halting is not None:
             state["halt_rng"] = self.pool.halting.generator.get_state()
         if self.pool.carry is not None:

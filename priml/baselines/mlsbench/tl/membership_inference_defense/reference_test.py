@@ -95,9 +95,8 @@ def test_the_rates_optimizer_and_split_match_the_driver() -> None:
     "key",
     [
         "exp000",
-        # Full-size VGG-16-BN and MobileNetV2 forwards take about a second.
-        pytest.param("exp005", marks=pytest.mark.compute_large_fixture),
-        pytest.param("exp010", marks=pytest.mark.compute_large_fixture),
+        "exp005",
+        "exp010",
     ],
 )
 def test_each_settings_network_initializes_and_runs_as_the_driver(key: str) -> None:
@@ -159,7 +158,10 @@ def test_the_record_joins_every_component(
     tmp_path: Path,
 ) -> None:
     def fake(name: str) -> Callable[..., dict[str, torch.Tensor]]:
-        return lambda *args: {f"{name}{args[:1]}": torch.zeros(1)}
+        def record(*args: object) -> dict[str, torch.Tensor]:
+            return {f"{name}{args[:1]}": torch.zeros(1)}
+
+        return record
 
     parts = (
         "defense_record",

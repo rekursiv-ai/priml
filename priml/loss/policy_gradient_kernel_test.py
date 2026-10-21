@@ -78,7 +78,6 @@ def test_loss_sums_are_added_across_program_blocks() -> None:
 
 def test_the_kernels_take_the_reference_rules_coefficients() -> None:
     config = TritonPPO.Config()
-    assert isinstance(config, TorchPPO.Config)
     config.entropy_coefficient = 0.25
     config.block = 128
     config.num_warps = 4

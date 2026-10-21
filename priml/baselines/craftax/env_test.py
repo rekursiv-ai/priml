@@ -1209,7 +1209,7 @@ def _world_hash(grid: Array3[int]) -> np.uint64:
 
 def _atomic_load(array: Array1[int], index: int) -> int:
     """Stand in for ``env.atomic_load``: a plain read, which the GIL orders."""
-    return int(array[index])
+    return int(array[index])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 def _atomic_store(array: Array1[int], index: int, value: int) -> None:

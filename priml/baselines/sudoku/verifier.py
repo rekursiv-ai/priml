@@ -278,7 +278,7 @@ class DenoisingVerifier(SudokuVerifier):
         denoise_fraction: float = 0.25
         """Fraction of non-given candidate cells blanked per training row."""
 
-    config: Config
+    config: Config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
     """Narrowed from the parent's declaration for the denoising fraction."""
 
     def __init__(self, config: Config) -> None:

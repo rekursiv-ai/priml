@@ -326,7 +326,7 @@ def _segment_bounds(segments: Tensor) -> list[tuple[int, int]]:
     """Return each segment's half-open token range."""
     if segments.ndim != 1:
         raise TypeError("Packed segment ids must be one-dimensional.")
-    values = [int(cast(int, value)) for value in segments.tolist()]
+    values = [cast(int, value) for value in segments.tolist()]
     if any(later < earlier for earlier, later in pairwise(values)):
         raise ValueError("Packed segment ids must be non-decreasing.")
     bounds: list[tuple[int, int]] = []

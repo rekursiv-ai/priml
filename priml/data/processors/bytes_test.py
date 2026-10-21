@@ -473,7 +473,7 @@ def test_decode_video_filters_a_non_positive_target(video_tar: Path) -> None:
 
     assert "media_tensor" not in out[0]
     reasons = out[0].get("filter_reasons", [])
-    assert any("invalid_target" in str(r) for r in reasons)
+    assert any("invalid_target" in r for r in reasons)
 
 
 @pytest.mark.cli_python_subprocess
@@ -1599,7 +1599,7 @@ def test_decode_video_requires_each_input_and_keeps_empty_keys_empty() -> None:
     for address in (
         {"key": "clip"},
         {"_tar_handle": object()},
-        {},
+        dict[str, object](),
     ):
         missing_address = cast(
             DecodeVideo.Input,
@@ -2399,7 +2399,7 @@ def test_video_decoder_routes_an_unclaimed_format_on_untouched() -> None:
 
 def test_video_decoder_rejects_a_process_without_stdout() -> None:
     class Process:
-        stdout = None
+        stdout: None = None
 
     processor = DecodeVideo(DecodeVideo.Config(ffmpeg_exe="no-pipe-ffmpeg"))
     with (
@@ -2425,7 +2425,7 @@ def test_video_decoder_drops_a_failed_read_and_kills_a_hung_ffmpeg() -> None:
 
     class Process:
         stdout = Stdout()
-        returncode = None
+        returncode: None = None
 
         def poll(self) -> None:
             return None

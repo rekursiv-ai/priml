@@ -155,11 +155,11 @@ def test_build_dataset_end_to_end(tmp_path: Path) -> None:
     groups = read_split_arrays(dataset_dir / "test").group_indices
     assert inputs.shape == labels.shape == (3, 81)
     assert inputs.dtype == labels.dtype == np.uint8
-    assert [int(groups.item(index)) for index in range(4)] == [0, 1, 2, 3]
+    assert [groups.item(index) for index in range(4)] == [0, 1, 2, 3]
     for row in range(3):
         assert is_valid_completion(
-            [int(labels.item(row, cell)) for cell in range(81)],
-            [int(inputs.item(row, cell)) for cell in range(81)],
+            [labels.item(row, cell) for cell in range(81)],
+            [inputs.item(row, cell) for cell in range(81)],
         )
     metadata = json_loads((dataset_dir / "test" / "dataset.json").read_text())
     assert metadata == {"vocab_size": 11, "seq_len": 81}

@@ -44,7 +44,7 @@ def test_rescaling_keywords_are_rejected(arguments: _RescalingArguments) -> None
             seq_len=4,
             batch_size=1,
             dtype=None,
-            **arguments,
+            **arguments,  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
         )
 
 

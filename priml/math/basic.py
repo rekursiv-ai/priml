@@ -212,9 +212,9 @@ def broadcast_sequences[T](*args: T | Sequence[T]) -> tuple[list[T], ...]:
     # so isinstance cannot separate the union and both checkers widen the
     # element type the signature already stated.
     lists: list[list[T]] = [
-        list(cast(Sequence[T], a))
+        list(cast(Sequence[T], a))  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
         if isinstance(a, Sequence) and not isinstance(a, (str, bytes))
-        else [cast(T, a)]
+        else [cast(T, a)]  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
         for a in args
     ]
     n = max(len(a) for a in lists)

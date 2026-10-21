@@ -463,7 +463,7 @@ def _chunk_matmul_cost(
     value_width: int,
 ) -> Cost:
     chunk = 64
-    chunks = int(ceil_multiple(seq_len, chunk)) // chunk
+    chunks = int(ceil_multiple(seq_len, chunk)) // chunk  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     # solve_triangular contributes primal products but dispatches no backward matmuls.
     shapes = [
         (chunk, key_width, chunk, 2),

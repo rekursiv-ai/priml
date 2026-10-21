@@ -108,7 +108,7 @@ class SpeedrunTrainStep(TrainStep):
                 "objective draws fresh times and noise on every call, so a closure "
                 "would recompute a different loss.",
             )
-        self.config: SpeedrunTrainStep.Config = config
+        self.config: SpeedrunTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.reference_samples = 0
         self.latent_norm: LatentNormalizer = config.latent_norm.make()
         self.teacher = (

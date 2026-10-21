@@ -133,35 +133,35 @@ class AttentionProjections(nn.Module):
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.num_heads
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
-                self.norm_qk.channels_in = self.channels_head
+                self.norm_qk.channels_in = self.channels_head  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.norm_out, ChannelsIn)
                 and self.norm_out.channels_in == -1
             ):
-                self.norm_out.channels_in = self.num_heads * self.channels_head
+                self.norm_out.channels_in = self.num_heads * self.channels_head  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             infer_same_width(self)
             if (
                 isinstance(self.proj_qkv, ChannelsIn)
                 and self.proj_qkv.channels_in == -1
             ):
-                self.proj_qkv.channels_in = self.channels_in
+                self.proj_qkv.channels_in = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.proj_qkv, ChannelsOut)
                 and self.proj_qkv.channels_out == -1
             ):
-                self.proj_qkv.channels_out = (
+                self.proj_qkv.channels_out = (  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
                     self.num_heads + 2 * self.num_heads_kv
                 ) * self.channels_head
             if (
                 isinstance(self.proj_out, ChannelsIn)
                 and self.proj_out.channels_in == -1
             ):
-                self.proj_out.channels_in = self.num_heads * self.channels_head
+                self.proj_out.channels_in = self.num_heads * self.channels_head  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.proj_out, ChannelsOut)
                 and self.proj_out.channels_out == -1
             ):
-                self.proj_out.channels_out = self.channels_out
+                self.proj_out.channels_out = self.channels_out  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             return super().finalize()
 
         def cost(

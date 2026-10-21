@@ -71,10 +71,10 @@ def data_parallel_shape() -> tuple[int, int]:
     if mesh is None or mesh.mesh_dim_names is None or "dp" not in mesh.mesh_dim_names:
         return 0, 1
     dp = mesh["dp"]
-    world = int(dp.size())
+    world = dp.size()
     if world <= 1:
         return 0, 1
-    return int(dp.get_local_rank()), world
+    return dp.get_local_rank(), world
 
 
 class TMaxRolloutData:
@@ -207,7 +207,7 @@ class TMaxRolloutData:
 
         """
         if isinstance(step, ResolvesPadTokenId):
-            step_pad_token_id = int(step.pad_token_id)
+            step_pad_token_id = step.pad_token_id
             if self.config.pad_token_id not in (None, step_pad_token_id):
                 raise ValueError(
                     "dataset.pad_token_id must match the training step's "
@@ -439,7 +439,7 @@ class TMaxRolloutData:
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the read position and epoch timer."""
-        self._position = int(cast(int, state_dict.get("position", 0)))
+        self._position = cast(int, state_dict.get("position", 0))
         timer = state_dict.get("timer_epoch")
         if isinstance(timer, Mapping):
             self.timer_epoch.load_state_dict(cast(Mapping[str, object], timer))

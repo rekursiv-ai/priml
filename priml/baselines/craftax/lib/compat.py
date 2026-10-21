@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING, ClassVar, Final, override
 
-from configgle import Makes
+from configgle import Makes, Makes2
 
 from priml.baselines.craftax.rollout import PhiloxSampler
 from priml.kernel import jit_kernel
@@ -264,7 +264,7 @@ class ExactScan(TritonScan):
 class ExactPPO(TritonPPO):
     """TritonPPO with the arithmetic and the loss reduction of PufferLib's kernels."""
 
-    class Config(TritonPPO.Config):
+    class Config(Makes2["ExactPPO"], TritonPPO.Config):
         """The coefficients; the arithmetic is PufferLib's."""
 
     helpers: ClassVar[dict[str, Callable[..., object]]] = {
@@ -303,7 +303,7 @@ class ExactPPO(TritonPPO):
 class ExactPhiloxSampler(PhiloxSampler):
     """PhiloxSampler with the arithmetic of PufferLib's ``sample_logits``."""
 
-    class Config(PhiloxSampler.Config):
+    class Config(Makes2["ExactPhiloxSampler"], PhiloxSampler.Config):
         """The stream seed and the launch geometry; the arithmetic is PufferLib's."""
 
     helpers: ClassVar[dict[str, Callable[..., object]]] = {

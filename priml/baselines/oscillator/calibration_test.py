@@ -1,7 +1,5 @@
 """Check force fitting, held-out forecasts, and the training-data boundary."""
 
-from configgle import PartialConfig
-
 import pytest
 import torch
 
@@ -11,6 +9,7 @@ from priml.baselines.oscillator.calibration import (
 )
 from priml.baselines.oscillator.data import ForecastData, Windows
 from priml.baselines.oscillator.experiments import exp003
+from priml.baselines.oscillator.search import BoundedScalarSearch
 from priml.testing.golden import assert_pprint_golden
 
 
@@ -96,9 +95,8 @@ def test_config_and_search_are_printable() -> None:
 
 def test_search_budget_is_configurable_and_failure_is_reported() -> None:
     cfg = CalibratedSimulator.Config()
-    search = cfg.search
-    assert isinstance(search, PartialConfig)
-    search.options = {"maxiter": 1, "xatol": 1e-6}
+    assert isinstance(cfg.search, BoundedScalarSearch.Config)
+    cfg.search.max_evaluations = 1
     method = cfg.make()
     data = _data_config().make()
     train = data.windows(data.config.train, simulator=data.reference)

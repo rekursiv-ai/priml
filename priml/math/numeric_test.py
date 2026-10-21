@@ -1359,7 +1359,7 @@ def test_kahan_sum_reduction_preserves_multiple_trailing_dimensions() -> None:
 
 def test_kahan_sum_pins_short_and_empty_reductions() -> None:
     """The blocked reducer handles lengths around its block-count transition."""
-    for values in ([], [3.0], [3.0, -2.0], [3.0, -2.0, 5.0]):
+    for values in (list[float](), [3.0], [3.0, -2.0], [3.0, -2.0, 5.0]):
         x = torch.tensor(values, dtype=torch.float64)
         assert torch.equal(kahan_sum(x), torch.tensor(sum(values), dtype=x.dtype))
     matrix = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])

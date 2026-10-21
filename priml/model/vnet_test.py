@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from priml.model.conv import Conv2d, ConvTranspose2d
-from priml.model.custom_types import ChannelsInOut
+from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.norm import BatchNorm2d
 from priml.model.special import Dropout2d
 from priml.model.swiglu import elu
@@ -53,8 +53,8 @@ def _image() -> Tensor:
 )
 def test_composites_infer_only_unspecified_widths(config: Fig[object]) -> None:
     for channels_in, channels_out in [(3, -1), (-1, 5), (3, 6)]:
-        resolved = config.copy_tree()
-        assert isinstance(resolved, ChannelsInOut)
+        resolved: object = config.copy_tree()
+        assert isinstance(resolved, ChannelsInOutConfig)
         resolved.channels_in, resolved.channels_out = channels_in, channels_out
         resolved = resolved.finalize()
         assert resolved.channels_in == (

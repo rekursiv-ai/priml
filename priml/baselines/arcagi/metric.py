@@ -31,10 +31,10 @@ from typing import (
     Self,
     SupportsFloat,
     SupportsIndex,
-    TypedDict,
     cast,
     override,
 )
+from typing_extensions import TypedDict
 
 import logging
 import operator
@@ -829,7 +829,7 @@ class ParquetPassK:
                 self.config.recent_window_size if self.config.aggregated_voting else 1
             ),
         )
-        return {**local_state, "rank_states": rank_states}
+        return {**local_state, "rank_states": rank_states}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore rank streams and prediction grids from a metric checkpoint.
@@ -1221,7 +1221,7 @@ class _ArcVote:
     confidence: float
 
 
-class _ParquetVoteState(TypedDict):
+class _ParquetVoteState(TypedDict, closed=True):
     prediction_hash: str
     confidence: float
 

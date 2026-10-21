@@ -327,7 +327,7 @@ class TMaxDPPOTrainStep(TrainStep):
         ) = None
         """Keep smoke and parity runs eager; cluster launch may opt into compile."""
 
-    config: Config
+    config: Config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
 
     def __init__(self, config: Config) -> None:
         """Validate DPPO settings, resolve the checkpoint, build the step."""

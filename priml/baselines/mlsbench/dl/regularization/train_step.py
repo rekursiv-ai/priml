@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import field
 from typing import TYPE_CHECKING, Protocol, override
 
-from configgle import Makeable, PartialConfig
+from configgle import Makeable, Makes2, PartialConfig
 
 from priml.baselines.mlsbench.dl.regularization.regularizers import zero
 from priml.baselines.mlsbench.dl.vision.train_step import (
@@ -45,15 +45,8 @@ class Regularizer(Protocol):
 class RegularizedTrainStep(VisionTrainStep):
     """The vision step, minimizing its loss plus a regularization term."""
 
-    class Config(VisionTrainStep.Config, kw_only=True):
+    class Config(Makes2["RegularizedTrainStep"], VisionTrainStep.Config, kw_only=True):
         """The vision step's slots and the regularizer."""
-
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> RegularizedTrainStep:
-                """Build this step."""
-                ...
 
         regularization: Makeable[Regularizer] = field(
             default_factory=lambda: PartialConfig(zero),

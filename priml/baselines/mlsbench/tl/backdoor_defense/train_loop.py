@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 class BackdoorTrainLoop(EpochTrainLoop):
     """Trains on poisoned data, filters it with a defense, and retrains on the rest."""
 
-    class Config(
+    class Config(  # pyrefly: ignore[bad-override] -- pyrefly reads the base's ``Config = EpochLoopConfig`` alias as an instance variable.
         Makes["BackdoorTrainLoop"],
         VisionLoop[VisionTrainStep.Config, PoisonedData.Config],
     ):

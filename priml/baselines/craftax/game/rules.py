@@ -355,11 +355,11 @@ def equipped_armour_numba(state: EnvState) -> int:
       armour: The sum of the four armour levels.
 
     """
-    return int(
+    return (
         state.inventory.armour[0]
         + state.inventory.armour[1]
         + state.inventory.armour[2]
-        + state.inventory.armour[3],
+        + state.inventory.armour[3]
     )
 
 
@@ -429,7 +429,7 @@ def action_to_direction_numba(action: int) -> tuple[int, int]:
 @jit
 def is_solid_block_numba(block: int) -> bool:
     """Whether ``block`` stops movement."""
-    return bool(SOLID_BLOCKS[block])
+    return SOLID_BLOCKS[block]
 
 
 @jit

@@ -146,7 +146,9 @@ class Session:
 
         """
         if source is None:
-            self._starts, self._frames, self._decisions = True, [], []
+            self._starts = True
+            self._frames = []
+            self._decisions = []
             self.engine.reset(self._rows_mask())
             begun = self.engine.start(self._control())
             self._record_frame(begun.job.logp[self.row, 2:], mark=Mark.MODEL)

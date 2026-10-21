@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self, cast
 
@@ -14,67 +15,47 @@ import numpy as np
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from typing import Literal, Protocol
-
     import torch
 
     from priml.math.fused import fma32
-
-    class _DenseResult(Protocol):
-        @property
-        def x(self) -> NDArray[np.float64]: ...
-
-        @property
-        def nit(self) -> int: ...
-
-    class _DenseMinimize(Protocol):
-        def __call__[Float: np.float32 | np.float64](
-            self,
-            objective: Callable[[NDArray[Float]], tuple[float, NDArray[Float]]],
-            *,
-            x0: NDArray[Float],
-            method: Literal["L-BFGS-B"],
-            jac: Literal[True],
-            options: dict[str, float | int],
-        ) -> _DenseResult: ...
-
-    # SciPy retains x0.dtype at callbacks; scipy-stubs incorrectly requires F64.
-    minimize: _DenseMinimize
 else:
     from wrapt import lazy_import
 
     torch = lazy_import("torch")
     fma32 = lazy_import("priml.math.fused", "fma32")
-    minimize = lazy_import("scipy.optimize", "minimize")
 
 
+# Bit parity with scikit-learn's solver, SciPy's L-BFGS-B, is deferred: SciPy calls
+# OpenBLAS dnrm2, which rounds per ISA (x87 on x86), so no golden minted from it
+# replays on aarch64. The goldens pin this torch solver instead.
 class LBFGS:
     """Configure the dense quasi-Newton solve used by the embedding heads."""
 
     class Config(Fig["LBFGS"]):
-        """Gradient tolerance and update budget."""
+        """Iteration budget, stopping tolerances, and curvature history."""
 
         max_iter: int = 5000
-        """Accepted-update limit checked after a step; zero still allows one."""
+        """Iteration limit; torch also caps objective calls at max_iter * 5 // 4."""
 
         tolerance_gradient: float = 1e-4
         """Stop when the maximum absolute gradient reaches this bound."""
 
-        tolerance_relative: float = 64 * np.finfo(np.float64).eps
-        """Relative objective improvement required to continue updating."""
+        tolerance_change: float = 64 * np.finfo(np.float64).eps
+        """Stop once a step entry, objective change, or descent slope falls below."""
 
-        max_line_search: int = 50
-        """Maximum trial steps per line search."""
+        history_size: int = 10
+        """Curvature pairs kept to approximate the inverse Hessian."""
 
     def __init__(self, config: Config) -> None:
-        if config.max_iter < 0 or config.max_line_search < 1:
-            raise ValueError("Expected nonnegative updates and a positive line search.")
+        # Torch checks none of these: a zero history fails at the first curvature
+        # update, and a negative one never discards a pair.
+        if config.max_iter < 0 or config.history_size < 1:
+            raise ValueError("Expected nonnegative updates and a positive history.")
         if (
             math.isnan(config.tolerance_gradient)
             or config.tolerance_gradient < 0
-            or math.isnan(config.tolerance_relative)
-            or config.tolerance_relative < 0
+            or math.isnan(config.tolerance_change)
+            or config.tolerance_change < 0
         ):
             raise ValueError("Expected nonnegative stopping tolerances.")
         self.config = config
@@ -88,26 +69,28 @@ class LBFGS:
 
         Args:
           objective: Value and same-dtype gradient; every call uses initial.dtype.
-          initial: Complete initial vector; its dtype controls objective arithmetic.
+          initial: Complete initial vector; its dtype controls solver arithmetic.
 
         Returns:
-          parameters: Complete fitted parameters at solver precision.
-          updates: Number of accepted quasi-Newton updates.
+          parameters: Complete fitted parameters, widened exactly to float64.
+          updates: Iterations run, counting a final one that stops before a step.
 
         """
-        result = minimize(
-            objective,
-            x0=initial,
-            method="L-BFGS-B",
-            jac=True,
-            options={
-                "maxiter": self.config.max_iter,
-                "gtol": self.config.tolerance_gradient,
-                "ftol": self.config.tolerance_relative,
-                "maxls": self.config.max_line_search,
-            },
+        parameters = torch.tensor(initial)
+        optimizer = torch.optim.LBFGS(
+            [parameters],
+            lr=1,
+            max_iter=self.config.max_iter,
+            tolerance_grad=self.config.tolerance_gradient,
+            tolerance_change=self.config.tolerance_change,
+            history_size=self.config.history_size,
+            line_search_fn="strong_wolfe",
         )
-        return result.x, result.nit
+        optimizer.step(_Evaluation(objective=objective, parameters=parameters))
+        return (
+            parameters.numpy().astype(np.float64),
+            cast("int", optimizer.state[parameters]["n_iter"]),
+        )
 
 
 class LogisticRegression:
@@ -188,9 +171,24 @@ class LogisticRegression:
         """
         probabilities = features @ self.coef_.T + self.intercept_
         probabilities -= probabilities.max(axis=1, keepdims=True)
-        np.exp(probabilities, out=probabilities)
+        # The source bits come from NumPy's x86 SIMD exp; elsewhere np.exp calls
+        # libm expf, which rounds differently.
+        probabilities = _exp32(probabilities)
         probabilities /= probabilities.sum(axis=1, keepdims=True)
         return probabilities
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Evaluation[Float: np.float32 | np.float64]:
+    objective: Callable[[NDArray[Float]], tuple[float, NDArray[Float]]]
+    parameters: torch.Tensor
+
+    def __call__(self) -> float:
+        loss, gradient = self.objective(
+            cast("NDArray[Float]", self.parameters.numpy()),
+        )
+        self.parameters.grad = torch.from_numpy(gradient)
+        return loss
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -270,3 +268,58 @@ def _norm_squared32(values: NDArray[np.float32]) -> np.float32:
     for value in terms[boundary32:] * terms[boundary32:]:
         tail += float(value)
     return np.float32(float(combined) + tail)
+
+
+def _exp32(values: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Return NumPy 2.5's x86 AVX2 and AVX-512 binary32 exp on every host."""
+    (
+        maximum,
+        minimum,
+        log2e,
+        shifter,
+        ln2_high,
+        ln2_low,
+        zero,
+        *numerator_coefficients,
+        q2,
+        q1,
+        q0,
+    ) = torch.tensor(
+        [
+            88.72283935546875,
+            -103.97208404541015625,
+            1.442695040888963407359924681001892137,
+            1.5 * 2**23,
+            -6.93145752e-1,
+            -1.42860677e-6,
+            0,
+            5.082762527590693718096e-04,
+            6.757896990527504603057e-03,
+            5.114512081637298353406e-02,
+            2.473615434895520810817e-01,
+            7.257664613233124478488e-01,
+            9.999999999980870924916e-01,
+            2.159509375685829852307e-02,
+            -2.742335390411667452936e-01,
+            1,
+        ],
+        dtype=torch.float32,
+    )
+    x = torch.from_numpy(values)
+    nan, overflow, underflow = x.isnan(), x >= maximum, x <= minimum
+    x = torch.where(nan | overflow | underflow, zero, x)
+    quadrant = x * log2e
+    quadrant = (quadrant + shifter) - shifter
+    for ln2 in (ln2_high, ln2_low, zero):
+        x = fma32(quadrant, y=ln2, addend=x)
+    numerator, *rest = numerator_coefficients
+    for coefficient in rest:
+        numerator = fma32(numerator, y=x, addend=coefficient)
+    denominator = fma32(fma32(q2, y=x, addend=q1), y=x, addend=q0)
+    # One rounding of the quotient times 2**quadrant, as scalef and AVX2's
+    # divide by a power of two both give, subnormal results included.
+    power = ((quadrant.to(torch.int64) + 1023) << 52).view(torch.float64)
+    result = ((numerator / denominator).double() * power).float()
+    result = torch.where(nan, math.nan, result)
+    result = torch.where(overflow, math.inf, result)
+    return torch.where(underflow, zero, result).numpy()

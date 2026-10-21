@@ -990,7 +990,7 @@ def _axis_channels(
 ) -> list[int]:
     """Resolve the per-axis channel widths a config describes."""
     c = channels_head
-    channels = [int(v) for v in c] if isinstance(c, Sequence) else [c]
+    channels = [int(v) for v in c] if isinstance(c, Sequence) else [c]  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     if isinstance(tables, list):
         if reduction_mode == "cat" and isinstance(c, int):
             channels = _split_dim(c, len(tables))
@@ -1263,7 +1263,9 @@ class RoPEMixed(RoPE):
         """Move the module, carrying the LEARNED frequencies across."""
         # Fixed frequencies are the config's float32 table, as in ``RoPE``; a
         # module dtype cast must not round them. Learned ones follow the cast.
-        fixed = [] if self.learnable else [f.detach().clone() for f in self._inv_freqs]
+        fixed: list[Tensor] = (
+            [] if self.learnable else [f.detach().clone() for f in self._inv_freqs]
+        )
         super(RoPE, self)._apply(fn, recurse)
         for frequency, kept in zip(self._inv_freqs, fixed, strict=False):
             frequency.data = (

@@ -124,8 +124,12 @@ def craftax_target_nll(model: nn.Module, media: object) -> Tensor:
       nll: Flat per-target NLL in nats, the evaluation output
         ``CraftaxBitsPerByte`` consumes.
 
+    Raises:
+      TypeError: ``model`` does not score targets as ``ScoresTargets`` does.
+
     """
-    assert isinstance(model, ScoresTargets)
+    if not isinstance(model, ScoresTargets):
+        raise TypeError(f"{type(model).__name__} does not score packed targets.")
     assert isinstance(media, PackedBatch)
     terms = model.target_terms(media, model.logits(media))
     scored = {
@@ -417,7 +421,7 @@ class NanochatSeries:
                 isinstance(child, HasNormalizedWorkingDirPattern)
                 and child.base_dir is None
             ):
-                child.base_dir = self.working_dir
+                child.base_dir = self.working_dir  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

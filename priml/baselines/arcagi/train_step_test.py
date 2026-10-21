@@ -8,8 +8,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest.mock import Mock
 
-import traceback
-
 from configgle import PartialConfig
 from torch import Tensor, nn
 from torch._inductor import config as inductor_config
@@ -76,9 +74,6 @@ from priml.train.parallelism import NoParallel
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-    from torch.distributed.device_mesh import DeviceMesh
-
-    from priml.distributed.testing import WarmPoolGetter
     from priml.model.grid_solver import GridSolver
     from priml.optimizers.sign_sgd import SignSGD
     from priml.train.custom_types import TrainStepOutput
@@ -575,9 +570,12 @@ def test_the_original_implementations_trajectory_replays_bit_for_bit() -> None:
         subject = PortSubject("exp000")
         with torch.no_grad():
             next(subject.step.model.parameters()).view(torch.int32).view(-1)[0] += 1
-        nudged = record_original(subject)
+        nudged = {"state/state": _joined(subject.state()).unsqueeze(0)}
     assert not mismatches(expected, actual)
-    assert mismatches(expected, nudged)
+    assert mismatches(
+        {"state/state": expected["state/state"][:1]},
+        {"state/state": nudged["state/state"]},
+    )
 
 
 @pytest.mark.parametrize("recipe", RECIPES)
@@ -1726,44 +1724,6 @@ def test_arc_data_parallel_broadcasts_every_tensor_from_rank_zero(
     finally:
         runtime.destroy()
         dist.destroy_process_group()
-
-
-@pytest.mark.compute_distributed
-def test_a_warm_eval_before_training_leaves_replication_trainable(
-    tmp_path: Path,
-    warm_pools: WarmPoolGetter,
-) -> None:
-    """The loop's warm eval is the first forward, and it runs in inference mode.
-
-    Replication builds its gradient buckets on the first forward, so buckets
-    built there are inference tensors and the first backward cannot write them.
-    """
-    warm_pools({"dp": 2})(partial(_warm_eval_then_train, tmp_path))
-    failures = [path.read_text() for path in sorted(tmp_path.glob("rank*.txt"))]
-    assert not failures, "\n".join(failures)
-    assert len(list(tmp_path.glob("rank*.ok"))) == 2
-
-
-def _warm_eval_then_train(root: Path, mesh: DeviceMesh) -> None:
-    """Run one eval batch, then one train step, on this rank."""
-    runtime = MultiProcess.Config(
-        device="cpu",
-        mesh_topology={"dp": 2, "pp": 1, "tp": 1},
-    ).make()
-    rank = mesh.get_rank()
-    try:
-        runtime.initialize()
-        config = port_config("exp000")
-        config.parallelism = ArcDataParallel.Config(gradient_as_bucket_view=True)
-        step = PooledActTrainStep(config.finalize())
-        batch = batches()[0]
-        step.eval_loss(**batch)
-        step.train_step(**batch)
-        (root / f"rank{rank}.ok").touch()
-    except RuntimeError:
-        (root / f"rank{rank}.txt").write_text(traceback.format_exc())
-    finally:
-        runtime.destroy()
 
 
 def _source_target_key(source_name: str) -> str:

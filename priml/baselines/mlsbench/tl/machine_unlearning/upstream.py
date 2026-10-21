@@ -633,4 +633,4 @@ def _numpy_seeded(seed: int) -> bool:
     """Return whether NumPy's legacy generator stands exactly where ``seed`` puts it."""
     _, live_key, *live_rest = np.random.get_state()  # noqa: NPY002 -- The harness seeds NumPy's legacy generator; its state is what is checked.
     _, fresh_key, *fresh_rest = np.random.RandomState(seed).get_state()
-    return bool(np.array_equal(live_key, fresh_key)) and live_rest == fresh_rest
+    return bool(np.array_equal(live_key, fresh_key)) and live_rest == fresh_rest  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.

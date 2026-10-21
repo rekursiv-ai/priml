@@ -146,12 +146,14 @@ instead of fitting the dynamics. Its loss uses every adjacent observation pair
 within each training trajectory, including the training targets. Pairs never
 cross trajectory boundaries. Validation and test data are not used for fitting.
 
-The search uses SciPy's bounded scalar minimizer over coefficients from 0 to 1,
-with `xatol=1e-6` and at most 64 search evaluations. The unchanged simulator is
-also scored and retained if its training loss is better. Each evaluation advances
-all training pairs by one observation interval using the same four substeps as
-the supplied simulator. Loss calculations use float64; forecasts use the input
-dtype. The search is an injectable config, including its bounds and stopping rules.
+The search is Brent's bounded minimization, mixing golden-section and parabolic
+steps, over coefficients from 0 to 1, with `xatol=1e-6` and at most 64 search
+evaluations. It never evaluates the interval's endpoints. The unchanged simulator
+is also scored and retained if its training loss is better. Each evaluation
+advances all training pairs by one observation interval using the same four
+substeps as the supplied simulator. Loss calculations use float64; forecasts use
+the input dtype. The search is an injectable config, including its bounds and
+stopping rules.
 
 Run the existing controls and the new method together:
 
@@ -218,9 +220,11 @@ The library contains position powers 1, 3, and 5, and signed velocity powers
 1, 2, and 3. A signed power is `-s * abs(s)^(power - 1)`. Coefficients stay
 between 0 and 2. Each combination is fitted with bounded nonlinear least squares
 on adjacent training observations, using the actual integration substeps rather
-than a finite-difference estimate of acceleration. Separate validation
-trajectories choose the combination by full-horizon scaled MSE plus `1e-6` per
-added term. Test targets never enter fitting or selection.
+than a finite-difference estimate of acceleration. The fit is Levenberg-Marquardt
+with forward-difference Jacobians; a coefficient pressing against a bound is held
+there while the others move. Separate validation trajectories choose the
+combination by full-horizon scaled MSE plus `1e-6` per added term. Test targets
+never enter fitting or selection.
 
 The full library needs 21 candidate fits and one unchanged control; the ablation
 needs 15 fits and the control. Fits start at 0.1, allow 40 solver evaluations,
@@ -265,10 +269,12 @@ system was:
 | Cheap simulator | 0.006589 | 0.050387 |
 
 `exp005` selected the cubic restoring force and quadratic drag on all five
-samples, recovering coefficients near 0.4 and 0.35. It used 328--354 training
+samples, recovering coefficients near 0.4 and 0.35. It used 241--247 training
 residual evaluations, including one starting check per candidate, and 22
-validation batches per sample. In the matched
-control it selected no extra terms, keeping exact zero test error.
+validation batches per sample. Those counts come from an October 20, 2026 rerun
+with the current least-squares fit, which reproduced the selections and scores of
+`exp005` and `exp006`. In the matched control it selected no extra terms, keeping
+exact zero test error.
 
 Without the correct drag term, `exp006` selected cubic drag instead. Its shifted
 scaled MSE ranged from 0.000182 to 0.000270. That is a useful approximation over
@@ -467,5 +473,6 @@ The ETTh1 test MSE cannot be compared numerically with these synthetic scores.
 - Zeng et al., [Are Transformers Effective for Time Series Forecasting?](https://arxiv.org/abs/2205.13504)
 - Toner and Darlow, [An Analysis of Linear Time Series Forecasting Models](https://proceedings.mlr.press/v235/toner24a.html)
 - Hoerl and Kennard, [Ridge Regression: Biased Estimation for Nonorthogonal Problems](https://doi.org/10.1080/00401706.1970.10488634)
-- SciPy, [Bounded scalar minimization](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize_scalar.html)
+- Brent, [Algorithms for Minimization without Derivatives](https://maths-people.anu.edu.au/~brent/pub/pub011.html)
+- Madsen, Nielsen and Tingleff, [Methods for Non-Linear Least Squares Problems](https://www2.imm.dtu.dk/pubdb/edoc/imm3215.pdf)
 - Brunton et al., [Discovering governing equations from data by sparse identification of nonlinear dynamical systems](https://doi.org/10.1073/pnas.1517384113)

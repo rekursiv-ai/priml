@@ -50,7 +50,11 @@ def test_eval_weights_overlay_the_ema_shadow_on_a_full_checkpoint(
     live = {"w": torch.zeros(2, 3), "b": torch.ones(3)}
     shadow = {"w": torch.full((2, 3), 5.0)}
     full = tmp_path / "full.pt"
-    ema = {"shadow_params": shadow, "shadow_buffers": {}, "global_step": 4}
+    ema: dict[str, object] = {
+        "shadow_params": shadow,
+        "shadow_buffers": {},
+        "global_step": 4,
+    }
     torch.save({"step": {"model": live, "ema": ema}}, full)
     weights = load_eval_weights(full)
     assert weights.keys() == {"w", "b"}

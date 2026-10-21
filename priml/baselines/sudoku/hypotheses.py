@@ -68,7 +68,7 @@ class HypothesisRecursion(LatentRecursion):
         hypothesis_seed: int = 0
         """Seeds the stored extra rows and every per-puzzle draw."""
 
-    config: Config
+    config: Config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
     """Narrowed from the parent's declaration for the hypothesis fields."""
 
     def __init__(self, config: Config) -> None:

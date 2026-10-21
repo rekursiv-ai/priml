@@ -286,30 +286,30 @@ class SwiGLU(nn.Module):
             # Pushed here, not in __init__: the norm is finalized with the tree,
             # so a width written afterwards never reaches pprint or a diff.
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
-                self.norm.channels_in = self.channels_hidden
+                self.norm.channels_in = self.channels_hidden  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if isinstance(self.up_proj, ChannelsIn) and self.up_proj.channels_in == -1:
-                self.up_proj.channels_in = self.channels_in
+                self.up_proj.channels_in = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.up_proj, ChannelsOut)
                 and self.up_proj.channels_out == -1
             ):
-                self.up_proj.channels_out = self.channels_hidden * (
+                self.up_proj.channels_out = self.channels_hidden * (  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
                     2 if self.gate else 1
                 )
             if (
                 isinstance(self.down_proj, ChannelsIn)
                 and self.down_proj.channels_in == -1
             ):
-                self.down_proj.channels_in = self.channels_hidden
+                self.down_proj.channels_in = self.channels_hidden  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.down_proj, ChannelsOut)
                 and self.down_proj.channels_out == -1
             ):
-                self.down_proj.channels_out = self.channels_out
+                self.down_proj.channels_out = self.channels_out  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if isinstance(self.middle, ChannelsIn) and self.middle.channels_in == -1:
-                self.middle.channels_in = self.channels_hidden
+                self.middle.channels_in = self.channels_hidden  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if isinstance(self.middle, ChannelsOut) and self.middle.channels_out == -1:
-                self.middle.channels_out = self.channels_hidden
+                self.middle.channels_out = self.channels_hidden  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             return super().finalize()
 
         def cost(
@@ -460,6 +460,7 @@ class SwiGLU(nn.Module):
             )
         ).make()
         self.act: TensorFn = config.act
+        self.norm: TensorModule | None
         if config.norm is None:
             self.norm = None
         else:

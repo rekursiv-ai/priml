@@ -49,16 +49,8 @@ def _capture_kernel_state(
         reduce_dim: int,
         coefficients: tuple[tuple[float, float, float], ...],
     ) -> None:
-        del (
-            stacked_grads,
-            stacked_params,
-            momentum,
-            lr,
-            weight_decay,
-            beta2,
-            ns_steps,
-            coefficients,
-        )
+        del stacked_grads, stacked_params, momentum, lr, weight_decay, beta2, ns_steps
+        del coefficients
         capture(momentum_buffer, second_moment, reduce_dim)
 
     optimizer._update = update
@@ -626,15 +618,8 @@ def test_shape_setup_preserves_dtype_and_reduces_over_the_short_axis() -> None:
         reduce_dim: int,
         coefficients: tuple[tuple[float, float, float], ...],
     ) -> None:
-        del (
-            stacked_grads,
-            stacked_params,
-            momentum,
-            lr,
-            weight_decay,
-            beta2,
-            coefficients,
-        )
+        del stacked_grads, stacked_params, momentum, lr, weight_decay, beta2
+        del coefficients
         calls.append((momentum_buffer, second_moment, reduce_dim, ns_steps))
 
     optimizer._update = capture

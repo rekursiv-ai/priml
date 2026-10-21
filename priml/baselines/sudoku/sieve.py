@@ -333,8 +333,8 @@ class SieveEval:
             )
             stats: dict[str, float | int | str] = {
                 "round": round_name,
-                "entering": int(survivors.shape[0]),
-                "generated": int(grids.shape[0]),
+                "entering": survivors.shape[0],
+                "generated": grids.shape[0],
                 "locked": int(accepted.sum()),
                 "deferred": int((~accepted).sum()),
                 "seconds": time.monotonic() - started,
@@ -354,7 +354,7 @@ class SieveEval:
             "eval/n_puzzles": n_puzzles,
             "eval/cell_accuracy": float((final_grids == labels_all).float().mean()),
             "eval/locked_total": int(locked.sum()),
-            "eval/tail_modal_count": int(survivors.shape[0]),
+            "eval/tail_modal_count": survivors.shape[0],
             "eval/algorithmic_decision_calls": 0,
             "eval/rounds": round_stats,
             "eval/total_seconds": math.fsum(
@@ -550,7 +550,7 @@ class StaircaseSieveEval(SieveEval):
         """Draw ``i`` of the selection round seeds a dedicated generator at
         ``qsel_seed + i``; the ambient RNG is never read."""
 
-    config: Config
+    config: Config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
     """Narrowed from the parent's declaration for the staircase fields."""
 
     def __init__(self, config: Config) -> None:

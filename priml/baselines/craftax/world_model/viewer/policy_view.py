@@ -149,13 +149,13 @@ def write_bundle(
         game=package_digest(Path(jit.__file__).parent),
         platform=platform_key(),
         end=(
-            int(final.floor_before),
-            int(final.row),
-            int(final.col),
-            int(final.direction),
+            int(final.floor_before),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(final.row),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(final.col),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(final.direction),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         ),
-        tick=int(final.tick_before),
-        score=int(final.score),
+        tick=int(final.tick_before),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        score=int(final.score),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         sleep_stride=sleep_stride if slept else None,
         sleeps=[(d, k, f) for d, k, f in int_rows(replayed.sleeps)],
         sleep_frames=len(sleep_frames),

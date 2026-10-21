@@ -7,6 +7,7 @@ exact; there is no tolerance.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -14,6 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
+from priml.baselines.mlsbench.dl.vision.data import normalize
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.tl.backdoor_defense import reference
 from priml.testing.golden import mismatches, read_tensors
@@ -183,6 +185,111 @@ def test_decoding_rejects_an_image_that_is_no_crop_of_any_source() -> None:
         reference.decode_record(reference.FIRST, ([[batch]], []))
 
 
+@pytest.fixture
+def two_source_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[str], tuple[torch.Tensor, torch.Tensor]]:
+    """Limit decoder witnesses to two real-shaped synthetic sources."""
+    original = reference.synthetic
+    first_two = partial(_first_two_synthetic, original)
+    monkeypatch.setattr(reference, "synthetic", first_two)
+    return first_two
+
+
+def test_decoding_rejects_a_matching_centre_with_an_off_centre_corruption(
+    two_source_split: Callable[[str], tuple[torch.Tensor, torch.Tensor]],
+) -> None:
+    setting = reference.FIRST
+    spec = reference.SETTINGS[setting]
+    source, _ = two_source_split(spec.dataset)
+    config = reference.SETTINGS[setting].factory().dataset
+    pad = config.translate_pad
+    height, width = source.shape[-2:]
+    padded = torch.nn.functional.pad(source, (pad,) * 4)
+    crop = padded[0, :, pad : pad + height, pad : pad + width]
+    mean, std = torch.tensor(config.mean), torch.tensor(config.std)
+    image = normalize(crop.unsqueeze(0), mean=mean, std=std)
+    image[..., 0, 0] = 9.0
+    batch = {"media": image, "label": torch.zeros(1, dtype=torch.int64)}
+
+    with pytest.raises(ValueError, match="no crop"):
+        reference.decode_record(setting, ([[batch]], []))
+
+
+@pytest.mark.parametrize("setting", list(reference.SETTINGS))
+def test_decoding_matches_clean_and_triggered_crops(
+    setting: str,
+    two_source_split: Callable[[str], tuple[torch.Tensor, torch.Tensor]],
+) -> None:
+    source, source_labels = two_source_split(reference.SETTINGS[setting].dataset)
+    config = reference.SETTINGS[setting].factory().dataset
+    # Target-class source 0 is not selected for poisoning, but remains decodable.
+    assert int(source_labels[0]) == config.target_class
+
+    pad = config.translate_pad
+    height, width = source.shape[-2:]
+    padded = torch.nn.functional.pad(source, (pad,) * 4)
+    mean, std = torch.tensor(config.mean), torch.tensor(config.std)
+    cases = (
+        ((0, 2, 3, 1, True), (1, 1, 2, 1, False)),
+        ((0, 0, 1, 0, False), (1, 3, 4, 0, True)),
+        ((1, 4, 0, 1, False), (0, 1, 4, 0, True)),
+    )
+    batches: list[list[dict[str, torch.Tensor]]] = []
+    for pass_cases in cases:
+        images: list[torch.Tensor] = []
+        labels: list[int] = []
+        for source_id, top, left, flip, triggered in pass_cases:
+            crop = padded[
+                source_id,
+                :,
+                top : top + height,
+                left : left + width,
+            ]
+            if flip:
+                crop = crop.flip(-1)
+            image = normalize(crop.unsqueeze(0), mean=mean, std=std)
+            if triggered:
+                image = config.trigger(image, mean=mean, std=std)
+            images.append(image[0])
+            labels.append(
+                config.target_class if triggered else int(source_labels[source_id]),
+            )
+        batches.append(
+            [{"media": torch.stack(images), "label": torch.tensor(labels)}],
+        )
+
+    prefix = f"loader/{setting}/"
+    expected = {
+        f"{prefix}label": torch.tensor(
+            [
+                [
+                    config.target_class if triggered else int(source_labels[source_id])
+                    for source_id, _, _, _, triggered in pass_cases
+                ]
+                for pass_cases in cases
+            ],
+        ),
+        f"{prefix}source": torch.tensor(
+            [
+                [source_id for source_id, _, _, _, _ in pass_cases]
+                for pass_cases in cases
+            ],
+        ),
+        f"{prefix}top": torch.tensor(
+            [[top for _, top, _, _, _ in pass_cases] for pass_cases in cases],
+        ),
+        f"{prefix}left": torch.tensor(
+            [[left for _, _, left, _, _ in pass_cases] for pass_cases in cases],
+        ),
+        f"{prefix}flip": torch.tensor(
+            [[flip for _, _, _, flip, _ in pass_cases] for pass_cases in cases],
+        ),
+    }
+
+    assert_exact(expected, reference.decode_record(setting, (batches[:2], batches[2:])))
+
+
 def test_the_port_record_joins_every_component(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -228,15 +335,30 @@ def test_the_poisoned_loaders_shuffle_augment_and_trigger_as_the_driver(
     setting: str,
     tmp_path: Path,
 ) -> None:
-    assert_exact(
-        stored(f"loader/{setting}/"),
-        reference.decode_record(setting, reference.loader_batches(setting, tmp_path)),
-    )
+    expected = _captured_loader_output(setting)
+    captured_passes = reference.loader_batches(setting, tmp_path)
+    actual_passes = (*captured_passes[0], *captured_passes[1])
+    assert len(actual_passes) == len(expected["label"])
+
+    actual_media: list[torch.Tensor] = []
+    actual_labels: list[torch.Tensor] = []
+    for batches, expected_labels in zip(
+        actual_passes,
+        expected["label"],
+        strict=True,
+    ):
+        media = torch.cat([batch["media"] for batch in batches])
+        labels = torch.cat([batch["label"] for batch in batches])
+        assert len(media) == len(expected_labels)
+        actual_media.append(media)
+        actual_labels.append(labels)
+
+    actual = {"media": torch.stack(actual_media), "label": torch.stack(actual_labels)}
+    assert_exact(expected, actual)
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("setting", list(reference.SETTINGS))
-def test_each_full_network_initializes_and_runs_as_the_driver(setting: str) -> None:
+def test_each_shallow_setting_replay_matches_the_driver(setting: str) -> None:
     spec = reference.SETTINGS[setting]
     assert_exact(
         stored(f"settings/{setting}/", "reference_networks.pt"),
@@ -267,6 +389,80 @@ def test_the_golden_bites_on_one_ulp() -> None:
     assert mismatches({"defense/spectral_signature/scores": value}, port) == [
         "defense/spectral_signature/scores: 1/13 differ",
     ]
+
+
+def _first_two_synthetic(
+    original: Callable[[str], tuple[torch.Tensor, torch.Tensor]],
+    dataset: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the first two source images and labels from the original split."""
+    media, labels = original(dataset)
+    return media[:2], labels[:2]
+
+
+def _captured_loader_output(setting: str) -> dict[str, torch.Tensor]:
+    """Rebuild loader pixels from frozen decoder-inferred crop metadata."""
+    prefix = f"loader/{setting}/"
+    captured = stored(prefix)
+    sources = captured[f"{prefix}source"]
+    tops = captured[f"{prefix}top"]
+    lefts = captured[f"{prefix}left"]
+    flips = captured[f"{prefix}flip"]
+    labels = captured[f"{prefix}label"]
+    source, source_labels = reference.synthetic(reference.SETTINGS[setting].dataset)
+    config = reference.SETTINGS[setting].factory().dataset
+    pad = config.translate_pad
+    height, width = source.shape[-2:]
+    padded = torch.nn.functional.pad(source, (pad,) * 4)
+    mean, std = torch.tensor(config.mean), torch.tensor(config.std)
+
+    expected_passes: list[torch.Tensor] = []
+    for source_row, top_row, left_row, flip_row, label_row in zip(
+        sources,
+        tops,
+        lefts,
+        flips,
+        labels,
+        strict=True,
+    ):
+        crops: list[torch.Tensor] = []
+        triggered_rows: list[int] = []
+        for source_id, top, left, flip, label in zip(
+            source_row,
+            top_row,
+            left_row,
+            flip_row,
+            label_row,
+            strict=True,
+        ):
+            source_index = int(source_id)
+            crop_top, crop_left = int(top), int(left)
+            crop = padded[
+                source_index,
+                :,
+                crop_top : crop_top + height,
+                crop_left : crop_left + width,
+            ]
+            if int(flip):
+                crop = crop.flip(-1)
+            crops.append(crop)
+
+            # The captured record has no poison flag: a changed label marks a
+            # source image relabeled to this setting's target class.
+            if int(label) != int(source_labels[source_index]):
+                assert int(label) == config.target_class
+                triggered_rows.append(len(crops) - 1)
+
+        media = normalize(torch.stack(crops), mean=mean, std=std)
+        if triggered_rows:
+            media[triggered_rows] = config.trigger(
+                media[triggered_rows],
+                mean=mean,
+                std=std,
+            )
+        expected_passes.append(media)
+
+    return {"media": torch.stack(expected_passes), "label": labels}
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, cast, override
 
 import math
 
-from configgle import Makeable, PartialConfig
+from configgle import Makeable, Makes2, PartialConfig
 from torch import Tensor
 
 from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
@@ -34,15 +34,8 @@ if TYPE_CHECKING:
 class CompressedTrainStep(VisionTrainStep):
     """The vision step, stepping with compressed gradients."""
 
-    class Config(VisionTrainStep.Config, kw_only=True):
+    class Config(Makes2["CompressedTrainStep"], VisionTrainStep.Config, kw_only=True):
         """The vision step's slots and the compressor."""
-
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> CompressedTrainStep:
-                """Build this step."""
-                ...
 
         compressor: Makeable[Compressor] = field(
             default_factory=lambda: PartialConfig(identity),
@@ -105,7 +98,7 @@ class CompressedTrainStep(VisionTrainStep):
 
         """
         compressor = self.compressor
-        return {
+        return {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **super().state_dict(),
             "compressor": compressor.state_dict()
             if isinstance(compressor, CheckpointableProtocol)

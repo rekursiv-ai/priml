@@ -15,7 +15,8 @@ import numpy as np
 if TYPE_CHECKING:
     from numpy.random import RandomState
     from numpy.typing import NDArray
-    from scipy.sparse import csr_array
+
+    from priml.baselines.name_that_llm.sparse import CsrMatrix
 
 
 class DualCoordinate:
@@ -138,7 +139,7 @@ class LinearSVC:
         self.intercept_ = np.empty(0, dtype=np.float64)
         self.n_iter_ = 0
 
-    def fit(self, features: csr_array[np.float64], targets: NDArray[np.int64]) -> Self:
+    def fit(self, features: CsrMatrix, targets: NDArray[np.int64]) -> Self:
         """Fit every class with a continuing shuffle stream.
 
         Args:
@@ -157,8 +158,8 @@ class LinearSVC:
             raise ValueError(
                 "Expected at least three classes for the multiclass branch.",
             )
-        grouped = features[np.argsort(targets, kind="stable")]
-        data = cast("list[float]", grouped.data.tolist())
+        grouped = features.take_rows(np.argsort(targets, kind="stable"))
+        data = grouped.data.tolist()
         indices = grouped.indices.tolist()
         boundaries = grouped.indptr.tolist()
         rows = [
@@ -170,7 +171,7 @@ class LinearSVC:
             for row in range(len(targets))
         ]
         labels = cast("list[int]", targets[np.argsort(targets, kind="stable")].tolist())
-        seed_solver = int(
+        seed_solver = int(  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             np.random.RandomState(self.config.seed).randint(np.iinfo(np.int32).max),
         )
         random = np.random.RandomState(seed_solver)
@@ -192,7 +193,7 @@ class LinearSVC:
         self.intercept_ = fitted[:, -1]
         return self
 
-    def decision_function(self, features: csr_array[np.float64]) -> NDArray[np.float64]:
+    def decision_function(self, features: CsrMatrix) -> NDArray[np.float64]:
         """Return one score per fitted class for every document.
 
         Args:
@@ -204,7 +205,17 @@ class LinearSVC:
         """
         if len(self.classes_) == 0 or features.shape[1] != self.n_features_in_:
             raise ValueError("Expected fitted classifier feature columns.")
-        return features @ self.coef_.T + self.intercept_
+        # The source scored with SciPy's csr_matvecs, which rounds each product
+        # before adding it on x86; its aarch64 wheels fuse the two.
+        rows = np.repeat(np.arange(features.shape[0]), repeats=np.diff(features.indptr))
+        scores = np.zeros((features.shape[0], len(self.classes_)))
+        for column, weights in enumerate(self.coef_):
+            np.add.at(
+                scores[:, column],
+                rows,
+                features.data * weights[features.indices],
+            )
+        return scores + self.intercept_
 
 
 def _bounded(random: RandomState, *, limit: int) -> int:

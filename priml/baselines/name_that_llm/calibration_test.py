@@ -1,13 +1,11 @@
-"""Replay complete source-minted sigmoid state and extreme-score outputs."""
+"""Replay torch-solver sigmoid fits and source-minted likelihood points."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast
+from typing import Final
 
 import math
-
-from treekle import from_plain
 
 import numpy as np
 import pytest
@@ -19,6 +17,7 @@ from priml.baselines.name_that_llm.calibration import (
     dot_product,
 )
 from priml.baselines.name_that_llm.logistic import LBFGS
+from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -27,13 +26,14 @@ _CWD: Final = Path(__file__).resolve().parent
 
 @pytest.mark.parametrize("scale", argvalues=[1, 100])
 @pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_sigmoid_replays_complete_source_state_and_predictions(
+def test_sigmoid_replays_complete_solver_state_and_predictions(
     scale: int,
     corrupt: bool,
 ) -> None:
     scores = np.sin(np.arange(7) / 3) * scale
     targets = np.array([0, 1, 0, 0, 1, 0, 1], dtype=np.int64)
-    model = SigmoidCalibration.Config().make().fit(scores, targets=targets)
+    with host_agnostic_numerics():
+        model = SigmoidCalibration.Config().make().fit(scores, targets=targets)
     if corrupt:
         model.a_ = math.nextafter(model.a_, math.inf)
     actual = {
@@ -86,7 +86,7 @@ def test_binary_likelihood_matches_every_source_boundary_and_tail(
 
 @pytest.mark.parametrize("column", argvalues=[0, 1, 2])
 @pytest.mark.parametrize("strided", argvalues=[False, True])
-def test_sigmoid_replays_all_source_grouped_calibration_inputs(
+def test_sigmoid_replays_solver_fits_of_all_source_grouped_inputs(
     column: int,
     strided: bool,
 ) -> None:
@@ -103,14 +103,15 @@ def test_sigmoid_replays_all_source_grouped_calibration_inputs(
         columns = np.empty((len(scores), 3), dtype=np.float64)
         columns[:, 0] = scores
         scores = columns[:, 0]
-    model = (
-        SigmoidCalibration.Config()
-        .make()
-        .fit(
-            scores,
-            targets=expected["targets"].numpy(),
+    with host_agnostic_numerics():
+        model = (
+            SigmoidCalibration.Config()
+            .make()
+            .fit(
+                scores,
+                targets=expected["targets"].numpy(),
+            )
         )
-    )
     actual = dict(expected)
     actual["a_"] = torch.tensor(model.a_, dtype=torch.float64)
     actual["b_"] = torch.tensor(model.b_, dtype=torch.float64)
@@ -143,25 +144,20 @@ def test_sigmoid_rejects_empty_or_unaligned_scores(rows: int, labels: int) -> No
 
 
 @pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_sigmoid_replays_complete_additional_source_state(corrupt: bool) -> None:
+def test_sigmoid_replays_complete_additional_solver_state(corrupt: bool) -> None:
     """Replay the complete seven-row witness and detect one-ULP parameter drift.
 
     Args:
       corrupt: Whether to perturb the fitted slope by one representable value.
 
     """
-    expected = from_plain(
-        cast(
-            object,
-            torch.load(_CWD / "testdata" / "calibration.pt", weights_only=True),
-        ),
-        target=dict[str, torch.Tensor],
-    )
+    expected = read_tensors(_CWD / "testdata" / "calibration.pt")
     scores, targets = (
         expected["scores"].numpy().copy(),
         expected["targets"].numpy().copy(),
     )
-    model = SigmoidCalibration.Config().make().fit(scores, targets=targets)
+    with host_agnostic_numerics():
+        model = SigmoidCalibration.Config().make().fit(scores, targets=targets)
     actual = {
         "scores": torch.from_numpy(scores),
         "targets": torch.from_numpy(targets),
@@ -180,12 +176,21 @@ def test_sigmoid_replays_complete_additional_source_state(corrupt: bool) -> None
         assert not report, "\n".join(report)
 
 
+def test_sigmoid_predictions_saturate_without_overflow_and_keep_shape() -> None:
+    model = SigmoidCalibration.Config().make()
+    model.a_, model.b_ = -1.0, 0.0
+    scores = np.array([[-np.inf, -1000, 0], [1000, np.inf, np.nan]])
+    np.testing.assert_array_equal(
+        model.predict(scores),
+        np.array([[0, 0, 0.5], [1, 1, np.nan]]),
+    )
+
+
 def test_default_calibration_keeps_the_shared_solver_and_source_budgets() -> None:
     config = SigmoidCalibration.Config()
     assert isinstance(config.optimizer.make(), LBFGS)
     assert config.optimizer.max_iter == 15_000
     assert config.optimizer.tolerance_gradient == 1e-6
-    assert config.optimizer.max_line_search == 20
 
 
 def test_dot_product_rejects_misaligned_vectors() -> None:

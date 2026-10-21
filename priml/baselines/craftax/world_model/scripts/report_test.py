@@ -128,7 +128,7 @@ def test_summarize_reads_every_step_and_spreads_over_checkpoints(
 
 def test_summarize_reads_the_training_criteria_from_wandb(tmp_path: Path) -> None:
     trend = {m: {"decreased": True, "monotone": m != "done"} for m in MODALITIES}
-    run = {
+    run: dict[str, object] = {
         "run": "abc",
         "last_step": 9,
         "eval_steps": [5, 9],

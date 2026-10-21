@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, override
 
+from configgle import Makes2
+
 from priml.baselines.arcagi.train_step import PooledActTrainStep
 
 
@@ -17,15 +19,8 @@ if TYPE_CHECKING:
 class BoundaryLossTrainStep(PooledActTrainStep):
     """Train as :class:`PooledActTrainStep`, adding a weighted boundary loss when set."""
 
-    class Config(PooledActTrainStep.Config):
+    class Config(Makes2["BoundaryLossTrainStep"], PooledActTrainStep.Config):
         """The reference step plus the boundary loss slot."""
-
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> BoundaryLossTrainStep:
-                """Build this nested configuration's step."""
-                ...
 
         boundary: CanonicalBoundary.Config | None = None
         """Extra token loss over the path and its open neighbours; ``None`` omits it."""

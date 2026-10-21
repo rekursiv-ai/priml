@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast, override
 
 import math
 
-from configgle import Fig, InlineConfig, PartialConfig
+from configgle import Fig, InlineConfig, Makes2, PartialConfig
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -20,7 +20,7 @@ from priml.baselines.motor_imagery.model import (
     MultiScaleEEGNet,
     ShallowConvNet,
 )
-from priml.baselines.motor_imagery.testing.helpers_support_test import (
+from priml.baselines.motor_imagery.testing import (
     compare_record,
     model_record,
     optimizer_record,
@@ -72,7 +72,7 @@ class RecordingCompiler:
 class RecordingStep(MotorImageryStep):
     """Retain the final clipped gradients the shared update clears."""
 
-    class Config(MotorImageryStep.Config):
+    class Config(Makes2["RecordingStep"], MotorImageryStep.Config):
         @override
         def make(self) -> RecordingStep:
             return RecordingStep(self.finalized())

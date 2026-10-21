@@ -148,7 +148,6 @@ def test_rotation_fallback_roundtrips_as_a_visible_config_field(custom: bool) ->
     if custom:
         config.rotate = _fallback_rotation
     restored = from_plain(to_plain(config), Attention.Config, allow_imports=True)
-    assert isinstance(restored, Attention.Config)
     assert restored.rotate == config.rotate
     assert restored.make().rotate == (
         RoPE.rotate if config.rotate is None else config.rotate

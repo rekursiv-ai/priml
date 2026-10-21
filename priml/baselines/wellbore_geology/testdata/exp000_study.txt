@@ -1,0 +1,40 @@
+WellboreStudy.Config(
+        study_name='wellbore_geology',
+        experiment_name='exp000',
+        reference_revision='fade6112ffebd9e27c08ac7f053e8d4c3d5c319a',
+        dataset_directory=PosixPath('/opt/scratch/datasets/rogii-ruby-fade6112'),
+        base_dir=PosixPath('/opt/scratch'),
+        working_dir=PosixPath('/opt/scratch/runs/wellbore_geology/exp000'),
+        pf_directory=PosixPath('/opt/scratch/caches/wellbore_geology/exp000-pf'),
+        device='cuda',
+        families=[],
+        runner=NativeFamilyRunner.Config(
+            inference=FreshInference.Config(
+                python_executable=None,
+                working_directory=None
+            )
+        ),
+        results=PublishResults.Config(
+            prediction=TableBlend.Config(
+                diagnostic_family='0801_V2',
+                gate=GeographicGate.Config(
+                    distance_max=2_459,
+                    distance_q10_max=1_426,
+                    path_alignment_min=0.96,
+                    radial_extrapolation_max=1.45,
+                    prefix_weight_ratio_max=0.315
+                ),
+                blend=WellBlend.Config(
+                    geographic=[
+                        ('0719_V1', 0.25),
+                        ('0801_V1', 0.25),
+                        ('0724_V1', 1.0),
+                        ('0801_V2', 1.0),
+                        ('0803_V2', 1.0)
+                    ],
+                    fallback=[('0719_V1', 1.0), ('0729_V3', 0.5), ('0801_V1', 1.0)]
+                )
+            )
+        ),
+        budget=None
+    )

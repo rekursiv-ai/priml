@@ -375,7 +375,7 @@ class GridSolver(nn.Module):
             if isinstance(propagate, ChannelsIn) and propagate.channels_in == -1:
                 propagate.channels_in = self.channels_in
             if isinstance(self.prefix, ChannelsOut) and self.prefix.channels_out == -1:
-                self.prefix.channels_out = self.channels_in
+                self.prefix.channels_out = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if self.num_prefix_tokens == -1:
                 self.num_prefix_tokens = _count_prefix_tokens(self.prefix)
             return super().finalize()
@@ -988,7 +988,7 @@ def _single_latent_recurrence() -> RecurrenceConfig:
 class SingleLatentGridSolver(GridSolver):
     """Grid solver specialization that carries one recurrent latent state."""
 
-    config: Config
+    config: Config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
 
     class Config(Makes["SingleLatentGridSolver"], GridSolver.Config):
         """Single-state architecture with injectable grid and memory children."""

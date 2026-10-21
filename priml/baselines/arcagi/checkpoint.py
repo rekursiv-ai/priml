@@ -4,8 +4,9 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import cast
 
+from configgle import Makes2
 from configgle.custom_types import Makeable
 from numpy._core.multiarray import _reconstruct
 from torch import Tensor
@@ -24,15 +25,8 @@ from priml.train.ema import EMA
 class CheckpointActTrainStep(PooledActTrainStep):
     """Initialize ARC evaluation from saved weights with a fresh optimizer."""
 
-    class Config(PooledActTrainStep.Config):
+    class Config(Makes2["CheckpointActTrainStep"], PooledActTrainStep.Config):
         """ARC recipe plus the weights file to evaluate."""
-
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> "CheckpointActTrainStep":
-                """Build this nested configuration's step."""
-                ...
 
         checkpoint: Makeable[CheckpointFile] = field(default_factory=LocalFile.Config)
         """Native or released checkpoint; resolved before evaluation starts."""

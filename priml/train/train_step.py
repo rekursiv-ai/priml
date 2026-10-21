@@ -297,7 +297,7 @@ class TrainStep:
             by the parallel strategy.
 
         """
-        self.config = config
+        self.config = config  # pyrefly: ignore[invalid-type-var] -- Each subclass redeclares ``config`` with its own model config type.
 
         if math.isnan(config.gradient_clip_norm) or config.gradient_clip_norm < 0:
             raise ValueError(

@@ -109,7 +109,9 @@ test = [
 ]
 typecheck = [
     "basedpyright>=1.40.1",
+    "pyrefly>=1.4.0",
     "ty>=0.0.84",
+    # Extra.
     "rekursiv-ai-typeshed",
     "rekursiv-ai-typings",
     "safetensors",
@@ -175,7 +177,7 @@ packages = ["priml"]
 # documented API), etth1/testing.py (scripts/reference.py imports it), and
 # craftax/world_model/testing.py (scripts/feature_gates.py imports it).
 # kernel_cache.py warms only the test environments, so it goes with them.
-exclude = ["**/*_test.py", "**/conftest.py", "priml/lib/testing/**", "priml/testing/experiments.py", "priml/testing/fixtures.py", "priml/testing/policy_gradient.py", "priml/testing/qwen3_5.py", "priml/testing/triton_interpreter.py", "priml/distributed/testing.py", "priml/baselines/convextok/testing.py", "priml/baselines/craftax/testing.py", "priml/baselines/craftax/kernel_cache.py", "priml/baselines/craftax/game/testing.py", "priml/baselines/craftax/ghosts/testing.py", "priml/baselines/craftax/world_model/scripts/testing.py", "priml/baselines/craftax/world_model/viewer/testing.py", "priml/baselines/sudoku/testing.py", "priml/baselines/tmax/scripts/testing.py"]
+exclude = ["**/*_test.py", "**/conftest.py", "priml/lib/testing/**", "priml/testing/experiments.py", "priml/testing/fixtures.py", "priml/testing/policy_gradient.py", "priml/testing/qwen3_5.py", "priml/testing/triton_interpreter.py", "priml/distributed/testing.py", "priml/baselines/casmi2026/testing.py", "priml/baselines/convextok/testing.py", "priml/baselines/craftax/testing.py", "priml/baselines/craftax/kernel_cache.py", "priml/baselines/craftax/game/testing.py", "priml/baselines/craftax/ghosts/testing.py", "priml/baselines/craftax/world_model/scripts/testing.py", "priml/baselines/craftax/world_model/viewer/testing.py", "priml/baselines/motor_imagery/testing.py", "priml/baselines/name_that_llm/testing.py", "priml/baselines/sudoku/testing.py", "priml/baselines/tmax/scripts/testing.py", "priml/baselines/wellbore_geology/testing.py"]
 artifacts = ["priml/py.typed"]
 
 [tool.hatch.build.targets.sdist]
@@ -429,6 +431,7 @@ extend-safe-fixes = [
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
     "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
+    "RUF022", # `__all__` is not sorted.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.
@@ -702,6 +705,11 @@ exclude = [
 
 [tool.ty.rules]
 all = "warn"
+# ty 0.0.86+ rejects nested-class overrides like `class Config(Parent.Config)`:
+# https://github.com/astral-sh/ty/issues/4711 (fix: astral-sh/ruff#29346).
+# Re-enable once a ty release includes the fix; pyrefly's bad-override still
+# checks overrides meanwhile.
+invalid-attribute-override = "ignore"
 
 [[tool.ty.overrides]]
 include = ["*_test.py"]
@@ -714,6 +722,9 @@ error-on-warning = true
 output-format = "concise"   # Choices: full concise gitlab github junit
 
 [tool.pyrefly]
+# Explicit: the default also globs `**/*.ipynb`, which the excludes then drop
+# with a warning on every run.
+project-includes = ["**/*.py", "**/*.pyi"]
 project-excludes = [
     "**/.venv/",
     "**/.venv-ci312/",
@@ -738,8 +749,9 @@ python-interpreter-path = ".venv/bin/python"
 python-platform = "linux"
 python-version = "3.12.0"  # Intentional; test at 3.12 for exports.
 preset = "strict"
-infer-with-first-use = false
+infer-with-first-use = true  # Like ty: an empty `[]`/`{}` takes its first use's type.
 output-format = "min-text"
+min-severity = "warn"
 
 # Mirrors the `[tool.basedpyright]` rules turned off there.
 [tool.pyrefly.errors]

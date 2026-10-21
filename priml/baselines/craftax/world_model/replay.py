@@ -520,7 +520,7 @@ def record(*, world_seed: int, sampling_seed: int, max_decisions: int) -> Episod
         raise ValueError("A token value lies outside the schema.")
     if status == UNFINISHED:
         raise ValueError(f"No terminal within {max_decisions} decisions.")
-    count = int(decisions)
+    count = decisions
     return Episode(
         receipt=Receipt(
             world_seed=world_seed,
@@ -697,7 +697,7 @@ def _status(
     )
     if status == REJECTED:
         raise ValueError("A token value lies outside the schema.")
-    return int(status), bool(ends_elsewhere)
+    return int(status), bool(ends_elsewhere)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 def _empty_frames(decisions: int) -> Frames:
@@ -763,7 +763,7 @@ def _run_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only paramete
             states[0],
             rng,
             stats[0],
-            int(actions[t]),
+            actions[t],
             rules,
         )
         if write:
@@ -818,7 +818,7 @@ def _record_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only param
             states[0],
             rng,
             stats[0],
-            int(actions[t]),
+            actions[t],
             rules,
         )
         token = reward_token_numba(step_reward)

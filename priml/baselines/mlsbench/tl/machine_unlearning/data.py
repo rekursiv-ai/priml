@@ -58,7 +58,7 @@ class UnlearningData(Cifar100Data):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.config: UnlearningData.Config = config
+        self.config: UnlearningData.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.mean = torch.tensor(config.mean)
         self.std = torch.tensor(config.std)
         self.augment: Augment = config.augment.make()

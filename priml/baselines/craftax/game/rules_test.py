@@ -12,6 +12,7 @@ from llvmlite import ir
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game.jit import jit
 from priml.baselines.craftax.game.rules import (
     _DAYLIGHT_ARRAY,
@@ -42,29 +43,29 @@ if TYPE_CHECKING:
     import numba.core.types as nbtypes
 
 
-@pytest.mark.compute_large_fixture
 def test_set_block_keeps_every_spawn_bitset_in_step_with_the_map() -> None:
     states = new_states(1)
     state = env_state(states, 0)
-    set_block_numba(state, 2, 5, 7, BlockType.GRASS)
-    assert states[0]["map"][2, 5, 7] == BlockType.GRASS
-    assert states[0]["spawn_land"][2, 5] == 1 << 7
-    set_block_numba(state, 2, 5, 7, BlockType.WATER)
-    assert states[0]["spawn_land"][2, 5] == 0
-    assert states[0]["spawn_water"][2, 5] == 1 << 7
-    set_block_numba(state, 2, 5, 7, BlockType.GRAVE3)
-    assert states[0]["spawn_water"][2, 5] == 0
-    assert states[0]["spawn_grave"][2, 5] == 1 << 7
-    set_block_numba(state, 2, 5, 7, BlockType.STONE)
-    assert states[0]["spawn_grave"][2, 5] == 0
+    with eager():
+        set_block_numba(state, 2, 5, 7, BlockType.GRASS)
+        assert states[0]["map"][2, 5, 7] == BlockType.GRASS
+        assert states[0]["spawn_land"][2, 5] == 1 << 7
+        set_block_numba(state, 2, 5, 7, BlockType.WATER)
+        assert states[0]["spawn_land"][2, 5] == 0
+        assert states[0]["spawn_water"][2, 5] == 1 << 7
+        set_block_numba(state, 2, 5, 7, BlockType.GRAVE3)
+        assert states[0]["spawn_water"][2, 5] == 0
+        assert states[0]["spawn_grave"][2, 5] == 1 << 7
+        set_block_numba(state, 2, 5, 7, BlockType.STONE)
+        assert states[0]["spawn_grave"][2, 5] == 0
 
 
-@pytest.mark.compute_large_fixture
 def test_refresh_touches_only_its_own_bit() -> None:
     states = new_states(1)
     states[0]["spawn_land"][0, 3] = np.uint64(0xFFFF_FFFF_FFFF_FFFF)
     states[0]["map"][0, 3, 10] = BlockType.STONE
-    refresh_spawn_cell_numba(env_state(states, 0), 0, 3, 10)
+    with eager():
+        refresh_spawn_cell_numba(env_state(states, 0), 0, 3, 10)
     assert states[0]["spawn_land"][0, 3] == np.uint64(
         0xFFFF_FFFF_FFFF_FFFF,
     ) & ~np.uint64(1 << 10)

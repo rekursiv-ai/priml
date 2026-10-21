@@ -60,7 +60,7 @@ _OBJECTIVE_KEYS: Final = frozenset(
 )
 
 
-class RolloutPayload(TypedDict):
+class RolloutPayload(TypedDict, closed=True):
     """Typed shape of the literal rollout records compared against the golden."""
 
     step: int

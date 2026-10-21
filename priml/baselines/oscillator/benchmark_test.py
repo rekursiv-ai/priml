@@ -16,10 +16,7 @@ from priml.baselines.oscillator.experiments import exp_smoke
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 
 
-@pytest.mark.parametrize(
-    "ridge",
-    [True, pytest.param(False, marks=pytest.mark.compute_training)],
-)
+@pytest.mark.parametrize("ridge", [True, False])
 def test_test_changes_do_not_change_training_or_reference_budget(ridge: bool) -> None:
     cfg = exp_smoke()
     cfg.seed = 7

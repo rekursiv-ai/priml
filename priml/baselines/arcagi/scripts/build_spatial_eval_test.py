@@ -506,7 +506,7 @@ def test_spatial_eval_fetch_builds_once(monkeypatch: pytest.MonkeyPatch) -> None
     assert fetch._built is False
     fetch(rel_path="one", dest=Path("unused"))
     fetch(rel_path="two", dest=Path("unused"))
-    assert fetch._built is True
+    assert fetch._built is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
     assert calls == [
         {
             "spatial_views": 2,

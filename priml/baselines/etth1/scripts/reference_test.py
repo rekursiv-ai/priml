@@ -19,14 +19,24 @@ from treekle import json_loads
 import pytest
 import torch
 
+from priml.baselines.etth1 import experiments
+from priml.baselines.etth1.experiments import exp000
 from priml.baselines.etth1.scripts import data, reference
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    from priml.baselines.etth1.train_step import Etth1TrainLoop
+
 
 _UPSTREAM_PACKAGES: Final = ("exp", "data_provider", "utils", "models")
+
+# 24 windows at 336/96 geometry provide exactly three batches of eight.
+_TEST_TRAIN_ROWS: Final = 455
+_TEST_VAL_ROWS: Final = 96
+_TEST_ROWS: Final = 96
+_TEST_CSV_ROWS: Final = _TEST_TRAIN_ROWS + _TEST_VAL_ROWS + _TEST_ROWS
 
 _EXP_MAIN: Final = """
 import torch
@@ -68,7 +78,7 @@ class Exp_Main:
         return nn.MSELoss()
 """
 
-_DATA_FACTORY: Final = """
+_DATA_FACTORY: Final = f"""
 from priml.baselines.etth1.data import Etth1Data
 
 
@@ -79,6 +89,9 @@ def data_provider(args, flag):
     cfg.pred_len = args.pred_len
     cfg.channels = args.enc_in
     cfg.batch_size = args.batch_size
+    cfg.train_rows = {_TEST_TRAIN_ROWS}
+    cfg.val_rows = {_TEST_VAL_ROWS}
+    cfg.test_rows = {_TEST_ROWS}
     loader = cfg.make().train_dataloader()
     return None, ((b["media"], b["label"], b["media"], b["label"]) for b in loader)
 """
@@ -97,11 +110,19 @@ def dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
     with (directory / "ETTh1.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["date", *"abcdefg"])
-        for row in range(14_400):
+        for row in range(_TEST_CSV_ROWS):
             writer.writerow(
                 ["2016-07-01", *((row * (c + 2)) % (31 + c) for c in range(7))],
             )
     return directory
+
+
+@pytest.fixture
+def compact_data_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject matching test splits where the verifier has no split-size hook."""
+    # Both factories must change or the source and candidate read different row counts.
+    monkeypatch.setattr(experiments, "exp000", _exp000_with_compact_data)
+    monkeypatch.setattr(reference, "exp000", _exp000_with_compact_data)
 
 
 @pytest.fixture
@@ -137,7 +158,7 @@ def test_reference_args_change_only_geometry_for_the_probe(tmp_path: Path) -> No
     assert full["root_path"] == str(tmp_path)
 
 
-@pytest.mark.usefixtures("isolated_imports")
+@pytest.mark.usefixtures("isolated_imports", "compact_data_config")
 def test_verify_reports_exact_parity(
     tmp_path: Path,
     pinned: Path,
@@ -155,7 +176,7 @@ def test_verify_reports_exact_parity(
     assert report["canonical_three_step_mismatches"] == 0
 
 
-@pytest.mark.usefixtures("isolated_imports")
+@pytest.mark.usefixtures("isolated_imports", "compact_data_config")
 def test_capture_returns_portable_source_records(
     tmp_path: Path,
     pinned: Path,
@@ -301,6 +322,14 @@ def _checkout(
 
 def _set_argv(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
     monkeypatch.setattr(sys, "argv", ["verify_reference", *args])
+
+
+def _exp000_with_compact_data() -> Etth1TrainLoop.Config:
+    cfg = exp000()
+    cfg.dataset.train_rows = _TEST_TRAIN_ROWS
+    cfg.dataset.val_rows = _TEST_VAL_ROWS
+    cfg.dataset.test_rows = _TEST_ROWS
+    return cfg
 
 
 if __name__ == "__main__":

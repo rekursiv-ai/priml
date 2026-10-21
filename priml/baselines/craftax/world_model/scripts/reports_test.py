@@ -50,7 +50,7 @@ def test_the_tiles_run_is_optional_and_read_whole_when_present() -> None:
 
 
 def test_a_training_run_reads_its_trends_and_partial_timing() -> None:
-    run = {
+    run: dict[str, object] = {
         "run": "abc",
         "last_step": None,
         "eval_steps": [1, 2],

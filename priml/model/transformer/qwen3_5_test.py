@@ -377,7 +377,7 @@ def test_rotary_scaling_is_read_as_yarn_reads_it(key: str, value: object) -> Non
     )
     try:
         _ = YarnScaling.Config.from_hf(config)
-    except (ValueError, ReadError) as error:
+    except ValueError as error:
         expected = error
     with pytest.raises(type(expected), match=re.escape(str(expected))):
         Qwen35.Config.from_hf(config)

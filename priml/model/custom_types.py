@@ -45,6 +45,7 @@ __all__ = [
     "ForwardOutput",
     "HasAttention",
     "HasDepthIndex",
+    "HasForward",
     "HasOutputGrid",
     "HasResetParameters",
     "HeadGeometry",
@@ -201,6 +202,14 @@ class HasOutputGrid(Protocol):
         ...
 
 
+class HasForward[**P, R](Protocol):
+    """Whatever ``forward`` accepts and returns, its ``__call__`` does too."""
+
+    def forward(self, *args: P.args, **kwargs: P.kwargs) -> R:
+        """Run the module."""
+        ...
+
+
 @runtime_checkable
 class HasResetParameters(Protocol):
     """Owns resettable parameters or buffers."""
@@ -217,7 +226,7 @@ class TensorModule(HasResetParameters, Protocol[_Kwargs]):
     every call site ``Any``. This names the contract those call sites need.
     """
 
-    def __call__(
+    def forward(
         self,
         x: Tensor,
         /,
@@ -225,6 +234,14 @@ class TensorModule(HasResetParameters, Protocol[_Kwargs]):
         **kwargs: _Kwargs.kwargs,
     ) -> Tensor:
         """Apply to the input."""
+        ...
+
+    def __call__[**P, R](
+        self: HasForward[P, R],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        """Dispatch to ``forward``, exactly as ``nn.Module.__call__`` does."""
         ...
 
 

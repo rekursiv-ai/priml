@@ -50,11 +50,10 @@ ForecastStudy.Config(
             )
         ),
         method=CalibratedSimulator.Config(
-            search=PartialConfig(
-                scipy.optimize._minimize.minimize_scalar,
+            search=BoundedScalarSearch.Config(
                 bounds=(0.0, 1.0),
-                method='bounded',
-                options={'maxiter': 64, 'xatol': 1e-06}
+                xatol=1e-06,
+                max_evaluations=64
             ),
             dtype=torch.float64
         )

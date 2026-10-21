@@ -40,7 +40,7 @@ Numeric = bool | int | float | complex | np.number | np.bool_
 # "Tensorable" follows Python's -able convention (Callable, Hashable, Iterable)
 # and avoids collision with torch._prims_common.TensorLike.
 Tensorable = (
-    Sequence["Tensorable"]
+    Sequence["Tensorable"]  # pyrefly: ignore[not-a-type] -- pyrefly misses this recursive implicit alias; ``TensorableNest`` passes.
     | np.ndarray[tuple[int, ...], np.dtype[np.generic]]
     | Tensor
     | Numeric

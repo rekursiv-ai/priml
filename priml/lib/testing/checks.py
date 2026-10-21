@@ -9,11 +9,14 @@
   launched, not the code under test::
 
       subprocess.Popen([*default_signals(signal.SIGINT), "/bin/bash", script])
+
+- ``smuggle``: pass a deliberately ill-typed value through a typed API, so a
+  test can reach the runtime check that rejects it.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import sys
 
@@ -27,7 +30,7 @@ if TYPE_CHECKING:
     import signal
 
 
-__all__ = ["assert_help_without_docstring", "default_signals"]
+__all__ = ["assert_help_without_docstring", "default_signals", "smuggle"]
 
 
 def assert_help_without_docstring(
@@ -78,3 +81,9 @@ def default_signals(*signums: signal.Signals) -> list[str]:
             "os.execvp(sys.argv[1], sys.argv[1:])\n"
         ),
     ]
+
+
+def smuggle[T](value: object, as_type: type[T]) -> T:
+    """Return ``value`` typed as ``as_type``, unchecked, for a negative test."""
+    del as_type
+    return cast("T", value)

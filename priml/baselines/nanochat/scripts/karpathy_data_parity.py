@@ -96,7 +96,7 @@ def load_upstream(root: Path, *, corpus: Path) -> _PrepareModule:
     """
     sys.path.insert(0, str(root))
     module = importlib.import_module("prepare")
-    if not isinstance(module, _PrepareModule):
+    if not isinstance(module, _PrepareModule):  # pyrefly: ignore[unsafe-overlap] -- pyrefly reads a module's attributes as read-only and a protocol's members as read-write.
         raise TypeError("prepare module does not satisfy the parity contract")
     module.DATA_DIR = str(corpus)
     module.TOKENIZER_DIR = str(corpus / "tokenizer")

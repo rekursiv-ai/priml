@@ -85,8 +85,8 @@ Benchmark.Config(
         │           optimizer=LBFGS.Config(
         │               max_iter=15_000,
         │               tolerance_gradient=1e-06,
-        │               tolerance_relative=np.float64(1.4210854715202004e-14),
-        │               max_line_search=20
+        │               tolerance_change=np.float64(1.4210854715202004e-14),
+        │               history_size=10
         │           )
         │       ),
         │       inner_folds=3
@@ -97,8 +97,8 @@ Benchmark.Config(
         │           optimizer=LBFGS.Config(
         │               max_iter=5_000,
         │               tolerance_gradient=0.0001,
-        │               tolerance_relative=np.float64(1.4210854715202004e-14),
-        │               max_line_search=50
+        │               tolerance_change=np.float64(1.4210854715202004e-14),
+        │               history_size=10
         │           )
         │       ),
         │       scaler=StandardScaler.Config(),
@@ -111,8 +111,8 @@ Benchmark.Config(
         │               optimizer=LBFGS.Config(
         │                   max_iter=3_000,
         │                   tolerance_gradient=0.0001,
-        │                   tolerance_relative=np.float64(1.4210854715202004e-14),
-        │                   max_line_search=50
+        │                   tolerance_change=np.float64(1.4210854715202004e-14),
+        │                   history_size=10
         │               )
         │           ),
         │           scaler=StandardScaler.Config(),
@@ -126,8 +126,6 @@ Benchmark.Config(
         validation=ValidationGroups.Config(
         │   topics=TopicClusters.Config(
         │   │   threshold=0.9,
-        │   │   method='average',
-        │   │   criterion='distance',
         │   │   vectorizer=TfidfVectorizer.Config(
         │   │   │   analyzer=WordNgrams.Config(
         │   │   │   │   token_pattern='(?u)\\b\\w\\w+\\b',

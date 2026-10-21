@@ -332,7 +332,7 @@ class _Daylight:
 
     def __getitem__(self, timestep: int) -> np.float32:
         """Return the light at ``timestep``."""
-        return _DAYLIGHT(int(timestep))
+        return _DAYLIGHT(timestep)
 
 
 # Made at the first block's entry, before it patches a kernel: so the ids
@@ -598,7 +598,7 @@ class _Records:
 
     def __getitem__(self, index: SupportsIndex | slice | tuple[int, ...]) -> object:
         """Return record ``index`` as its :class:`_Fields`; else the array's item."""
-        if isinstance(index, slice | tuple):
+        if isinstance(index, (slice, tuple)):
             return cast("object", self.array[index])
         key = operator.index(index)
         if key not in self.records:

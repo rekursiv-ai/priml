@@ -112,7 +112,7 @@ class DenoisingLoss(VerifierLoss):
         denoise_weight: float = 1.0
         """Weight of the masked-digit cross-entropy term."""
 
-    config: Config
+    config: Config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
     """Narrowed from the parent's declaration for the denoising weight."""
 
     @override

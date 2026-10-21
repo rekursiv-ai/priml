@@ -425,8 +425,8 @@ def test_a_frame_outside_the_schema_is_refused_at_its_first_offender() -> None:
     # Status is 1 plus the observation index: aux 0, wood, follows the cells.
     assert replay.token_frame_numba(state, cells, aux) == 1 + replay.CELL_VALUES
     states["inventory"]["wood"][0] = replay.AUX_HIGH[0]
-    level = int(state.player_level)
-    row, col = (int(v) for v in state.player_position)
+    level = int(state.player_level)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+    row, col = (v for v in state.player_position)
     states["map"][0, level, row, col] = replay.CELL_LIMIT[0]
     # The player stands at the window's centre, row 4 and column 5 of 9 x 11.
     assert replay.token_frame_numba(state, cells, aux) == 1 + (4 * 11 + 5) * 8

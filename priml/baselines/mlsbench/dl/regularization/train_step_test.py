@@ -66,7 +66,7 @@ def test_the_default_regularizer_adds_zero_and_leaves_the_update_unchanged() -> 
     regularized = config().make()
     made = regularized.regularization
     assert isinstance(made, functools.partial)
-    assert cast("functools.partial[Tensor]", made).func is zero
+    assert cast("functools.partial[Tensor]", made).func is zero  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
     regularized.model.load_state_dict(plain.model.state_dict())
     ours, theirs = regularized.train_step(**batch()), plain.train_step(**batch())
     assert torch.equal(ours["loss"], theirs["loss"])

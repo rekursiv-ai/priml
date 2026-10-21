@@ -467,4 +467,4 @@ def _visible_tile_numba(state: EnvState, mobs: Mobs, i: int) -> int:
         <= VISIBLE_LIGHT_THRESHOLD
     ):
         return -1
-    return int(local_row * OBS_COLS + local_col)
+    return local_row * OBS_COLS + local_col

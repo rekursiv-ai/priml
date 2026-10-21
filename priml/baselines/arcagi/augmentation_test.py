@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import math
 import re
@@ -86,6 +86,17 @@ def test_color_dihedral_roundtrip() -> None:
         assert np.array_equal(inverse(forward(grid)), grid)
 
 
+# Each invalid scale weighting and the message ``normalize_scale_weights`` gives it.
+_bad_scale_weights: Final[tuple[tuple[dict[int, float], str], ...]] = (
+    ({}, "train_scale_weights must contain at least one scale."),
+    ({0: 1.0}, "scale factors must be positive: {0: 1.0}."),
+    ({1: -1.0}, "scale weights must be finite and nonnegative: {1: -1.0}."),
+    ({1: float("nan")}, "scale weights must be finite and nonnegative: {1: nan}."),
+    ({1: float("inf")}, "scale weights must be finite and nonnegative: {1: inf}."),
+    ({1: 0.0}, "scale weights must include a positive weight: {1: 0.0}."),
+)
+
+
 def test_spatial_config_validates_grid_and_scale_weights() -> None:
     config = SpatialAugmentation.Config(spec=ArcSpec(max_grid=1))
     config.make()
@@ -93,7 +104,7 @@ def test_spatial_config_validates_grid_and_scale_weights() -> None:
     config.spec.max_grid = 0
     with pytest.raises(ValueError, match=re.escape("max_grid must be positive.")):
         config.make()
-    for weights in ({}, {0: 1.0}, {1: float("nan")}, {1: -1.0}, {1: 0.0}):
+    for weights, _ in _bad_scale_weights:
         config = SpatialAugmentation.Config(spec=ArcSpec())
         config.train_scale_weights = weights
         with pytest.raises(
@@ -273,25 +284,7 @@ def test_arc_grid_conversion_and_hash_pin_representation() -> None:
 def test_scale_weight_normalization() -> None:
     weights = normalize_scale_weights({3: 2.0, 1: 1.0, 2: 0.0})
     assert weights == {1: 1 / 3, 3: 2 / 3}
-    for invalid, message in (
-        ({}, "train_scale_weights must contain at least one scale."),
-        (
-            {0: 1.0},
-            "scale factors must be positive: {0: 1.0}.",
-        ),
-        (
-            {1: -1.0},
-            "scale weights must be finite and nonnegative: {1: -1.0}.",
-        ),
-        (
-            {1: float("inf")},
-            "scale weights must be finite and nonnegative: {1: inf}.",
-        ),
-        (
-            {1: 0.0},
-            "scale weights must include a positive weight: {1: 0.0}.",
-        ),
-    ):
+    for invalid, message in _bad_scale_weights:
         with pytest.raises(ValueError, match=re.escape(message)):
             normalize_scale_weights(invalid)
 

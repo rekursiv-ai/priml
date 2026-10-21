@@ -24,7 +24,7 @@ from priml.baselines.name_that_llm.model import (
     Split,
     SvmBranch,
 )
-from priml.baselines.name_that_llm.testing.fixtures_support_test import (
+from priml.baselines.name_that_llm.testing import (
     miniature_split,
     recipe,
 )

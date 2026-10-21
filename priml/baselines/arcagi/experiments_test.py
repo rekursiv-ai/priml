@@ -82,7 +82,6 @@ from priml.model.embedding import Embedding
 from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
 from priml.model.grid_solver import (
     CoreCompile,
-    GridSolver,
     SingleLatentGridSolver,
     lattice_positions,
 )
@@ -205,7 +204,6 @@ def test_published_charm_recipe_is_explicit_and_io_free(
 ) -> None:
     config = factory().copy_tree().finalize()
 
-    assert isinstance(config, experiments.CharmTrainLoop.Config)
     assert config.study_name == "arcagi"
     assert config.experiment_name == name
     assert config.seed == config.dataset.seed == 0
@@ -246,7 +244,6 @@ def test_published_charm_recipe_is_explicit_and_io_free(
         == (_charm_source_names(name)[-1])
     )
     step = config.step
-    assert isinstance(step, PooledActTrainStep.Config)
     assert isinstance(config.dataset, ArcParquetData.Config)
     assert all(
         isinstance(source, PairSource.Config) for source in config.dataset.train_sources
@@ -1149,7 +1146,6 @@ def test_the_muon_recipe_filters_and_rates() -> None:
 
 def test_exp000_states_the_reference_architecture() -> None:
     model = experiments.exp000().step.model
-    assert isinstance(model, GridSolver.Config)
     assert model.channels_in == 512
     assert model.num_layers == 2
     assert isinstance(model.embedding, GridEmbedding.Config)

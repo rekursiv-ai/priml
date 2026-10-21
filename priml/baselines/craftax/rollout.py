@@ -1887,8 +1887,8 @@ def _graph_launcher() -> Callable[[np.uint64, np.uint64], int]:
     stream_synchronize = cast("Callable[[np.uint64], int]", cu_stream_synchronize)
 
     def launch(graph_exec: np.uint64, stream: np.uint64) -> int:
-        status = int(graph_launch(graph_exec, stream))
-        return status or int(stream_synchronize(stream))
+        status = graph_launch(graph_exec, stream)
+        return status or stream_synchronize(stream)
 
     # A ``cfunc``: the env's cached loop takes it as a first-class function. A
     # jitted function holding these ctypes pointers would make that loop

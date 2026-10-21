@@ -311,7 +311,7 @@ class Etth1TrainLoop(TrainLoop):
     @override
     def state_dict(self) -> StateDict:
         """Save stopping history together with model, loader, optimizer, and RNG."""
-        return {
+        return {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **super().state_dict(),
             "best_validation_loss": self.best_validation_loss,
             "bad_validation_epochs": self.bad_validation_epochs,

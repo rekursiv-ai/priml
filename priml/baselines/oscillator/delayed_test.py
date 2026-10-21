@@ -1,7 +1,5 @@
 """Check the paired construction, causal rollout, and linear-model limit."""
 
-from configgle import PartialConfig
-
 import pytest
 import torch
 
@@ -17,6 +15,7 @@ from priml.baselines.oscillator.delayed import (
 )
 from priml.baselines.oscillator.experiments import exp009, exp019
 from priml.baselines.oscillator.nonlinear import KernelCorrection, PolynomialKernel
+from priml.baselines.oscillator.search import BoundedScalarSearch
 from priml.baselines.oscillator.train_step import RidgeCorrection
 from priml.testing.golden import assert_pprint_golden
 
@@ -333,9 +332,8 @@ def test_failed_delayed_calibration_has_no_prediction_state() -> None:
     method_cfg = DelayedCalibration.Config()
     assert isinstance(cfg.reference, DelayedOscillator.Config)
     method_cfg.simulator = cfg.reference.copy_tree()
-    search = method_cfg.search
-    assert isinstance(search, PartialConfig)
-    search.options = {"maxiter": 1}
+    assert isinstance(method_cfg.search, BoundedScalarSearch.Config)
+    method_cfg.search.max_evaluations = 1
     method = method_cfg.make()
     with pytest.raises(RuntimeError, match="converged"):
         method.fit(train, validation=train, synthetic=train, simulator=data.cheap)

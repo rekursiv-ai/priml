@@ -593,7 +593,7 @@ def test_prediction_wire_format_round_trips_multiple_values() -> None:
             "1" * 64: [("a" * 64, 0.25), ("b" * 64, 0.75)],
             "2" * 64: [("c" * 64, 0.5)],
         },
-        "task-b": {},
+        "task-b": dict[str, list[tuple[str, float]]](),
     }
     assert decode_preds(encode_preds(predictions)) == predictions
 
@@ -1648,7 +1648,7 @@ def test_metric_rejects_mismatched_batch_and_unsupported_scale(
     metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
     packed = _parquet_packed(candidate=[[3]], q_logit=0.0)
     batch = _parquet_batch([("task-a", [[1, 2]], packed)])
-    batch["canonical_puzzle_names"] = []
+    batch["canonical_puzzle_names"] = list[str]()
 
     with pytest.raises(ValueError, match="metadata must match packed batch size"):
         metric.update(packed.unsqueeze(0), **batch)

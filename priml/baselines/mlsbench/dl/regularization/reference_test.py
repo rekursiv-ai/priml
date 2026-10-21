@@ -171,7 +171,6 @@ def test_each_regularizer_on_each_settings_network_matches_the_script(
     assert_exact(expected, {k: v for k, v in record.items() if k in expected})
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize(
     "key",
     [
@@ -180,7 +179,7 @@ def test_each_regularizer_on_each_settings_network_matches_the_script(
         for name in variants
     ],
 )
-def test_each_variants_full_network_at_each_setting_matches_the_script(
+def test_each_variants_shallow_setting_replay_matches_the_script(
     key: str,
 ) -> None:
     setting, name = key.split("/")

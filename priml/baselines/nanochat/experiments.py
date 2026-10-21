@@ -65,7 +65,7 @@ else:
 
     torch = lazy_import("torch")  # ~1050 ms; experiment setup needs it.
 
-from configgle import Makes, PartialConfig
+from configgle import Makes, Makes2, PartialConfig
 
 from priml.baselines.nanochat.attention import CausalAttention
 from priml.baselines.nanochat.data import NanoChatData, ReferenceEvaluation
@@ -434,7 +434,7 @@ def exp003() -> NanoChatLoop.Config:
 class NgramTrainLoop(NanoChatLoop):
     """Run memory-augmented models on the training step's budget clock."""
 
-    class Config(NanoChatLoop.Config):
+    class Config(Makes2["NgramTrainLoop"], NanoChatLoop.Config):
         """Bind memory-table optimization to the packed training dataset."""
 
         step: NanoChatTrainStep.Config = field(default_factory=NgramTrainStep.Config)
@@ -551,7 +551,7 @@ def exp007() -> NgramTrainLoop.Config:
     assert isinstance(value, PartialConfig)
     assert isinstance(token, PartialConfig)
     value.weight_decay = 0.01
-    context = cast(PartialConfig[torch.optim.Optimizer], token.copy_tree())
+    context = cast(PartialConfig[torch.optim.Optimizer], token.copy_tree())  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
     context.weight_decay = 0.01
     optimizer.select[1] = matching("embed.inner")
     optimizer.optimizers.append(context)
@@ -597,7 +597,7 @@ def exp008() -> NgramTrainLoop.Config:
     context = optimizer.optimizers[6]
     assert isinstance(context, PartialConfig)
     context.lr = 0.8
-    trigram = cast(PartialConfig[torch.optim.Optimizer], context.copy_tree())
+    trigram = cast(PartialConfig[torch.optim.Optimizer], context.copy_tree())  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
     trigram.lr = 1.2
     optimizer.optimizers.append(trigram)
     optimizer.select[6] = matching("embed.contexts.bigram.inner")
@@ -762,7 +762,7 @@ def exp011() -> NgramTrainLoop.Config:
     optimizer.select[4] = matching("mix.original", "mix.gate_scales")
     skip = optimizer.optimizers[4]
     assert isinstance(skip, PartialConfig)
-    pooling = cast(PartialConfig[torch.optim.Optimizer], skip.copy_tree())
+    pooling = cast(PartialConfig[torch.optim.Optimizer], skip.copy_tree())  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
     pooling.lr = cast(float, pooling.lr) * 0.15
     optimizer.optimizers.append(pooling)
     optimizer.select.append(matching("pool_weights"))
@@ -1008,7 +1008,7 @@ def exp016() -> NgramTrainLoop.Config:
     cfg = exp015()
     cfg.experiment_name = "exp016"
     assert isinstance(cfg.step.compile, PartialConfig)
-    compiler = cast(PartialConfig[Callable[..., object]], cfg.step.compile)
+    compiler = cast(PartialConfig[Callable[..., object]], cfg.step.compile)  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
     compiler.mode = "max-autotune"
     assert isinstance(cfg.step.model.block, list)
     for block in cfg.step.model.block:
@@ -1078,7 +1078,7 @@ def exp018() -> NgramTrainLoop.Config:
     for index in (0, 1, 2, 5, 6):
         member = optimizer.optimizers[index]
         assert isinstance(member, (PartialConfig, BiasCorrectedRMSProp.Config))
-        member.lr = cast(float, member.lr) * batch_correction
+        member.lr = cast(float, member.lr) * batch_correction  # pyrefly: ignore[missing-attribute] -- pyrefly drops PartialConfig.__setattr__ inside a union; the attribute is a kwarg.
     matrices = optimizer.optimizers[8]
     assert isinstance(matrices, FFNScaledNorMuon.Config)
     matrices.channels_in = model.channels_in

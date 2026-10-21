@@ -703,7 +703,7 @@ class Reproduction:
             return metrics, time.monotonic() - started
         return self._lock_eval(
             step,
-            count=int(self.config.full_eval.evaluation_count),
+            count=int(self.config.full_eval.evaluation_count),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             tag="full9v",
         )
 
@@ -717,7 +717,7 @@ class Reproduction:
         row: dict[str, object] = {
             "step": step,
             "exact": int(_as_float(headline["eval/n_correct"])),
-            "of": int(self.config.full_eval.evaluation_count),
+            "of": int(self.config.full_eval.evaluation_count),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         }
         if isinstance(self.config.full_eval, SieveEval.Config):
             row["rounds"] = headline["eval/rounds"]
@@ -882,7 +882,7 @@ def _det_gate_screen(
         del gate
         release()
     exact = (result.grids == result.label).all(dim=-1)
-    return int(exact.sum()), int(exact.shape[0]), time.monotonic() - started
+    return int(exact.sum()), int(exact.shape[0]), time.monotonic() - started  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 # The learned-q policy runs when ``accept_fn`` is None (the single-view dev screen); a
@@ -973,7 +973,7 @@ class _OuterRun:
         """Forward scalar metrics at ``step`` (non-scalars are dropped)."""
         if self._tracker is None:
             return
-        self._step = max(self._step, int(step))
+        self._step = max(self._step, int(step))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         self._tracker.log_metrics(dict(metrics), self._step, prefix=prefix)
 
     def forward_segment(self, metrics_path: Path, step: int) -> None:

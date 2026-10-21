@@ -132,7 +132,7 @@ class Cifar10TrainStep(TrainStep):
                 f"total_train_steps must be positive; got {config.total_train_steps}.",
             )
         super().__init__(config)
-        self.config: Cifar10TrainStep.Config = config
+        self.config: Cifar10TrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         if self.device.type != "mps":
             # cuDNN's convolutions want this layout; MPS rejects the format on
             # some torch releases. Applied after the parallel strategy placed
@@ -236,7 +236,7 @@ class Cifar10TrainStep(TrainStep):
         Fitting happens once, from the first batch seen, so a resume that
         forgot it would re-fit against a model whose weights had already moved.
         """
-        return {**super().state_dict(), "whitened": self._whitened}
+        return {**super().state_dict(), "whitened": self._whitened}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
 
     @override
     def load_state_dict(

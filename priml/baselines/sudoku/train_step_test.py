@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
+from typing_extensions import TypedDict
 
 from treekle import from_plain
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
-class _TestPrefixKwargs(TypedDict, total=False):
+class _TestPrefixKwargs(TypedDict, total=False, closed=True):
     puzzle_identifiers: object
 
 

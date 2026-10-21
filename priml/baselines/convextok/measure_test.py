@@ -6,6 +6,7 @@ solver with a known answer pins the objective, the infeasibility, and the
 vocabulary diff.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
@@ -130,7 +131,7 @@ def test_known_solution_pins_objective_infeasibility_and_diff(tmp_path: Path) ->
 
 
 def test_run_writes_stage_seconds_memory_and_tokenizer(tmp_path: Path) -> None:
-    config = _measured_config(tmp_path)
+    config = _measured_config(tmp_path, texts=["abababab"])
     config.preparation.presolve = None
     config.preparation.solver = _Zeros.Config()
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * MAXRSS_UNIT_BYTES
@@ -240,7 +241,7 @@ def test_cuda_peak_memory_is_reset_before_the_fit_and_read_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The CUDA branch, driven on a CPU host with the memory counters faked."""
-    config = _measured_config(tmp_path)
+    config = _measured_config(tmp_path, texts=["abababab"])
     config.preparation.device = "cuda"
     config.preparation.presolve = None
     config.preparation.solver = _Zeros.Config()
@@ -304,13 +305,17 @@ def test_inputs_resolve_beneath_base_dir(tmp_path: Path) -> None:
     assert finalized.reference == tmp_path / "runs/convextok/exp000/tokenizer.json"
 
 
-def _measured_config(tmp_path: Path) -> MeasuredFit.Config:
+def _measured_config(
+    tmp_path: Path,
+    *,
+    texts: Sequence[str] = (),
+) -> MeasuredFit.Config:
     """Point a CPU measured fit at the fixture corpus, written as one raw shard."""
     config = MeasuredFit.Config()
     config.study_name = "convextok"
     config.experiment_name = "exp000"
     config.base_dir = tmp_path
-    config.preparation = fixture_config(tmp_path)
+    config.preparation = fixture_config(tmp_path, texts=texts)
     # Logical, as a measured fit's inputs are: it resolves beneath base_dir.
     config.preparation.raw_dir = Path("/raw")
     return config

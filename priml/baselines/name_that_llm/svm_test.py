@@ -5,13 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
-from scipy.sparse import csr_array
 from treekle import from_plain
 
 import numpy as np
 import pytest
 import torch
 
+from priml.baselines.name_that_llm.sparse import CsrMatrix
 from priml.baselines.name_that_llm.svm import DualCoordinate, LinearSVC, _bounded
 from priml.testing.golden import mismatches, read_tensors
 
@@ -27,11 +27,11 @@ def test_sparse_classifier_replays_complete_source_state(
 ) -> None:
     fit = np.sin(np.arange(35).reshape(5, 7) / 7)
     fit[np.arange(5), np.arange(5)] = 0
-    predict = csr_array(np.cos(np.arange(21).reshape(3, 7) / 11))
+    predict = CsrMatrix.from_dense(np.cos(np.arange(21).reshape(3, 7) / 11))
     targets = np.array([4, 2, 8, 4, 2], dtype=np.int64)
     config = LinearSVC.Config()
     config.optimizer.max_iter = max_iter
-    model = config.make().fit(csr_array(fit), targets=targets)
+    model = config.make().fit(CsrMatrix.from_dense(fit), targets=targets)
     if corrupt:
         model.coef_[:1, :1] = np.nextafter(model.coef_[:1, :1], np.inf)
     actual = {"predict": torch.from_numpy(model.decision_function(predict))}
@@ -64,13 +64,27 @@ def test_sparse_prediction_replays_from_complete_captured_fitted_state(
     model.intercept_ = record[f"{max_iter}/intercept_"].numpy()
     # The original fixture fixes three prediction rows and three classes.
     scores = model.decision_function(
-        csr_array(np.cos(np.arange(21).reshape(3, 7) / 11)),
+        CsrMatrix.from_dense(np.cos(np.arange(21).reshape(3, 7) / 11)),
     )
     report = mismatches(
         {"scores": record[f"{max_iter}/predict"]},
         actual={"scores": torch.from_numpy(scores)},
     )
     assert not report, report
+
+
+def test_sparse_scores_round_each_product_before_adding_it() -> None:
+    model = LinearSVC.Config().make()
+    model.n_features_in_ = 3
+    model.classes_ = np.arange(4)
+    model.coef_ = np.zeros((4, 3))
+    model.coef_[0, :2] = [-1, 1 - 2**-27]
+    model.intercept_ = np.arange(4, dtype=np.float64)
+    scores = model.decision_function(
+        CsrMatrix.from_dense(np.array([[1, 1 + 2**-27, 0], [0, 0, 2]])),
+    )
+    # A fused second step would leave -2**-54, the rounding error of the product.
+    assert np.array_equal(scores, np.tile(model.intercept_, reps=(2, 1)))
 
 
 def test_coordinate_shuffle_matches_complete_source_bounded_draws() -> None:
@@ -109,7 +123,7 @@ def test_optimizer_rejects_invalid_gradient_tolerance(tolerance: float) -> None:
 
 @pytest.mark.parametrize("classes", argvalues=[1, 2])
 def test_sparse_classifier_rejects_nonmulticlass_targets(classes: int) -> None:
-    features = csr_array(np.arange(20, dtype=np.float64).reshape(4, 5))
+    features = CsrMatrix.from_dense(np.arange(20, dtype=np.float64).reshape(4, 5))
     with pytest.raises(ValueError, match="at least three classes"):
         LinearSVC.Config().make().fit(
             features,
@@ -118,7 +132,7 @@ def test_sparse_classifier_rejects_nonmulticlass_targets(classes: int) -> None:
 
 
 def test_sparse_classifier_rejects_unaligned_rows() -> None:
-    features = csr_array(np.zeros((3, 5)))
+    features = CsrMatrix.from_dense(np.zeros((3, 5)))
     with pytest.raises(ValueError, match="feature rows aligned with targets"):
         LinearSVC.Config().make().fit(features, targets=np.arange(4, dtype=np.int64))
 
@@ -130,18 +144,18 @@ def test_sparse_classifier_rejects_unfitted_or_mismatched_feature_columns(
     config = LinearSVC.Config()
     config.optimizer.max_iter = 3
     model = config.make()
-    features = csr_array(np.arange(15, dtype=np.float64).reshape(3, 5))
+    features = CsrMatrix.from_dense(np.arange(15, dtype=np.float64).reshape(3, 5))
     with pytest.raises(
         ValueError,
         match=r"^Expected fitted classifier feature columns\.$",
     ):
-        model.decision_function(csr_array((3, unfitted_columns), dtype=np.float64))
+        model.decision_function(CsrMatrix.from_dense(np.zeros((3, unfitted_columns))))
     model.fit(features, targets=np.arange(3, dtype=np.int64))
     with pytest.raises(
         ValueError,
         match=r"^Expected fitted classifier feature columns\.$",
     ):
-        model.decision_function(features[:, :2])
+        model.decision_function(features.take_columns(np.arange(2)))
 
 
 if __name__ == "__main__":

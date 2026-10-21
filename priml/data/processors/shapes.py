@@ -114,7 +114,7 @@ class ImageShapeStatistics:
             # pipeline from inside a passthrough that only collects statistics.
             if width is not None and height is not None and width > 0 and height > 0:
                 # Track pixel density (total pixels)
-                pixel_density = int(width) * int(height)
+                pixel_density = int(width) * int(height)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                 self.pixel_densities.append(pixel_density)
 
                 # Track effective resolution (sqrt of pixel density, rounded)

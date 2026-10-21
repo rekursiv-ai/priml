@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Never, cast
 
 import json
 import subprocess
@@ -37,7 +37,25 @@ from priml.baselines.tmax.scripts.eval import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
+
+
+def _fails(reason: str) -> Callable[..., Never]:
+    """Return an injected callable that fails the test if anything calls it."""
+
+    def called(*_args: object, **_kwargs: object) -> Never:
+        pytest.fail(reason)
+
+    return called
+
+
+def _returns[T](value: T) -> Callable[..., T]:
+    """Return an injected callable that answers every call with ``value``."""
+
+    def called(*_args: object, **_kwargs: object) -> T:
+        return value
+
+    return called
 
 
 def _ignore(*args: object, **kwargs: object) -> None:
@@ -243,7 +261,7 @@ def test_daytona_preflight_runs_before_vllm_starts(
     with pytest.raises(RuntimeError, match="DAYTONA_API_KEY"):
         eval_module.run(
             _config(tmp_path),
-            popen=lambda *_args, **_kwargs: pytest.fail("must not start vLLM"),
+            popen=_fails("must not start vLLM"),
         )
 
 
@@ -263,7 +281,7 @@ def test_daytona_preflight_requires_the_optional_package(
     with pytest.raises(RuntimeError, match=f"daytona=={DAYTONA_VERSION}"):
         eval_module.run(
             _config(tmp_path),
-            popen=lambda *_args, **_kwargs: pytest.fail("must not start vLLM"),
+            popen=_fails("must not start vLLM"),
             run_command=missing_extra,
         )
 
@@ -292,7 +310,7 @@ def test_existing_job_must_match_the_checkpoint_identity(
     with pytest.raises(ValueError, match="different inputs"):
         eval_module.run(
             config,
-            popen=lambda *_args, **_kwargs: pytest.fail("must not start vLLM"),
+            popen=_fails("must not start vLLM"),
         )
 
 
@@ -392,7 +410,7 @@ def test_server_readiness_requires_the_requested_model() -> None:
                 "requested-model",
                 timeout=1.0,
                 sleep=lambda _: None,
-                urlopen=lambda *_args, **_kwargs: response,
+                urlopen=_returns(response),
             )
     assert response.closed
 
@@ -405,7 +423,7 @@ def test_server_readiness_returns_once_the_model_is_listed() -> None:
         "requested-model",
         timeout=1.0,
         sleep=lambda _: pytest.fail("must not wait once ready"),
-        urlopen=lambda *_args, **_kwargs: response,
+        urlopen=_returns(response),
     )
     assert response.closed
 
@@ -448,27 +466,39 @@ def test_server_readiness_rejects_an_exited_process() -> None:
             8008,
             "requested-model",
             server=server,
-            urlopen=lambda *_args, **_kwargs: pytest.fail("must not probe"),
+            urlopen=_fails("must not probe"),
         )
+
+
+_INVALID_COUNTS: tuple[tuple[Callable[[EvalConfig], EvalConfig], str], ...] = (
+    (
+        lambda c: replace(c, data_parallel_size=0),
+        "data_parallel_size and n_concurrent",
+    ),
+    (lambda c: replace(c, n_attempts=0), "n_attempts must be positive"),
+    (
+        lambda c: replace(c, max_format_errors=0),
+        "max_format_errors must be positive",
+    ),
+    (lambda c: replace(c, n_tasks=0), "n_tasks must be positive"),
+    (
+        lambda c: replace(c, tensor_parallel_size=0),
+        "tensor_parallel_size must be positive",
+    ),
+)
 
 
 @pytest.mark.parametrize(
     ("overrides", "match"),
-    [
-        ({"data_parallel_size": 0}, "data_parallel_size and n_concurrent"),
-        ({"n_attempts": 0}, "n_attempts must be positive"),
-        ({"max_format_errors": 0}, "max_format_errors must be positive"),
-        ({"n_tasks": 0}, "n_tasks must be positive"),
-        ({"tensor_parallel_size": 0}, "tensor_parallel_size must be positive"),
-    ],
+    _INVALID_COUNTS,
 )
 def test_eval_config_rejects_invalid_counts(
     tmp_path: Path,
-    overrides: dict[str, int],
+    overrides: Callable[[EvalConfig], EvalConfig],
     match: str,
 ) -> None:
     with pytest.raises(ValueError, match=match):
-        replace(_config(tmp_path), **overrides)
+        overrides(_config(tmp_path))
 
 
 def test_eval_config_requires_the_checkout_and_checkpoint(tmp_path: Path) -> None:
@@ -544,10 +574,7 @@ def test_a_failed_harbor_run_records_the_failure_and_stops_vllm(
     with pytest.raises(subprocess.CalledProcessError):
         eval_module.run(
             config,
-            popen=lambda *_args, **_kwargs: cast(
-                subprocess.Popen[bytes],
-                cast(object, server),
-            ),
+            popen=_returns(cast(subprocess.Popen[bytes], cast(object, server))),
             run_command=fail,
         )
     payload = json_loads(config.provenance_path.read_bytes(), dict[str, object])
@@ -585,7 +612,7 @@ def test_an_unreadable_manifest_is_refused(tmp_path: Path) -> None:
 def test_a_non_daytona_environment_needs_no_preflight(tmp_path: Path) -> None:
     eval_module._preflight_environment(
         replace(_config(tmp_path), environment="docker"),
-        run_command=lambda *_args, **_kwargs: pytest.fail("must not probe"),
+        run_command=_fails("must not probe"),
     )
 
 
@@ -612,7 +639,7 @@ def test_server_readiness_keeps_polling_past_an_unparseable_response(
             "m",
             timeout=1.0,
             sleep=lambda _: None,
-            urlopen=lambda *_args, **_kwargs: response,
+            urlopen=_returns(response),
         )
     assert response.closed
 

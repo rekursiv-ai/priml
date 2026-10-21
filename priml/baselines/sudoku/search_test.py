@@ -723,7 +723,7 @@ def test_empty_result_preserves_batch_device_and_field_contract() -> None:
     media = torch.tensor([[2, 1, 3], [1, 4, 1]])
 
     class ModelStub:
-        puzzle_emb = None
+        puzzle_emb: None = None
 
     result = (
         HpsSearch.Config()

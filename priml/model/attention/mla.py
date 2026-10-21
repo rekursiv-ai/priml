@@ -594,6 +594,7 @@ class MultiHeadLatentAttention(nn.Module):
         # Q path. The attribute names below are the CONTRACT the tensor-parallel
         # plan names (see ``tensor_parallel_plan``); the slots they are built
         # from are the caller's choice.
+        self.proj_q: TensorModule | None
         if config.q_lora_rank is None:
             self.proj_q = config.proj_q.make()
             self.proj_q_a: TensorModule | None = None

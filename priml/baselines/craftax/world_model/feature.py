@@ -2001,7 +2001,7 @@ def _flash4() -> _Flash4Decode:
             "FlashAttention 4 is not installed; install priml[cuda] or use "
             "MaskedCacheAttention instead.",
         ) from error
-    if not isinstance(module, _Flash4Decode):
+    if not isinstance(module, _Flash4Decode):  # pyrefly: ignore[unsafe-overlap] -- pyrefly reads a module's attributes as read-only and a protocol's members as read-write.
         raise TypeError("FA4 must provide flash_attn_varlen_func.")
     return module
 

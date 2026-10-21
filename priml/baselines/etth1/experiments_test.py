@@ -69,7 +69,6 @@ def test_rate_experiments_change_only_the_starting_rate(
     assert fork.copy_tree().finalize() == base.copy_tree().finalize()
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize(
     ("factory", "second_epoch_rate"),
     [(exp001, 1e-4 * (1 + math.cos(math.pi / 10)) / 2), (exp004, 1e-3)],

@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import field
 from typing import TYPE_CHECKING, NotRequired, cast, override
 
+from configgle import Makes2
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -38,17 +39,8 @@ if TYPE_CHECKING:
 class MultiTaskStep(VisionTrainStep):
     """Model, optimizer and loss combination for one multi-task experiment."""
 
-    class Config(VisionTrainStep.Config):
+    class Config(Makes2["MultiTaskStep"], VisionTrainStep.Config):
         """The vision step's slots plus the combination of the two losses."""
-
-        # Not ``Makes["MultiTaskStep"]``: the base already derives from
-        # ``Makes["VisionTrainStep"]``, and the two give no consistent MRO.
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> MultiTaskStep:
-                """Build the multi-task step."""
-                ...
 
         model: Makeable[nn.Module] = field(default_factory=TwoHeadResNet.Config)
         """Network returning the fine and the coarse logits, in that order."""
@@ -170,7 +162,7 @@ class MultiTaskStep(VisionTrainStep):
           state: The base entries plus ``"mtl_loss"``.
 
         """
-        return {**super().state_dict(), "mtl_loss": self.mtl_loss.state_dict()}
+        return {**super().state_dict(), "mtl_loss": self.mtl_loss.state_dict()}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
 
     @override
     def load_state_dict(

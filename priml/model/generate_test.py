@@ -18,7 +18,7 @@ from priml.testing.golden import assert_text_golden
 
 
 if TYPE_CHECKING:
-    from priml.model.custom_types import LayerCache
+    from priml.model.custom_types import LayerCache, TensorModule
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -498,10 +498,13 @@ class _Lookup:
         self.weight = torch.empty(4, 2)
         self.inputs: list[Tensor] = []
 
-    def __call__(self, tokens: Tensor, /, **kwargs: object) -> Tensor:
+    def forward(self, tokens: Tensor, /, **kwargs: object) -> Tensor:
         del kwargs
         self.inputs.append(tokens.clone())
         return tokens.unsqueeze(-1).float()
+
+    def __call__(self, tokens: Tensor, /, **kwargs: object) -> Tensor:
+        return self.forward(tokens, **kwargs)
 
     def reset_parameters(self) -> None:
         pass
@@ -635,7 +638,7 @@ class _TransformerWithoutEmbedding(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.proj_in = None
+        self.proj_in: TensorModule | None = None
         self.blocks = nn.ModuleList([_Block()])
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:

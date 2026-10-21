@@ -26,6 +26,7 @@ from priml.baselines.sudoku.act import FeedbackCarry
 from priml.model.attention.attention import Attention
 from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
 from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps
@@ -38,13 +39,22 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepOutput
 
 
-def training_config(width: int, dtype: torch.dtype | None) -> ArcTrainStep.Config:
+def training_config(
+    width: int,
+    dtype: torch.dtype | None,
+    *,
+    slow_cycles: int = 3,
+    fast_cycles: int = 4,
+) -> ArcTrainStep.Config:
     """Shape-compact the reference recipe without replacing its components."""
     candidate = ArcTrainStep.Config()
     model = candidate.model
     model.channels_in = width
     model.vocab_size = 4
     model.num_layers = 1
+    assert isinstance(model.recurrence, DeepRecurrence.Config)
+    model.recurrence.slow_cycles = slow_cycles
+    model.recurrence.fast_cycles = fast_cycles
     assert isinstance(model.embedding, GridEmbedding.Config)
     model.embedding.grid_shape = (3,)
     assert isinstance(model.block, RotaryBlock.Config)
@@ -279,15 +289,23 @@ def run_port(
     width: int,
     dtype: torch.dtype | None,
     clip: float,
+    *,
+    slow_cycles: int = 3,
+    fast_cycles: int = 4,
 ) -> dict[str, Tensor]:
     """Record the exported step for one case."""
-    config = training_config(width, dtype)
+    config = training_config(
+        width,
+        dtype,
+        slow_cycles=slow_cycles,
+        fast_cycles=fast_cycles,
+    )
     config.gradient_clip_norm = clip
     return record_trajectory(lambda: PortSubject(config), clip=clip)
 
 
-# The records were minted from the original implementation, which is gone, so
-# they cannot be re-minted smaller; replaying them is what this package is for.
+# Source fbef08ed1c5ae07db4578347947f26ba36e54fa6 was captured at slow_cycles=2
+# and fast_cycles=2 in all four dtype/clipping arms; replay the whole records.
 @pytest.mark.compute_training
 @pytest.mark.parametrize(("width", "dtype", "clip"), CASES)
 def test_reference_training_trajectory(
@@ -299,14 +317,14 @@ def test_reference_training_trajectory(
     assert_matches(
         "train_step",
         case_name(width, dtype, clip),
-        run_port(width, dtype, clip),
+        run_port(width, dtype, clip, slow_cycles=2, fast_cycles=2),
     )
 
 
 @pytest.mark.compute_training
 def test_reference_trajectory_bites() -> None:
     """A doubled sparse rate is reported, not absorbed."""
-    config = training_config(4, None)
+    config = training_config(4, None, slow_cycles=2, fast_cycles=2)
     config.gradient_clip_norm = math.inf
     config.sparse_optimizer.lr *= 2
     record = record_trajectory(lambda: PortSubject(config), clip=math.inf)

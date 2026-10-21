@@ -324,14 +324,10 @@ class PipelinedGPUProcessor3Stream(_SpecTransformMixin):
         super().__init__(config)
 
         # Create separate streams for pipelined GPU operations.
-        if torch.cuda.is_available():
-            self.stream_input = torch.cuda.Stream()  # CPU→GPU transfers.
-            self.stream_work = torch.cuda.Stream()  # GPU processing.
-            self.stream_output = torch.cuda.Stream()  # GPU→CPU transfers.
-        else:
-            self.stream_input = None
-            self.stream_work = None
-            self.stream_output = None
+        cuda = torch.cuda.is_available()
+        self.stream_input = torch.cuda.Stream() if cuda else None  # CPU→GPU transfers.
+        self.stream_work = torch.cuda.Stream() if cuda else None  # GPU processing.
+        self.stream_output = torch.cuda.Stream() if cuda else None  # GPU→CPU transfers.
 
     def __call__(self, samples: Iterator[Sample]) -> Iterator[Sample]:
         """Process batches with pipelined GPU transfers.
@@ -450,12 +446,9 @@ class PipelinedGPUProcessor2Stream(_SpecTransformMixin):
     def __init__(self, config: _SpecConfig):
         super().__init__(config)
 
-        if torch.cuda.is_available():
-            self.stream_output = torch.cuda.Stream()
-            self.stream_input = torch.cuda.Stream()
-        else:
-            self.stream_output = None
-            self.stream_input = None
+        cuda = torch.cuda.is_available()
+        self.stream_output = torch.cuda.Stream() if cuda else None
+        self.stream_input = torch.cuda.Stream() if cuda else None
 
     def __call__(self, samples: Iterator[Sample]) -> Iterator[Sample]:
         """Process batches with 2-stream pipelined GPU transfers."""

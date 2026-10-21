@@ -643,7 +643,7 @@ def _flat(config: object, path: str = "") -> dict[str, str]:
             (f".{entry.name}", cast("object", getattr(config, entry.name)))
             for entry in fields(config)
         ]
-    elif isinstance(config, list | tuple):
+    elif isinstance(config, (list, tuple)):
         items = cast("list[object] | tuple[object, ...]", config)
         label = f"{type(items).__name__} of {len(items)}"
         children = [(f"[{index}]", item) for index, item in enumerate(items)]

@@ -433,7 +433,6 @@ def test_exp013_fits_a_prior_free_committee_then_runs_exp011s_sieve() -> None:
 
 def test_exp013_locks_with_the_members_it_fits() -> None:
     cfg = experiments.exp013().copy_tree().finalize()
-    assert isinstance(cfg, FittedSieve.Config)
     committee = tuple(
         f"/runs/exp013_verifier_s{seed}/checkpoints/step_00016000.pt"
         for seed in range(3)

@@ -109,7 +109,7 @@ class Upstream(Protocol):
         int,
     ]:
         """Build the loaders."""
-        raise NotImplementedError
+        ...
 
     def train_epoch(
         self,

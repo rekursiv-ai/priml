@@ -59,7 +59,6 @@ def test_model_golden_detects_one_changed_bit() -> None:
         assert_tensor_golden(_CWD / "testdata" / "dlinear_model.pt", actual)
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize("pretrain_updates", [0, 1])
 def test_fit_matches_golden(
     pretrain_updates: int,
@@ -79,14 +78,12 @@ def test_network_model_matches_golden() -> None:
     assert path.stat().st_size <= MAX_GOLDEN_BYTES
 
 
-@pytest.mark.compute_training
 def test_network_fit_matches_golden(monkeypatch: pytest.MonkeyPatch) -> None:
     path = _CWD / "testdata" / "network_fit.pt"
     assert_tensor_golden(path, _fit_record(_network_config(), monkeypatch=monkeypatch))
     assert path.stat().st_size <= MAX_GOLDEN_BYTES
 
 
-@pytest.mark.compute_training
 def test_fit_golden_detects_changed_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = exp_smoke()
     assert isinstance(cfg.method, DLinearForecast.Config)

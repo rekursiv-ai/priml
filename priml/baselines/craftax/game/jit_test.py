@@ -133,9 +133,7 @@ def _sin_loop(x: Array1[np.float32], out: Array1[np.float32]) -> None:
         out[i] = math.sin(x[i])
 
 
-@pytest.mark.compute_large_fixture
 def test_the_decorator_pins_the_options_parity_depends_on() -> None:
-    _identity(1)
     options = _identity.targetoptions
     assert options["nogil"] is True
     assert options["fastmath"] is False
@@ -359,7 +357,6 @@ def test_cos_and_sin_match_the_platform_libm() -> None:
     } == TRIG_ANCHORS
 
 
-@pytest.mark.compute_large_fixture
 def test_clamps_check_low_before_high_like_c() -> None:
     assert clampi_numba(5, 0, 3) == 3
     assert clampi_numba(-1, 0, 3) == 0

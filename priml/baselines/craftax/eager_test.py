@@ -119,7 +119,7 @@ def _tick(pair: _Counted, row: int) -> int:
     states = cast("Records[EnvState]", pair.states)
     states[row].timestep += 1
     pair.counts[0] += 1
-    return int(states[row].timestep)
+    return int(states[row].timestep)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 @jit.jit
@@ -129,7 +129,7 @@ def _first_timestep(states: Records[EnvState]) -> int:
 
 @jit.jit
 def _timestep_of(state: EnvState) -> int:
-    return int(state.timestep)
+    return int(state.timestep)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 def _stand_in_target() -> str:
@@ -336,7 +336,7 @@ def test_a_block_inside_another_plays_its_own_world_then_the_outer_ones() -> Non
 def _clock() -> int:
     """Return the clock of world 1's State at its reset."""
     states, _ = replay.reset_world(1)
-    return int(env_state(states, 0).timestep)
+    return env_state(states, 0).timestep
 
 
 class _Pair(NamedTuple):

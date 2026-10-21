@@ -509,7 +509,9 @@ def test_quantized_module_conv_fp32_backward_regression() -> None:
     assert torch.isfinite(conv.weight.grad).all()
 
 
-def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
+def test_quantized_module_conv_dequant_matches_input_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """T-038: backward dequant must use the saved input dtype, not hardcoded fp32.
 
     bf16 conv *backward* is unsupported on many CPUs, so we assert the saved
@@ -538,13 +540,11 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
 
     x = torch.randn(2, 3, 4, 5, dtype=torch.bfloat16, requires_grad=True)
     out = conv(x)
-    Tensor.to = spy_to  # ty: ignore[invalid-assignment] -- test spy replaces an overloaded bound method.
-    try:
-        # bf16 conv backward may be unsupported.
-        with contextlib.suppress(RuntimeError):
-            out.sum().backward()
-    finally:
-        Tensor.to = orig_to
+    monkeypatch.setattr(Tensor, "to", spy_to)
+    # bf16 conv backward may be unsupported.
+    with contextlib.suppress(RuntimeError):
+        out.sum().backward()
+    monkeypatch.undo()
 
     # The float8 activation must be dequantized to the input's bf16 dtype.
     assert captured.get("dequant_target") == torch.bfloat16, (

@@ -161,7 +161,10 @@ def test_a_lockstep_hands_back_the_state_after_each_update() -> None:
 
 def test_the_record_joins_every_component(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake(name: str) -> Callable[..., dict[str, torch.Tensor]]:
-        return lambda *_: {name: torch.zeros(2)}
+        def record(*_args: object) -> dict[str, torch.Tensor]:
+            return {name: torch.zeros(2)}
+
+        return record
 
     for name in ("norm_record", "draws_record", "lockstep_record"):
         monkeypatch.setattr(reference, name, fake(name))

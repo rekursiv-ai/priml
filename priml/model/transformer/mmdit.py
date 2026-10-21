@@ -41,6 +41,7 @@ from priml.model.custom_types import (
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
+    HasForward,
     HasResetParameters,
     HeadGeometry,
     TensorModule,
@@ -68,13 +69,21 @@ class _JointAttention(Protocol[_AttentionKwargs]):
 
     def reset_parameters(self) -> None: ...
 
-    def __call__(
+    def forward(
         self,
         xs: Sequence[Tensor],
         /,
         *args: _AttentionKwargs.args,
         **kwargs: _AttentionKwargs.kwargs,
     ) -> tuple[Tensor, ...]: ...
+
+    def __call__[**P, R](
+        self: HasForward[P, R],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        """Dispatch to ``forward``, exactly as ``nn.Module.__call__`` does."""
+        ...
 
 
 class AdaLNZero(nn.Module):
@@ -224,11 +233,11 @@ class MMDiTStream(nn.Module):
         def finalize(self) -> Self:
             for child in (self.norm1, self.norm2, self.ffn, self.adaln):
                 if isinstance(child, ChannelsIn) and child.channels_in == -1:
-                    child.channels_in = self.channels_in
+                    child.channels_in = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
                 if isinstance(child, ChannelsOut) and child.channels_out == -1:
-                    child.channels_out = self.channels_in
+                    child.channels_out = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
                 if isinstance(child, HasDepthIndex) and not child.depth_index:
-                    child.depth_index = self.depth_index
+                    child.depth_index = self.depth_index  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             return super().finalize()
 
         def cost(

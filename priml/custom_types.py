@@ -8,7 +8,7 @@ aliases and ``convert_to_tensor`` live in
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -43,16 +43,15 @@ class HasCost(Protocol):
     the bus passes through ``**kwargs`` so a container can forward it unread.
     """
 
-    def cost(self, **kwargs: object) -> Cost:
+    # A property, not a method: each implementation's own required keywords
+    # make it narrower than any one signature the protocol could fix.
+    @property
+    def cost(self) -> Callable[..., Cost]:
         """Cost one complete invocation of the module ``self`` builds.
 
-        Args:
-          **kwargs: The open bus, named arguments only; each implementation
-            declares what it reads.
-
-        Returns:
-          cost: Whole-invocation integer FLOP and byte counts.
-
+        Called with the open bus, named arguments only; each implementation
+        declares what it reads. Returns whole-invocation integer FLOP and byte
+        counts.
         """
         ...
 

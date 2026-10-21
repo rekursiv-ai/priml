@@ -244,8 +244,8 @@ def load_upstream(
     sys.modules["kernels"] = kernels_stub()
     # Their own knob, at the value that ends their training loop as early as
     # their ``step > 10`` guard allows. Their context length is left alone.
-    constants = importlib.import_module("constants")
-    constants.TIME_BUDGET = 1e-9  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and has no static attributes.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and has no static attributes.
+    constants = cast(_ConstantsModule, importlib.import_module("constants"))
+    constants.TIME_BUDGET = 1e-9
     _prepare_module(corpus, loader)
 
     # Their 128 rows hold two resident models' activations on no card this runs
@@ -515,12 +515,13 @@ def main() -> int:
     # rather than as distributions -- a draw-order or a fan-in difference shows
     # up here instead of hiding behind a matching standard deviation.
     their_loader: dict[str, object] = {}
+    seeded: dict[str, object] = {}
     theirs, their_optimizer, upstream = build_theirs(
         root,
         corpus=flags.corpus,
         loader=their_loader,
         rows=flags.rows,
-        rng=(seeded := {}),
+        rng=seeded,
     )
     train_loader = cast(Iterator[tuple[Tensor, Tensor, object]], their_loader["train"])
 
@@ -621,13 +622,13 @@ def compare_eval(
 
     """
     tokenizer = upstream.tokenizer
-    rows = int(upstream.DEVICE_BATCH_SIZE)
+    rows = int(upstream.DEVICE_BATCH_SIZE)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     # Their own metric, on each model in turn. Capped by rebinding the token
     # count their function divides by: it is a module constant they read, not
     # an argument, and the full 40 x 524,288 tokens take minutes to answer a
     # question a few batches settle.
     original = prepare.EVAL_TOKENS
-    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)
+    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     # Under autocast, as their own final eval runs it (train.py:609-611): their
     # tables are held in bfloat16, so the model is only runnable inside one.
     autocast = torch.amp.autocast(device_type=device, dtype=torch.bfloat16)
@@ -993,6 +994,10 @@ def _compare_steps(
         for line in step_problems[:8]:
             print(f"    {line}")
     return failures
+
+
+class _ConstantsModule(Protocol):
+    TIME_BUDGET: float
 
 
 if __name__ == "__main__":

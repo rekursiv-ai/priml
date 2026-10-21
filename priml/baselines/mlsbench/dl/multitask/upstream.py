@@ -102,7 +102,7 @@ class Script(Protocol):
         DataLoader[tuple[Tensor, Tensor, Tensor]],
     ]:
         """Build the loaders."""
-        raise NotImplementedError
+        ...
 
     def train_epoch(  # noqa: PLR0917 -- The script's own signature.
         self,
@@ -522,7 +522,6 @@ def check_walk(
         )
         instance = pcgrad.MultiTaskLoss(2)
         report = pin_shared(instance, loss_fine)
-    assert isinstance(instance, Walker)
     found = {id(p) for p in instance._shared_params or ()}  # noqa: SLF001 -- What pin_shared set.
     missed = [
         n

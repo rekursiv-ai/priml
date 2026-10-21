@@ -93,7 +93,6 @@ def canonical_config() -> KimiK2.Config:
     )
 
 
-@pytest.mark.compute_large_fixture
 def test_kimi_k2_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
@@ -376,7 +375,6 @@ class TestConfig:
         cfg = KimiK2.Config.from_hf(config)
         assert cfg.channels_hidden_expert == cfg.channels_hidden_dense == 4
 
-    @pytest.mark.compute_large_fixture
     def test_nonpositive_channels_still_print(self) -> None:
         """The degenerate config is the one worth rendering; torch rejects it."""
         config = KimiK2.Config.from_hf(hf_config(hidden_size=0))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Self, cast
+from typing import Self, cast
 
 import math
 
@@ -14,14 +14,6 @@ import numpy as np
 
 from priml.baselines.name_that_llm.logistic import LBFGS
 from priml.math.fused import fma64
-
-
-if TYPE_CHECKING:
-    from scipy.special import expit
-else:
-    from wrapt import lazy_import
-
-    expit = lazy_import("scipy.special", "expit")
 
 
 class SigmoidCalibration:
@@ -37,7 +29,6 @@ class SigmoidCalibration:
             default_factory=lambda: LBFGS.Config(
                 max_iter=15_000,
                 tolerance_gradient=1e-6,
-                max_line_search=20,
             ),
         )
         """Quasi-Newton solver for the smoothed binary likelihood."""
@@ -86,7 +77,7 @@ class SigmoidCalibration:
 
     def predict(self, scores: NDArray[np.float64]) -> NDArray[np.float64]:
         """Return calibrated probabilities for the supplied scores."""
-        return expit(-(self.a_ * scores + self.b_))
+        return _expit(-(self.a_ * scores + self.b_))
 
 
 def dot_product(left: NDArray[np.float64], *, right: NDArray[np.float64]) -> float:
@@ -186,3 +177,16 @@ def _binary_points(
             ) * score
             gradient[row] = ((1 - target) - target * exponential) / (1 + exponential)
     return losses, gradient
+
+
+def _expit(values: NDArray[np.float64]) -> NDArray[np.float64]:
+    # NumPy's float64 exp and torch.sigmoid are SIMD kernels that round per ISA; the C
+    # library's scalar exp rounds alike on x86 and aarch64. Each branch exponentiates
+    # a nonpositive value: Python's exp raises OverflowError above 709.
+    probabilities = [
+        1 / (1 + math.exp(-value))
+        if value >= 0
+        else (exponential := math.exp(value)) / (1 + exponential)
+        for value in values.reshape(-1).tolist()
+    ]
+    return np.array(probabilities, dtype=np.float64).reshape(values.shape)

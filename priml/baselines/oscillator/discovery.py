@@ -4,15 +4,13 @@ from __future__ import annotations
 
 from dataclasses import field
 from itertools import combinations
-from typing import TYPE_CHECKING, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 import math
 
-from configgle import Fig, Makeable, PartialConfig
-from scipy.optimize import OptimizeResult, least_squares
+from configgle import Fig, Makeable
 from torch import Tensor
 
-import numpy as np
 import torch
 
 from priml.baselines.oscillator.benchmark import forecast_scores
@@ -23,13 +21,14 @@ from priml.baselines.oscillator.forces import (
     PowerForce,
     WeightedForce,
 )
+from priml.baselines.oscillator.search import BoundedLeastSquares
 from priml.baselines.oscillator.train_step import FitReport
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from numpy.typing import NDArray
+    from priml.baselines.oscillator.search import SearchResult
 
 
 class CoefficientSearch(Protocol):
@@ -37,10 +36,10 @@ class CoefficientSearch(Protocol):
 
     def __call__(
         self,
-        fun: Callable[[NDArray[np.float64]], NDArray[np.float64]],
-        x0: NDArray[np.float64],
+        fun: Callable[[Tensor], Tensor],
+        x0: Tensor,
         /,
-    ) -> OptimizeResult:
+    ) -> SearchResult[Tensor]:
         """Return fitted strengths and convergence status."""
         ...
 
@@ -89,14 +88,7 @@ class SparseSimulator:
         """Starting strength for every candidate term."""
 
         search: Makeable[CoefficientSearch] = field(
-            default_factory=lambda: PartialConfig(
-                least_squares,
-                bounds=(0.0, 2.0),
-                max_nfev=40,
-                ftol=1e-9,
-                xtol=1e-9,
-                gtol=1e-9,
-            ),
+            default_factory=BoundedLeastSquares.Config,
         )
         """Bounded training fit, including its numerical stopping rules."""
 
@@ -138,7 +130,8 @@ class SparseSimulator:
         Returns:
           report: Selected terms, score, and actual residual/validation calls.
             Finite-difference Jacobian calls count as training evaluations.
-            Gradient-update counts stay zero because SciPy owns the fit.
+            Gradient-update counts stay zero because a least-squares search
+            fits the coefficients.
 
         Raises:
           ValueError: The horizons differ, or the unchanged simulator cannot
@@ -180,24 +173,21 @@ class SparseSimulator:
                     scale=scale.reshape(STATE_CHANNELS).to(cfg.dtype),
                 )
                 tried += 1
-                start = np.full(size, cfg.initial_coefficient, dtype=np.float64)
-                # SciPy differences its starting residuals before rejecting
-                # nonfinite ones, so an overflowing candidate is skipped here.
-                if not np.isfinite(objective(start)).all():
+                start = torch.full((size,), cfg.initial_coefficient, dtype=cfg.dtype)
+                # An overflowing start cannot be fitted; skip the candidate
+                # rather than spend the search's budget failing on it.
+                if not bool(objective(start).isfinite().all()):
                     evaluations += objective.evaluations
                     continue
                 result = self.search(objective, start)
                 evaluations += objective.evaluations
-                coefficients = np.asarray(
-                    cast("NDArray[np.float64]", result.x),
-                    dtype=np.float64,
-                )
+                coefficients = result.x
                 if (
-                    not cast(bool, result.success)
-                    or not np.isfinite(coefficients).all()
+                    not result.success
+                    or not bool(coefficients.isfinite().all())
                     or coefficients.ndim != 1
-                    or coefficients.size != size
-                    or (coefficients < 0).any()
+                    or coefficients.numel() != size
+                    or bool((coefficients < 0).any())
                 ):
                     continue
                 candidate = objective.simulator(coefficients)
@@ -289,22 +279,22 @@ class _ForceResiduals:
         self.scale = scale
         self.evaluations = 0
 
-    def simulator(self, coefficients: NDArray[np.float64]) -> CorrectedOscillator:
+    def simulator(self, coefficients: Tensor) -> CorrectedOscillator:
         for term, coefficient in zip(
             self.config.corrections[self.existing_terms :],
-            cast("list[float]", coefficients.tolist()),
+            coefficients,
             strict=True,
         ):
-            term.coefficient = coefficient
+            term.coefficient = float(coefficient)
         return self.config.make()
 
-    def __call__(self, coefficients: NDArray[np.float64]) -> NDArray[np.float64]:
+    def __call__(self, coefficients: Tensor) -> Tensor:
         for term, coefficient in zip(
             self.model.corrections[self.existing_terms :],
-            cast("list[float]", coefficients.tolist()),
+            coefficients,
             strict=True,
         ):
-            term.coefficient = coefficient
+            term.coefficient = float(coefficient)
         prediction = self.model.forecast(self.states, steps=1)[:, 0]
         self.evaluations += 1
-        return ((prediction - self.targets) / self.scale).flatten().numpy()
+        return ((prediction - self.targets) / self.scale).flatten()

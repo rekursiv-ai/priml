@@ -106,7 +106,7 @@ class Script(Protocol):
         Tensor,
     ]:
         """Build the long-tailed loaders."""
-        raise NotImplementedError
+        ...
 
     def train_epoch(
         self,
@@ -646,4 +646,4 @@ def _datasets(script: Script, dataset: type) -> Generator[None]:
 def _kept(loader: DataLoader[object]) -> Tensor:
     """Return the positions a loader's ``Subset`` kept, in order."""
     indices = cast("Subset[object]", loader.dataset).indices
-    return torch.tensor([int(i) for i in indices], dtype=torch.int64)
+    return torch.tensor(list(indices), dtype=torch.int64)

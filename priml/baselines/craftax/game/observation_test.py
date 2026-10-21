@@ -65,8 +65,8 @@ def _reference_map(state: EnvState) -> NDArray[np.float32]:
     """``render_craftax_symbolic``'s view (``renderer.py:9-122``) on a port state."""
     rows, cols = OBS_ROWS, OBS_COLS
     view = np.zeros((rows, cols, SYMBOLIC_TILE_CHANNELS), dtype=np.float32)
-    level = int(state.player_level)
-    pr, pc = (int(v) for v in state.player_position)
+    level = state.player_level
+    pr, pc = (v for v in state.player_position)
     lit = np.zeros((rows, cols), dtype=bool)
     for r in range(rows):
         for c in range(cols):

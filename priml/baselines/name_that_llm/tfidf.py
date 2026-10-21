@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import field, replace
 from typing import TYPE_CHECKING, cast
 
 import itertools
 import re
 
 from configgle import Fig, Makeable
-from scipy.sparse import csr_array
 
 import numpy as np
+
+from priml.baselines.name_that_llm.sparse import CsrMatrix
 
 
 if TYPE_CHECKING:
@@ -433,9 +434,9 @@ class TfidfTransformer:
     def __init__(self, config: Config) -> None:
         del config
         self.n_features_in_ = 0
-        self.idf_ = np.empty(0, dtype=np.float64)
+        self.idf_ = np.zeros(0)
 
-    def fit(self, counts: csr_array[np.float64]) -> TfidfTransformer:
+    def fit(self, counts: CsrMatrix) -> TfidfTransformer:
         """Fit the complete smoothed inverse-document-frequency vector.
 
         Args:
@@ -445,18 +446,12 @@ class TfidfTransformer:
           transformer: This fitted numerical transform.
 
         """
-        self.n_features_in_ = counts.shape[-1]
-        frequency = np.bincount(counts.indices, minlength=self.n_features_in_).astype(
-            np.float64,
-        )
-        frequency += 1
-        self.idf_ = np.full_like(frequency, fill_value=counts.shape[0] + 1)
-        self.idf_ /= frequency
-        np.log(self.idf_, out=self.idf_)
-        self.idf_ += 1
+        self.n_features_in_ = counts.shape[1]
+        documents = np.bincount(counts.indices, minlength=self.n_features_in_)
+        self.idf_ = np.log((counts.shape[0] + 1) / (documents + 1)) + 1
         return self
 
-    def transform(self, counts: csr_array[np.float64]) -> csr_array[np.float64]:
+    def transform(self, counts: CsrMatrix) -> CsrMatrix:
         """Weight and normalize a copy of every sparse document row.
 
         Args:
@@ -466,21 +461,19 @@ class TfidfTransformer:
           features: Sublinear, inverse-document-weighted unit-norm rows.
 
         """
-        if counts.shape[-1] != self.n_features_in_:
+        if counts.shape[1] != self.n_features_in_:
             raise ValueError("Expected the fitted number of lexical features.")
-        result = counts.copy()
-        np.log(result.data, out=result.data)
-        result.data += 1
-        result.data *= self.idf_[result.indices]
-        boundaries = result.indptr.tolist()
-        for start, stop in itertools.pairwise(boundaries):
+        data = np.log(counts.data)
+        data += 1
+        data *= self.idf_[counts.indices]
+        # Every stored weight is at least one, so only empty rows have norm zero,
+        # and dividing their empty slice is a no-op.
+        for start, stop in itertools.pairwise(counts.indptr.tolist()):
             squared_norm = 0.0
-            for value in cast("list[float]", result.data[start:stop].tolist()):
+            for value in cast("list[float]", data[start:stop].tolist()):
                 squared_norm += value * value
-            if squared_norm == 0:
-                continue
-            result.data[start:stop] /= cast("np.float64", np.sqrt(squared_norm))
-        return result
+            data[start:stop] /= cast("np.float64", np.sqrt(squared_norm))
+        return replace(counts, data=data)
 
 
 class TfidfVectorizer:
@@ -518,7 +511,7 @@ class TfidfVectorizer:
         self.transformer = config.transformer.make()
         self.vocabulary_: dict[str, int] = {}
 
-    def fit_transform(self, texts: Sequence[str]) -> csr_array[np.float64]:
+    def fit_transform(self, texts: Sequence[str]) -> CsrMatrix:
         """Fit feature identities and return all weighted training rows.
 
         Args:
@@ -533,18 +526,18 @@ class TfidfVectorizer:
         if not self.vocabulary_:
             raise ValueError("Expected a nonempty lexical vocabulary.")
         if self.config.max_features is not None:
-            self._sort_vocabulary(counts)
+            counts = self._sort_vocabulary(counts)
         counts = self._prune(counts)
         if self.config.max_features is None:
-            self._sort_vocabulary(counts)
+            counts = self._sort_vocabulary(counts)
         self.transformer.fit(counts)
         return self.transformer.transform(counts)
 
-    def transform(self, texts: Sequence[str]) -> csr_array[np.float64]:
+    def transform(self, texts: Sequence[str]) -> CsrMatrix:
         """Map held-out documents into the fitted feature vocabulary."""
         if not self.vocabulary_:
             raise ValueError("Expected a fitted lexical vocabulary.")
-        return self.transformer.transform(self._counts(texts, expand=False))
+        return self.transformer.transform(self._counts(texts))
 
     @property
     def vocabulary(self) -> list[str]:
@@ -556,54 +549,48 @@ class TfidfVectorizer:
         """Return the complete fitted inverse document weights."""
         return self.transformer.idf_
 
-    def _counts(self, texts: Sequence[str], *, expand: bool) -> csr_array[np.float64]:
-        values: list[int] = []
+    def _counts(self, texts: Sequence[str], *, expand: bool = False) -> CsrMatrix:
+        values: list[float] = []
         indices: list[int] = []
         boundaries = [0]
         for text in texts:
-            row: dict[int, int] = {}
+            row: dict[int, float] = {}
             for token in self.analyzer(self.config.preprocess(text)):
                 if token not in self.vocabulary_:
                     if not expand:
                         continue
                     self.vocabulary_[token] = len(self.vocabulary_)
                 index = self.vocabulary_[token]
-                row[index] = row.get(index, 0) + 1
+                row[index] = row.get(index, 0.0) + 1
             indices.extend(row)
             values.extend(row.values())
             boundaries.append(len(indices))
-        result = csr_array(
-            (
-                np.array(values, dtype=np.float64),
-                np.array(indices, dtype=np.int32),
-                np.array(boundaries, dtype=np.int32),
-            ),
+        return CsrMatrix(
+            data=np.array(values),
+            indices=np.array(indices, dtype=np.int32),
+            indptr=np.array(boundaries, dtype=np.int32),
             shape=(len(texts), len(self.vocabulary_)),
-            dtype=np.float64,
-        )
-        result.sort_indices()
-        return result
+        ).sorted_indices()
 
-    def _sort_vocabulary(self, counts: csr_array[np.float64]) -> None:
+    def _sort_vocabulary(self, counts: CsrMatrix) -> CsrMatrix:
         remap = np.empty(len(self.vocabulary_), dtype=np.int32)
         for index, term in enumerate(sorted(self.vocabulary_)):
             remap[self.vocabulary_[term]] = index
             self.vocabulary_[term] = index
-        counts.indices = remap[counts.indices]
+        # Rows stay in stored order, unsorted under the new numbering: the golden
+        # buffers and every stored-order row sum downstream depend on it.
+        return replace(counts, indices=remap[counts.indices])
 
-    def _prune(self, counts: csr_array[np.float64]) -> csr_array[np.float64]:
-        frequency = np.bincount(counts.indices, minlength=len(self.vocabulary_))
-        keep = frequency >= self.config.min_documents
-        if (
-            self.config.max_features is not None
-            and np.count_nonzero(keep) > self.config.max_features
-        ):
-            total = np.asarray(counts.sum(axis=0)).ravel()
+    def _prune(self, counts: CsrMatrix) -> CsrMatrix:
+        # Every vocabulary entry was counted, so each bincount spans the vocabulary.
+        keep = np.bincount(counts.indices) >= self.config.min_documents
+        if self.config.max_features is not None:
+            total = np.bincount(counts.indices, weights=counts.data)
             priorities = -total[keep]
             preferred = np.flatnonzero(keep)[
                 priorities.argsort()[: self.config.max_features]
             ]
-            keep = np.zeros(len(self.vocabulary_), dtype=np.bool_)
+            keep = np.zeros_like(keep)
             keep[preferred] = True
         retained = np.flatnonzero(keep)
         if len(retained) == 0:
@@ -614,4 +601,4 @@ class TfidfVectorizer:
             for term, index in self.vocabulary_.items()
             if index in remap
         }
-        return counts[:, retained]
+        return counts.take_columns(retained)

@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
-from typing import TYPE_CHECKING, Final, Literal, cast, override
-
-import traceback
+from typing import TYPE_CHECKING, Final, Literal, override
 
 from torch import Tensor
-from treekle import from_plain
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.arcagi.parity.metric import PassK
 from priml.baselines.arcagi.parity.record_test import load, reduce
@@ -20,13 +17,7 @@ from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
-
-    from torch.distributed.device_mesh import DeviceMesh
-
-    from priml.distributed.testing import WarmPoolGetter
-    from priml.metrics.custom_types import MetricProtocol
 
 
 type Mode = Literal["majority", "tie", "empty", "all_empty", "empty_corpus"]
@@ -42,15 +33,15 @@ MODES: Final[tuple[Mode, ...]] = (
 """Every :data:`Mode`, in parametrize order."""
 
 
-@pytest.mark.compute_distributed
-def test_reject_missing_gather(tmp_path: Path, warm_pools: WarmPoolGetter) -> None:
+def test_reject_missing_gather(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reject rank-local scoring with the same global-ballot comparator."""
     _manifest(tmp_path)
-    warm_pools({"dp": 2})(
-        partial(_worker, tmp_path, "majority", candidate=_local_metric),
-    )
-    result = (tmp_path / "metric_0").read_text()
-    assert "AssertionError: global pass@1" in result
+    ports = [_local_metric(tmp_path), _local_metric(tmp_path)]
+    with pytest.raises(AssertionError, match="global pass@1"):
+        _score_both_ranks(ports, "majority", monkeypatch)
 
 
 def test_frozen_ballot_scores_bite() -> None:
@@ -95,35 +86,53 @@ def _manifest(root: Path) -> None:
     )
 
 
-def _worker(
-    root: Path,
+def _ballots(mode: Mode, rank: int) -> tuple[Tensor, dict[str, object]] | None:
+    """Return the prediction and batch ``rank`` casts under ``mode``, or None."""
+    count = (
+        0
+        if mode in ("all_empty", "empty_corpus") or (mode == "empty" and rank == 1)
+        else 2
+        if mode == "majority" and rank == 1
+        else 1
+    )
+    if not count:
+        return None
+    prediction = 2 if rank == 1 or mode == "empty" else 3
+    packed = torch.tensor([[0.0, float(prediction)]]).expand(count, 2)
+    return packed, {
+        "media": torch.full((count, 1), 2, dtype=torch.int32),
+        "puzzle_identifiers": torch.ones(count, dtype=torch.int64),
+        "valid_count": count,
+    }
+
+
+# The metric's one collective is ``all_gather_object`` of the local votes, answered here
+# with both ranks' votes in rank order.
+def _score_both_ranks(
+    ports: list[PassK],
     mode: Mode,
-    mesh: DeviceMesh,
-    *,
-    candidate: Callable[[Path], MetricProtocol] | None = None,
-) -> None:
-    rank = mesh.get_rank()
-    try:
-        port = candidate(root) if candidate else PassK.Config(working_dir=root).make()
-        count = (
-            0
-            if mode in ("all_empty", "empty_corpus") or (mode == "empty" and rank == 1)
-            else 2
-            if mode == "majority" and rank == 1
-            else 1
-        )
-        prediction = 2 if rank == 1 or mode == "empty" else 3
-        packed = torch.tensor([[0.0, float(prediction)]]).expand(count, 2)
-        batch = {
-            "media": torch.full((count, 1), 2, dtype=torch.int32),
-            "puzzle_identifiers": torch.ones(count, dtype=torch.int64),
-            "valid_count": count,
-        }
-        if count:
-            port.update(packed, **batch)
-        snapshot = deepcopy(port.state_dict())
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Tensor]]:
+    """Cast each rank's ballots, then compute each rank's scores over the gather."""
+    for rank, port in enumerate(ports):
+        cast_ = _ballots(mode, rank)
+        if cast_ is not None:
+            port.update(cast_[0], **cast_[1])
+    snapshots = [deepcopy(port.state_dict()) for port in ports]
+
+    def gather(
+        out: list[dict[str, dict[str, list[tuple[str, float]]]]],
+        votes: object,
+    ) -> None:
+        del votes
+        out[:] = [port.votes for port in ports]
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    scores: list[dict[str, Tensor]] = []
+    for port, snapshot in zip(ports, snapshots, strict=True):
         actual = port.compute()
-        torch.save(reduce(actual), root / f"scores_{rank}.pt")
         assert actual["pass@1"] == (
             0.0 if mode in ("tie", "all_empty", "empty_corpus") else 1.0
         ), "global pass@1"
@@ -132,20 +141,14 @@ def _worker(
         ), "global pass@2"
         assert port.compute() == actual, "repeated compute"
         assert port.state_dict() == snapshot, "local ballots mutated"
-        result = "ok"
-    except (AssertionError, RuntimeError, ValueError, TypeError, KeyError):
-        result = traceback.format_exc()
-    (root / f"metric_{rank}").write_text(result)
+        scores.append(reduce(actual))
+    return scores
 
 
-@pytest.mark.compute_distributed
-@pytest.mark.parametrize(
-    "mode",
-    MODES,
-)
+@pytest.mark.parametrize("mode", MODES)
 def test_source_global_ballots(
     tmp_path: Path,
-    warm_pools: WarmPoolGetter,
+    monkeypatch: pytest.MonkeyPatch,
     mode: Mode,
 ) -> None:
     """Gather all ranks once per compute, preserving local state and tie order.
@@ -155,17 +158,9 @@ def test_source_global_ballots(
     _manifest(tmp_path)
     if mode == "empty_corpus":
         (tmp_path / "test_puzzles.json").write_text("{}")
-    warm_pools({"dp": 2})(partial(_worker, tmp_path, mode))
+    ports = [PassK.Config(working_dir=tmp_path).make() for _ in range(2)]
     frozen = load("metric_distributed")
-    for rank in range(2):
-        assert (tmp_path / f"metric_{rank}").read_text() == "ok"
-        actual = from_plain(
-            cast(
-                object,
-                torch.load(tmp_path / f"scores_{rank}.pt", weights_only=True),
-            ),
-            dict[str, Tensor],
-        )
+    for rank, actual in enumerate(_score_both_ranks(ports, mode, monkeypatch)):
         report = mismatches(frozen[f"{mode}/rank{rank}"], actual)
         assert not report, "\n".join(report)
 

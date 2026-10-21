@@ -105,7 +105,7 @@ def test_torchvision_load_is_atomic_and_rejects_every_mismatch() -> None:
     state = {name: value.clone() for name, value in model.state_dict().items()}
     torchvision = _torchvision_names(state)
     for bad in (
-        {},
+        dict[str, torch.Tensor](),
         {**torchvision, "fc.bias": torch.zeros(2)},
         {**torchvision, "fc.weight": state["fc.weight"].double()},
         {**torchvision, "stages.0.0.conv1.weight": state["stages.0.0.conv1.weight"]},

@@ -125,7 +125,7 @@ class ImageNetTrainStep(TrainStep):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.config: ImageNetTrainStep.Config = config
+        self.config: ImageNetTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.schedule: Schedule[float] = config.schedule.make()
         # The peak rate lives on the step, so ``initial_lr`` is written here
         # rather than through every optimizer group's own ``lr``.
@@ -206,8 +206,8 @@ class ImageNetTrainStep(TrainStep):
     def resolution(self) -> int:
         """Training side length at the current progress, a multiple of 32."""
         config = self.config
-        low = int(config.resolution_min)
-        high = int(config.resolution_max)
+        low = int(config.resolution_min)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        high = int(config.resolution_max)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         start = float(config.resize_start)
         end = float(config.resize_end)
         spent = self.progress_learning_schedule
@@ -246,7 +246,7 @@ class ImageNetTrainStep(TrainStep):
     @override
     def state_dict(self) -> StateDict:
         """Extend the base state with the loss scaler."""
-        return {**super().state_dict(), "scaler": self.scaler.state_dict()}
+        return {**super().state_dict(), "scaler": self.scaler.state_dict()}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
 
     @override
     def load_state_dict(

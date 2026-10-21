@@ -28,7 +28,7 @@ from typing import Protocol, Self, cast, override
 
 import functools
 
-from configgle import Fig, Makeable, Makes
+from configgle import Fig, Makeable, Makes, Makes2
 from torch import Tensor, nn
 
 import torch
@@ -593,10 +593,7 @@ def _reject_ragged_heads(blocks: Sequence[HasAttention]) -> None:
 class OutputNormFeedForward(SwiGLUReluSquared):
     """Apply an injected transform to the FFN output; identity by default."""
 
-    class Config(  # ty: ignore[inconsistent-mro] -- Makes re-parents make(); ty cannot model configgle's metaclass.  # pyright: ignore[reportGeneralTypeIssues] -- Makes re-parents make(); pyright cannot model configgle's metaclass.
-        Makes["OutputNormFeedForward"],
-        SwiGLUReluSquared.Config,
-    ):
+    class Config(Makes2["OutputNormFeedForward"], SwiGLUReluSquared.Config):
         norm_out: Makeable[TensorModule] = field(
             default_factory=Identity.Config,
         )
@@ -609,8 +606,7 @@ class OutputNormFeedForward(SwiGLUReluSquared):
                 "channels_in",
                 self.channels_out if self.channels_out > 0 else self.channels_in,
             )
-            SwiGLUReluSquared.Config.finalize(self)
-            return self
+            return super().finalize()
 
         @override
         def cost(
@@ -633,8 +629,7 @@ class OutputNormFeedForward(SwiGLUReluSquared):
               cost: Whole-invocation cost of this module.
 
             """
-            return SwiGLUReluSquared.Config.cost(
-                self,
+            return super().cost(
                 seq_len=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,

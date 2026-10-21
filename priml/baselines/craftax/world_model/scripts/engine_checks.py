@@ -243,7 +243,7 @@ def check_teacher_forced(checked: Checked, *, tolerance: float) -> dict[str, Pla
         "max_abs_slot_logp_diff": float(diff.max()),
         "mean_abs_slot_logp_diff": float(diff.mean()),
         "max_abs_action_logp_diff": float(adiff.max()),
-        "jobs": int(got.shape[0]),
+        "jobs": int(got.shape[0]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         "tolerance": tolerance,
         "passed": bool(diff.max() < tolerance and adiff.max() < tolerance),
     }
@@ -287,8 +287,8 @@ def check_prefill(checked: Checked, *, tolerance: float) -> dict[str, PlainTree]
         stepped.decide(forced_control(stepped, segment, step))
     prefilled = Engine(model, rows=1, t_max=t_max, generator=torch.Generator(device))
     prefilled.prefill(torch.tensor([0]), prefix_of(segment))
-    length_equal = bool(torch.equal(prefilled.state.length, stepped.state.length))
-    frame_equal = bool(torch.equal(prefilled.state.cells, stepped.state.cells))
+    length_equal = bool(torch.equal(prefilled.state.length, stepped.state.length))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+    frame_equal = bool(torch.equal(prefilled.state.cells, stepped.state.cells))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     same = 0
     max_logp = 0.0
     for seed in range(8):
@@ -474,7 +474,7 @@ def check_seed_and_session(model: WorldModel, *, t_max: int) -> dict[str, PlainT
         )
         for f in dataclasses.fields(stream)
     )
-    identical = bool(torch.equal(tokens[0], tokens[1]))
+    identical = torch.equal(tokens[0], tokens[1])
     return {
         "5_fixed_seed_and_session_reload": {
             "same_seed_identical": identical,

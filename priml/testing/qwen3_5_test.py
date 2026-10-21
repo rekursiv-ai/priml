@@ -113,7 +113,6 @@ def test_hf_reference_casts_dtype_and_adapts_linear_attention(
     result = hf_reference(reference, dtype=torch.float64)
 
     assert result is reference
-    assert isinstance(result, Reference)
     assert result.weight.dtype == torch.float64
     assert adapted == [reference.linear_attn]
 
@@ -148,13 +147,11 @@ def _reference_forward(self: nn.Module, value: Tensor) -> Tensor:
     )
 
 
-@wraps(_reference_forward)
-def _wrapped_reference_forward(self: nn.Module, value: Tensor) -> Tensor:
-    return _reference_forward(self, value)
-
-
 class _Reference(nn.Module):
-    forward = _wrapped_reference_forward
+    @override
+    @wraps(_reference_forward)
+    def forward(self, value: Tensor) -> Tensor:
+        return _reference_forward(self, value)
 
 
 def _module_fallback(called: list[str]) -> nn.Module:

@@ -285,7 +285,7 @@ class TestImageNetSourceInit:
         a ``--override`` is unchecked text, and the runtime guard catches it.
         """
         config = ImageNetSource.Config(working_dir=temp_dir)
-        config.split = "unknown"  # ty: ignore[invalid-assignment] -- The fixture uses the PIL test double's runtime-only attribute.  # pyright: ignore[reportAttributeAccessIssue] -- The fixture uses the PIL test double's runtime-only attribute.
+        config.split = "unknown"  # ty: ignore[invalid-assignment] -- The fixture uses the PIL test double's runtime-only attribute.  # pyright: ignore[reportAttributeAccessIssue] -- The fixture uses the PIL test double's runtime-only attribute.  # pyrefly: ignore[bad-assignment] -- The fixture uses the PIL test double's runtime-only attribute.
         with pytest.raises(ValueError, match="Unknown split"):
             ImageNetSource(config)
 

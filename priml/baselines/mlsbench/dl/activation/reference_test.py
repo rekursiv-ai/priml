@@ -183,7 +183,10 @@ def test_a_lockstep_hands_back_the_state_after_each_update() -> None:
 
 def test_the_record_joins_every_component(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake(name: str) -> Callable[..., dict[str, torch.Tensor]]:
-        return lambda *args: {f"{name}/{'/'.join(map(str, args))}": torch.zeros(2)}
+        def record(*args: object) -> dict[str, torch.Tensor]:
+            return {f"{name}/{'/'.join(map(str, args))}": torch.zeros(2)}
+
+        return record
 
     for name in ("activation_record", "draws_record", "lockstep_record"):
         monkeypatch.setattr(reference, name, fake(name))

@@ -887,7 +887,7 @@ def _unpack_size(*samples_size: int | Sequence[int]) -> tuple[int, ...]:
         size = samples_size[0]
         if isinstance(size, int):
             return (size,)
-        return tuple(int(dimension) for dimension in size)
+        return tuple(dimension for dimension in size)
 
     dimensions: list[int] = []
     for size in samples_size:

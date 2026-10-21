@@ -63,14 +63,23 @@ def two_numba_threads() -> Iterator[None]:
     torch.set_num_threads(torch_threads)
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
 @pytest.mark.usefixtures("two_numba_threads")
 def test_index_dtypes_share_one_kernel_specialization() -> None:
     # A second specialization of a cached kernel can segfault a later process.
-    # ``new_state`` fixes every kernel argument's dtype, so building the state
+    # ``new_state`` fixes every kernel argument's dtype, so building a small state
     # compiles only what the assertion reads, not the whole presolve.
-    program = fixture_program()
+    program = LinearProgram(
+        crow_indices=torch.tensor([0, 1, 2], dtype=torch.int32),
+        col_indices=torch.tensor([0, 2], dtype=torch.int32),
+        values=torch.ones(2, dtype=torch.float64),
+        num_columns=3,
+        row_lower=torch.zeros(2, dtype=torch.float64),
+        row_upper=torch.zeros(2, dtype=torch.float64),
+        objective=torch.zeros(3, dtype=torch.float64),
+        lower=torch.zeros(3, dtype=torch.float64),
+        upper=torch.ones(3, dtype=torch.float64),
+    )
     new_state(program, _CPU)
     new_state(_wide_indices(program), _CPU)
     # ``new_core`` is the Python entry that registers the struct proxies first;
@@ -81,9 +90,8 @@ def test_index_dtypes_share_one_kernel_specialization() -> None:
 
 
 def test_index_dtypes_reduce_to_the_same_program() -> None:
-    # A 121-entry fuzz program that presolve cuts to 51: the fixture's 2,553
-    # entries cost 0.12 s for the two presolves on x86.
-    with npz(TESTDATA / "presolve_fuzz" / "general_00801.npz") as golden:
+    # A 69-entry fuzz program that presolve cuts to 40; keep a nonempty output.
+    with npz(TESTDATA / "presolve_fuzz" / "general_01278.npz") as golden:
         wide = input_program(golden)
     narrow = replace(
         wide,

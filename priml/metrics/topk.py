@@ -76,7 +76,7 @@ class TopK:
             correct_k = (pred_k == targets.unsqueeze(1)).any(dim=1)
             self.correct[k] += int(correct_k.sum().item())
 
-        self.total += int(batch_size)
+        self.total += int(batch_size)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
     def compute(self) -> dict[str, float]:
         """Compute top-k accuracies.

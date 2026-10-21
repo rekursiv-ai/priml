@@ -53,7 +53,7 @@ class PoisonedData(Cifar100Data):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.config: PoisonedData.Config = config
+        self.config: PoisonedData.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         poisoned = select_poison_indices(
             from_plain(self.train_label.tolist(), list[int]),
             poison_fraction=config.poison_fraction,

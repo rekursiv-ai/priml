@@ -57,7 +57,7 @@ class _TpOneSubmesh:
 
 class _TpOneMesh:
     device_type = "cpu"
-    mesh_dim_names = ("tp",)
+    mesh_dim_names: tuple[str, ...] = ("tp",)
 
     def __getitem__(self, name: str) -> _TpOneSubmesh:
         assert name == "tp"
@@ -161,7 +161,6 @@ def test_tp1_applier_is_structural_noop() -> None:
     expected = model(x)
     sharded = apply_tensor_parallel(model, cast(DeviceMesh, _TpOneMesh()))
     assert sharded is model
-    assert isinstance(sharded, TwoLinear)
     assert not any(p.__class__.__name__ == "DTensor" for p in sharded.parameters())
     assert torch.equal(sharded(x), expected)
 

@@ -35,14 +35,14 @@ def test_the_world_pens_the_cow_and_leaves_the_player_tired() -> None:
     for dr, dc in ((-1, 0), (1, 0), (0, -1)):
         assert state.map[0, row + dr, col + dc] == BlockType.STONE
     cows = state.passive_mobs[0]
-    assert (int(cows.mask[0]), int(cows.type_id[0])) == (1, 0)
-    assert (int(cows.position[0, 0]), int(cows.position[0, 1])) == testing.COW
-    assert int(state.player_energy) == 8
+    assert (int(cows.mask[0]), int(cows.type_id[0])) == (1, 0)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+    assert (int(cows.position[0, 0]), int(cows.position[0, 1])) == testing.COW  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+    assert int(state.player_energy) == 8  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     assert float(state.player_fatigue) == testing.SLEEP_TICKS - 13
     expected_tick = DEFAULT_MAX_TIMESTEPS - (
         len(testing.SCRIPT) - 1 + testing.SLEEP_TICKS
     )
-    assert int(state.timestep) == expected_tick
+    assert int(state.timestep) == expected_tick  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 def test_the_record_plays_the_script_from_world_4() -> None:

@@ -356,7 +356,6 @@ def test_span_from_strides_keeps_zero_reach_at_zero() -> None:
     ) == (100, 112)
 
 
-@pytest.mark.compute_torch_compile
 def test_a_scalar_argument_survives_a_fullgraph_compile() -> None:
     """A Python number must convert, not abort the graph.
 

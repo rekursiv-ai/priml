@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
 import math
+import re
 
 from configgle import PartialConfig
 from torch import Tensor, nn
@@ -21,6 +22,7 @@ from priml.baselines.nanochat.model import (
     MemoryNanoChatLM,
     NanoChatLM,
     OutputNormFeedForward,
+    ScaledSoftCap,
 )
 from priml.baselines.nanochat.optimizers import (
     BiasCorrectedRMSProp,
@@ -358,7 +360,7 @@ class _EndpointTrajectory(nn.Module):
                 member,
                 (PartialConfig, BiasCorrectedRMSProp.Config, FusedAdamW.Config),
             ):
-                member.compile = False
+                member.compile = False  # pyrefly: ignore[missing-attribute] -- pyrefly drops PartialConfig.__setattr__ inside a union; the attribute is a kwarg.
                 if isinstance(member, BiasCorrectedRMSProp.Config):
                     member.sparse_rows = False
             elif isinstance(member, FFNScaledNorMuon.Config):
@@ -1068,7 +1070,7 @@ def test_fused_ngram_binding_routes_every_table_to_rmsprop() -> None:
     tables[0].prepare_gradient_sinks(dirty_bitmaps=True)
     step._bind_ngram_gradients(step.model)
     first = rmsprop[0]
-    first.param_groups[0]["params"] = []
+    first.param_groups[0]["params"] = list[nn.Parameter]()
     with pytest.raises(
         ValueError,
         match=r"^Every fused n-gram table must route to RMSProp\.$",
@@ -1098,7 +1100,11 @@ def test_a_fused_ngram_step_binds_its_table_sinks_at_construction() -> None:
 
 def _doubling_compile(function: Callable[..., Tensor]) -> Callable[..., Tensor]:
     """Stand in for a compiler whose output is visible: it doubles the loss."""
-    return lambda *args: 2 * function(*args)
+
+    def doubled(*args: object) -> Tensor:
+        return 2 * function(*args)
+
+    return doubled
 
 
 def test_an_injected_compiler_wraps_model_and_loss_together() -> None:
@@ -1211,6 +1217,138 @@ def test_train_step_rejects_invalid_budget_and_gradient_settings() -> None:
     config.gradient_clip_norm = 0
     with pytest.raises(ValueError, match="gradient_clip_norm"):
         config.make()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "train_budget_sec",
+            0.0,
+            "train_budget_sec must be finite and positive; got 0.0.",
+        ),
+        (
+            "train_budget_sec",
+            math.inf,
+            "train_budget_sec must be finite and positive; got inf.",
+        ),
+        ("budget_warmup_steps", -1, "budget_warmup_steps must be at least 0; got -1."),
+        (
+            "momentum_warmup_steps",
+            0,
+            "momentum_warmup_steps must be at least 1; got 0.",
+        ),
+        ("rows_per_pass", 0, "rows_per_pass must be at least 1; got 0."),
+        (
+            "tokens_per_optimizer_step",
+            0,
+            "tokens_per_optimizer_step must be at least 1; got 0.",
+        ),
+        (
+            "gradient_clip_norm",
+            0.0,
+            "gradient_clip_norm must be positive; got 0.0. Infinite disables it.",
+        ),
+        (
+            "divergence_threshold",
+            0.0,
+            "divergence_threshold must be positive; got 0.0. Infinite disables it.",
+        ),
+        ("momentum_start", -0.1, "momentum_start must lie in [0, 1); got -0.1."),
+        ("momentum_end", 1.0, "momentum_end must lie in [0, 1); got 1.0."),
+    ],
+)
+def test_validate_rejects_the_first_invalid_value_with_its_exact_message(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    config = NanoChatTrainStep.Config()
+    train_step._validate(config)
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        train_step._validate(config)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("train_budget_sec", 0.5),
+        ("budget_warmup_steps", 0),
+        ("momentum_warmup_steps", 1),
+        ("momentum_start", 0.0),
+        ("momentum_end", 0.0),
+    ],
+)
+def test_validate_accepts_each_boundary_value(field: str, value: float) -> None:
+    config = NanoChatTrainStep.Config()
+    setattr(config, field, value)
+    train_step._validate(config)
+
+
+def test_validate_accepts_the_smallest_whole_pass_geometry() -> None:
+    config = NanoChatTrainStep.Config()
+    config.model.max_seq_len = 1
+    config.rows_per_pass = 1
+    config.tokens_per_optimizer_step = 1
+    train_step._validate(config)
+
+
+def test_validate_names_the_token_batch_that_no_whole_pass_count_reaches() -> None:
+    config = NanoChatTrainStep.Config()
+    config.model.max_seq_len = 100
+    config.rows_per_pass = 3
+    config.tokens_per_optimizer_step = 1_000
+    message = (
+        "tokens_per_optimizer_step=1000 is not divisible by rows_per_pass * "
+        "max_seq_len=300, so no whole number of passes reaches the token batch."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        train_step._validate(config)
+
+
+def _bounded_config(head: SoftCap.Config | Linear.Config) -> NanoChatTrainStep.Config:
+    config = NanoChatTrainStep.Config()
+    config.loss = train_step.BoundedTokenCrossEntropy.Config(logit_upper_bound=15.0)
+    config.model.lm_head = head
+    return config
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        SoftCap.Config(cap=15.0),
+        SoftCap.Config(cap=0.5),
+        # The output amplitude bounds the logits; the inherited ``cap`` only divides.
+        ScaledSoftCap.Config(cap=100.0, output_cap=15.0),
+        ScaledSoftCap.Config(cap=100.0, output_cap=-15.0),
+    ],
+)
+def test_bounded_loss_accepts_a_readout_within_its_bound(
+    head: SoftCap.Config | Linear.Config,
+) -> None:
+    train_step._validate(_bounded_config(head))
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        SoftCap.Config(cap=0.0),
+        SoftCap.Config(cap=-1.0),
+        SoftCap.Config(cap=16.0),
+        ScaledSoftCap.Config(cap=1.0, output_cap=16.0),
+        Linear.Config(),
+    ],
+)
+def test_bounded_loss_rejects_a_readout_outside_its_bound(
+    head: SoftCap.Config | Linear.Config,
+) -> None:
+    message = (
+        "BoundedTokenCrossEntropy requires a symmetric readout bound no larger "
+        "than logit_upper_bound. Use TokenCrossEntropy for an unbounded readout."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        train_step._validate(_bounded_config(head))
 
 
 def test_an_integer_rate_is_rescaled_with_width() -> None:

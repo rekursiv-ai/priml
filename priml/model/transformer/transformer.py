@@ -85,12 +85,12 @@ class Transformer(nn.Module):
             if self.num_layers == -1 and isinstance(self.block, list):
                 self.num_layers = len(self.block)
             if isinstance(self.proj_in, ChannelsIn) and self.proj_in.channels_in == -1:
-                self.proj_in.channels_in = self.channels_in
+                self.proj_in.channels_in = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.proj_in, ChannelsOut)
                 and self.proj_in.channels_out == -1
             ):
-                self.proj_in.channels_out = self.channels_in
+                self.proj_in.channels_out = self.channels_in  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             channels_hidden = (
                 self.proj_in.channels_out
                 if isinstance(self.proj_in, ChannelsOut)
@@ -127,13 +127,13 @@ class Transformer(nn.Module):
                 isinstance(self.proj_out, ChannelsIn)
                 and self.proj_out.channels_in == -1
             ):
-                self.proj_out.channels_in = channels_hidden
+                self.proj_out.channels_in = channels_hidden  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 self.channels_out != -1
                 and isinstance(self.proj_out, ChannelsOut)
                 and self.proj_out.channels_out == -1
             ):
-                self.proj_out.channels_out = self.channels_out
+                self.proj_out.channels_out = self.channels_out  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             finalized = super().finalize()
             # After the cascade: a composed head derives its output width from
             # its last element inside its own finalize, so reading it earlier

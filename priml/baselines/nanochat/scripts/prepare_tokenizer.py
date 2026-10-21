@@ -480,7 +480,7 @@ class ByteLevelTokenizer:
             ids = encoded.ids
             if self.backend.decode(ids, skip_special_tokens=False) != text:
                 raise ValueError("The tokenizer failed literal document round-trip.")
-            if int(cast(int, self.token_bytes_literal[ids].sum())) != len(
+            if cast(int, self.token_bytes_literal[ids].sum()) != len(
                 text.encode(),
             ):
                 raise ValueError("Token pieces do not conserve literal UTF-8 bytes.")

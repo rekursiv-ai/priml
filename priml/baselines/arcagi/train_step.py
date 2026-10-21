@@ -405,7 +405,7 @@ class PooledActTrainStep(TrainStep):
             )
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         super().__init__(config)
-        self.config: PooledActTrainStep.Config = config
+        self.config: PooledActTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.pool: ActPool = config.pool.make()
         self.pool.to(self.device)
         self.pool_transition: PoolTransition = config.pool_transition.make()
@@ -751,7 +751,7 @@ class PooledActTrainStep(TrainStep):
     @override
     def state_dict(self) -> StateDict:
         """Extend the base state; in-flight pool slots are deliberately excluded."""
-        state: PooledActTrainStep.StateDict = {**super().state_dict()}
+        state: PooledActTrainStep.StateDict = {**super().state_dict()}  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
         if self.pool.halting is not None:
             state["halt_rng"] = self.pool.halting.generator.get_state()
         if self.pool.carry is not None:

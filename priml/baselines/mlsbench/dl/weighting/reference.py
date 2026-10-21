@@ -290,16 +290,19 @@ def setting_counts_record(name: str) -> tuple[dict[str, Tensor], Tensor]:
     return record, indices
 
 
-def setting_record(name: str) -> dict[str, Tensor]:
+def setting_record(name: str, *, include_lockstep: bool = True) -> dict[str, Tensor]:
     """Run every port-side comparison of a setting whose values fit a golden.
 
     Args:
       name: A key of :data:`SETTINGS`.
+      include_lockstep: Whether to run the setting's two-update locksteps. The
+        per-weighting setting lockstep tests compare those records separately.
 
     Returns:
       record: Under ``settings/<name>/``: the 200 rates and the optimizer,
-        the shallowest network's draws and forwards, the counts and weights,
-        and the lockstep of every weighting if the setting's network differs.
+        the shallowest network's draws and forwards, and the counts and
+        weights. When ``include_lockstep`` is true and the setting's network
+        differs, it also includes each weighting's lockstep.
 
     """
     setting = SETTINGS[name]
@@ -321,7 +324,7 @@ def setting_record(name: str) -> dict[str, Tensor]:
         record[f"{prefix}draws"] = rng_fingerprint()
     record |= reference.setting_forward(model, name)
     record |= setting_counts_record(name)[0]
-    if setting.lockstep:
+    if setting.lockstep and include_lockstep:
         for weighting in setting.experiments:
             record |= setting_lockstep_record(f"{name}/{weighting}")
     return record

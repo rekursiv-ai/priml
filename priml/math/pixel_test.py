@@ -1112,7 +1112,7 @@ def test_patchify_rejects_a_degenerate_patch():
     ``Patchify.Config`` validates this (``patchify.py:79``) but the public
     helper it wraps did not, so a direct caller got ZeroDivisionError.
     """
-    for bad in ([0, 0], [-2, -2], [2, 0], []):
+    for bad in ([0, 0], [-2, -2], [2, 0], list[int]()):
         with pytest.raises(ValueError, match="patch_size"):
             _ = patchify(torch.zeros(2, 3, 4, 5), bad)
         with pytest.raises(ValueError, match="patch_size"):

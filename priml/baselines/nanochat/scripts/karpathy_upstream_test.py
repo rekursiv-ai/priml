@@ -135,7 +135,7 @@ class _KernelRegistry(Protocol):
 def test_kernel_stub_hands_their_fa3_call_the_portable_kernel() -> None:
     kernel = karpathy_upstream.kernels_stub()
     assert kernel.__name__ == "kernels"
-    assert isinstance(kernel, _KernelRegistry)
+    assert isinstance(kernel, _KernelRegistry)  # pyrefly: ignore[unsafe-overlap] -- pyrefly reads a module's attributes as read-only and a protocol's members as read-write.
     attention = kernel.get_kernel("flash-attention-3").flash_attn_interface
     assert attention.flash_attn_func is karpathy_upstream.their_attention
     with pytest.raises(ValueError, match=r"^other$"):

@@ -110,7 +110,7 @@ def test_marker_loading_checks_duplicates_by_step(
 ) -> None:
     writer = RolloutWriter(tmp_path, "mock")
     _write_json(_marker(tmp_path, 3), {"version": 1, "step": 3})
-    writer._markers[3] = {}
+    writer._markers[3] = dict[str, object]()
     monkeypatch.setattr(writer, "_reset_index", lambda: None)
     with pytest.raises(ValueError, match="Duplicate live rollout marker"):
         writer._load_markers()
@@ -182,7 +182,7 @@ def test_intent_loading_checks_duplicates_by_step(
         _intent(tmp_path, 1),
         {"version": 1, "step": 1, "shard": _shard(tmp_path).name, "byte_offset": 0},
     )
-    writer._pending[1] = {}
+    writer._pending[1] = dict[str, object]()
     with pytest.raises(ValueError, match="Duplicate live rollout write intent"):
         writer._load_intents()
 

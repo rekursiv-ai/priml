@@ -151,7 +151,7 @@ def test_patchify_rejects_degenerate_patch_size():
     "invalid shape dimension -4", naming neither the config field nor the
     value the caller actually set.
     """
-    for bad in ([0, 0], [-2, -2], [2, 0], []):
+    for bad in ([0, 0], [-2, -2], [2, 0], list[int]()):
         with pytest.raises(ValueError, match="patch_size"):
             _ = Patchify.Config(channels_in=3, patch_size=bad).make()
         with pytest.raises(ValueError, match="patch_size"):

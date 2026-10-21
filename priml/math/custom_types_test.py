@@ -14,9 +14,9 @@ from priml.math.custom_types import Numeric, Tensorable, jaxtypechecked
 
 
 def test_jaxtypechecked_binds_typeguard_as_the_checker() -> None:
-    assert jaxtypechecked.func is jaxtyped
-    assert jaxtypechecked.args == ()
-    assert jaxtypechecked.keywords == {"typechecker": typechecked}
+    assert jaxtypechecked.func is jaxtyped  # pyrefly: ignore[missing-attribute] -- pyrefly types a `functools.partial` of an overload as the overload, dropping `partial`'s attributes.
+    assert jaxtypechecked.args == ()  # pyrefly: ignore[missing-attribute] -- pyrefly types a `functools.partial` of an overload as the overload, dropping `partial`'s attributes.
+    assert jaxtypechecked.keywords == {"typechecker": typechecked}  # pyrefly: ignore[missing-attribute] -- pyrefly types a `functools.partial` of an overload as the overload, dropping `partial`'s attributes.
 
 
 def test_numeric_admits_python_and_numpy_scalars() -> None:

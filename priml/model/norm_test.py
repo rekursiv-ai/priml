@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
-from priml.model.custom_types import ChannelsInOut
+from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.norm import (
     BatchNorm,
     BatchNorm2d,
@@ -441,7 +441,7 @@ def test_norm_infers_the_missing_width_and_rejects_unequal_widths(
     config: Fig[nn.Module],
 ) -> None:
     """One finalize serves every norm: either width fills the other, both must agree."""
-    assert isinstance(config, ChannelsInOut)
+    assert isinstance(config, ChannelsInOutConfig)
     config.channels_out = 8
     finalized = config.copy_tree().finalize()
     assert finalized.channels_in == 8

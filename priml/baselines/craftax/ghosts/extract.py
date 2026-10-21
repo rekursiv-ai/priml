@@ -440,9 +440,9 @@ def _new_trace(
     floor_first[state.player_level] = 0
     visited = np.zeros((NUM_LEVELS, MAP_SIZE, MAP_SIZE), np.uint8)
     visited[
-        int(state.player_level),
-        int(state.player_position[0]),
-        int(state.player_position[1]),
+        state.player_level,
+        state.player_position[0],
+        state.player_position[1],
     ] = 1
     counts = np.zeros(_AT + 4, np.int64)
     counts[_END] = -1
@@ -571,7 +571,7 @@ def _trace_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only parame
         row = state.player_position[0]
         col = state.player_position[1]
         facing = state.player_direction
-        action = int(actions[t])
+        action = actions[t]
         effective = (
             Action.NOOP.value if state.is_sleeping or state.is_resting else action
         )
@@ -747,13 +747,13 @@ def _snapshot_fight_numba(state: EnvState, trace: _TraceView, level: int) -> int
             trace.health[mob_class * MOB_SLOTS + i] = (
                 mobs.health[i] if alive else -np.inf
             )
-    return int(state.monsters_killed.sum()) + int(state.boss_progress)
+    return int(state.monsters_killed.sum()) + int(state.boss_progress)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
 @jit
 def _fought_numba(state: EnvState, trace: _TraceView, level: int, score: int) -> bool:
     """Whether a creature snapshotted on ``level`` lost health, or kills or the boss advanced."""
-    if int(state.monsters_killed.sum()) + int(state.boss_progress) > score:
+    if int(state.monsters_killed.sum()) + int(state.boss_progress) > score:  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         return True
     for mob_class in range(3):
         mobs = mobs_for_class_numba(state, level, mob_class)

@@ -6,6 +6,9 @@ print (edge cases, cited steps, regularity).
 
 ## Probability
 
+- Foundations
+  - [Fundamental theorem of calculus](fundamental-theorem-calculus.md)
+  - [Fubini–Tonelli](fubini-tonelli.md)
 - Expectation and variance
   - [Jensen's inequality](jensen.md)
   - [Law of total expectation (tower property)](law-of-total-expectation.md)
@@ -48,7 +51,7 @@ print (edge cases, cited steps, regularity).
   - [Data processing inequality](data-processing.md)
   - [Pinsker's inequality](pinsker.md)
   - [Mutual information as KL](mutual-information.md)
-  - [Maximum entropy and the exponential family](max-entropy.md)
+
 - Variational representations
   - [f-divergence variational form](f-divergence-variational.md)
   - [Donsker–Varadhan](donsker-varadhan.md)
@@ -59,7 +62,86 @@ print (edge cases, cited steps, regularity).
   - [Kraft inequality and source coding](kraft-source-coding.md)
   - [Fano's inequality](fano.md)
 
+## Choosing a Distribution
+
+Each picks the distribution a criterion makes extreme over a constraint set:
+entropy or KL to a reference (uncertainty about `Y`), Fisher information
+(how learnable a location is), or mutual information (how far data move a
+prior). Some choose a data density, some a prior. Max entropy is the
+I-projection onto moments from a uniform reference, and agrees with min
+Fisher information on the Gaussian under a variance constraint. The least
+favorable forms are saddle points: nature picks the noise or the parameter,
+the statistician its best response, so a robust loss or a minimax rule is the
+statistician's side of the game. The reference prior is the least favorable
+prior for prediction under log loss.
+
+- Data densities
+  - [Maximum entropy and the exponential family](max-entropy.md)
+  - [I-projection and exponential tilting](i-projection.md)
+  - [Minimum Fisher information](min-fisher-information.md)
+- Saddle points
+  - [Least favorable distributions: probability floors and the Huber loss](least-favorable-density.md)
+  - [Least favorable prior and minimax rules](least-favorable-prior.md)
+- Priors
+  - [Reference priors and Jeffreys](reference-priors.md)
+
 ## Optimization
+
+Almost every first-order method is one majorization–minimization step:
+minimize a model of `f` plus a penalty on moving
+(majorization-minimization.md). A method is a point on four axes.
+
+1. Geometry: the norm the step is bounded in. With a linear model, the step
+   is that norm's linear minimization oracle,
+   `argmin_{‖d‖≤1} ⟨g, d⟩`.
+
+    ```
+    norm                  zero-memory step       method
+    ℓ₂                    −g / ‖g‖₂              normalized GD
+    ℓ∞                    −sign(g)               sign descent
+    spectral (per matrix) −U Vᵀ                  Muon
+    ‖·‖_H                 −H⁻¹ g (∝)             Newton
+    Bregman D_ψ           mirror map             mirror descent
+    ```
+
+2. Memory: how the norm is estimated from past gradients. Accumulating
+   squared gradients learns the norm from data; forgetting them fixes it.
+
+    ```
+    memory                  vector (diagonal)   matrix (Kronecker)
+    none                    sign descent        Muon
+    exponential average     Adam, RMSProp       SOAP, EMA-Shampoo
+    full sum, regret-opt.   AdaGrad             Shampoo
+    ```
+
+   So `Muon : Shampoo :: sign descent : AdaGrad`. The square root in both
+   regret-optimal preconditioners equalizes per-direction regret. Geometry
+   and memory are one axis seen twice: zero memory is a fixed norm, full
+   memory a learned one.
+
+3. Momentum: a linear filter on the steps (heavy ball, Nesterov, the `m_t`
+   of Adam and Muon). It smooths the direction over time; it does not
+   change the norm.
+
+4. Influence: a nonlinearity `ψ` applied before averaging. The same operation
+   at different granularities:
+
+    ```
+    one unit treated as a draw   ψ there                robust to outlying
+    a residual coordinate        Huber / z cap          coordinates
+    a sample's gradient          per-sample clip        samples
+    a batch's gradient           global norm clip       batches
+    a stretch of steps           Adam's √v (no clip)    nothing: rescales only
+    ```
+
+   Only a `ψ` at the outliers' granularity bounds their influence
+   (polyak-tsypkin.md). Everything after the average controls step size,
+   not who picks the direction.
+
+A successor is a move along an axis its parent zeroed out or approximated:
+Muon's descendants restore per-coordinate scale (memory), clip singular
+values or logits (influence), or approximate the orthogonalization at
+scale (geometry).
 
 - Convex duality
   - [Fenchel–Young inequality](fenchel-young.md)
@@ -73,10 +155,18 @@ print (edge cases, cited steps, regularity).
   - [SGD convergence](sgd-convergence.md)
   - [Nesterov acceleration](nesterov.md)
 - Generalized descent
+  - [A taxonomy of first-order methods](optimizer-taxonomy.md)
+  - [Continuous-time optimization](continuous-time-optimization.md)
+  - [Majorization–minimization](majorization-minimization.md)
   - [Gradient descent as proximal gradient](gd-as-proximal.md)
   - [Mirror descent](mirror-descent.md)
   - [Natural gradient](natural-gradient.md)
   - [Newton as proximal step](newton-as-proximal.md)
+  - [Adam](adam.md)
+  - [Muon](muon.md)
+- Stochastic approximation
+  - [Robbins–Monro](robbins-monro.md)
+  - [Polyak–Tsypkin: the optimal nonlinearity](polyak-tsypkin.md)
 - Beyond smooth gradients
   - [Subgradient method](subgradient-method.md)
   - [Frank–Wolfe](frank-wolfe.md)
@@ -166,7 +256,6 @@ print (edge cases, cited steps, regularity).
   - [Policy gradient theorem](policy-gradient.md)
   - [Compatible function approximation](compatible-function-approx.md)
 - Stochastic approximation
-  - [Robbins–Monro](robbins-monro.md)
   - [TD(0) convergence with linear features](td-convergence.md)
   - [Q-learning convergence](q-learning.md)
 - Entropy regularization

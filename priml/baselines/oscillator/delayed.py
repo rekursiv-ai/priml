@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Protocol, cast, override
 
 import math
 
-from configgle import Fig, Makeable, Makes, PartialConfig
-from scipy.optimize import minimize_scalar
+from configgle import Fig, Makeable, Makes
 from torch import Tensor
 
 import torch
@@ -22,13 +21,12 @@ from priml.baselines.oscillator.data import (
     Oscillator,
     Windows,
 )
+from priml.baselines.oscillator.search import BoundedScalarSearch
 from priml.baselines.oscillator.train_step import FitReport
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from scipy.optimize import OptimizeResult
 
 
 class Pulse:
@@ -458,7 +456,7 @@ class DelayedStudy(ForecastStudy):
 
         """
         record = super().run()
-        return {
+        return {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **record,
             "forecast_skill": {
                 split: 1 - scores["method"]["mse"] / scores["cheap_simulator"]["mse"]
@@ -487,12 +485,7 @@ class DelayedCalibration:
         """Privileged equation form and lags; its gain is fitted, not assumed."""
 
         search: Makeable[ScalarSearch] = field(
-            default_factory=lambda: PartialConfig(
-                minimize_scalar,
-                bounds=(0.0, 3.0),
-                method="bounded",
-                options={"maxiter": 64, "xatol": 1e-6},
-            ),
+            default_factory=lambda: BoundedScalarSearch.Config(bounds=(0.0, 3.0)),
         )
         """Bounded search on reference training targets only."""
 
@@ -535,8 +528,8 @@ class DelayedCalibration:
         cfg.cubic = simulator.config.cubic
         objective = _ResponseLoss(cfg, train=train)
         objective(0.0)
-        result: OptimizeResult = self.search(objective)
-        if not cast(bool, result.success) or objective.best_config is None:
+        result = self.search(objective)
+        if not result.success or objective.best_config is None:
             raise RuntimeError(
                 "Delayed calibration did not find a finite converged fit.",
             )

@@ -53,7 +53,6 @@ def test_load_local_checkpoint(tmp_path: Path, tie: bool, dtype: torch.dtype) ->
     assert graft.num_streams == 3
     assert isinstance(graft.blocks[0].ffns[2], SwiGLU)
     built_ffn = graft.blocks[0].ffns[2]
-    assert isinstance(built_ffn, SwiGLU)
     assert built_ffn.up_proj.weight.shape[-2] == 2 * stream_width
     assert all(parameter.dtype == dtype for parameter in graft.parameters())
     assert config.pformat(finalize=False) == before

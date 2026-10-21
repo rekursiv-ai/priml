@@ -116,7 +116,7 @@ class Script(Protocol):
         int,
     ]:
         """Build the loaders."""
-        raise NotImplementedError
+        ...
 
     def evaluate(
         self,

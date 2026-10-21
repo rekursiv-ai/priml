@@ -218,6 +218,7 @@ class _LatentKernelStub:
 
 
 class _TensorModuleStub:
+    forward = TensorModule.forward
     __call__ = TensorModule.__call__
     reset_parameters = HasResetParameters.reset_parameters
 
@@ -232,6 +233,7 @@ class _RotationStub:
 
 class _LookupStub:
     weight = torch.zeros(1)
+    forward = TensorModule.forward
     __call__ = TensorModule.__call__
     reset_parameters = HasResetParameters.reset_parameters
     to = LookupTable.to
@@ -253,7 +255,7 @@ def test_protocol_stub_bodies_are_inert() -> None:
     latent: LatentAttentionKernel[...] = _LatentKernelStub()
     assert latent(x, x, x, x) is None
     module: TensorModule = _TensorModuleStub()
-    assert module(x) is None
+    assert module.forward(x) is None
     assert module.reset_parameters() is None
     rotary: RotaryFactors = _RotaryStub()
     assert rotary(x) is None
@@ -261,17 +263,97 @@ def test_protocol_stub_bodies_are_inert() -> None:
     assert not isinstance(rotary, RotaryRotation)
     assert rotation.rotate(x, x, x, x) is None
     assert has_weight(_LookupStub())
-    assert _LookupStub().to(dtype=torch.float32) is None
+    assert _LookupStub().to(dtype=torch.float32) is None  # pyrefly: ignore[bad-argument-type] -- The stub borrows protocol bodies to cover them; its `self` need not satisfy the protocol.
 
 
 @pytest.mark.compute_large_fixture
 def test_channel_config_fields_are_uniform() -> None:
-    root = _CWD.parent
+    violations = _channel_config_violations(root=_CWD.parent)
+    assert not violations, "\n".join(violations)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "class  Config:\n",
+        "class\tConfig:\n",
+        "class \\\n    Config:\n",
+        "class Ｃｏｎｆｉｇ:\n",
+    ],
+    ids=("spaces", "tab", "line-continuation", "unicode-normalized"),
+)
+def test_channel_config_scan_filter_keeps_valid_class_spellings(
+    source: str,
+    tmp_path: Path,
+) -> None:
+    source += "    @property\n    def channels_in(self) -> int:\n        return -1\n"
+    tree = ast.parse(source)
+    assert any(
+        isinstance(node, ast.ClassDef) and node.name == "Config"
+        for node in ast.walk(tree)
+    )
+    root = tmp_path / "priml"
+    (root / "model").mkdir(parents=True)
+    (root / "candidate.py").write_text(source, encoding="utf-8")
+    violations = _channel_config_violations(root=root)
+    assert violations == ["candidate.py:1: channel properties ['channels_in']"]
+
+
+@pytest.mark.parametrize("grid", [(), (3, 7)])
+def test_preserved_grid_contract_matches_the_requested_spatial_axes(
+    grid: tuple[int, ...],
+) -> None:
+    preserving = PreservesGrid()
+    assert preserving.output_grid(grid) == grid
+
+
+def test_nonspatial_grid_rejects_an_image_grid() -> None:
+    nonspatial = NonspatialGrid()
+    assert nonspatial.output_grid(()) == ()
+    with pytest.raises(TypeError, match="nonspatial feature vectors"):
+        nonspatial.output_grid((3, 7))
+
+
+@pytest.mark.parametrize("widths", [(-1, 8), (8, -1), (8, 8)])
+def test_constructor_width_validation_preserves_unresolved_or_equal_widths(
+    widths: tuple[int, int],
+) -> None:
+    config = _Widths(channels_in=widths[0], channels_out=widths[1])
+    validate_same_width(config)
+    assert (config.channels_in, config.channels_out) == widths
+
+
+def test_constructor_width_validation_rejects_a_preserving_projection() -> None:
+    with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
+        validate_same_width(_Widths(channels_in=4, channels_out=8))
+
+
+class _FlattenDepthIndex(nn.Module):
+    @override
+    def forward(self, depth_indices: Tensor) -> Tensor:
+        return torch.tensor(
+            [
+                flatten_depth_index(
+                    tuple(
+                        (int(levels[i, 0].item()), int(levels[i, 1].item()))
+                        for i in range(levels.shape[0])
+                    ),
+                )
+                for levels in depth_indices
+            ],
+        )
+
+
+def _channel_config_violations(root: Path) -> list[str]:
+    """Find Config classes that violate the channel field contract."""
     violations: list[str] = []
     for path in sorted(root.rglob("*.py")):
         if path.name.endswith("_test.py"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        if source.isascii() and "Config" not in source:
+            continue
+        tree = ast.parse(source)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef) or node.name != "Config":
                 continue
@@ -314,52 +396,7 @@ def test_channel_config_fields_are_uniform() -> None:
                             f"{path.relative_to(root)}:{field.lineno}: "
                             f"{name} default is not -1",
                         )
-    assert not violations, "\n".join(violations)
-
-
-class _FlattenDepthIndex(nn.Module):
-    @override
-    def forward(self, depth_indices: Tensor) -> Tensor:
-        return torch.tensor(
-            [
-                flatten_depth_index(
-                    tuple(
-                        (int(levels[i, 0].item()), int(levels[i, 1].item()))
-                        for i in range(levels.shape[0])
-                    ),
-                )
-                for levels in depth_indices
-            ],
-        )
-
-
-@pytest.mark.parametrize("grid", [(), (3, 7)])
-def test_preserved_grid_contract_matches_the_requested_spatial_axes(
-    grid: tuple[int, ...],
-) -> None:
-    preserving = PreservesGrid()
-    assert preserving.output_grid(grid) == grid
-
-
-def test_nonspatial_grid_rejects_an_image_grid() -> None:
-    nonspatial = NonspatialGrid()
-    assert nonspatial.output_grid(()) == ()
-    with pytest.raises(TypeError, match="nonspatial feature vectors"):
-        nonspatial.output_grid((3, 7))
-
-
-@pytest.mark.parametrize("widths", [(-1, 8), (8, -1), (8, 8)])
-def test_constructor_width_validation_preserves_unresolved_or_equal_widths(
-    widths: tuple[int, int],
-) -> None:
-    config = _Widths(channels_in=widths[0], channels_out=widths[1])
-    validate_same_width(config)
-    assert (config.channels_in, config.channels_out) == widths
-
-
-def test_constructor_width_validation_rejects_a_preserving_projection() -> None:
-    with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
-        validate_same_width(_Widths(channels_in=4, channels_out=8))
+    return violations
 
 
 if __name__ == "__main__":

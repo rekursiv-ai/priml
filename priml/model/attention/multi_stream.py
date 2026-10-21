@@ -131,12 +131,12 @@ class MultiStreamAttention(nn.Module):
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.num_heads
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
-                self.norm_qk.channels_in = self.channels_head
+                self.norm_qk.channels_in = self.channels_head  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if (
                 isinstance(self.norm_out, ChannelsIn)
                 and self.norm_out.channels_in == -1
             ):
-                self.norm_out.channels_in = self.num_heads * self.channels_head
+                self.norm_out.channels_in = self.num_heads * self.channels_head  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             if self.streams:
                 ignored = [
                     name

@@ -33,7 +33,6 @@ from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.convextok.testing import (
     TESTDATA,
-    Candidates,
     Corpus,
     HeldoutTokens,
     Vocab,
@@ -106,7 +105,7 @@ def test_any_solver_fills_the_solver_slot(
 
     monkeypatch.setattr(prepare, "count_pretokens", patched_count_pretokens)
     monkeypatch.setattr(prepare, "count_candidates", patched_count_candidates)
-    config = fixture_config(tmp_path)
+    config = fixture_config(tmp_path, texts=["abababab"], vocab_size=270)
     config.working_dir = tmp_path / "new-parent" / "nested" / "convextok"
     config.device = "meta"
     config.presolve = None
@@ -150,11 +149,8 @@ def test_any_solver_fills_the_solver_slot(
     config.make().build()
 
     tokenizer = Tokenizer.from_file(str(config.working_dir / "tokenizer.json"))
-    candidates = json_loads(
-        (TESTDATA / "candidates.json").read_text(),
-        Candidates,
-    )["tokens"]
-    budget = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)["budget"]
+    candidates = ["ab", "aba", "abab", "ababa", "ababab", "ba", "bab", "baba", "babab"]
+    budget = config.vocab_size - config.reserved_count - 256
     assert _learned_pieces(tokenizer) == set(candidates[:budget])
     assert shards == [(config.raw_dir / "shard_00000.parquet", 0)]
     assert solver_devices == [torch.device("meta")]
@@ -171,7 +167,7 @@ def test_build_forwards_the_presolved_program_and_solution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = fixture_config(tmp_path)
+    config = fixture_config(tmp_path, texts=["abababab"], vocab_size=270)
     config.working_dir = tmp_path / "presolved" / "convextok"
     config.device = "meta"
     config.solver = _AllOnes.Config()
@@ -214,7 +210,11 @@ def test_build_forwards_the_presolved_program_and_solution(
 
 
 def test_fit_times_each_stage_and_keeps_both_programs(tmp_path: Path) -> None:
-    config = fixture_config(tmp_path)
+    config = fixture_config(
+        tmp_path,
+        texts=["The quick brown fox jumps over the lazy dog. The dog sleeps."],
+        vocab_size=270,
+    )
     config.solver = _AllOnes.Config()
     start = time.perf_counter()
     fit = config.make().fit()
@@ -267,11 +267,18 @@ def test_donor_recipe_fits_convextok_on_its_raw_shards(tmp_path: Path) -> None:
     assert finalized.corpus == unigram.copy_tree().finalize().corpus
 
 
-def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
-    """Write the fixture corpus as one raw shard and point a CPU preparation at it.
+def fixture_config(
+    tmp_path: Path,
+    *,
+    texts: Sequence[str] = (),
+    vocab_size: int = 0,
+) -> ConvexTokPreparation.Config:
+    """Write one raw shard and point a CPU preparation at it.
 
     Args:
       tmp_path: Directory that receives ``raw/shard_00000.parquet``.
+      texts: Optional smaller fitting corpus; defaults to the reference corpus.
+      vocab_size: Optional vocabulary budget; defaults to the reference size.
 
     Returns:
       config: A one-worker CPU preparation over that shard, writing to
@@ -279,11 +286,12 @@ def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
 
     """
     corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
+    documents = list(texts) or corpus["texts"]
     raw = tmp_path / "raw"
     raw.mkdir()
     parquet.write_table(
         pa.table(
-            {"text": corpus["texts"]},
+            {"text": documents},
         ),
         raw / "shard_00000.parquet",
     )
@@ -291,7 +299,7 @@ def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
     config.raw_dir = raw
     config.shard_indices = [0]
     config.working_dir = tmp_path / "convextok"
-    config.vocab_size = corpus["vocab_size"]
+    config.vocab_size = vocab_size or corpus["vocab_size"]
     config.num_workers = 1
     config.device = "cpu"
     return config

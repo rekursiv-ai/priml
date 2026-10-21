@@ -269,7 +269,7 @@ class ParquetMergeWriter:
                 if buf is not None and field_name in buf:
                     value = self._convert_to_serializable(buf[field_name])
                     if isinstance(value, dict):
-                        value = {str(k): v for k, v in value.items()} if value else None
+                        value = {str(k): v for k, v in value.items()} if value else None  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                     values.append(value)
                 else:
                     values.append(existing[i])

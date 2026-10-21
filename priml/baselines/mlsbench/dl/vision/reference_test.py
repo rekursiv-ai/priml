@@ -488,7 +488,10 @@ def test_the_record_joins_every_component(
     tmp_path: Path,
 ) -> None:
     def fake(name: str) -> Callable[..., dict[str, torch.Tensor]]:
-        return lambda *_: {name: torch.zeros(1)}
+        def record(*_args: object) -> dict[str, torch.Tensor]:
+            return {name: torch.zeros(1)}
+
+        return record
 
     components = (
         "schedule_record",

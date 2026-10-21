@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Protocol, Self, cast, override
 import math
 import time
 
-from configgle import Fig, Makeable, Makes, PartialConfig
+from configgle import Fig, Makeable, Makes, Makes2, PartialConfig
 from torch import Tensor, nn
 from torch.nn import functional
 from treekle import from_plain
@@ -332,7 +332,7 @@ class NanoChatTrainStep(TrainStep):
     def __init__(self, config: Config) -> None:
         _validate(config)
         super().__init__(config)
-        self.config: NanoChatTrainStep.Config = config
+        self.config: NanoChatTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.accumulate_passes = config.tokens_per_optimizer_step // (
             config.rows_per_pass * config.model.max_seq_len
         )
@@ -569,7 +569,7 @@ class NanoChatTrainStep(TrainStep):
                 "cannot checkpoint with incomplete gradient accumulation; "
                 "per-pass gradients are not serializable",
             )
-        return {
+        return {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **super().state_dict(),
             "elapsed_sec": self.elapsed_sec,
             "local_step": self._steps_this_process,
@@ -700,15 +700,13 @@ class NanoChatTrainStep(TrainStep):
 
 def _memory_model_config() -> NanoChatLM.Config:
     """Build the memory-model default through the inherited model-config interface."""
-    config = MemoryNanoChatLM.Config()
-    assert isinstance(config, NanoChatLM.Config)
-    return config
+    return MemoryNanoChatLM.Config()
 
 
 class NgramTrainStep(NanoChatTrainStep):
     """Train n-gram memory with persistent gradient sinks and configurable updates."""
 
-    class Config(NanoChatTrainStep.Config):
+    class Config(Makes2["NgramTrainStep"], NanoChatTrainStep.Config):
         """Extend the existing training configuration without duplicating its fields."""
 
         model: NanoChatLM.Config = field(default_factory=_memory_model_config)
@@ -1111,5 +1109,15 @@ def _bounded_backward(
 
 class _BoundedCrossEntropy(torch.autograd.Function):
     # Dynamo requires unbound callbacks; classmethods bind the class twice.
-    forward = staticmethod(_bounded_forward)
+    @staticmethod
+    @override
+    def forward(
+        ctx: _LossContext,
+        logits: Tensor,
+        targets: Tensor,
+        logit_upper_bound: float,
+        ignore_index: int,
+    ) -> Tensor:
+        return _bounded_forward(ctx, logits, targets, logit_upper_bound, ignore_index)
+
     backward = staticmethod(_bounded_backward)

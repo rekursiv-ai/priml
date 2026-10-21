@@ -188,7 +188,11 @@ def test_a_lockstep_setting_adds_every_combinations_two_updates(
 
 def named_record(name: str) -> Callable[..., dict[str, torch.Tensor]]:
     """Return a stand-in for a record function: one key, ``name``."""
-    return lambda *_: {name: torch.zeros(2)}
+
+    def record(*_args: object) -> dict[str, torch.Tensor]:
+        return {name: torch.zeros(2)}
+
+    return record
 
 
 def test_the_port_record_joins_every_component_and_each_lockstep(

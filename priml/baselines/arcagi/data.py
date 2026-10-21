@@ -267,8 +267,8 @@ class PuzzleBatches:
             default=0,
         )
         self.n_examples = len(self.inputs)
-        self.n_puzzles = int(self.puzzle_indices.size - 1)
-        self.n_groups = int(self.group_indices.size - 1)
+        self.n_puzzles = int(self.puzzle_indices.size - 1)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        self.n_groups = int(self.group_indices.size - 1)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         self.iters = 0
         """Train passes started; the next pass seeds Philox with ``seed + iters + 1``."""
 

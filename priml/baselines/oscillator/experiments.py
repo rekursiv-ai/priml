@@ -105,7 +105,7 @@ def exp003() -> ForecastStudy.Config:
 
     References:
       exp002 for the reference-data budget and residual-correction control.
-      https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize_scalar.html
+      https://maths-people.anu.edu.au/~brent/pub/pub011.html for the search.
 
     Results:
       Reference-hardware results: TBD. Local pilot results are separate.

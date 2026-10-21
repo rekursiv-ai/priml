@@ -311,7 +311,7 @@ def split_record(count: int) -> dict[str, Tensor]:
 
 
 def network_record() -> dict[str, Tensor]:
-    """Build each setting's full network, then run it in training and evaluation mode.
+    """Build each setting's shallow network, then run training and evaluation forwards.
 
     Returns:
       record: ``settings/<experiment>/{draws,train,eval}`` per :data:`SETTINGS`.

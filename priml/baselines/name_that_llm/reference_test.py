@@ -1,4 +1,7 @@
-"""Replay complete portable paths against the immutable source's stored values."""
+"""Replay portable paths against source values and fitted heads against solver goldens.
+
+The fitted heads' goldens pin the torch solver, not scikit-learn's; see LBFGS.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +23,8 @@ from priml.baselines.name_that_llm.model import (
     center,
     random_chunks,
 )
-from priml.baselines.name_that_llm.testing.fixtures_support_test import (
+from priml.baselines.name_that_llm.testing import (
+    NumericalTrace,
     capture_source,
     centred_branch,
     completed_record,
@@ -29,9 +33,9 @@ from priml.baselines.name_that_llm.testing.fixtures_support_test import (
     recipe,
     svm_branch,
 )
-from priml.baselines.name_that_llm.testing.trace_support_test import NumericalTrace
 from priml.baselines.name_that_llm.topic import TopicClusters
 from priml.data.folds import grouped_folds
+from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -224,12 +228,12 @@ def test_source_golden_inventory(record_testsuite_property: SuiteProperty) -> No
         ("style", "style"),
     ],
 )
-def test_complete_fitted_state_replays_from_source_values(
+def test_complete_fitted_state_replays_its_golden(
     component: str,
     golden_name: str,
 ) -> None:
     expected = read_tensors(_CWD / "testdata" / f"{golden_name}.pt")
-    with NumericalTrace() as trace:
+    with host_agnostic_numerics(), NumericalTrace() as trace:
         actual = port_outputs(component, dependencies=capture_source("blend"))
     report = mismatches(expected, actual=completed_record(trace, outputs=actual))
     assert not report, "\n".join(report)
@@ -238,7 +242,7 @@ def test_complete_fitted_state_replays_from_source_values(
 def test_complete_svm_state_replay_detects_one_ulp() -> None:
     """Reject a one-ULP output perturbation while comparing every committee field."""
     expected = read_tensors(_CWD / "testdata" / "svm.pt")
-    with NumericalTrace() as trace:
+    with host_agnostic_numerics(), NumericalTrace() as trace:
         outputs = port_outputs("svm", dependencies=capture_source("blend"))
     actual = completed_record(trace, outputs=outputs)
     assert not mismatches(expected, actual=actual)

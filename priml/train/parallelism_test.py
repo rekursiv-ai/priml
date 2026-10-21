@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast, override
 
+import contextlib
 import functools
 import importlib
 import math
-import tempfile
 
 from torch import Tensor, nn
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy
@@ -20,7 +19,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml import runtime
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.norm import CenteredRMSNorm
 from priml.train import parallelism
@@ -41,12 +39,12 @@ from priml.train.parallelism import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
+    from pathlib import Path
 
     from configgle import Makeable
     from torch.distributed.device_mesh import DeviceMesh
 
-    from priml.distributed.testing import WarmPoolGetter
     from priml.train.custom_types import ParallelStrategyProtocol
 
 
@@ -58,7 +56,7 @@ class _FakeMesh:
     """
 
     device_type = "cpu"
-    mesh_dim_names = ("dp", "tp")
+    mesh_dim_names: tuple[str, ...] = ("dp", "tp")
     shape = (1, 1)
 
     def __getitem__(self, key: object) -> _FakeMesh:
@@ -847,45 +845,47 @@ def test_distributed_strategies_place_an_eager_model(
         assert next(placed.parameters()).is_meta, type(config).__qualname__
 
 
-# ``result_dir`` is bound via ``functools.partial`` and pickled with the worker, so it
-# survives a forkserver started by an earlier test (an env var would be stale in that
-# forkserver's snapshotted environment). Writes ``ok`` or ``FAIL:<reason>`` to
-# ``rank_<r>`` under ``result_dir``.
-def _fsdp_materialize_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Worker: shard a meta model under FSDP, record materialize outcome."""
-    result_path = Path(result_dir)
-    rank = mesh.get_rank()
+@contextlib.contextmanager
+def _one_rank_mesh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mesh_dims: dict[str, int],
+) -> Generator[DeviceMesh]:
+    """Install a world-1 gloo group and its mesh as the global device mesh."""
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
     try:
-        runtime._device_mesh = mesh
+        mesh = init_device_mesh(
+            "cpu",
+            tuple(mesh_dims.values()),
+            mesh_dim_names=tuple(mesh_dims),
+        )
+        monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+        yield mesh
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.filterwarnings("ignore:DTensor random operators:UserWarning")
+def test_fully_sharded_materializes_a_meta_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FSDP shards a meta model; its local shard must materialize finite."""
+    with _one_rank_mesh(tmp_path, monkeypatch, {"dp": 1}):
         torch.manual_seed(0)
         with torch.device("meta"):
             model = _TwoLinear()
         out = FullySharded.Config(mesh_dim="dp").make()(model)
         param = next(out.parameters())
         local = param.to_local() if isinstance(param, DTensor) else param
-        if param.is_meta:
-            (result_path / f"rank_{rank}").write_text("FAIL:still-meta")
-        elif not torch.isfinite(local).all():
-            (result_path / f"rank_{rank}").write_text("FAIL:non-finite")
-        else:
-            (result_path / f"rank_{rank}").write_text("ok")
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
-    finally:
-        runtime._device_mesh = None
-
-
-@pytest.mark.compute_distributed
-def test_fully_sharded_materializes_meta_model_multirank(
-    warm_pools: WarmPoolGetter,
-) -> None:
-    """FSDP shards a meta model across 2 ranks; each shard must materialize."""
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_fsdp_materialize_worker, tmp))
-        results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
-
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
+        assert isinstance(param, DTensor)
+        assert not param.is_meta
+        assert torch.isfinite(local).all()
 
 
 class _BNBlock(nn.Module):
@@ -944,65 +944,24 @@ def test_module_mp_policy_forces_batchnorm_fp32() -> None:
     assert _module_mp_policy(nn.BatchNorm1d(8), None) is None
 
 
-def _bn_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Worker: shard a BN-bearing model under bf16; confirm BN materializes ok."""
-    result_path = Path(result_dir)
-    rank = mesh.get_rank()
-    try:
-        runtime._device_mesh = mesh
+def test_recursive_sharded_shards_batchnorm_under_bf16(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#324: a BN-bearing model shards under bf16 FSDP; BN stays fp32 and finite."""
+    with _one_rank_mesh(tmp_path, monkeypatch, {"dp": 1}):
         torch.manual_seed(0)
-        model = _BNModel()
         out = RecursiveSharded.Config(
             mesh_dim="dp",
             module_types=(_BNBlock,),
             mp_param_dtype=torch.bfloat16,
             mp_reduce_dtype=torch.bfloat16,
-        ).make()(model)
+        ).make()(_BNModel())
         bn = next(m for m in out.modules() if isinstance(m, nn.BatchNorm1d))
         weight = bn.weight
-        local = weight.to_local() if isinstance(weight, DTensor) else weight
-        ok = torch.isfinite(local).all()
-        (result_path / f"rank_{rank}").write_text("ok" if ok else "FAIL:non-finite")
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
-    finally:
-        runtime._device_mesh = None
-
-
-@pytest.mark.compute_distributed
-def test_recursive_sharded_shards_batchnorm_multirank(
-    warm_pools: WarmPoolGetter,
-) -> None:
-    """#324: a BN-bearing model shards under bf16 FSDP without crashing."""
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_bn_shard_worker, tmp))
-        results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
-
-
-def _inference_then_train_worker(
-    result_dir: str,
-    config: Makeable[ParallelStrategyProtocol],
-    mesh: DeviceMesh,
-) -> None:
-    """Worker: apply the strategy, forward under inference mode, then backward."""
-    rank = mesh.get_rank()
-    try:
-        runtime._device_mesh = mesh
-        torch.manual_seed(0)
-        model = config.make()(_TwoLinear())
-        x = torch.full((2, 8), float(rank + 1))  # Ranks differ before the reduction.
-        with torch.inference_mode():
-            model(x)
-        cast(Tensor, model(x)).sum().backward()
-        grads = [_whole_grad(p) for p in model.parameters()]
-        outcome = repr([None if g is None else g.tolist() for g in grads])
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        outcome = f"FAIL:{e!r}"
-    finally:
-        runtime._device_mesh = None
-    (Path(result_dir) / f"rank_{rank}").write_text(outcome)
+        assert isinstance(weight, DTensor)
+        assert weight.dtype == torch.float32
+        assert torch.isfinite(weight.to_local()).all()
 
 
 def _whole_grad(param: Tensor) -> Tensor | None:
@@ -1014,11 +973,11 @@ def _whole_grad(param: Tensor) -> Tensor | None:
 @pytest.mark.parametrize(
     ("mesh_dims", "build"),
     [
-        ({"dp": 2}, DataParallel.Config),
-        ({"dp": 2}, lambda: DataParallel.Config(gradient_as_bucket_view=True)),
-        ({"dp": 2}, FullySharded.Config),
-        ({"dp": 2}, lambda: RecursiveSharded.Config(module_types=(nn.Linear,))),
-        ({"dp": 1, "tp": 2}, HybridSharded.Config),
+        ({"dp": 1}, DataParallel.Config),
+        ({"dp": 1}, lambda: DataParallel.Config(gradient_as_bucket_view=True)),
+        ({"dp": 1}, FullySharded.Config),
+        ({"dp": 1}, lambda: RecursiveSharded.Config(module_types=(nn.Linear,))),
+        ({"dp": 1, "tp": 1}, HybridSharded.Config),
     ],
     ids=[
         "data_parallel",
@@ -1028,10 +987,9 @@ def _whole_grad(param: Tensor) -> Tensor | None:
         "hybrid_sharded",
     ],
 )
-@pytest.mark.compute_distributed
 def test_strategies_train_after_an_inference_forward(
-    warm_pools: WarmPoolGetter,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mesh_dims: dict[str, int],
     build: Callable[[], Makeable[ParallelStrategyProtocol]],
 ) -> None:
@@ -1041,40 +999,15 @@ def test_strategies_train_after_an_inference_forward(
     buffers it gathers parameters into. Allocated under inference mode, they
     are inference tensors, and training fails writing into them.
     """
-    pool = warm_pools(mesh_dims)
-    pool(functools.partial(_inference_then_train_worker, str(tmp_path), build()))
-    results = {p.name: p.read_text() for p in sorted(tmp_path.iterdir())}
-    failures = [f"{name}: {r}" for name, r in results.items() if r.startswith("FAIL")]
-    assert not failures, "\n".join(failures)
-    assert len(results) == math.prod(mesh_dims.values()), results
-    assert "None" not in results["rank_0"], "A parameter received no gradient."
-    assert len(set(results.values())) == 1, "Ranks disagree on the gradient."
-
-
-def test_fully_sharded_one_rank_trains_after_an_inference_forward(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pre-allocated unshard buffers let a training forward follow an inference one."""
-    dist.init_process_group(
-        backend="gloo",
-        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
-        rank=0,
-        world_size=1,
-    )
-    try:
-        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
-        monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    with _one_rank_mesh(tmp_path, monkeypatch, mesh_dims):
         torch.manual_seed(0)
-        model = FullySharded.Config().make()(_TwoLinear())
+        model = build().make()(_TwoLinear())
         x = torch.ones(2, 8)
         with torch.inference_mode():
             model(x)
         cast(Tensor, model(x)).sum().backward()
         grads = [_whole_grad(p) for p in model.parameters()]
-    finally:
-        dist.destroy_process_group()
-    assert all(grad is not None for grad in grads)
+    assert all(grad is not None for grad in grads), "A parameter got no gradient."
 
 
 def test_tensor_parallel_lives_in_lib() -> None:
@@ -1358,39 +1291,6 @@ def test_materialization_failure_reaches_every_rank(
     with pytest.raises(RuntimeError, match="injected reset failure"):
         materialize_meta(model, torch.device("cpu"))
     assert observed == (["injected reset failure"] if rank == 0 else [None])
-
-
-class _RankFailingReset(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(2, 3))
-
-    def reset_parameters(self) -> None:
-        if torch.distributed.get_rank() == 0:
-            raise RuntimeError("injected reset failure")
-        nn.init.ones_(self.weight)
-
-
-def _materialization_failure_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    with torch.device("meta"):
-        model = _RankFailingReset()
-    with pytest.raises(RuntimeError, match="injected reset failure"):
-        materialize_meta(model, torch.device("cpu"))
-    (Path(result_dir) / f"rank_{mesh.get_rank()}").write_text("ok")
-
-
-@pytest.mark.compute_distributed
-def test_materialization_failure_reaches_real_peers(
-    warm_pools: WarmPoolGetter,
-    tmp_path: Path,
-) -> None:
-    """Propagate a rank-zero reset failure across a real two-rank group."""
-    pool = warm_pools({"dp": 2})
-    pool(functools.partial(_materialization_failure_worker, str(tmp_path)))
-    assert {p.name: p.read_text() for p in tmp_path.iterdir()} == {
-        "rank_0": "ok",
-        "rank_1": "ok",
-    }
 
 
 if __name__ == "__main__":

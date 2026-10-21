@@ -26,6 +26,7 @@ from treekle import from_plain
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.arcagi.parity.data import Arc2Data
 from priml.baselines.arcagi.parity.record_test import load, reduce
@@ -327,25 +328,6 @@ def run_distributed(
     return out
 
 
-def _sampling_worker(root: Path, mesh: DeviceMesh) -> None:
-    rank = mesh.get_rank()
-    try:
-        config = Arc2Data.Config(working_dir=root, batch_size=2, device="cpu")
-        port = config.make()
-        record = record_sampling(port)
-        actual_loader = port.train_dataloader()
-        iterator = iter(actual_loader)
-        next(iterator)
-        resumed = config.make()
-        resumed.load_state_dict(port.state_dict())
-        assert len(resumed.train_dataloader()) == len(actual_loader)
-        for left, right in zip(iterator, resumed.train_dataloader(), strict=True):
-            assert not mismatches(reduce(_batch(left)), reduce(_batch(right))), "resume"
-        torch.save(record, root / f"record_{rank}.pt")
-    except (AssertionError, RuntimeError, ValueError, TypeError, KeyError):
-        (root / f"record_{rank}.txt").write_text(traceback.format_exc())
-
-
 def _training_worker(root: Path, clip: float, fault: Fault, mesh: DeviceMesh) -> None:
     runtime = MultiProcess.Config(
         device="cpu",
@@ -388,7 +370,7 @@ def _without_tensors(value: object) -> object:
     if isinstance(value, dict):
         items = cast("dict[object, object]", value).items()
         return {k: _without_tensors(v) for k, v in items if not isinstance(v, Tensor)}
-    if isinstance(value, list | tuple):
+    if isinstance(value, (list, tuple)):
         return [_without_tensors(item) for item in cast("list[object]", value)]
     return value
 
@@ -413,12 +395,33 @@ def _expect(
     return report
 
 
-@pytest.mark.compute_distributed
-def test_source_global_sampling(tmp_path: Path, warm_pools: WarmPoolGetter) -> None:
-    """Plan globally, slice locally, preserve resume, and align empty eval tails."""
+@pytest.mark.parametrize("rank", [0, 1])
+def test_source_global_sampling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+) -> None:
+    """Plan globally, slice locally, preserve resume, and align empty eval tails.
+
+    The loader reads its rank and world once, at construction, and runs no
+    collective, so each rank's view is built here without a process group.
+    """
     prepared_tree(tmp_path)
-    records = run_distributed(partial(_sampling_worker, tmp_path), tmp_path, warm_pools)
-    report = _expect("distributed", lambda rank: f"sampling/rank{rank}", records)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: rank)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    config = Arc2Data.Config(working_dir=tmp_path, batch_size=2, device="cpu")
+    port = config.make()
+    record = record_sampling(port)
+    actual_loader = port.train_dataloader()
+    iterator = iter(actual_loader)
+    next(iterator)
+    resumed = config.make()
+    resumed.load_state_dict(port.state_dict())
+    assert len(resumed.train_dataloader()) == len(actual_loader)
+    for left, right in zip(iterator, resumed.train_dataloader(), strict=True):
+        assert not mismatches(reduce(_batch(left)), reduce(_batch(right)))
+    report = mismatches(load("distributed")[f"sampling/rank{rank}"], record)
     assert not report, "\n".join(report)
 
 

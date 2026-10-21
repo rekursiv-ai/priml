@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 import math
 
-from configgle import Fig, Makeable, PartialConfig
-from scipy.optimize import OptimizeResult, minimize_scalar
+from configgle import Fig, Makeable
 from torch import Tensor
 
 import torch
 
 from priml.baselines.oscillator.data import STATE_CHANNELS, Oscillator
+from priml.baselines.oscillator.search import BoundedScalarSearch
 from priml.baselines.oscillator.train_step import FitReport
 
 
@@ -21,12 +21,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from priml.baselines.oscillator.data import Windows
+    from priml.baselines.oscillator.search import SearchResult
 
 
 class ScalarSearch(Protocol):
     """Search one simulator parameter using a supplied training loss."""
 
-    def __call__(self, fun: Callable[[float], float], /) -> OptimizeResult:
+    def __call__(self, fun: Callable[[float], float], /) -> SearchResult[float]:
         """Return the search result for the supplied loss."""
         ...
 
@@ -44,12 +45,7 @@ class CalibratedSimulator:
 
     class Config(Fig["CalibratedSimulator"]):
         search: Makeable[ScalarSearch] = field(
-            default_factory=lambda: PartialConfig(
-                minimize_scalar,
-                bounds=(0.0, 1.0),
-                method="bounded",
-                options={"maxiter": 64, "xatol": 1e-6},
-            ),
+            default_factory=BoundedScalarSearch.Config,
         )
         """Search bounds and stopping rules for the cubic force."""
 
@@ -101,7 +97,7 @@ class CalibratedSimulator:
         # Keep the original simulator if fitting cannot improve its training loss.
         objective(simulator.config.cubic)
         result = self.search(objective)
-        if not cast(bool, result.success) or objective.best_config is None:
+        if not result.success or objective.best_config is None:
             raise RuntimeError("Calibration did not find a finite converged fit.")
         self.simulator = objective.best_config.make()
         self.horizon = train.label.shape[1]

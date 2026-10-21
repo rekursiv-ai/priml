@@ -96,7 +96,6 @@ def test_ceil_multiple_int() -> None:
 def test_ceil_multiple_float() -> None:
     result = ceil_multiple(5.5, 2.0)
     assert result == 6.0
-    assert isinstance(result, float)
 
 
 def test_ceil_multiple_numpy() -> None:
@@ -125,7 +124,6 @@ def test_floor_multiple_int() -> None:
 def test_floor_multiple_float() -> None:
     result = floor_multiple(5.5, 2.0)
     assert result == 4.0
-    assert isinstance(result, float)
     assert floor_multiple(1, 0.1) == 1.0
 
 

@@ -32,7 +32,7 @@ from priml.model.coatnet import (
     silu_inplace,
 )
 from priml.model.conv import Conv2d
-from priml.model.custom_types import ChannelsInOut
+from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.norm import BatchNorm2d
 from priml.model.squeeze_excitation import SqueezeExcitation
 from priml.model.swiglu import sigmoid
@@ -52,8 +52,8 @@ def test_composite_boundaries_infer_only_unspecified_widths(
     config: Fig[object],
 ) -> None:
     for channels_in, channels_out in [(3, -1), (-1, 5), (3, 6)]:
-        resolved = config.copy_tree()
-        assert isinstance(resolved, ChannelsInOut)
+        resolved: object = config.copy_tree()
+        assert isinstance(resolved, ChannelsInOutConfig)
         resolved.channels_in, resolved.channels_out = channels_in, channels_out
         resolved = resolved.finalize()
         assert resolved.channels_in == (
@@ -359,7 +359,7 @@ def test_coatnet_checkpoint_validation_is_atomic() -> None:
     model = _config().make()
     state = {name: value.clone() for name, value in model.state_dict().items()}
     for bad in (
-        {},
+        dict[str, torch.Tensor](),
         {**state, "norm.weight": torch.zeros(1)},
         {**state, "norm.bias": state["norm.bias"].double()},
     ):

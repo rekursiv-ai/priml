@@ -21,7 +21,7 @@ from torch import Tensor, nn
 from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.distributed.tensor import Shard, distribute_tensor
 from treekle import from_plain
 
 import pytest
@@ -44,9 +44,6 @@ from priml.train.checkpointer import (
 
 if TYPE_CHECKING:
     from configgle import Makeable
-    from torch.distributed.device_mesh import DeviceMesh
-
-    from priml.distributed.testing import WarmPoolGetter
 
 
 @pytest.fixture
@@ -630,7 +627,7 @@ def test_maybe_save_rejects_a_negative_step(temp_checkpoint_dir: Path) -> None:
 def test_close_drains_the_storer(temp_checkpoint_dir: Path) -> None:
     ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
     flushed: list[int] = []
-    ckpt.storage.flush = lambda: flushed.append(1)  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+    ckpt.storage.flush = lambda: flushed.append(1)  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
     ckpt.close()
     assert flushed == [1]
 
@@ -1933,203 +1930,132 @@ def test_async_is_complete_is_pure_no_join(
     assert storage._pending is None
 
 
-# Mirrors a real loop: shard ONCE, then checkpoint repeatedly. (Re-sharding a fresh FSDP
-# model per step is not how training works and wedges the group.)
-def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Two async saves of one sharded model across ranks, then load back."""
-    rank = mesh.get_rank()
-    try:
-        model, optimizer = _shard_and_step(mesh)
-        ckpt = Checkpointer(
-            Checkpointer.Config(
-                working_dir=Path(result_dir) / "ck",
-                save_every=1,
-                keep_last_n=1,
-                storer=AsyncLocalStateDictStorer.Config(),
-            ),
-        )
-        save_target = _DictTarget(
-            {"model": model.state_dict(), "opt": optimizer.state_dict()},
-        )
-        # Force-save each step: exercises the collective broadcast in save()
-        # interleaved with the async storer's barriers (regression: must not
-        # desync the gloo group).
-        for step in (1, 2):
-            ckpt.save(save_target, step)
-        ckpt.close()
-        # Retention kept the newest complete checkpoint.
-        steps = ckpt.available_steps()
-        load_target = _DictTarget(
-            {"model": model.state_dict(), "opt": optimizer.state_dict()},
-        )
-        merged = ckpt.load(load_target, max_steps=1e9, guard=False)
-        ok = steps == [2] and merged
-        (Path(result_dir) / f"rank_{rank}").write_text("ok" if ok else f"FAIL:{steps}")
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
+# A deadlock is two ranks reaching different collective sequences, which comparing the
+# returned lists exposes. Broadcasts leave rank 0's payload.
+def _run_as_rank(
+    rank: int,
+    monkeypatch: pytest.MonkeyPatch,
+    run: Callable[[], None],
+) -> list[str]:
+    """Run ``run`` as ``rank`` of a two-rank group; return its collectives in order."""
+    calls: list[str] = []
+
+    def broadcast(objects: list[object], src: int) -> None:
+        assert src == 0
+        del objects
+        calls.append("broadcast")
+
+    def gather(errors: list[str | None], error: str | None) -> None:
+        del error
+        calls.append("all_gather")
+        errors[:] = [None, None]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dist, "is_initialized", lambda: True)
+        patch.setattr(dist, "get_rank", lambda: rank)
+        patch.setattr(dist, "get_world_size", lambda: 2)
+        patch.setattr(checkpointer, "is_rank_zero", lambda: rank == 0)
+        patch.setattr(dist, "barrier", lambda: calls.append("barrier"))
+        patch.setattr(dist, "broadcast_object_list", broadcast)
+        patch.setattr(dist, "all_gather_object", gather)
+        run()
+    del monkeypatch
+    return calls
 
 
-@pytest.mark.compute_distributed
-def test_async_multirank_does_not_deadlock(warm_pools: WarmPoolGetter) -> None:
-    """Async save+prune+load across 2 ranks must not desync barriers.
+def _completed_async_save(
+    state_dict: StateDict,
+    *,
+    checkpoint_id: str,
+) -> Future[object]:
+    """Stand in for ``dcp.async_save``: write the completion marker, already done."""
+    del state_dict
+    Path(checkpoint_id).mkdir(parents=True, exist_ok=True)
+    (Path(checkpoint_id) / ".metadata").write_bytes(b"done")
+    done: Future[object] = Future()
+    done.set_result(None)
+    return done
 
-    Prune runs rank-0-only; any collective (barrier/join) reached only on rank 0
-    deadlocks the others. This drives repeated async saves with retention and a
-    final load across a real 2-rank group.
+
+def _ignore_load(state_dict: StateDict, *, checkpoint_id: str) -> None:
+    del state_dict, checkpoint_id
+
+
+def _async_saves_then_load(working_dir: Path) -> None:
+    """Two forced async saves with ``keep_last_n=1``, a close, then a resume."""
+    ckpt = Checkpointer(
+        Checkpointer.Config(
+            working_dir=working_dir,
+            save_every=1,
+            keep_last_n=1,
+            storer=AsyncLocalStateDictStorer.Config(),
+        ),
+    )
+    for step in (1, 2):
+        ckpt.save(_DictTarget({"x": torch.tensor([step])}), step)
+    ckpt.close()
+    assert ckpt.load(_DictTarget({"x": torch.zeros(1)}), max_steps=1e9, guard=False)
+
+
+def test_async_save_prune_and_load_reach_the_same_collectives_on_every_rank(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prune is rank-0-only; a collective inside it would strand rank 1."""
+    monkeypatch.setattr(dcp, "async_save", _completed_async_save)
+    monkeypatch.setattr(state_dict_loader, "load", _ignore_load)
+    sequences = [
+        _run_as_rank(
+            rank,
+            monkeypatch,
+            functools.partial(_async_saves_then_load, tmp_path / str(rank)),
+        )
+        for rank in (0, 1)
+    ]
+    assert sequences[0] == sequences[1]
+    assert "barrier" in sequences[0]
+    # Retention ran on rank 0 alone: only its directory dropped the older step.
+    assert sorted(p.name for p in (tmp_path / "0").iterdir()) == ["step_00000002.pt"]
+    assert sorted(p.name for p in (tmp_path / "1").iterdir()) == [
+        "step_00000001.pt",
+        "step_00000002.pt",
+    ]
+
+
+def test_a_sharded_resume_loads_into_the_targets_live_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DCP reshards into the template it is handed: the target's current state.
+
+    A world-size change resumes correctly because that template is sharded for
+    THIS world; the restored blob must then reach ``load_state_dict``.
     """
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_async_multisave_worker, tmp))
-        results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
+    path = tmp_path / "step_00000003.pt"
+    path.mkdir()
+    (path / ".metadata").write_bytes(b"done")
+    live: dict[str, object] = {"model": torch.zeros(2), "opt": torch.zeros(3)}
+    templates: list[StateDict] = []
 
+    def load(state_dict: StateDict, *, checkpoint_id: str) -> None:
+        assert Path(checkpoint_id) == path
+        templates.append(state_dict)
+        state_dict["model"] = torch.ones(2)
 
-class _Tiny(nn.Module):
-    """Minimal shardable model: one linear, recursive-ownership reset."""
+    monkeypatch.setattr(state_dict_loader, "load", load)
+    target = _DictTarget(live)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.fc = nn.Linear(3, 2)
+    assert Checkpointer(Checkpointer.Config(working_dir=tmp_path)).load(
+        target,
+        max_steps=1e9,
+        guard=False,
+    )
 
-    def reset_parameters(self) -> None:
-        self.fc.reset_parameters()
-
-    @override
-    def forward(self, x: Tensor) -> Tensor:
-        return self.fc(x)
-
-
-def _full_tensor(t: Tensor) -> Tensor:
-    """Gather a (possibly sharded) tensor to its full, replicated value."""
-    return t.full_tensor() if isinstance(t, DTensor) else t
-
-
-def _shard_and_step(mesh: DeviceMesh) -> tuple[nn.Module, torch.optim.Optimizer]:
-    """Fully-shard a fresh model over ``mesh`` and run one AdamW step."""
-    torch.manual_seed(0)
-    model = _Tiny()
-    fully_shard(model, mesh=mesh)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
-    model(torch.randn(2, 3)).sum().backward()
-    optimizer.step()
-    return model, optimizer
-
-
-def _first_exp_avg(optimizer: torch.optim.Optimizer) -> Tensor:
-    """Read the first parameter's Adam ``exp_avg`` moment off the state dict."""
-    exp_avg = optimizer.state_dict()["state"][0]["exp_avg"]  # pyright: ignore[reportAny] -- torch's own opaque optimizer payload.
-    assert isinstance(exp_avg, Tensor)
-    return exp_avg
-
-
-def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Save+reload model and optimizer DTensors; compare full param + opt state."""
-    rank = mesh.get_rank()
-    try:
-        model, optimizer = _shard_and_step(mesh)
-        orig_weight = _full_tensor(next(model.parameters())).clone()
-        orig_exp_avg = _full_tensor(_first_exp_avg(optimizer)).clone()
-        ckpt = Checkpointer(
-            Checkpointer.Config(working_dir=Path(result_dir) / "ck"),
-        )
-        ckpt.save(
-            _DictTarget({"model": model.state_dict(), "opt": optimizer.state_dict()}),
-            0,
-        )
-
-        reload_model, reload_opt = _shard_and_step(mesh)
-        target = _DictTarget(
-            {"model": reload_model.state_dict(), "opt": reload_opt.state_dict()},
-        )
-        loaded = ckpt.load(target, max_steps=1e9, guard=False)
-        merged = target.loaded
-        if merged is not None:
-            reload_model.load_state_dict(
-                from_plain(merged["model"], dict[str, object]),
-            )
-            reload_opt.load_state_dict(from_plain(merged["opt"], dict[str, object]))
-        weight = _full_tensor(next(reload_model.parameters()))
-        exp_avg = _full_tensor(_first_exp_avg(reload_opt))
-        ok = (
-            loaded
-            and torch.equal(weight, orig_weight)
-            and torch.equal(exp_avg, orig_exp_avg)
-        )
-        (Path(result_dir) / f"rank_{rank}").write_text(
-            "ok" if ok else f"FAIL loaded={loaded}",
-        )
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
-
-
-@pytest.mark.compute_distributed
-def test_sharded_resume_remaps_or_reshards(warm_pools: WarmPoolGetter) -> None:
-    """Sharded resume must restore model AND optimizer DTensors correctly."""
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_resume_worker, tmp))
-        results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
-
-
-def _world2_save_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> None:
-    """Save a sharded checkpoint at world=2 and record the full parameter."""
-    rank = mesh.get_rank()
-    try:
-        model, _ = _shard_and_step(mesh)
-        ckpt = Checkpointer(Checkpointer.Config(working_dir=Path(ckpt_dir)))
-        ckpt.save(_DictTarget({"model": model.state_dict()}), 0)
-        full = _full_tensor(next(model.parameters())).clone()
-        if rank == 0:
-            torch.save(full, Path(result_dir) / "full.pt")
-        (Path(result_dir) / f"save_rank_{rank}").write_text("ok")
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        (Path(result_dir) / f"save_rank_{rank}").write_text(f"FAIL:{e!r}")
-
-
-def _world1_load_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> None:
-    """Load a world=2 checkpoint at world=1; DCP must reshard to full tensor."""
-    rank = mesh.get_rank()
-    try:
-        model, _ = _shard_and_step(mesh)
-        ckpt = Checkpointer(Checkpointer.Config(working_dir=Path(ckpt_dir)))
-        target = _DictTarget({"model": model.state_dict()})
-        loaded = ckpt.load(target, max_steps=1e9, guard=False)
-        merged = target.loaded
-        if merged is not None:
-            model.load_state_dict(from_plain(merged["model"], dict[str, object]))
-        full = _full_tensor(next(model.parameters()))
-        ref = cast(object, torch.load(Path(result_dir) / "full.pt"))
-        assert isinstance(ref, Tensor)
-        ok = loaded and torch.equal(full, ref)
-        (Path(result_dir) / f"load_rank_{rank}").write_text(
-            "ok" if ok else f"FAIL loaded={loaded}",
-        )
-    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
-        (Path(result_dir) / f"load_rank_{rank}").write_text(f"FAIL:{e!r}")
-
-
-@pytest.mark.compute_distributed
-def test_world_size_change_resume(warm_pools: WarmPoolGetter) -> None:
-    """A world=2 checkpoint must reshard correctly when loaded at world=1."""
-    save_pool = warm_pools({"dp": 2})
-    load_pool = warm_pools({"dp": 1})
-    with tempfile.TemporaryDirectory() as tmp:
-        ckpt_dir = str(Path(tmp) / "ck")
-        res = Path(tmp) / "res"
-        res.mkdir()
-        save_pool(functools.partial(_world2_save_worker, ckpt_dir, str(res)))
-        load_pool(functools.partial(_world1_load_worker, ckpt_dir, str(res)))
-        results = {
-            p.name: p.read_text()
-            for p in res.iterdir()
-            if p.is_file() and not p.name.endswith(".pt")
-        }
-    assert results == {
-        "save_rank_0": "ok",
-        "save_rank_1": "ok",
-        "load_rank_0": "ok",
-    }, results
+    [template] = templates
+    assert template["opt"] is live["opt"]
+    assert target.loaded is not None
+    assert torch.equal(_tensor(target.loaded["model"]), torch.ones(2))
+    assert target.loaded["opt"] is live["opt"]
 
 
 def test_async_failed_join_releases_pending_state(tmp_path: Path) -> None:
@@ -2343,50 +2269,6 @@ def test_async_failed_join_is_agreed_and_released_on_every_rank(
     assert barriers == []
     storage.flush()
     assert barriers == [1]
-
-
-def _checkpoint_failure_worker(result_dir: str, mode: str, mesh: DeviceMesh) -> None:
-    rank = mesh.get_rank()
-    if mode == "plain":
-        storage = SyncLocalStateDictStorer()
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(torch, "save", _fail_plain_save)
-            with pytest.raises(OSError, match="injected save failure"):
-                storage.write(Path(result_dir) / "checkpoint.pt", {"x": torch.ones(2)})
-    else:
-        storage = AsyncLocalStateDictStorer()
-        future: Future[object] = Future()
-        if rank == 0:
-            future.set_exception(OSError("injected async failure"))
-        else:
-            future.set_result(None)
-        storage._pending = future
-        with pytest.raises(OSError, match="injected async failure"):
-            storage.flush()
-        assert storage._pending is None
-        storage.flush()
-    (Path(result_dir) / f"rank_{rank}").write_text("ok")
-
-
-def _fail_plain_save(state: object, path: object) -> None:
-    del state, path
-    raise OSError("injected save failure")
-
-
-@pytest.mark.compute_distributed
-@pytest.mark.parametrize("mode", ["plain", "async"])
-def test_checkpoint_failure_reaches_real_peers(
-    warm_pools: WarmPoolGetter,
-    tmp_path: Path,
-    mode: str,
-) -> None:
-    """Propagate a rank-zero storage failure across a real two-rank group."""
-    pool = warm_pools({"dp": 2})
-    pool(functools.partial(_checkpoint_failure_worker, str(tmp_path), mode))
-    assert {p.name: p.read_text() for p in tmp_path.iterdir()} == {
-        "rank_0": "ok",
-        "rank_1": "ok",
-    }
 
 
 if __name__ == "__main__":

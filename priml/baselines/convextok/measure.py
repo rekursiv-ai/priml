@@ -198,7 +198,7 @@ class MeasuredFit:
         )
         tokenizer.save(str(output / "tokenizer.json"))
         seconds = {**fit.seconds, "export": time.perf_counter() - start}
-        metrics: Metrics = {
+        metrics: Metrics = {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             "seconds": {**seconds, "total": sum(seconds.values())},
             "peak_gpu_bytes": peak_gpu_bytes,
             "peak_host_bytes": peak_host_bytes,

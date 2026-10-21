@@ -1249,27 +1249,60 @@ def test_a_system_prompt_override_resolves_under_base_dir(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    ("overrides", "match"),
+    ("config", "match"),
     [
-        ({"start_step": -1}, "start_step must be non-negative"),
-        ({"num_prompts": 0}, "num_prompts must be positive"),
-        ({"samples_per_prompt": 1}, "samples_per_prompt must be greater than one"),
-        ({"max_prompt_tokens": 0}, "lengths must be positive"),
-        ({"max_steps": 0}, "max_steps must be positive"),
-        ({"num_engines": 0}, "Engine counts must be positive"),
-        ({"pool_size": 0}, "pool_size must be positive"),
-        ({"dataset_repo": ""}, "dataset_repo must name"),
-        ({"filter_zero_std_samples": False}, "active_sampling needs filter"),
-        ({"async_steps": 1}, "active_sampling needs async_steps"),
-        ({"active_sampling": False, "async_steps": 0}, "async_steps must be positive"),
+        (
+            dataclasses.replace(RunnerConfig(), start_step=-1),
+            "start_step must be non-negative",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), num_prompts=0),
+            "num_prompts must be positive",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), samples_per_prompt=1),
+            "samples_per_prompt must be greater than one",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), max_prompt_tokens=0),
+            "lengths must be positive",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), max_steps=0),
+            "max_steps must be positive",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), num_engines=0),
+            "Engine counts must be positive",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), pool_size=0),
+            "pool_size must be positive",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), dataset_repo=""),
+            "dataset_repo must name",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), filter_zero_std_samples=False),
+            "active_sampling needs filter",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), async_steps=1),
+            "active_sampling needs async_steps",
+        ),
+        (
+            dataclasses.replace(RunnerConfig(), active_sampling=False, async_steps=0),
+            "async_steps must be positive",
+        ),
     ],
 )
 def test_invalid_runner_settings_are_refused(
-    overrides: dict[str, object],
+    config: RunnerConfig,
     match: str,
 ) -> None:
     with pytest.raises(ValueError, match=match):
-        dataclasses.replace(RunnerConfig(), **overrides).make()
+        config.make()
 
 
 # -- upstream import ----------------------------------------------------------

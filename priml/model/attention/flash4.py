@@ -452,7 +452,7 @@ def _interface() -> "_Flash4Interface":
             "FlashAttention 4 is not installed; install priml[cuda] or inject a "
             "portable kernel such as SdpaFused or SdpaVarlen instead.",
         ) from error
-    if not isinstance(module, _Flash4Interface):
+    if not isinstance(module, _Flash4Interface):  # pyrefly: ignore[unsafe-overlap] -- pyrefly reads a module's attributes as read-only and a protocol's members as read-write.
         raise TypeError(
             "FA4 must provide flash_attn_func, flash_attn_varlen_func and "
             "_flash_attn_bwd.",

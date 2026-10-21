@@ -9,13 +9,13 @@ import re
 
 from configgle import Fig, InlineConfig, Makeable
 from numpy.typing import NDArray
-from scipy.sparse import coo_array, csr_array, hstack
 
 import numpy as np
 
 from priml.baselines.name_that_llm import standardization
 from priml.baselines.name_that_llm.calibration import SigmoidCalibration
 from priml.baselines.name_that_llm.logistic import LogisticRegression
+from priml.baselines.name_that_llm.sparse import CsrMatrix, hstack
 from priml.baselines.name_that_llm.svm import LinearSVC
 from priml.baselines.name_that_llm.tfidf import (
     CharacterNgrams,
@@ -169,7 +169,7 @@ class DocumentFeatures:
         self.style = config.style.make()
         self.scaler = config.scaler.make()
 
-    def fit_transform(self, texts: Sequence[str]) -> csr_array[np.float64]:
+    def fit_transform(self, texts: Sequence[str]) -> CsrMatrix:
         """Fit every feature transform and combine all training columns.
 
         Args:
@@ -186,7 +186,7 @@ class DocumentFeatures:
             style=self.scaler.fit(style).transform(style) * self.config.style_weight,
         )
 
-    def transform(self, texts: Sequence[str]) -> csr_array[np.float64]:
+    def transform(self, texts: Sequence[str]) -> CsrMatrix:
         """Transform held-out passages with the fitted complete vocabulary.
 
         Args:
@@ -205,24 +205,11 @@ class DocumentFeatures:
 
     def _combine(
         self,
-        char: csr_array[np.float64],
-        word: csr_array[np.float64],
+        char: CsrMatrix,
+        word: CsrMatrix,
         style: NDArray[np.float64],
-    ) -> csr_array[np.float64]:
-        # COO-to-CSR sorts each row in the same order as the mixed dense union.
-        return hstack(
-            [
-                char.tocoo(),
-                word.tocoo(),
-                coo_array(
-                    style,
-                    shape=(style.shape[0], style.shape[1]),
-                    dtype=np.float64,
-                ),
-            ],
-            format="csr",
-            dtype=np.float64,
-        )
+    ) -> CsrMatrix:
+        return hstack([char, word, CsrMatrix.from_dense(style)])
 
 
 class SvmBranch:

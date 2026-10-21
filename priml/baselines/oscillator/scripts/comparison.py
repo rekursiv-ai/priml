@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg.pformat(hide_default_values=False) + "\n",
         )
         started = time.perf_counter()
-        record: ComparisonRecord = {
+        record: ComparisonRecord = {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **cfg.make().run(),
             "case": case,
             "data_seed_offset": offset,

@@ -792,7 +792,7 @@ def _process_interpolate_args(
     # type the parameter annotation already carries; re-state it on the way out.
     size_: tuple[int, ...] | None
     if isinstance(size, Sequence):
-        size_ = tuple(int(s) for s in size) if size else None
+        size_ = tuple(int(s) for s in size) if size else None  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     else:
         size_ = (size,) * output_rank
 

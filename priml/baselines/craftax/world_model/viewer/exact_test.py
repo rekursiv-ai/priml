@@ -323,14 +323,14 @@ def test_the_map_and_creatures_are_the_players_floor(played: Replayed) -> None:
         # ``read_frame``'s map: the floor's 48 x 48 cells, each block, item and light.
         board = np.asarray(frame.map).reshape(48, 48, 3)
         view = np.asarray(frame.observation).reshape(9, 11, 8)
-        row, col = int(frame.row), int(frame.col)
+        row, col = int(frame.row), int(frame.col)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         centre = view[4, 5, :]
         if centre[2]:
             assert (centre[0], centre[1]) == (
                 board[row, col, 0],
                 board[row, col, 1] + 1,
             )
-        count = int(frame.mob_count)
+        count = frame.mob_count
         mobs = int_rows(np.asarray(frame.mobs, np.int64)[: 4 * count].reshape(count, 4))
         listed: set[tuple[int, int, int]] = set()
         for i, (klass, kind, mob_row, mob_col) in enumerate(mobs):

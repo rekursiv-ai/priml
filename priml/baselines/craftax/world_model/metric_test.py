@@ -9,6 +9,7 @@ import copy
 import math
 
 from configgle import Fig
+from torch import nn
 from treekle import from_plain
 
 import pytest
@@ -185,6 +186,11 @@ def test_craftax_target_nll_is_the_models_scored_terms_per_job() -> None:
     assert torch.allclose(record[:, 2].sum(), loss.nll["done"])
     assert torch.allclose(record[:, 3:board].sum(), loss.nll["board"])
     assert torch.allclose(record[:, board:].sum(), loss.nll["hud"])
+
+
+def test_craftax_target_nll_refuses_a_model_that_scores_no_targets() -> None:
+    with pytest.raises(TypeError, match="Linear does not score packed targets"):
+        craftax_target_nll(nn.Linear(2, 2), _batch(small_schema()))
 
 
 def test_each_job_records_the_nll_of_its_own_action() -> None:

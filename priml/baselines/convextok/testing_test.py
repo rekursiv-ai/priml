@@ -140,10 +140,11 @@ def test_assert_reduced_like_rejects_another_offset(tmp_path: Path) -> None:
 
 
 def _fixture_reduction() -> tuple[Presolved, dict[str, np.ndarray]]:
-    """Presolve the fixture and copy its golden's arrays, ready to perturb."""
-    with npz(_GOLDEN) as golden:
+    """Presolve recorded input and copy its golden arrays, ready to perturb."""
+    with npz(_FUZZ) as golden:
         arrays = {key: np.array(golden[key]) for key in golden.files}
-    return presolve(fixture_program(), _CPU), arrays
+        program = input_program(golden)
+    return presolve(program, _CPU), arrays
 
 
 def _saved(tmp_path: Path, arrays: dict[str, np.ndarray]) -> Path:

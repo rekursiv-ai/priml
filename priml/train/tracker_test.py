@@ -553,7 +553,7 @@ def test_wandb_capture_console_rebinds_logging_stdout(
 
     _init_kwargs(monkeypatch, WandbTracker.Config(project="trm"))
 
-    assert called is True
+    assert called is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
 
 def test_wandb_capture_console_disabled_does_not_rebind_logging_stdout(
@@ -577,7 +577,7 @@ def test_wandb_capture_console_disabled_does_not_rebind_logging_stdout(
         WandbTracker.Config(project="trm", capture_console=False),
     )
 
-    assert called is False
+    assert called is False  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
 
 def test_wandb_flush_interval_bounds_history_buffering(
@@ -1115,7 +1115,7 @@ def test_async_tracker_is_enabled_ordered_and_nonblocking_by_default() -> None:
     assert child.thread_ids[0] != caller_thread
     assert child.thread_names[0].startswith("tracker_")
     assert child.closed
-    assert tracker._closed is True
+    assert tracker._closed is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
 
 def test_async_tracker_shutdown_waits_for_worker(

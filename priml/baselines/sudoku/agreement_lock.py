@@ -251,8 +251,8 @@ class AgreementLockEval:
             selected, _, _ = modal_grid_predictions(torch.stack(collected))
             final[survivors] = selected
         exact = (final == labels).all(dim=-1)
-        n_puzzles = int(labels.shape[0])
-        passes = 2 * int(agree.sum()) + len(names) * int(survivors.numel())
+        n_puzzles = labels.shape[0]
+        passes = 2 * int(agree.sum()) + len(names) * int(survivors.numel())  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         metrics: dict[str, float | int | str] = {
             "eval/exact_accuracy": float(exact.float().mean()),
             "eval/n_correct": int(exact.sum()),
@@ -260,7 +260,7 @@ class AgreementLockEval:
             "eval/cell_accuracy": float((final == labels).float().mean()),
             "eval/locked_count": int(agree.sum()),
             "eval/wrong_locks": int((agree & ~exact).sum()),
-            "eval/disagreement_count": int(survivors.numel()),
+            "eval/disagreement_count": survivors.numel(),
             "eval/mean_passes": passes / n_puzzles if n_puzzles else 0.0,
             "eval/algorithmic_decision_calls": 0,
             "eval/selection": "first_pair_agreement_lock_else_modal",

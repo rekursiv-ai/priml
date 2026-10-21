@@ -595,7 +595,7 @@ def extreme_csv(name: str) -> Path:
 
     """
     path = Path(
-        str(
+        str(  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             hf_hub_download(
                 "sapientinc/sudoku-extreme",
                 name,

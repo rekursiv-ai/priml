@@ -52,7 +52,7 @@ def reduce(value: object, prefix: str = "") -> dict[str, Tensor]:
         for key, item in cast("dict[object, object]", value).items():
             out.update(reduce(item, f"{prefix}/{key}" if prefix else str(key)))
         return out
-    if isinstance(value, list | tuple):
+    if isinstance(value, (list, tuple)):
         out = {}
         for index, item in enumerate(cast("list[object]", value)):
             out.update(reduce(item, f"{prefix}/{index}" if prefix else str(index)))

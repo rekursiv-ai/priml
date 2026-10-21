@@ -137,7 +137,6 @@ def test_network_costs_one_flattened_history_per_trajectory(
         cost(cfg, seq_len=5, batch_size=2, dtype=dtype)
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize("accumulate", [1, 3])
 def test_network_uses_common_updates_and_restores_the_selected_full_state(
     accumulate: int,
@@ -291,7 +290,6 @@ def test_history_ablation_forwards_study_geometry_to_a_wrapped_network() -> None
     assert kernel.method == KernelCorrection.Config()
 
 
-@pytest.mark.compute_training
 def test_network_batches_pass_through_the_step_preprocessor() -> None:
     method = _neural_config().make()
     train = _windows()
@@ -347,7 +345,6 @@ def test_bias_free_single_gate_has_only_a_quadratic_even_part() -> None:
     assert (biased(values).T @ target).abs().max() > 1e-8
 
 
-@pytest.mark.compute_training
 def test_composed_blocks_receive_gradients_and_inherit_geometry() -> None:
     cfg = _neural_config()
     cfg.step.model.block = Sequential.Config(

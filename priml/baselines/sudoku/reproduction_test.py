@@ -766,7 +766,7 @@ class _FrozenEvaluations:
             if key.startswith(prefix)
         }
         if f"{prefix}eval/locked_total" in self.golden:
-            metrics["eval/rounds"] = []
+            metrics["eval/rounds"] = list[dict[str, float | int | str]]()
         return metrics, 1.0
 
     def _int(self, key: str) -> int:
@@ -837,7 +837,7 @@ def _segments(node: object) -> list[tuple[str, object]]:
     if isinstance(node, dict):
         children = cast("dict[object, object]", node).items()
         return [(_key_segment(name), child) for name, child in children]
-    if isinstance(node, list | tuple):
+    if isinstance(node, (list, tuple)):
         tag = "t" if isinstance(node, tuple) else "l"
         items = cast("list[object]", node)
         return [(f"{tag}{index}", child) for index, child in enumerate(items)]

@@ -413,7 +413,7 @@ def test_load_hf_checkpoint_does_not_treat_config_file_as_directory(
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "tiny"}))
     hf_model = MagicMock()
     hf_model.config.to_dict.return_value = {"model_type": "remote"}
-    hf_model.state_dict.return_value = {}
+    hf_model.state_dict.return_value = dict[str, torch.Tensor]()
     load = Mock(return_value=hf_model)
     monkeypatch.setattr(hub, "load_transformers_model", load)
 
@@ -480,8 +480,8 @@ def test_load_hf_checkpoint_defaults_to_no_remote_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hf_model = MagicMock()
-    hf_model.config.to_dict.return_value = {}
-    hf_model.state_dict.return_value = {}
+    hf_model.config.to_dict.return_value = dict[str, object]()
+    hf_model.state_dict.return_value = dict[str, torch.Tensor]()
     load = Mock(return_value=hf_model)
     monkeypatch.setattr(hub, "load_transformers_model", load)
 

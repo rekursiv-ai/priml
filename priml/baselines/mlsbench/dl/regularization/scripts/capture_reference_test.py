@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 import sys
 
+from torch import Tensor
+
 import torch
 
 from priml.baselines.mlsbench.dl.regularization import reference, upstream
@@ -29,8 +31,6 @@ from priml.testing.golden import read_tensors
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    from torch import Tensor
 
     import pytest
 
@@ -77,7 +77,7 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
         (upstream, "setting_argv"): ["script.py", "--epochs", "200"],
         (upstream, "trace_setting"): vision_upstream.MainTrace(),
         (upstream, "upstream_lockstep"): lockstep,
-        (upstream, "upstream_regularizers"): {},
+        (upstream, "upstream_regularizers"): dict[str, Tensor](),
         (upstream, "upstream_record"): {"regularizer/x": torch.zeros(2)},
         (reference, "setting_batch_size"): torch.ones(2),
         (vision_upstream, "upstream_batches"): ([[batch]], [[batch]]),
@@ -89,14 +89,14 @@ def test_capture_assembles_both_sides_and_every_setting_into_one_report(
         },
         (vision_reference, "loader_batches"): ([[moved]], [[batch]]),
         (upstream, "upstream_setting_recipe"): {"settings/s/recipe": torch.zeros(2)},
-        (vision_capture_reference, "compare_setting"): [],
+        (vision_capture_reference, "compare_setting"): list[str](),
         (upstream, "tiny_network"): tiny,
         (reference, "tiny_network"): tiny,
-        (upstream, "upstream_setting_regularizers"): {},
+        (upstream, "upstream_setting_regularizers"): dict[str, Tensor](),
         (vision_reference, "decode_batches"): {"loader/index": torch.zeros(2)},
         (vision_reference, "setting_batches"): ([[batch]], [[batch]]),
-        (reference, "settings_record"): {},
-        (vision_reference, "task_settings_record"): {},
+        (reference, "settings_record"): dict[str, Tensor](),
+        (vision_reference, "task_settings_record"): dict[str, Tensor](),
     }
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, returning(value))

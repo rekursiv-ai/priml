@@ -412,7 +412,7 @@ def test_skip_preserving_modules_reject_width_changes(
 def test_skip_channels_proxy_inner() -> None:
     config = Skip.Config(inner=Identity.Config(channels_in=64)).finalize()
 
-    assert isinstance(config, ChannelsInOut)
+    assert isinstance(config, ChannelsInOut)  # pyrefly: ignore[unsafe-overlap] -- The passthrough descriptors answer at runtime, which is what this asserts.
     assert config.channels_in == 64
     assert config.channels_out == 64
     assert isinstance(config.inner, Identity.Config)

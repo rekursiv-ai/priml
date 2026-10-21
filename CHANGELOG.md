@@ -107,6 +107,12 @@ All notable priml changes are documented here. This project follows
   `priml.testing.{experiments,fixtures,policy_gradient,qwen3_5}`, and the
   `testing` modules of the convextok, craftax, sudoku and tmax baselines.
 
+### Removed
+
+- `priml.data.processors.logarithm`. The casmi2026 and wellbore baselines
+  evaluate `log`, `log1p`, `expm1` and `pow` in float64 and round once to
+  float32, which does not depend on the host's libm.
+
 ### Fixed
 
 - SpeedrunDiT: gradient accumulation weights micro-batches by their sample

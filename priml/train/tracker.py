@@ -496,7 +496,8 @@ class AsyncTracker:
 
     def flush(self) -> None:
         """Wait for submitted calls in order and surface delivery failures."""
-        pending, self._pending = self._pending, []
+        pending = self._pending
+        self._pending = []
         for future in pending:
             future.result()
 

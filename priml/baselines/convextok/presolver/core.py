@@ -1899,7 +1899,7 @@ def _row_hashes(
         start, end = starts[row], ends[row]
         h = 5381
         for kk in range(start, end):
-            h = (h * 33 + int(idx[kk])) & 0xFFFF_FFFF
+            h = (h * 33 + int(idx[kk])) & 0xFFFF_FFFF  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         sparsity[row] = h - (1 << 32) if h >= 1 << 31 else h
         biggest = abs(x[start])
         for kk in range(start + 1, end):

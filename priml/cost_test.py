@@ -1120,7 +1120,7 @@ class _Rows:
         ) -> Cost:
             del kwargs
             del dtype
-            return Cost(params=int(seq_len * batch_size))
+            return Cost(params=seq_len * batch_size)
 
     def __init__(self, config: Config) -> None:
         del config
@@ -1290,7 +1290,9 @@ def test_every_model_config_is_priced() -> None:
             if type(owner) is not type or owner.__module__ != module_name:
                 continue
             if not issubclass(owner, torch.nn.Module) or [
-                *inspect.signature(owner.forward).parameters,
+                *inspect.signature(
+                    cast("Callable[..., object]", owner.forward),
+                ).parameters,
             ][1:4] == ["q", "k", "v"]:
                 continue
             config = getattr(owner, "Config", None)

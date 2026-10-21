@@ -86,25 +86,14 @@ def two_numba_threads() -> Iterator[None]:
     torch.set_num_threads(torch_threads)
 
 
-# Compiled, so marked: the first case in a process JIT-compiles every kernel it
-# reaches, about 45 s on x86 with a cold Numba cache. Later cases, and every case
-# under a warm cache, take milliseconds. The fuzz programs with the fixture execute
-# every reachable kernel line, so together these cases compile every kernel the
-# presolve can call.
+# The one compiled run: the fixture specializes every kernel the fuzz programs
+# do, which run here as Python. Cold, it pays the JIT compile; keep the mark.
 @pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
 @pytest.mark.usefixtures("two_numba_threads")
 def test_compiled_kernels_match_pslp_on_fixture() -> None:
     with npz(TESTDATA / "presolve.npz") as golden:
         assert_reduced_like(presolve(fixture_program(), _CPU), golden)
-
-
-@pytest.mark.compute_large_fixture
-@pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
-@pytest.mark.parametrize("path", [pytest.param(path, id=path.stem) for path in _FUZZ])
-@pytest.mark.usefixtures("two_numba_threads")
-def test_compiled_kernels_match_pslp_on_fuzz_program(path: Path) -> None:
-    _assert_matches_pslp(path)
 
 
 @pytest.mark.parametrize("length", [5, 20], ids=["linear", "binary"])

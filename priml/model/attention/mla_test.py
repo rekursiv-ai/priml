@@ -17,9 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-import functools
+import copy
 import re
-import tempfile
 
 from configgle import Makeable, PartialConfig
 from torch import Tensor, nn
@@ -36,7 +35,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml import runtime
 from priml.cost import Cost, cost
 from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.kernel import (
@@ -56,7 +54,6 @@ from priml.testing.bfb import (
 )
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden
-from priml.train.tensor_parallel import apply_tensor_parallel
 
 
 if TYPE_CHECKING:
@@ -75,7 +72,6 @@ if TYPE_CHECKING:
 
     from torch.distributed.device_mesh import DeviceMesh
 
-    from priml.distributed.testing import WarmPoolGetter
     from priml.model.custom_types import AttentionKernel
 
 
@@ -1021,23 +1017,50 @@ def test_mla_decode_matches_reference() -> None:
     ), f"max abs diff: {diff:.3e}"
 
 
-@pytest.mark.compute_distributed
-def test_mla_sharded_equals_dense_tp2(warm_pools: WarmPoolGetter) -> None:
-    """#307: the custom MLA style makes sharded output equal dense at tp=2."""
-    pool = warm_pools({"dp": 1, "tp": 2})
-    with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_mla_tp_worker, tmp))
-        results = {
-            path.name: path.read_text()
-            for path in Path(tmp).iterdir()
-            if path.is_file()
-        }
-    expected = {
-        f"{case}_rank{rank}": "ok"
-        for case in ("no_lora", "q_lora", "indivisible")
-        for rank in (0, 1)
-    }
-    assert results == expected, results
+class _TwoWayMesh:
+    """The tp sub-mesh surface ``shard_heads_over`` reads: two ranks, one local."""
+
+    def __init__(self, rank: int) -> None:
+        self.rank = rank
+
+    def size(self) -> int:
+        """Ranks the head dim is split across."""
+        return 2
+
+    def get_local_rank(self) -> int:
+        """Return the rank's index along the tp dim."""
+        return self.rank
+
+
+def _rank_share(
+    module: MultiHeadLatentAttention,
+    rank: int,
+) -> MultiHeadLatentAttention:
+    """Return ``rank``'s tp=2 shard: its q rows, its ``proj_out`` columns."""
+    share = copy.deepcopy(module)
+    share.shard_heads_over(cast("DeviceMesh", _TwoWayMesh(rank)))
+    share._tp_mesh = None  # The rowwise all-reduce is the caller's sum below.
+    q = share.proj_q if share.proj_q is not None else share.proj_q_b
+    assert isinstance(q, Linear)
+    out = share.proj_out
+    assert isinstance(out, Linear)
+    with torch.no_grad():
+        q.weight = nn.Parameter(q.weight.chunk(2, dim=0)[rank].clone())
+        out.weight = nn.Parameter(out.weight.chunk(2, dim=1)[rank].clone())
+        if out.bias is not None and rank != 0:
+            out.bias.zero_()
+    return share
+
+
+@pytest.mark.parametrize("q_lora_rank", [None, 8])
+def test_mla_head_shards_sum_to_the_dense_forward(q_lora_rank: int | None) -> None:
+    """#307: each tp=2 rank expands only its heads; the partial outputs sum to dense."""
+    torch.manual_seed(0)
+    module, x = _tensor_parallel_mla(q_lora_rank=q_lora_rank)
+    with torch.no_grad():
+        dense = first_tensor(module(x))
+        partials = [first_tensor(_rank_share(module, rank)(x)) for rank in (0, 1)]
+    torch.testing.assert_close(partials[0] + partials[1], dense)
 
 
 def _reference_mla_forward(
@@ -1111,83 +1134,6 @@ def _tensor_parallel_mla(
         shard="colwise",
     ).make()
     return module, torch.randn(2, 3, 16)
-
-
-def _record_case(
-    result_dir: Path,
-    case: str,
-    rank: int,
-    q_lora_rank: int | None,
-    mesh: DeviceMesh,
-) -> None:
-    """Assert one MLA variant's sharded forward equals dense; record outcome."""
-    target = result_dir / f"{case}_rank{rank}"
-    try:
-        torch.manual_seed(0)
-        model, x = _tensor_parallel_mla(q_lora_rank=q_lora_rank)
-        dense = first_tensor(model(x))
-        sharded = apply_tensor_parallel(model, mesh)
-        assert isinstance(sharded, MultiHeadLatentAttention)
-        # A sharded q-path guards against a replicated no-op passing trivially.
-        q = sharded.proj_q if sharded.proj_q is not None else sharded.proj_q_b
-        assert isinstance(q, Linear)
-        if not isinstance(q.weight, DTensor):
-            target.write_text("FAIL:q-path-not-sharded")
-            return
-        out = first_tensor(sharded(x))
-        full = out.full_tensor() if isinstance(out, DTensor) else out
-        if torch.allclose(full, dense, rtol=1e-4, atol=1e-5):
-            target.write_text("ok")
-        else:
-            target.write_text(f"FAIL:max={float((full - dense).abs().max()):.2e}")
-    except Exception as error:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
-        target.write_text(f"FAIL:{error!r}")
-
-
-def _record_indivisible_guard(
-    result_dir: Path,
-    rank: int,
-    mesh: DeviceMesh,
-) -> None:
-    """Record whether tensor parallelism rejects indivisible head counts."""
-    target = result_dir / f"indivisible_rank{rank}"
-    try:
-        torch.manual_seed(0)
-        module = MultiHeadLatentAttention.Config(
-            channels_in=16,
-            num_heads=3,
-            channels_qk_nope_head=4,
-            channels_qk_rope_head=4,
-            channels_v_head=4,
-            kv_lora_rank=8,
-            shard="colwise",
-        ).make()
-        target.write_text(_outcome_of_apply(module, mesh))
-    except Exception as error:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
-        target.write_text(f"FAIL:{error!r}")
-
-
-def _outcome_of_apply(module: nn.Module, mesh: DeviceMesh) -> str:
-    """``ok`` when sharding raises the divisibility error, else a FAIL record."""
-    try:
-        apply_tensor_parallel(module, mesh)
-    except ValueError as error:
-        valid = "num_heads" in str(error) and "divis" in str(error).lower()
-        return "ok" if valid else f"FAIL:{error!r}"
-    return "FAIL:no-raise"
-
-
-def _mla_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
-    """Run MLA tensor-parallel cases and record each rank's outcomes."""
-    result_dir = Path(result_dir_str)
-    rank = mesh.get_rank()
-    runtime._device_mesh = mesh
-    try:
-        _record_case(result_dir, "no_lora", rank, None, mesh)
-        _record_case(result_dir, "q_lora", rank, 8, mesh)
-        _record_indivisible_guard(result_dir, rank, mesh)
-    finally:
-        runtime._device_mesh = None
 
 
 # Returns the kernel config too: the slot is typed by the PROTOCOL, so reaching a

@@ -156,6 +156,14 @@ class _Tables:
     aux_float: torch.Tensor
 
 
+def _move_table(table: torch.Tensor, *, device: torch.device) -> torch.Tensor:
+    # MPS holds no float64. Only ``encode`` reads those tables, and it
+    # computes in float64, so it cannot run there; ``decode`` can.
+    if device.type == "mps" and table.dtype == torch.float64:
+        return table
+    return table.to(device)
+
+
 @functools.cache
 def _tables(device: torch.device) -> _Tables:
     """Build the codec constants for ``device`` from the Craftax schema."""
@@ -164,19 +172,15 @@ def _tables(device: torch.device) -> _Tables:
     # as sqrt(11) / 10, and tables built there reject valid frames.
     if device.type != "cpu":
         cpu = _tables(torch.device("cpu"))
-        tables = {
-            field.name: cast("torch.Tensor", getattr(cpu, field.name))
-            for field in dataclasses.fields(cpu)
-            if field.name != "obs_names"
-        }
-        # MPS holds no float64. Only ``encode`` reads those tables, and it
-        # computes in float64, so it cannot run there; ``decode`` can.
         moved = {
-            name: table.to(device)
-            for name, table in tables.items()
-            if device.type != "mps" or table.dtype != torch.float64
+            field.name: _move_table(table, device=device)
+            for field in dataclasses.fields(cpu)
+            if isinstance(
+                table := cast("object", getattr(cpu, field.name)),
+                torch.Tensor,
+            )
         }
-        return dataclasses.replace(cpu, **moved)
+        return dataclasses.replace(cpu, **moved)  # pyrefly: ignore[bad-argument-type] -- pyrefly matches a ``**dict`` value against every field; the keys are only the Tensor fields.
     schema = craftax_schema()
     fields = schema.cell_fields
     names = schema.scalar_names

@@ -17,7 +17,7 @@ from priml.train.epoch_loop import EpochTrainLoop
 class CompressionTrainLoop(EpochTrainLoop):
     """A loop that evaluates after the epochs its policy picks, stepping with compression."""
 
-    class Config(
+    class Config(  # pyrefly: ignore[bad-override] -- pyrefly reads the base's ``Config = EpochLoopConfig`` alias as an instance variable.
         Makes["CompressionTrainLoop"],
         VisionLoop[CompressedTrainStep.Config, Cifar100Data.Config],
     ):

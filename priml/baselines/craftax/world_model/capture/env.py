@@ -409,7 +409,8 @@ class CaptureEnv:
     def episodes(self) -> list[Captured]:
         """Return the episodes ended since the last call, in the order they ended."""
         with self._lock:
-            finished, self._finished = self._finished, []
+            finished = self._finished
+            self._finished = []
         return finished
 
     def in_flight(self) -> int:
@@ -491,7 +492,7 @@ class CaptureEnv:
             ),
             summary=_summary(
                 episode,
-                floors=[*ints(floors), int(state.player_level)],
+                floors=[*ints(floors), state.player_level],
                 killed=np.array(state.monsters_killed, dtype=np.int64),
                 achievements=ints(np.flatnonzero(state.achievements)),
                 returned=np.float32(rows.returned.item(env)),

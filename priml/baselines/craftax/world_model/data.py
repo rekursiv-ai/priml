@@ -290,7 +290,6 @@ class ReplayStream:
                 **geometry,
             )
         else:
-            assert isinstance(validation, StratifiedWindows.Config)
             self.validation = StratifiedWindows(
                 validation,
                 sampler=self.eval_sampler,
@@ -685,17 +684,17 @@ class CorpusSampler:
           decision: Anchor decision within the episode.
 
         """
-        stratum = int(rng.choice(STRATA, p=self.probabilities))
+        stratum = rng.choice(STRATA, p=self.probabilities)
         groups = self._stratum_groups.item(stratum)
         group = self._stratum_first.item(stratum) + int(rng.integers(groups))
         size = self._group_size.item(group)
-        position = int(self._group_offset.item(group)) + int(rng.integers(size))
+        position = int(self._group_offset.item(group)) + int(rng.integers(size))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         span = int(np.searchsorted(self._end, position, side="right"))
-        offset = position - int(self._end.item(span) - self._length.item(span))
+        offset = position - int(self._end.item(span) - self._length.item(span))  # pyrefly: ignore[unnecessary-type-conversion] -- ty or basedpyright types this value more loosely than pyrefly; the conversion narrows it for them.
         return (
-            int(self._group_shard.item(group)),
-            int(self._group_episode.item(group)),
-            int(self._start.item(span)) + offset,
+            int(self._group_shard.item(group)),  # pyrefly: ignore[unnecessary-type-conversion] -- ty or basedpyright types this value more loosely than pyrefly; the conversion narrows it for them.
+            int(self._group_episode.item(group)),  # pyrefly: ignore[unnecessary-type-conversion] -- ty or basedpyright types this value more loosely than pyrefly; the conversion narrows it for them.
+            int(self._start.item(span)) + offset,  # pyrefly: ignore[unnecessary-type-conversion] -- ty or basedpyright types this value more loosely than pyrefly; the conversion narrows it for them.
         )
 
 

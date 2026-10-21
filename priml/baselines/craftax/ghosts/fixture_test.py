@@ -205,7 +205,7 @@ def test_the_walk_to_a_ladder_steps_along_a_shortest_path_around_a_wall() -> Non
         state.player_position[0] += dr
         state.player_position[1] += dc
         state.player_direction = action
-        moved = (int(state.player_position[0]), int(state.player_position[1]))
+        moved = (int(state.player_position[0]), int(state.player_position[1]))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         assert distance[moved] == distance[position] - 1
         position = moved
     assert position == (_CENTRE, _CENTRE + 6)
@@ -370,10 +370,10 @@ def _floors(record: Record) -> list[int]:
     """Return the floor before each decision of ``record`` and after its last."""
     states, rng = replay.reset_world(record.receipt.world_seed)
     stats, state = new_stats(1), env_state(states, 0)
-    floors = [int(state.player_level)]
+    floors = [state.player_level]
     for action in ints(record.actions.numpy()):
         step.play_numba(state, rng, env_stats(stats, 0), action, Rules())
-        floors.append(int(state.player_level))
+        floors.append(state.player_level)
     return floors
 
 

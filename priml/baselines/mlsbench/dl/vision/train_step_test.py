@@ -9,7 +9,7 @@ import copy
 import itertools
 import math
 
-from configgle import PartialConfig
+from configgle import Makes2, PartialConfig
 from torch import Tensor
 from torch.nn import functional
 
@@ -302,15 +302,8 @@ def test_cross_entropy_is_the_mean_negative_log_likelihood() -> None:
 class DoubledStep(VisionTrainStep):
     """A step whose objective is twice its loss."""
 
-    class Config(VisionTrainStep.Config, kw_only=True):
+    class Config(Makes2["DoubledStep"], VisionTrainStep.Config, kw_only=True):
         """The vision step's fields."""
-
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> DoubledStep:
-                """Build this step."""
-                ...
 
     @override
     def objective(

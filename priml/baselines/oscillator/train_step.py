@@ -112,7 +112,7 @@ class DLinearForecast:
         @property
         def seq_len(self) -> int:
             """Observed timesteps, read from and written to the model."""
-            return int(self.step.model.seq_len)
+            return int(self.step.model.seq_len)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
         @seq_len.setter
         def seq_len(self, value: int) -> None:
@@ -121,7 +121,7 @@ class DLinearForecast:
         @property
         def pred_len(self) -> int:
             """Forecast timesteps, read from and written to the model."""
-            return int(self.step.model.pred_len)
+            return int(self.step.model.pred_len)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
         @pred_len.setter
         def pred_len(self, value: int) -> None:

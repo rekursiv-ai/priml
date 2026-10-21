@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import field, fields
+from collections import Counter
+from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
@@ -10,7 +11,7 @@ import copy
 import functools
 import signal
 
-from configgle import Fig, InlineConfig, Makes
+from configgle import Fig, InlineConfig, Makes, Makes2
 from torch import Tensor
 from treekle import from_plain, json_loads
 
@@ -34,7 +35,7 @@ from priml.baselines.motor_imagery.model import (
     MultiScaleEEGNet,
     ShallowConvNet,
 )
-from priml.baselines.motor_imagery.testing.helpers_support_test import (
+from priml.baselines.motor_imagery.testing import (
     compare_record,
     model_record,
     optimizer_record,
@@ -45,8 +46,11 @@ from priml.baselines.motor_imagery.testing.helpers_support_test import (
 from priml.baselines.motor_imagery.train_loop import MotorImageryLoop
 from priml.baselines.motor_imagery.train_step import MotorImageryStep
 from priml.math.seed import get_rng_state
+from priml.model.conv import Conv2d
+from priml.model.pool import AvgPool2d
+from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
-from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.bfb import host_agnostic_numerics, portable_half_precision
 from priml.testing.golden import (
     NativeDraws,
     PinnedRandom,
@@ -119,11 +123,20 @@ class SyntheticInput(Preprocessing):
     """Supply external raw-ingestion results without replacing model numerics."""
 
     class Config(Makes["SyntheticInput"], Preprocessing.Config):
-        training: list[Trial] = field(default_factory=list[Trial])
-        """Trial fixtures returned for training recordings."""
+        training_trial_count: int = 4
+        """Number of generated training trials."""
 
-        testing: list[Trial] = field(default_factory=list[Trial])
-        """Trial fixtures returned for masked test recordings."""
+        windows_per_trial: int = 4
+        """Number of windows in each generated training trial."""
+
+        testing_subject: str = "S008"
+        """Subject identifier assigned to generated test trials."""
+
+        testing_trial_count: int = 1
+        """Number of generated masked test trials."""
+
+        testing_windows_per_trial: int = 2
+        """Number of windows in each generated masked test trial."""
 
         failure: BaseException | None = None
         """External ingestion failure injected by lifecycle regressions."""
@@ -142,13 +155,44 @@ class SyntheticInput(Preprocessing):
         if self.inputs.alarm:
             assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 1
             signal.raise_signal(signal.SIGALRM)
-        return self.inputs.training if labelled else self.inputs.testing
+        if labelled:
+            windows = torch.zeros(
+                self.inputs.windows_per_trial,
+                len(self.inputs.channels),
+                self.inputs.window_size,
+                dtype=torch.float32,
+                device="cpu",
+            )
+            return [
+                Trial(
+                    subject=f"S{index + 1:03}",
+                    trial_id=index,
+                    label=index % 2,
+                    windows=windows,
+                )
+                for index in range(self.inputs.training_trial_count)
+            ]
+        return [
+            Trial(
+                subject=self.inputs.testing_subject,
+                trial_id=index,
+                label=-1,
+                windows=torch.zeros(
+                    self.inputs.testing_windows_per_trial,
+                    len(self.inputs.channels),
+                    self.inputs.window_size,
+                    dtype=torch.float32,
+                    device="cpu",
+                ),
+            )
+            for index in range(self.inputs.testing_trial_count)
+        ]
 
 
 class CountingLoop(MotorImageryLoop):
     """Exercise fit orchestration independently of the numerical replay tests."""
 
-    class Config(MotorImageryLoop.Config):
+    class Config(Makes2["CountingLoop"], MotorImageryLoop.Config):
         """Retain the actual Priml tree while replacing only fit execution."""
 
         fail_fit: bool = False
@@ -208,19 +252,6 @@ def synthetic_campaign(tmp_path: Path) -> MotorImageryCampaign.Config:
     inputs = validation.dataset.preprocessing = SyntheticInput.Config()
     inputs.channels = ("Fz", "C3", "Cz")
     inputs.window_size = 100
-    windows = torch.zeros(4, 3, 100)
-    inputs.training = [
-        Trial(
-            subject=f"S00{index + 1}",
-            trial_id=index,
-            label=index % 2,
-            windows=windows,
-        )
-        for index in range(4)
-    ]
-    inputs.testing = [
-        Trial(subject="S008", trial_id=0, label=-1, windows=torch.zeros(2, 3, 100)),
-    ]
     validation.dataset.base_dir = None
     validation.dataset.working_dir = tmp_path / "raw"
     cfg.base_dir = None
@@ -235,11 +266,95 @@ def synthetic_campaign(tmp_path: Path) -> MotorImageryCampaign.Config:
     return cfg
 
 
+def test_synthetic_input_reconstructs_the_original_trial_fixtures() -> None:
+    config = SyntheticInput.Config()
+    config.channels = ("Fz", "C3", "Cz")
+    config.window_size = 100
+    processor = config.make()
+    rng_before = get_rng_state()
+    first_training = processor.read([], labelled=True)
+    first_testing = processor.read([], labelled=False)
+    second_training = processor.read([], labelled=True)
+    second_testing = processor.read([], labelled=False)
+    rng_after = get_rng_state()
+
+    expected_training_windows = torch.zeros(
+        (4, 3, 100),
+        dtype=torch.float32,
+        device="cpu",
+    )
+    expected_testing_windows = torch.zeros(
+        (2, 3, 100),
+        dtype=torch.float32,
+        device="cpu",
+    )
+    expected_training = [
+        Trial(
+            subject=f"S{index + 1:03}",
+            trial_id=index,
+            label=index % 2,
+            windows=expected_training_windows,
+        )
+        for index in range(4)
+    ]
+    expected_testing = [
+        Trial(
+            subject="S008",
+            trial_id=0,
+            label=-1,
+            windows=expected_testing_windows,
+        ),
+    ]
+    for actual, expected in (
+        (first_training, expected_training),
+        (first_testing, expected_testing),
+        (second_training, expected_training),
+        (second_testing, expected_testing),
+    ):
+        assert [trial.subject for trial in actual] == [
+            trial.subject for trial in expected
+        ]
+        assert [trial.trial_id for trial in actual] == [
+            trial.trial_id for trial in expected
+        ]
+        assert [trial.label for trial in actual] == [trial.label for trial in expected]
+        for trial, original in zip(actual, expected, strict=True):
+            assert trial.windows.shape == original.windows.shape
+            assert trial.windows.dtype == original.windows.dtype
+            assert trial.windows.device == original.windows.device
+            assert torch.equal(trial.windows, original.windows)
+    assert first_training is not second_training
+    assert first_testing is not second_testing
+    assert all(
+        first is not second
+        for first, second in zip(first_training, second_training, strict=True)
+    )
+    assert first_testing[0] is not second_testing[0]
+    assert first_training[0].windows is first_training[1].windows
+    assert first_training[0].windows.data_ptr() != second_training[0].windows.data_ptr()
+    assert first_testing[0].windows.data_ptr() != second_testing[0].windows.data_ptr()
+    assert rng_before["python"] == rng_after["python"]
+    assert "numpy" in rng_before
+    assert "numpy" in rng_after
+    assert rng_before["numpy"] == rng_after["numpy"]
+    assert torch.equal(rng_before["torch"], rng_after["torch"])
+    if "cuda" in rng_before:
+        assert "cuda" in rng_after
+        before_cuda = rng_before["cuda"]
+        after_cuda = rng_after["cuda"]
+        assert all(
+            torch.equal(before, after)
+            for before, after in zip(before_cuda, after_cuda, strict=True)
+        )
+
+
 def test_campaign_reports_all_folds_members_and_official_artifacts(
     tmp_path: Path,
 ) -> None:
     cfg = synthetic_campaign(tmp_path)
     assert isinstance(cfg.folds, GroupedFolds.Config)
+    assert isinstance(cfg.validation.dataset.preprocessing, SyntheticInput.Config)
+    cfg.validation.dataset.preprocessing.windows_per_trial = 2
     cfg.make().run()
     output = Path(cfg.working_dir)
     result = json_loads((output / "result.json").read_text(), dict[str, object])
@@ -268,7 +383,9 @@ def test_campaign_reports_all_folds_members_and_official_artifacts(
             "dict[str, Tensor]",
             torch.load(output / f"fold-{fold}.pt", weights_only=True),
         )
-        assert set(from_plain(state["best_trials"].tolist(), list[int])) == expected
+        best_trials = from_plain(state["best_trials"].tolist(), list[int])
+        assert set(best_trials) == expected
+        assert Counter(best_trials) == Counter(dict.fromkeys(expected, 2))
 
 
 def test_campaign_rejects_a_fold_without_a_positive_accuracy_epoch(
@@ -297,7 +414,7 @@ def test_campaign_rejects_a_fold_without_a_positive_accuracy_epoch(
 class TiedEpochLoop(MotorImageryLoop):
     """Select one deterministic epoch at the fit boundary."""
 
-    class Config(MotorImageryLoop.Config):
+    class Config(Makes2["TiedEpochLoop"], MotorImageryLoop.Config):
         """Retain the normal native dataset and step configuration."""
 
         @property
@@ -350,7 +467,7 @@ def test_validation_reports_the_selected_argmax_window_score(tmp_path: Path) -> 
     cohort.subjects = ["S001", "S002", "S003"]
     assert isinstance(cfg.validation.dataset.preprocessing, SyntheticInput.Config)
     result = cfg.make()._validate(
-        cfg.validation.dataset.preprocessing.training,
+        cfg.validation.dataset.preprocessing.make().read([], labelled=True),
         output=tmp_path,
     )
     assert result["source_window_accuracy"] == 2 / 3
@@ -379,6 +496,7 @@ class ObservedCampaign(MotorImageryCampaign):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        self.offered: list[torch.nn.Module] = []
         self.fitted: list[MotorImageryStep] = []
         self.inferred: list[list[Tensor]] = []
 
@@ -403,6 +521,7 @@ class ObservedCampaign(MotorImageryCampaign):
             validation_subjects=validation_subjects,
         )
         assert isinstance(loop.step, MotorImageryStep)
+        self.offered.append(model)
         self.fitted.append(loop.step)
         predictions: list[Tensor] = []
         self.inferred.append(predictions)
@@ -431,12 +550,29 @@ def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
 ) -> None:
     cfg = ObservedCampaign.Config()
     cfg.update(synthetic_campaign(tmp_path))
+    assert isinstance(cfg.validation.dataset.preprocessing, SyntheticInput.Config)
+    cfg.validation.dataset.preprocessing.training_trial_count = 2
+    cfg.validation.dataset.preprocessing.windows_per_trial = 5
+    cfg.validation.dataset.preprocessing.testing_windows_per_trial = 5
+    cfg.validation.dataset.preprocessing.window_size = 32
+    cfg.diagnostic_batch_size = 5
+    shallow = next(
+        model for model in cfg.ensemble if isinstance(model, ShallowConvNet.Config)
+    )
+    assert isinstance(shallow.conv_t, Conv2d.Config)
+    assert isinstance(shallow.pool, AvgPool2d.Config)
+    shallow.conv_t.kernel_size = (1, 3)
+    shallow.pool.kernel_size = (1, 16)
     validation, ensemble = MotorImageryLoop.Config(), MotorImageryLoop.Config()
     validation.update(cfg.validation, skip_missing=True)
     ensemble.update(cfg.ensemble_loop, skip_missing=True)
     cfg.validation, cfg.ensemble_loop = validation, ensemble
     for loop in (validation, ensemble):
-        loop.dataset.batch_size = 4
+        loop.max_epochs = 1
+        loop.step.train_budget_epochs = loop.max_epochs
+        assert isinstance(loop.step.lr_schedule, RecursiveCosine.Config)
+        loop.step.lr_schedule.T_max = loop.max_epochs
+        loop.dataset.batch_size = 5
         loop.early_train_log_steps = 0
         if policy == "copy":
             loop.step.model_quantization = CopyPreparation.Config()
@@ -448,13 +584,41 @@ def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
             if policy == "ema_params":
                 average.shadow_kind = "param_dict"
     runner = cfg.make()
-    runner.run()
+    finalized_shallow = next(
+        model
+        for model in runner.config.ensemble
+        if isinstance(model, ShallowConvNet.Config)
+    )
+    assert runner.config.validation.dataset.preprocessing.window_size == 32
+    assert isinstance(finalized_shallow.conv_t, Conv2d.Config)
+    assert finalized_shallow.conv_t.kernel_size == (1, 3)
+    assert isinstance(finalized_shallow.pool, AvgPool2d.Config)
+    assert finalized_shallow.pool.kernel_size == (1, 16)
+    assert finalized_shallow.pool.stride == (1, 15)
+    with portable_half_precision():
+        runner.run()
     assert len(runner.fitted) == len(cfg.ensemble) == 3
+    if policy == "copy":
+        for offered, fitted in zip(runner.offered, runner.fitted, strict=True):
+            assert fitted.model is not offered
+            assert all(
+                prepared.data_ptr() != source.data_ptr()
+                for prepared, source in zip(
+                    fitted.model.parameters(),
+                    offered.parameters(),
+                    strict=True,
+                )
+            )
     assert isinstance(cfg.validation.dataset.preprocessing, SyntheticInput.Config)
-    media = cfg.validation.dataset.preprocessing.testing[0].windows[:, None].float()
+    testing = cfg.validation.dataset.preprocessing.make().read([], labelled=False)
+    media = testing[0].windows[:, None].float()
     for index, (step, observed) in enumerate(
         zip(runner.fitted, runner.inferred, strict=True),
     ):
+        if policy in ("ema_module", "ema_params"):
+            assert isinstance(step.ema, EMA)
+            assert step.ema.global_step == step.global_step == 2
+            assert step.ema.local_step == 2
         state = from_plain(
             cast(
                 object,
@@ -623,6 +787,9 @@ def test_campaign_preserves_caller_owned_runtime_and_settings(
     fail_fit: bool,
 ) -> None:
     cfg = synthetic_campaign(tmp_path)
+    cfg.folds = FixedCohort.Config()
+    assert isinstance(cfg.folds, FixedCohort.Config)
+    cfg.folds.subjects = ["S001"]
     assert isinstance(cfg.validation, CountingLoop.Config)
     cfg.validation.fail_fit = fail_fit
     outer_config = cfg.validation.runtime = SingleProcess.Config(device="cpu")
@@ -683,6 +850,9 @@ def test_result_publication_cannot_escape_the_campaign_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = synthetic_campaign(tmp_path)
+    cfg.folds = FixedCohort.Config()
+    assert isinstance(cfg.folds, FixedCohort.Config)
+    cfg.folds.subjects = ["S001"]
     cfg.budget.seconds = 0.5
     clock = _ReceiptClock()
     cfg.budget.clock = clock.perf_counter
@@ -715,9 +885,7 @@ def test_campaign_requires_both_loops_to_share_one_runtime() -> None:
 def test_campaign_rejects_test_people_who_are_training_people(tmp_path: Path) -> None:
     cfg = synthetic_campaign(tmp_path)
     assert isinstance(cfg.validation.dataset.preprocessing, SyntheticInput.Config)
-    cfg.validation.dataset.preprocessing.testing = [
-        Trial(subject="S001", trial_id=0, label=-1, windows=torch.zeros(2, 3, 100)),
-    ]
+    cfg.validation.dataset.preprocessing.testing_subject = "S001"
     with pytest.raises(ValueError, match="overlap"):
         cfg.make().run()
 

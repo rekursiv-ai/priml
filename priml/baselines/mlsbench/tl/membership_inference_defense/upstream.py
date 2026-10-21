@@ -116,7 +116,7 @@ class Script(Protocol):
         augment: bool = ...,
     ) -> tuple[Served, Served, int]:
         """Build the training and test splits with their transforms."""
-        raise NotImplementedError
+        ...
 
     def auc_from_scores(
         self,
@@ -585,7 +585,7 @@ class _Loaders:
     ) -> DataLoader[tuple[Tensor, Tensor]]:
         self.trace.loaders.append(dict(kwargs))
         if isinstance(dataset, torch.utils.data.Subset):
-            self.trace.subsets.append([int(i) for i in dataset.indices])
+            self.trace.subsets.append([int(i) for i in dataset.indices])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         return self.loader(
             dataset,
             batch_size=cast(int, kwargs["batch_size"]),

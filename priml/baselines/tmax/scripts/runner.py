@@ -306,7 +306,7 @@ class TMaxRolloutRunner:
             raise ValueError("Engine counts must be positive.")
         if config.pool_size <= 0:
             raise ValueError("pool_size must be positive.")
-        if not str(config.dataset_repo):
+        if not config.dataset_repo:
             raise ValueError("dataset_repo must name the published dataset.")
         # Upstream's own two composition rules
         # (``StreamingDataLoaderConfig.__post_init__``): active sampling

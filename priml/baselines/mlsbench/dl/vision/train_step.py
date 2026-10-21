@@ -115,7 +115,7 @@ class VisionTrainStep(TrainStep):
                 f"has no {', '.join(ignored)}; leave them at their defaults.",
             )
         super().__init__(config)
-        self.config: VisionTrainStep.Config = config
+        self.config: VisionTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.schedule: LearningRateSchedule = config.schedule.make()
 
     @override

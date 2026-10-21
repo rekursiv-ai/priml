@@ -16,19 +16,22 @@ import pytest
 from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.scripts import comparison
-from priml.baselines.oscillator.train_step import RidgeCorrection
+from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
-@pytest.mark.compute_training
 def test_smoke_run_writes_configs_records_and_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
+    smoke = experiments.exp_smoke()
+    assert isinstance(smoke.method, DLinearForecast.Config)
+    smoke.method.updates = 1
+    monkeypatch.setattr(experiments, "exp_smoke", lambda: smoke)
     directory = tmp_path / "run"
     argv = ["--directory", str(directory), "--experiments", "exp_smoke", "--seeds", "7"]
     assert comparison.main(argv) == 0
@@ -193,12 +196,15 @@ def test_cli_defaults_name_the_pilot_recipes_and_seeds() -> None:
     assert flags.cases == ["matched", "mismatched"]
 
 
-@pytest.mark.compute_training
 def test_cli_can_run_only_the_requested_simulator_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
+    smoke = experiments.exp_smoke()
+    assert isinstance(smoke.method, DLinearForecast.Config)
+    smoke.method.updates = 1
+    monkeypatch.setattr(experiments, "exp_smoke", lambda: smoke)
     destination = tmp_path / "run"
     comparison.main(
         [
@@ -245,12 +251,16 @@ def test_repeated_values_fail_before_creating_output(
     assert not destination.exists()
 
 
-@pytest.mark.compute_training
 def test_data_offsets_are_saved_and_shift_every_split_seed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
+    smoke = experiments.exp_smoke()
+    smoke.data.synthetic.count = 4
+    assert isinstance(smoke.method, DLinearForecast.Config)
+    smoke.method.updates = 1
+    monkeypatch.setattr(experiments, "exp_smoke", lambda: smoke)
     destination = tmp_path / "run"
     comparison.main(
         [

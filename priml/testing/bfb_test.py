@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Final, Protocol, cast, override
 import ast
 import os
 import tempfile
-import traceback
 
 from torch import Tensor, nn
 from torch._decomp import decomposition_table
@@ -27,9 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from torch._ops import OpOverload
-    from torch.distributed.device_mesh import DeviceMesh
 
-    from priml.distributed.testing import WarmPoolGetter
     from priml.math.custom_types import TensorFn
 
 from treekle import from_plain
@@ -1593,7 +1590,6 @@ def _divergent_allowlisted_single_tensor_ops() -> set[str]:
             AttributeError,
             IndexError,
             ValueError,
-            NotImplementedError,
         ):
             continue
         if not equal:
@@ -1721,7 +1717,7 @@ class _DrawsAtConstruction(nn.Module):
 
     @override
     def forward(self, input: Tensor) -> Tensor:
-        return self.lin(input) + cast(Tensor, self.phase)
+        return self.lin(input) + cast(Tensor, self.phase)  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
 
 
 def test_the_harness_computes_nothing_natively_in_float32(tmp_path: Path) -> None:
@@ -2226,6 +2222,78 @@ def test_one_term_mm_leaves_non_tensor_operands_to_the_kernel() -> None:
     assert bfb._one_term_mm(func, args=(2.0, left)) is None
 
 
+# The BLAS on aarch64 fuses the second product into the first and keeps -2**-54.
+# Rounded on its own, that product is 1, which cancels the first exactly.
+@pytest.mark.parametrize("name", ["dot", "vdot"])
+def test_host_agnostic_dot_rounds_each_product_before_summing(name: str) -> None:
+    left = torch.tensor([1, 1 + 2**-27], dtype=torch.float64)
+    right = torch.tensor([-1, 1 - 2**-27], dtype=torch.float64)
+    with host_agnostic_numerics():
+        actual = cast(Tensor, getattr(torch, name)(left, right))
+    assert actual.dtype == torch.float64
+    assert actual.item() == 0
+
+
+# Adjacent pairs keep the 1 that a sequential sum absorbs into 2**53.
+@pytest.mark.parametrize("name", ["dot", "vdot"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_host_agnostic_dot_sums_products_in_a_fixed_tree(
+    name: str,
+    dtype: torch.dtype,
+) -> None:
+    terms = torch.tensor([2.0**53, 1, 1, -(2.0**53), 0], dtype=dtype)
+    with host_agnostic_numerics():
+        actual = cast(Tensor, getattr(torch, name)(torch.ones_like(terms), terms))
+    assert actual.dtype == dtype
+    assert actual.item() == 1
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_host_agnostic_dot_writes_the_tree_sum_into_out(dtype: torch.dtype) -> None:
+    terms = torch.tensor([2.0**53, 1, 1, -(2.0**53), 0], dtype=dtype)
+    out = torch.empty(0, dtype=dtype)
+    with host_agnostic_numerics():
+        returned = torch.dot(torch.ones_like(terms), terms, out=out)
+    assert returned is out
+    assert out.shape == ()
+    assert out.item() == 1
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "match"),
+    [
+        (torch.ones(2, 3), torch.ones(2, 3), "1D tensors expected"),
+        (torch.ones(2), torch.ones(3), "inconsistent tensor size"),
+        (
+            torch.ones(2, dtype=torch.float64),
+            torch.ones(2, dtype=torch.int64),
+            "expected both vectors to have same dtype",
+        ),
+    ],
+)
+def test_host_agnostic_dot_leaves_invalid_operands_to_the_kernel(
+    left: Tensor,
+    right: Tensor,
+    match: str,
+) -> None:
+    with host_agnostic_numerics(), pytest.raises(RuntimeError, match=match):
+        torch.dot(left, right)
+
+
+@pytest.mark.parametrize("dtype", [torch.int64, torch.float64])
+@pytest.mark.parametrize(("length", "expected"), [(0, 0), (3, 0 + 1 + 4)])
+def test_host_agnostic_dot_keeps_exact_integer_and_empty_sums(
+    dtype: torch.dtype,
+    length: int,
+    expected: int,
+) -> None:
+    values = torch.arange(length, dtype=dtype)
+    with host_agnostic_numerics():
+        actual = torch.dot(values, values)
+    assert actual.dtype == dtype
+    assert actual.item() == expected
+
+
 def test_stale_post_states_rejects_a_load_that_drops_the_post_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2285,38 +2353,54 @@ def test_host_agnostic_numerics_upcasts_foreach_norm() -> None:
     assert torch.equal(actual, expected)
 
 
-def _collective_worker(root: Path, mesh: DeviceMesh) -> None:
-    rank = mesh.get_rank()
+# Only ``inference_mode`` delivers ``softmax.int`` undecomposed, with its ``dtype``
+# positional; with autograd on it decomposes to ``_softmax``, which is widened anyway.
+@pytest.mark.parametrize(
+    "op",
+    [
+        torch.ops.aten.softmax.int,
+        torch.ops.aten.log_softmax.int,
+        torch.ops.aten._safe_softmax.default,
+    ],
+    ids=str,
+)
+def test_host_agnostic_widens_a_positional_dtype(op: OpOverload[..., object]) -> None:
+    x = torch.randn(3, 5, generator=torch.Generator().manual_seed(0))
+    expected = cast(Tensor, op(x.double(), -1, torch.float64)).float()
+    with host_agnostic_numerics(), torch.inference_mode():
+        actual = cast(Tensor, op(x, -1, torch.float32))
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
+
+
+def test_host_agnostic_foreach_norm_returns_its_explicit_dtype() -> None:
+    x = torch.tensor([0.5, 1.5, -2.5], dtype=torch.bfloat16)
+    expected = torch.linalg.vector_norm(x.double(), ord=2).float()
+    with host_agnostic_numerics():
+        actual = torch._foreach_norm([x], 2.0, dtype=torch.float32)[0]
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
+
+
+def test_host_agnostic_numerics_preserves_collectives(tmp_path: Path) -> None:
+    """``host_agnostic_numerics`` must not turn a collective into a no-op.
+
+    A gather writes a tensor other than its input, so even a one-rank group
+    shows a collective that ran on an upcast copy: the output stays zero.
+    """
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
     try:
+        gathered = torch.zeros(2)
         with host_agnostic_numerics():
-            broadcast = torch.tensor([float(rank + 1)])
-            dist.broadcast(broadcast, src=0)
-            summed = torch.tensor([float(rank + 1)])
-            dist.all_reduce(summed, op=dist.ReduceOp.SUM)
-        torch.save(
-            {"broadcast": broadcast, "allreduce": summed},
-            root / f"record_{rank}.pt",
-        )
-    except (AssertionError, RuntimeError, ValueError, TypeError, KeyError):
-        (root / f"record_{rank}.txt").write_text(traceback.format_exc())
-
-
-@pytest.mark.compute_distributed
-def test_host_agnostic_numerics_preserves_collectives(
-    tmp_path: Path,
-    warm_pools: WarmPoolGetter,
-) -> None:
-    """``host_agnostic_numerics`` must not turn a collective into a no-op."""
-    warm_pools({"dp": 2})(partial(_collective_worker, tmp_path))
-    for rank in range(2):
-        failure = tmp_path / f"record_{rank}.txt"
-        assert not failure.is_file(), failure.read_text()
-        record = cast(
-            "dict[str, Tensor]",
-            _torch_load(tmp_path / f"record_{rank}.pt", weights_only=True),
-        )
-        assert record["broadcast"].item() == 1.0, f"rank{rank} broadcast"
-        assert record["allreduce"].item() == 3.0, f"rank{rank} allreduce"
+            dist.all_gather_into_tensor(gathered, torch.tensor([1.5, -2.0]))
+    finally:
+        dist.destroy_process_group()
+    assert gathered.tolist() == [1.5, -2.0]
 
 
 def test_host_agnostic_foreach_inplace_writes_back_list_targets() -> None:

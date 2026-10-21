@@ -70,6 +70,7 @@ class ExtractedImageNetSource:
         if not self.dataset_dir.exists():
             raise ValueError(f"Dataset directory does not exist: {self.dataset_dir}")
 
+        self.validation_labels: dict[str, str] | None = None
         if self.split == "train":
             self.split_dir = self.dataset_dir / "train"
         elif self.split == "val":
@@ -79,8 +80,6 @@ class ExtractedImageNetSource:
                 if not labels_file.is_absolute():
                     labels_file = self.dataset_dir / labels_file
                 self.validation_labels = self._load_validation_labels(labels_file)
-            else:
-                self.validation_labels = None
         else:
             raise ValueError(f"Unknown split: {self.split}")
 

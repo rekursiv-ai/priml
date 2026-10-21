@@ -5,17 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
-import functools
 import json
-import tempfile
 
 from torch import Tensor, nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
 from treekle import json_loads
 
 import pytest
 import torch
+import torch.distributed as dist
 
-from priml import hub, runtime
+from priml import hub
 from priml.baselines.tmax import train_step
 from priml.baselines.tmax.scoring import ScoringLinear, ScoringTiedLinear
 from priml.baselines.tmax.train_step import (
@@ -42,15 +43,13 @@ from priml.model.transformer.qwen3_5 import Qwen35
 from priml.model.transformer.qwen3_5_weights import export_hf_state_dict
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.qwen3_5 import hf_config, native_qwen35_config
+from priml.train import parallelism
 from priml.train.parallelism import FullySharded, NoParallel
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
-
-    from priml.distributed.testing import WarmPoolGetter
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -428,53 +427,34 @@ def _staged_tiny_checkpoint(root: Path) -> Path:
     return root
 
 
-def _fsdp_checkpoint_worker(
-    checkpoint: str,
-    result_dir: str,
-    mesh: DeviceMesh,
+def test_full_checkpoint_loads_into_fully_sharded_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Load and verify a full checkpoint through a two-rank FSDP model."""
-    rank = mesh.get_rank()
+    """Rebuild a full checkpoint through an FSDP-sharded model."""
+    checkpoint = _staged_tiny_checkpoint(tmp_path / "source")
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
     try:
-        runtime._device_mesh = mesh
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
+        monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
         config = TMaxDPPOTrainStep.Config()
         config.model_path = checkpoint
         config.parallelism = FullySharded.Config()
         config.dtype_autocast = None
-        actual = config.make().hf_state_dict()
-        _, expected = hub.load_hf_checkpoint(checkpoint, dtype=None)
-        matches = all(
-            torch.equal(actual[name], value) for name, value in expected.items()
-        )
-        Path(result_dir, f"rank_{rank}").write_text("ok" if matches else "mismatch")
-    except Exception as error:  # noqa: BLE001 -- Serialize worker failures.
-        Path(result_dir, f"rank_{rank}").write_text(f"FAIL:{error!r}")
+        step = config.make()
+        assert isinstance(next(step.model.parameters()), DTensor)
+        actual = step.hf_state_dict()
     finally:
-        runtime._device_mesh = None
-
-
-@pytest.mark.compute_distributed
-def test_full_checkpoint_loads_into_fully_sharded_model(
-    tmp_path: Path,
-    warm_pools: WarmPoolGetter,
-) -> None:
-    """Rebuild a full checkpoint through both FSDP ranks."""
-    checkpoint = _staged_tiny_checkpoint(tmp_path / "source")
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as result_dir:
-        pool(
-            functools.partial(
-                _fsdp_checkpoint_worker,
-                str(checkpoint),
-                result_dir,
-            ),
-        )
-        results = {
-            path.name: path.read_text()
-            for path in Path(result_dir).iterdir()
-            if path.is_file()
-        }
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
+        dist.destroy_process_group()
+    _, expected = hub.load_hf_checkpoint(checkpoint, dtype=None)
+    assert actual.keys() == expected.keys()
+    for name, value in expected.items():
+        assert torch.equal(actual[name], value), name
 
 
 def test_export_round_trips_the_trained_weights(tmp_path: Path) -> None:

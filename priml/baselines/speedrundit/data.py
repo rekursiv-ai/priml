@@ -126,7 +126,7 @@ class PairedImageLatentDataset(Dataset[dict[str, Tensor]]):
             relative = latent_path.relative_to(latent_root).as_posix()
             if relative not in labels:
                 raise ValueError(f"missing class label for {relative}")
-            self.records.append((images[key], latent_path, int(labels[relative])))
+            self.records.append((images[key], latent_path, int(labels[relative])))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         self.sampler: DistributedSampler[dict[str, Tensor]] | None = None
 
     def __len__(self) -> int:

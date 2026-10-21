@@ -466,7 +466,7 @@ def replay_frames(
         frames=frames,
         health=health,
         hashes=hashes,
-        ended=bool(ended),
+        ended=ended,
         facings=facings,
         sleeps=np.array(sleeps, np.int64).reshape(-1, 3),
         sleep_frames=np.array([frame for frame, _, _ in slept], frame_dtype()).reshape(
@@ -532,9 +532,9 @@ def write_bundle(
         or "Replayed on the port's game; every recorded hash matched.",
         frames=actions + 1,
         actions=actions,
-        tick=int(final.tick_before),
-        score=int(final.score),
-        achievements=int(final.achievements),
+        tick=int(final.tick_before),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        score=int(final.score),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        achievements=int(final.achievements),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         mean_score=mean_score,
         mean_return_pct=None
         if mean_score is None
@@ -556,7 +556,7 @@ def _before(
 ) -> None:
     """Write what a frame, its health and its facings read from the State before its decision."""
     state = env_state(states, 0)
-    floor = int(state.player_level)
+    floor = state.player_level
     frame["tick_before"] = state.timestep
     frame["floor_before"] = floor
     frame["row"], frame["col"] = state.player_position
@@ -600,14 +600,14 @@ def _hud(frame: np.void, state: EnvState) -> None:
 
 def _creatures(frame: np.void, health: np.void, state: EnvState) -> None:
     """List the floor's creatures, and the health of each that has any."""
-    floor = int(state.player_level)
+    floor = state.player_level
     count = 0
     for klass, (_, slots, full) in enumerate(CREATURES):
         mobs = _classes(state)[klass][floor]
         for slot in range(slots):
             if not mobs.mask[slot]:
                 continue
-            kind = int(mobs.type_id[slot])
+            kind = mobs.type_id[slot]
             # A negative species would index the health table from its end.
             if kind < 0 or kind >= NUM_MOB_TYPES:
                 raise ValueError(f"A creature of class {klass} has species {kind}.")
@@ -638,8 +638,8 @@ def _classes(state: EnvState) -> tuple[Sequence[Mobs], ...]:
 def _facings(state: EnvState, cells: NDArray[np.uint8]) -> NDArray[np.uint8]:
     """Return each view cell's projectile facings, as the module docstring lays them out."""
     out = np.zeros(OBS_ROWS * OBS_COLS, np.uint8)
-    level = int(state.player_level)
-    row, col = (int(v) for v in state.player_position)
+    level = state.player_level
+    row, col = (v for v in state.player_position)
     light = state.light_map[level]
     flights = (
         (state.mob_projectiles, state.mob_projectile_dirs),
@@ -655,7 +655,7 @@ def _facings(state: EnvState, cells: NDArray[np.uint8]) -> NDArray[np.uint8]:
         for slot in range(slots):
             if not mobs.mask[slot]:
                 continue
-            at_row, at_col = int(mobs.position[slot, 0]), int(mobs.position[slot, 1])
+            at_row, at_col = int(mobs.position[slot, 0]), int(mobs.position[slot, 1])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             view_row, view_col = (
                 at_row - row + OBS_ROWS // 2,
                 at_col - col + OBS_COLS // 2,
@@ -668,7 +668,7 @@ def _facings(state: EnvState, cells: NDArray[np.uint8]) -> NDArray[np.uint8]:
                 or light[at_row, at_col] <= VISIBLE_LIGHT_THRESHOLD
             ):
                 continue
-            direction = int(directions[level, slot, 0]), int(directions[level, slot, 1])
+            direction = int(directions[level, slot, 0]), int(directions[level, slot, 1])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             if direction not in FACINGS:
                 raise ValueError(f"A projectile of {name} flies {direction}.")
             cell = view_row * OBS_COLS + view_col

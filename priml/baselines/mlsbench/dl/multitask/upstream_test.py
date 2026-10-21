@@ -335,7 +335,6 @@ def test_pin_shared_pins_only_a_walking_combination(tmp_path: Path) -> None:
     assert upstream.pin_shared(plain, loss) == []
     pcgrad = variants["pcgrad"].MultiTaskLoss(2)
     assert upstream.pin_shared(pcgrad, loss) == []
-    assert isinstance(pcgrad, upstream.Walker)
     assert pcgrad._shared_params == [w]
 
 

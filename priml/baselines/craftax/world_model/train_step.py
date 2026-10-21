@@ -206,7 +206,7 @@ class WorldModelTrainStep(TrainStep):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.config: WorldModelTrainStep.Config = config
+        self.config: WorldModelTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.target_nll: TargetNllFn = config.target_nll_fn.make()
         self.cost: CostFn = config.cost_fn.make()
         self.total_training_flops = 0.0
@@ -240,7 +240,8 @@ class WorldModelTrainStep(TrainStep):
         if self.accumulation_steps == 0:
             self._window_started = time.perf_counter()
             self._window_flops, self._window_positions = 0.0, 0
-            self._window_loss, self._window_logits = 0.0, []
+            self._window_loss = 0.0
+            self._window_logits = []
         if isinstance(media, PackedBatch):
             _mark_counts_dynamic(media)
         modality = self(media)
@@ -320,7 +321,7 @@ class WorldModelTrainStep(TrainStep):
     @override
     def state_dict(self) -> StateDict:
         """Extend the base state with the cumulative FLOPs and training time."""
-        return {
+        return {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **super().state_dict(),
             "total_training_flops": self.total_training_flops,
             "total_training_time": self.total_training_time,
@@ -497,7 +498,7 @@ def compile_forward(
 
     """
     compiled = torch.compile(model.forward, fullgraph=fullgraph, backend=backend)
-    model.forward = patch(optimize_ddp=False)(compiled)
+    model.forward = patch(optimize_ddp=False)(compiled)  # ty: ignore[invalid-assignment] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.  # pyrefly: ignore[read-only] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.
     return model
 
 

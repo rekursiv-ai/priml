@@ -56,7 +56,7 @@ class PoisonedData(Cifar100Data):
                 f"num_classes must be at least 1; got {config.num_classes}.",
             )
         super().__init__(config)
-        self.config: PoisonedData.Config = config
+        self.config: PoisonedData.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
         self.clean_label = self.train_label
         """``(N,)`` labels of the training split as prepared."""
         self.train_label, self.poison_index = flipped_labels(

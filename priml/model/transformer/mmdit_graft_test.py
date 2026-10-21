@@ -79,7 +79,6 @@ def _config(
     return config
 
 
-@pytest.mark.compute_large_fixture
 def test_graft_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
@@ -475,7 +474,7 @@ def test_factory_rejects_unsupported_backbones(invalid: str) -> None:
     elif invalid == "nonattention":
         config.block.attn = SwiGLU.Config()
     else:
-        streams = []
+        streams: list[MMDiTStream.Config] = []
     graft = MMDiTGraft.Config()
     graft.backbone = config
     graft.streams = streams

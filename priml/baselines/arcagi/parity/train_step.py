@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, override
 
 import math
 
-from configgle import Makeable, Makes
+from configgle import Makeable, Makes, Makes2
 from torch import Tensor
 from treekle import from_plain
 
@@ -75,15 +75,8 @@ class ArcModelConfig(Makes["GridSolver"], GridSolver.Config):
 class ArcTrainStep(SudokuTrainStep):
     """Atomic ACT with a stablemax loss and a sparsely updated task table."""
 
-    class Config(SudokuTrainStep.Config):
+    class Config(Makes2["ArcTrainStep"], SudokuTrainStep.Config):
         """Source TRM objective and injected dense/sparse optimizers."""
-
-        if TYPE_CHECKING:
-
-            @override
-            def make(self) -> ArcTrainStep:
-                """Build this nested configuration's ARC2 trainer."""
-                ...
 
         model: GridSolver.Config = field(default_factory=ArcModelConfig)
         """Shared puzzle solver with ARC2-specific slot defaults."""
@@ -147,7 +140,7 @@ class ArcTrainStep(SudokuTrainStep):
     @override
     def state_dict(self) -> StateDict:
         """Persist sparse optimizer settings without persisting in-flight ACT slots."""
-        return {
+        return {  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             **super().state_dict(),
             "sparse_optimizer": self.sparse_optimizer.state_dict(),
         }

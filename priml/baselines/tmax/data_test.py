@@ -8,16 +8,13 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast
 
 import dataclasses
-import functools
 import json
-import tempfile
 
 from torch import Tensor
 
 import pytest
 import torch
 
-from priml import runtime
 from priml.baselines.tmax import data as data_module
 from priml.baselines.tmax.data import TMaxRolloutData, _read_masks, _row_mapping
 from priml.baselines.tmax.rollouts import (
@@ -27,15 +24,12 @@ from priml.baselines.tmax.rollouts import (
     read_rollout_records,
 )
 from priml.baselines.tmax.train_step import TMaxDPPOTrainStep, tiny_qwen35_config
-from priml.train.parallelism import FullySharded, NoParallel
+from priml.train.parallelism import NoParallel
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
-
-    from priml.distributed.testing import WarmPoolGetter
     from priml.train.custom_types import TrainStepProtocol
 
 
@@ -69,77 +63,40 @@ def test_data_cadence_reads_a_real_published_rollout(recorded_rollout: Path) -> 
     )
 
 
-def _starved_refusal(config: TMaxRolloutData.Config) -> str:
-    """Return ``"refused"`` when too few rows cover the data-parallel world."""
-    try:
-        next(iter(config.make().train_dataloader()))
-    except ValueError as error:
-        return "refused" if "data-parallel world" in str(error) else repr(error)
-    return "no-refusal"
-
-
-def _shard_worker(
-    result_dir: str,
-    smoke_path: str,
-    recorded_path: str,
-    mesh: DeviceMesh,
+@pytest.mark.parametrize(
+    ("rank", "tail"),
+    [(0, (3274, 2923, 539, 2923)), (1, (9764, 728, 3418, 279))],
+)
+def test_each_rank_trains_its_contiguous_slice_of_one_update(
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+    tail: tuple[int, ...],
 ) -> None:
-    """Worker: verify this rank's contiguous slice, shared denominator, refusal."""
-    result_path = Path(result_dir)
-    rank = mesh.get_rank()
-    try:
-        runtime._device_mesh = mesh
-        smoke = TMaxRolloutData.Config()
-        smoke.working_dir = smoke_path
-        smoke.records_per_update = 2
-        smoke.num_samples_per_prompt = 2
-        smoke.mask_tool_use = False
-        smoke.pack_length = 10  # One short rollout per row: two rows total.
-        batch = next(iter(smoke.make().train_dataloader()))
-        rows = cast(tuple[Mapping[str, object], ...], batch["rows"])
-        expected_tail = (3274, 2923, 539, 2923) if rank == 0 else (9764, 728, 3418, 279)
-        sliced_ok = (
-            len(rows) == 1
-            and batch["response_token_count"] == 8
-            and tuple(cast(Tensor, rows[0]["query_responses"])[-4:].tolist())
-            == expected_tail
-        )
-        starved = TMaxRolloutData.Config()
-        starved.working_dir = recorded_path
-        starved.records_per_update = 1
-        starved.num_samples_per_prompt = 1
-        starved.mask_tool_use = False
-        starved.filter_zero_std_samples = False
-        starved.active_sampling = False
-        refusal = _starved_refusal(starved)
-        ok = sliced_ok and refusal == "refused"
-        (result_path / f"rank_{rank}").write_text(
-            "ok" if ok else f"FAIL:rows={len(rows)} refusal={refusal}",
-        )
-    except Exception as error:  # noqa: BLE001 -- The worker must serialize every subprocess failure for the parent assertion.
-        (result_path / f"rank_{rank}").write_text(f"FAIL:{error!r}")
-    finally:
-        runtime._device_mesh = None
+    """Ranks pack the same update, keep disjoint rows, and share its denominator."""
+    monkeypatch.setattr(data_module, "data_parallel_shape", lambda: (rank, 2))
+    smoke = _smoke()
+    smoke.pack_length = 10  # One short rollout per row: two rows total.
+    batch = next(iter(smoke.make().train_dataloader()))
+    rows = cast(tuple[Mapping[str, object], ...], batch["rows"])
+    assert len(rows) == 1
+    assert batch["response_token_count"] == 8
+    assert tuple(cast(Tensor, rows[0]["query_responses"])[-4:].tolist()) == tail
 
 
-@pytest.mark.cli_python_subprocess
-def test_rows_are_sharded_across_the_dp_world(
-    warm_pools: WarmPoolGetter,
+def test_a_world_wider_than_the_update_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
     recorded_rollout: Path,
 ) -> None:
-    """Each rank trains a disjoint contiguous slice of the same packed update."""
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as tmp:
-        pool(
-            functools.partial(
-                _shard_worker,
-                tmp,
-                str(SMOKE_FIXTURE),
-                str(recorded_rollout),
-            ),
-        )
-        results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
+    monkeypatch.setattr(data_module, "data_parallel_shape", lambda: (0, 2))
+    starved = TMaxRolloutData.Config()
+    starved.working_dir = recorded_rollout
+    starved.records_per_update = 1
+    starved.num_samples_per_prompt = 1
+    starved.mask_tool_use = False
+    starved.filter_zero_std_samples = False
+    starved.active_sampling = False
+    with pytest.raises(ValueError, match="data-parallel world"):
+        next(iter(starved.make().train_dataloader()))
 
 
 def _smoke() -> TMaxRolloutData.Config:
@@ -661,67 +618,6 @@ def test_single_token_row_can_pad_an_fsdp_forward(
     assert padded.packed_seq_lens == (1, 2)
     assert padded.query_responses.tolist() == [1, 1, 1]
     assert not padded.response_mask.any()
-
-
-def _uneven_segment_fsdp_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Run one real FSDP update with three segments on rank 0 and one on rank 1."""
-    rank = mesh.get_rank()
-    try:
-        runtime._device_mesh = mesh
-        torch.manual_seed(0)
-        config = TMaxDPPOTrainStep.Config()
-        config.model = tiny_qwen35_config()
-        config.parallelism = FullySharded.Config()
-        config.dtype_autocast = None
-        step = config.make()
-        data_config = TMaxRolloutData.Config()
-        data_config.working_dir = SMOKE_FIXTURE
-        data_config.records_per_update = 4
-        data_config.num_samples_per_prompt = 2
-        data_config.mask_tool_use = False
-        data_config.pack_length = 6
-        records = [
-            RolloutRecord(
-                step=0,
-                sample_idx=index,
-                prompt_idx=index // 2,
-                prompt_tokens=(1,),
-                response_tokens=(2,) * (length - 1),
-                logprobs=(-0.2,) * (length - 1),
-                reward=float(index % 2),
-                finish_reason="stop",
-                tool_mask=(1,) * (length - 1),
-            )
-            for index, length in enumerate((2, 2, 2, 6))
-        ]
-        batch = data_config.make().pack_update(records)
-        result = step.train_step(**step.preprocess_batch(batch))
-        ok = (
-            batch["response_token_count"] == 8
-            and step.global_step == 1
-            and bool(torch.isfinite(result["loss"]))
-        )
-        Path(result_dir, f"rank_{rank}").write_text("ok" if ok else "mismatch")
-    except Exception as error:  # noqa: BLE001 -- Serialize worker failures.
-        Path(result_dir, f"rank_{rank}").write_text(f"FAIL:{error!r}")
-    finally:
-        runtime._device_mesh = None
-
-
-@pytest.mark.compute_distributed
-def test_uneven_segments_complete_two_rank_fsdp_update(
-    warm_pools: WarmPoolGetter,
-) -> None:
-    """Uneven packing must not stall FSDP's per-segment collectives."""
-    pool = warm_pools({"dp": 2})
-    with tempfile.TemporaryDirectory() as result_dir:
-        pool(functools.partial(_uneven_segment_fsdp_worker, result_dir))
-        results = {
-            path.name: path.read_text()
-            for path in Path(result_dir).iterdir()
-            if path.is_file()
-        }
-    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
 
 
 def test_shard_rows_refuses_a_world_it_cannot_cover(

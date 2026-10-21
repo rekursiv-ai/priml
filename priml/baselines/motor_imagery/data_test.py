@@ -17,19 +17,59 @@ from priml.baselines.motor_imagery.data import (
     Preprocessing,
     Trial,
     WindowData,
+    _butterworth_bandpass,
     _causal_filter,
+    _complex_dot,
     _filter_initial_state,
+    _hypot,
+    _notch,
     _pole_polynomial,
+    _product,
+    _quotient,
+    _square_root,
     subject_id,
     write_submission,
 )
-from priml.baselines.motor_imagery.testing.helpers_support_test import (
+from priml.baselines.motor_imagery.testing import (
     source_preprocessing,
 )
 from priml.testing.golden import mismatches, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+# exp000's filters as SciPy 1.16.3 designed them on x86_64 for filtering.pt.
+# aarch64 SciPy rounds two denominator terms differently; do not recapture there.
+_NOTCH_NUMERATOR: Final = [
+    "0x1.f57ec3b2d27d1p-1",
+    "-0x1.35f0e978b5cb3p-1",
+    "0x1.f57ec3b2d27d1p-1",
+]
+_NOTCH_DENOMINATOR: Final = ["0x1p+0", "-0x1.35f0e978b5cb3p-1", "0x1.eafd8765a4fa2p-1"]
+_BAND_NUMERATOR: Final = [
+    "0x1.fca3a679bc166p-6",
+    "0x0p+0",
+    "-0x1.fca3a679bc166p-4",
+    "0x0p+0",
+    "0x1.7d7abcdb4d10cp-3",
+    "0x0p+0",
+    "-0x1.fca3a679bc166p-4",
+    "0x0p+0",
+    "0x1.fca3a679bc166p-6",
+]
+_BAND_DENOMINATOR: Final = [
+    "0x1p+0",
+    "-0x1.44f964874b0bcp+2",
+    "0x1.673368b6f9f9dp+3",
+    "-0x1.cc42acfd270acp+3",
+    "0x1.7d7a6edb8de1ep+3",
+    "-0x1.a61081d1061eap+2",
+    "0x1.2c599bf9aab12p+1",
+    "-0x1.ef794fc9b9221p-2",
+    "0x1.7f2c89f4131c4p-5",
+]
+_SQRT3: Final = float.fromhex("0x1.bb67ae8584caap+0")
+"""The correctly rounded root of 3; a root through pow need not round to it."""
 
 
 def test_subject_id_handles_both_published_filename_formats() -> None:
@@ -117,6 +157,224 @@ def test_pole_polynomial_is_monic_and_preserves_complex_products(
     actual = _pole_polynomial(np.asarray(roots, dtype=np.complex128))
     assert actual.dtype == np.complex128
     assert np.array_equal(actual, np.asarray(coefficients))
+
+
+def test_exp000_design_reproduces_the_x86_reference_coefficients() -> None:
+    cfg = source_preprocessing()
+    notch_numerator, notch_denominator = _notch(
+        cfg.notch_hz,
+        quality=cfg.notch_quality,
+        sample_rate=cfg.sample_rate,
+    )
+    zeros, poles, gain = _butterworth_bandpass(
+        cfg.band_hz,
+        order=cfg.filter_order,
+        sample_rate=cfg.sample_rate,
+    )
+    actual = {
+        "notch/numerator": notch_numerator,
+        "notch/denominator": notch_denominator,
+        "band/numerator": gain * _pole_polynomial(zeros).real,
+        "band/denominator": _pole_polynomial(poles).real,
+    }
+    expected = {
+        "notch/numerator": _NOTCH_NUMERATOR,
+        "notch/denominator": _NOTCH_DENOMINATOR,
+        "band/numerator": _BAND_NUMERATOR,
+        "band/denominator": _BAND_DENOMINATOR,
+    }
+    assert not mismatches(
+        {key: _float64(values) for key, values in expected.items()},
+        actual={key: torch.from_numpy(value.copy()) for key, value in actual.items()},
+        ulps=True,
+    )
+
+
+# SciPy 1.16.3 iirnotch supplied these on aarch64 with NumPy 2.5.3.
+@pytest.mark.parametrize(
+    ("center_hz", "quality", "sample_rate", "numerator", "denominator"),
+    [
+        (
+            60.0,
+            20.0,
+            500.0,
+            ["0x1.f686c73312e02p-1", "-0x1.6e53771bf8be9p+0", "0x1.f686c73312e02p-1"],
+            ["0x1p+0", "-0x1.6e53771bf8be9p+0", "0x1.ed0d8e6625c04p-1"],
+        ),
+        (
+            16.0,
+            5.0,
+            64.0,
+            ["0x1.b9feb0ecefaa2p-1", "-0x1.e78c6da74b4e9p-54", "0x1.b9feb0ecefaa2p-1"],
+            ["0x1p+0", "-0x1.e78c6da74b4e9p-54", "0x1.73fd61d9df544p-1"],
+        ),
+        (
+            0.0,
+            30.0,
+            250.0,
+            ["0x1p+0", "-0x1p+1", "0x1p+0"],
+            ["0x1p+0", "-0x1p+1", "0x1p+0"],
+        ),
+        (
+            125.0,
+            30.0,
+            250.0,
+            ["0x1.e680e1237202fp-1", "0x1.e680e1237202fp+0", "0x1.e680e1237202fp-1"],
+            ["0x1p+0", "0x1.e680e1237202fp+0", "0x1.cd01c246e405ep-1"],
+        ),
+    ],
+)
+def test_notch_matches_reference_coefficients_from_zero_through_nyquist(
+    center_hz: float,
+    quality: float,
+    sample_rate: float,
+    numerator: list[str],
+    denominator: list[str],
+) -> None:
+    actual = _notch(center_hz, quality=quality, sample_rate=sample_rate)
+    assert not mismatches(
+        {"numerator": _float64(numerator), "denominator": _float64(denominator)},
+        actual={
+            "numerator": torch.from_numpy(actual[0]),
+            "denominator": torch.from_numpy(actual[1]),
+        },
+        ulps=True,
+    )
+
+
+@pytest.mark.parametrize("center_hz", [-1.0, 126.0])
+def test_notch_rejects_a_center_outside_the_nyquist_band(center_hz: float) -> None:
+    with pytest.raises(ValueError, match="Notch frequency"):
+        _notch(center_hz, quality=30.0, sample_rate=250.0)
+
+
+# SciPy 1.16.3 butter(output="zpk") supplied these on aarch64 with NumPy 2.5.3;
+# both cases are insensitive to the per-ISA glibc hypot kernel. Order 1 pins the
+# real prototype pole's signed zero, which orders its conjugate pair, and the
+# np.sqrt center; order 6 pins the fused square and reciprocal angle division.
+@pytest.mark.parametrize(
+    ("order", "band_hz", "gain", "poles"),
+    [
+        (
+            1,
+            (8.0, 20.0),
+            "0x1.227014a7a9e9cp-2",
+            [
+                ("0x1.f6e7ece10f34cp-2", "-0x1.c02843ccfac56p-2"),
+                ("0x1.f6e7ece10f34cp-2", "0x1.c02843ccfac56p-2"),
+            ],
+        ),
+        (
+            6,
+            (3.0, 9.0),
+            "0x1.841bb1244b59dp-16",
+            [
+                ("0x1.ea5a60a568bb7p-1", "-0x1.77cc8f3f55a88p-3"),
+                ("0x1.cf1d81c9bfc03p-1", "-0x1.728675df97ab0p-3"),
+                ("0x1.abdd80a3e0e70p-1", "-0x1.8e05adbf141a1p-3"),
+                ("0x1.abdd80a3e0e70p-1", "0x1.8e05adbf141a1p-3"),
+                ("0x1.cf1d81c9bfc03p-1", "0x1.728675df97ab0p-3"),
+                ("0x1.ea5a60a568bb7p-1", "0x1.77cc8f3f55a88p-3"),
+                ("0x1.95ad3c7fa7c26p-1", "0x1.f6919d92ff177p-2"),
+                ("0x1.7b0b947ba37a1p-1", "0x1.817424cf8f6c0p-2"),
+                ("0x1.852a810e27129p-1", "0x1.0b22cce823adfp-2"),
+                ("0x1.852a810e27129p-1", "-0x1.0b22cce823adfp-2"),
+                ("0x1.7b0b947ba37a1p-1", "-0x1.817424cf8f6c0p-2"),
+                ("0x1.95ad3c7fa7c26p-1", "-0x1.f6919d92ff177p-2"),
+            ],
+        ),
+    ],
+)
+def test_butterworth_bandpass_matches_reference_zeros_poles_and_gain(
+    order: int,
+    band_hz: tuple[float, float],
+    gain: str,
+    poles: list[tuple[str, str]],
+) -> None:
+    zeros, actual_poles, actual_gain = _butterworth_bandpass(
+        band_hz,
+        order=order,
+        sample_rate=100.0,
+    )
+    assert zeros.tolist() == [1] * order + [-1] * order
+    assert actual_gain == float.fromhex(gain)
+    assert not mismatches(
+        {
+            "poles": torch.tensor(
+                [
+                    complex(float.fromhex(real), float.fromhex(imag))
+                    for real, imag in poles
+                ],
+                dtype=torch.complex128,
+            ),
+        },
+        actual={"poles": torch.from_numpy(actual_poles)},
+    )
+
+
+@pytest.mark.parametrize(
+    "band_hz",
+    [(0.0, 45.0), (1.0, 125.0), (45.0, 45.0), (45.0, 1.0)],
+)
+def test_butterworth_bandpass_rejects_edges_outside_the_open_band(
+    band_hz: tuple[float, float],
+) -> None:
+    with pytest.raises(ValueError, match="Band edges"):
+        _butterworth_bandpass(band_hz, order=4, sample_rate=250.0)
+
+
+def test_product_rounds_each_part_once() -> None:
+    assert _product(1 + 2j, 3 + 4j) == -5 + 10j
+    # Two roundings would lose the 2**-60 term of (1 + 2**-30)**2 - 1.
+    square = _product(complex(1 + 2**-30, 1), complex(1 + 2**-30, 1))
+    assert square == complex(2**-29 + 2**-60, 2 + 2**-29)
+
+
+@pytest.mark.parametrize(
+    ("dividend", "divisor"),
+    [(10 + 5j, 2 + 1j), (5 + 10j, 1 + 2j)],
+)
+def test_quotient_scales_by_the_larger_divisor_part(
+    dividend: complex,
+    divisor: complex,
+) -> None:
+    assert _quotient(dividend, divisor) == 5 + 0j
+
+
+@pytest.mark.parametrize(
+    ("value", "root"),
+    [
+        (3 + 4j, 2 + 1j),
+        (-3 + 4j, 1 + 2j),
+        (-3 - 4j, 1 - 2j),
+        (complex(-4, -0.0), complex(0, -2)),
+        (6j, complex(_SQRT3, _SQRT3)),
+    ],
+)
+def test_square_root_follows_csqrt_in_every_half_plane(
+    value: complex,
+    root: complex,
+) -> None:
+    assert np.complex128(_square_root(value)).tobytes() == np.complex128(root).tobytes()
+
+
+@pytest.mark.parametrize(
+    ("x", "y", "norm"),
+    [(0.34, -0.35, "0x1.f3aa7417b6f8fp-2"), (-0.46, 0.09, "0x1.dff8928653ed5p-2")],
+)
+def test_hypot_corrects_the_root_as_x86_glibc_does(
+    x: float,
+    y: float,
+    norm: str,
+) -> None:
+    # The generic glibc 2.39 kernel rounds each one ULP from the exact norm;
+    # aarch64's fused kernel and the uncorrected root round them differently.
+    assert _hypot(x, y) == float.fromhex(norm)
+
+
+def test_complex_dot_sums_four_real_partials_before_combining() -> None:
+    # Summing each complex product first would keep the 2**-53 real term.
+    assert _complex_dot([(1 + 1j, 1 + 1j), (complex(2**-53), 1 + 0j)]) == 2j
 
 
 def test_csv_trials_follow_adjacent_nonempty_markers(tmp_path: Path) -> None:
@@ -336,33 +594,13 @@ def test_causal_filter_preserves_row_major_reduction_order() -> None:
     ("numerator", "denominator", "expected"),
     [
         (
-            ["0x1.f57ec3b2d27d1p-1", "-0x1.35f0e978b5cb3p-1", "0x1.f57ec3b2d27d1p-1"],
-            ["0x1p+0", "-0x1.35f0e978b5cb3p-1", "0x1.eafd8765a4fa2p-1"],
+            _NOTCH_NUMERATOR,
+            _NOTCH_DENOMINATOR,
             ["0x1.502789a5b05e7p-6", "0x1.502789a5b05d4p-6"],
         ),
         (
-            [
-                "0x1.fca3a679bc166p-6",
-                "0x0p+0",
-                "-0x1.fca3a679bc166p-4",
-                "0x0p+0",
-                "0x1.7d7abcdb4d10cp-3",
-                "0x0p+0",
-                "-0x1.fca3a679bc166p-4",
-                "0x0p+0",
-                "0x1.fca3a679bc166p-6",
-            ],
-            [
-                "0x1p+0",
-                "-0x1.44f964874b0bcp+2",
-                "0x1.673368b6f9f9dp+3",
-                "-0x1.cc42acfd270acp+3",
-                "0x1.7d7a6edb8de1ep+3",
-                "-0x1.a61081d1061eap+2",
-                "0x1.2c599bf9aab12p+1",
-                "-0x1.ef794fc9b9221p-2",
-                "0x1.7f2c89f4131c4p-5",
-            ],
+            _BAND_NUMERATOR,
+            _BAND_DENOMINATOR,
             [
                 "-0x1.fca3a66af54f2p-6",
                 "-0x1.fca3a6b5fd347p-6",
@@ -403,6 +641,10 @@ def test_filter_initial_state_rejects_a_singular_steady_state() -> None:
             np.asarray([0.2, 0.3, 0.4]),
             a=np.asarray([1.0, -1.0, 0.0]),
         )
+
+
+def _float64(values: list[str]) -> torch.Tensor:
+    return torch.tensor([float.fromhex(value) for value in values], dtype=torch.float64)
 
 
 if __name__ == "__main__":

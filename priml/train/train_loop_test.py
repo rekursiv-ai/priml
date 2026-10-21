@@ -39,7 +39,7 @@ if TYPE_CHECKING:
         TrainStepProtocol,
     )
 
-from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
+from configgle import Fig, InlineConfig, Makeable, Makes, Makes2, PartialConfig
 from treekle import from_plain
 
 from priml.cost import Cost, matmul_cost
@@ -1317,6 +1317,58 @@ def test_eval_weights_scalar_metrics_by_valid_count(*, tensor_counts: bool) -> N
     assert loop.eval()["score"] == 0.8
 
 
+class _IntKeyEvalDataset(_WeightedEvalDataset):
+    """Eval batches whose collate keys one field by an int, as a custom collate may."""
+
+    class Config(Makes2["_IntKeyEvalDataset"], _WeightedEvalDataset.Config):
+        pass
+
+    @override
+    def eval_dataloader(self) -> list[dict[str, object]]:
+        """Return one batch carrying an int key."""
+        batch: dict[object, object] = {
+            "media": torch.tensor([[1.0]]),
+            0: torch.tensor([0]),
+        }
+        return [cast("dict[str, object]", cast("object", batch))]
+
+
+class _KeyRecordingEvalStep(_WeightedEvalStep):
+    """Eval step recording every batch key it is handed."""
+
+    class Config(Makes2["_KeyRecordingEvalStep"], _WeightedEvalStep.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.keys: list[object] = []
+
+    @override
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
+        """Record the keys, then return the batch unchanged."""
+        self.keys.extend(batch)
+        return batch
+
+
+def test_eval_hands_the_step_string_keys() -> None:
+    """A collate keying a field by a non-str still reaches the step as a str key."""
+    config = TrainLoop.Config(
+        step=_KeyRecordingEvalStep.Config(),
+        dataset=_IntKeyEvalDataset.Config(),
+    )
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.max_steps = 0
+    config.num_steps_eval = math.inf
+    config.eval_every_epoch = False
+    loop = config.make()
+
+    loop.eval()
+
+    assert isinstance(loop.step, _KeyRecordingEvalStep)
+    assert loop.step.keys == ["media", "0"]
+
+
 def test_eval_fails_when_exceeding_max_eval_time() -> None:
     """An eval pass over its wall-clock budget raises EvalTimeLimitError."""
     config = TrainLoop.Config(
@@ -1987,14 +2039,14 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
         tensor.mul_(8)
 
     loop = _make_step_logging_loop_config().make()
-    step = loop.step
-    assert isinstance(step, TrainStep)
+    assert isinstance(loop.step, TrainStep)
+    timer = loop.step.timer_step
 
     def _with_metrics(**batch: object) -> dict[str, object]:
         del batch
         # Advance the step counter the way the real step does -- by charging
         # the timer global_step reads -- since it is a read-only property.
-        step.timer_step.global_count += 1
+        timer.global_count += 1
         return {
             "loss": torch.tensor([1.0]),
             "model": torch.zeros(2, 3),
@@ -3040,7 +3092,7 @@ def test_train_metrics_accumulate_over_the_log_cadence() -> None:
             totals_at_compute.append(metric.total)
             return original_compute()
 
-        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
         tracker = cast(_RecordingTracker, loop.tracker)
 
         loop.train()
@@ -3085,7 +3137,7 @@ def test_train_metrics_compute_and_reset_on_every_rank(
             totals_at_compute.append(metric.total)
             return original_compute()
 
-        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
         tracker = cast(_RecordingTracker, loop.tracker)
 
         loop.train()
@@ -3277,7 +3329,6 @@ def test_accumulation_logs_once_per_update_not_once_per_microbatch() -> None:
         config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         step_config = config.step
-        assert isinstance(step_config, TrainStep.Config)
         step_config.accumulate_grad_batches = 4
         config.max_steps = 3
         config.num_steps_eval = math.inf
@@ -3319,7 +3370,6 @@ def test_accumulation_evaluates_once_per_update_not_once_per_microbatch(
         )
         config.checkpointer = None
         step_config = config.step
-        assert isinstance(step_config, TrainStep.Config)
         step_config.accumulate_grad_batches = 4
         config.max_steps = 4
         config.num_steps_eval = 2
@@ -3736,7 +3786,7 @@ def test_final_eval_improvement_refreshes_the_end_of_run_save() -> None:
             writes.append(step)
             original_write(target, step, after_write=after_write)
 
-        loop.checkpointer._write = spy_write  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+        loop.checkpointer._write = spy_write  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
         loop.train()
 
         assert writes == [3, 3]
@@ -4213,7 +4263,6 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     assert "Timeout (" not in capfd.readouterr().err
 
 
-@pytest.mark.compute_torch_compile
 def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -4233,10 +4282,10 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
         return time.perf_counter() - start
 
     bits = 1 << 22
-    while True:  # Calibrate one GIL-holding op to >=0.15s on this machine.
+    while True:  # Calibrate one GIL-holding op to >=0.01s on this machine.
         # Use the minimum to exclude scheduler preemption from calibration.
-        duration = min(_timed(bits) for _ in range(5))
-        if duration >= 0.15:
+        duration = min(_timed(bits) for _ in range(3))
+        if duration >= 0.01:
             break
         bits *= 2
     with _phase_heartbeat(
@@ -4562,7 +4611,7 @@ class _ClosingDataset(_ScopedEvalDataset):
 class _BoundClosingDataset(_ClosingDataset):
     """An owned dataset that receives the loop's actual step."""
 
-    class Config(_ClosingDataset.Config):
+    class Config(Makes2["_BoundClosingDataset"], _ClosingDataset.Config):
         @override
         def make(self) -> _BoundClosingDataset:
             return _BoundClosingDataset(self.finalized())
@@ -5060,7 +5109,7 @@ def test_partial_startup_closes_acquired_tracker_preserving_error(
     with pytest.raises(ValueError, match="profiler construction"):
         config.make()
     assert any(
-        record.exc_info is not None
+        isinstance(record.exc_info, tuple)
         and "tracker close failure" in str(record.exc_info[1])
         for record in caplog.records
     )

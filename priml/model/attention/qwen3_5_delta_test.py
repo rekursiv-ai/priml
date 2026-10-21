@@ -57,8 +57,7 @@ def _reference() -> nn.Module:
         linear_num_value_heads=2,
         linear_conv_kernel_dim=4,
     )
-    raw_reference: object = Qwen3_5GatedDeltaNet(config, layer_idx=0)
-    return torch_reference(raw_reference)
+    return torch_reference(Qwen3_5GatedDeltaNet(config, layer_idx=0))
 
 
 def _native() -> Qwen35GatedDeltaNet:

@@ -502,7 +502,7 @@ def test_load_upstream_uses_the_supplied_reference_and_corpus(
     assert imports == ["constants", "prepare"]
     assert sys.path[0] == str(root)
     assert constants.__dict__["TIME_BUDGET"] == 1e-9
-    assert isinstance(prepare, _PrepareDirectory)
+    assert isinstance(prepare, _PrepareDirectory)  # pyrefly: ignore[unsafe-overlap] -- pyrefly reads a module's attributes as read-only and a protocol's members as read-write.
     data_dir = prepare.DATA_DIR
     assert str(corpus) == data_dir
     assert loaded.__name__ == "train"

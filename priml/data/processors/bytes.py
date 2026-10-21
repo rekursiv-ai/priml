@@ -263,8 +263,8 @@ class GetBytesFromTarHandle:
                 if file_obj is not None:
                     sample["media"] = file_obj.read()
                     # Capture tar offset metadata for O(1) server lookups.
-                    sample["tar_offset"] = int(member.offset_data)
-                    sample["tar_size"] = int(member.size)
+                    sample["tar_offset"] = int(member.offset_data)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+                    sample["tar_size"] = int(member.size)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                     return True
             except (KeyError, OSError):
                 continue

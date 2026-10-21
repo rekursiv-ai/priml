@@ -115,7 +115,6 @@ def test_fit_restores_best_weights_and_checks_the_final_update(
         )
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize("pretrain_updates", [0, 1])
 def test_budget_includes_pretraining_and_final_validation(
     pretrain_updates: int,
@@ -325,7 +324,6 @@ def test_bad_development_data_cannot_produce_a_report(
         method.predict(validation.media)
 
 
-@pytest.mark.compute_training
 def test_nonfinite_training_data_leaves_no_finite_checkpoint() -> None:
     cfg = exp_smoke().copy_tree().finalize()
     train, validation, synthetic, data = _splits(cfg.data)

@@ -280,7 +280,7 @@ class TrainLoop:
                     isinstance(part, HasNormalizedWorkingDirPattern)
                     and part.base_dir is None
                 ):
-                    part.base_dir = self.working_dir
+                    part.base_dir = self.working_dir  # pyrefly: ignore[attribute-assign-on-never] -- pyrefly narrows isinstance(Optional, Protocol) to Never.
             for metric in (*self.metrics_train.values(), *self.metrics_eval.values()):
                 if (
                     not isinstance(metric, HasNormalizedWorkingDirPattern)
@@ -643,7 +643,7 @@ class TrainLoop:
         over = is_rank_zero() and self._max_time_elapsed() >= self.max_time
         flag = torch.tensor(1.0 if over else 0.0, device=collective_device())
         dist.broadcast(flag, src=0)
-        reached = bool(flag.item() > 0.0)
+        reached = bool(flag.item() > 0.0)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         if reached:
             self._time_limit_latched = True
         return reached
@@ -700,7 +700,7 @@ class TrainLoop:
         )
         flag = torch.tensor(1.0 if over else 0.0, device=collective_device())
         dist.broadcast(flag, src=0)
-        return bool(flag.item() > 0.0)
+        return bool(flag.item() > 0.0)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
     def _check_eval_deadline(self, eval_start: float) -> None:
         """Reject completed metric work over budget; never preempt metric code."""
@@ -784,7 +784,7 @@ class TrainLoop:
                     self.step.global_step + 1,
                 )
                 raw_batch = next(self.train_iter)
-                batch = {str(key): value for key, value in raw_batch.items()}
+                batch = {str(key): value for key, value in raw_batch.items()}  # pyrefly: ignore[unnecessary-type-conversion] -- The loader's item is cast, not checked; this normalizes keys a custom collate leaves non-str.
                 batch_time = time.perf_counter() - batch_start
                 logger.debug(
                     "TrainLoop step %d: raw train batch ready (batch_time=%.3fs).",
@@ -1096,7 +1096,7 @@ class TrainLoop:
             batch_start = time.perf_counter()
             raw_batch = cast(dict[str, object], raw_batch)
             batch = self.step.preprocess_batch(
-                {str(key): value for key, value in raw_batch.items()},
+                {str(key): value for key, value in raw_batch.items()},  # pyrefly: ignore[unnecessary-type-conversion] -- The loader's item is cast, not checked; this normalizes keys a custom collate leaves non-str.
             )
             if batch.get("metric_only", False):
                 logger.info(
@@ -1159,8 +1159,8 @@ class TrainLoop:
         total_loss = 0.0
         total_batch_time = 0.0
         total_step_metrics: dict[str, float] = {}
-        num_batches = 0
-        total_weight = 0
+        num_batches: int = 0
+        total_weight: int = 0
         total_batches = _loader_length(eval_loader)
         narrate = is_rank_zero()
         log_every = max(1, total_batches // 20) if total_batches else 50
@@ -1184,7 +1184,7 @@ class TrainLoop:
                 )
             raw_batch = cast(dict[str, object], raw_batch)
             batch = self.step.preprocess_batch(
-                {str(key): value for key, value in raw_batch.items()},
+                {str(key): value for key, value in raw_batch.items()},  # pyrefly: ignore[unnecessary-type-conversion] -- The loader's item is cast, not checked; this normalizes keys a custom collate leaves non-str.
             )
             # A collated batch carries its count as a 0-d tensor.
             count = batch.get("valid_count", 1)

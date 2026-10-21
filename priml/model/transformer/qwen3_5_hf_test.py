@@ -229,10 +229,10 @@ class _StubReference:
 def test_hf_reference_stub_bodies_are_inert() -> None:
     """The protocol narrows a lazy HF model; its own bodies compute nothing."""
     stub = _StubReference()
-    assert stub(torch.zeros(1)) is None
-    assert stub.named_parameters() is None
-    assert stub.state_dict() is None
-    assert stub.get_parameter("lm_head.weight") is None
+    assert stub(torch.zeros(1)) is None  # pyrefly: ignore[bad-argument-type] -- The stub borrows protocol bodies to cover them; its `self` need not satisfy the protocol.
+    assert stub.named_parameters() is None  # pyrefly: ignore[bad-argument-type] -- The stub borrows protocol bodies to cover them; its `self` need not satisfy the protocol.
+    assert stub.state_dict() is None  # pyrefly: ignore[bad-argument-type] -- The stub borrows protocol bodies to cover them; its `self` need not satisfy the protocol.
+    assert stub.get_parameter("lm_head.weight") is None  # pyrefly: ignore[bad-argument-type] -- The stub borrows protocol bodies to cover them; its `self` need not satisfy the protocol.
     descriptor = cast(object, inspect.getattr_static(HfReference, "config"))
     assert isinstance(descriptor, property)
     assert descriptor.fget is not None
