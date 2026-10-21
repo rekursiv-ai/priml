@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from priml.baselines.kvcache.experiments import exp000, exp001, exp002, exp003
 from priml.baselines.kvcache.fp4 import fp4_layer_cache
-from priml.baselines.kvcache.fp4_fused import Fp4TritonAttention, fp4_fused_layer_cache
+from priml.baselines.kvcache.fp4_fused import (
+    Fp4TritonAttention,
+    fp4_fused_layer_cache,
+)
 from priml.baselines.kvcache.int8 import int8_layer_cache
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
