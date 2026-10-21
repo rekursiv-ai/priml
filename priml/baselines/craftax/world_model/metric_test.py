@@ -181,6 +181,9 @@ def test_craftax_target_nll_is_the_models_scored_terms_per_job() -> None:
         loss = model(batch)
     board = 3 + schema.cell_slots
     assert record.shape[1] == 1 + schema.local_slots
+    flat = craftax_target_nll(model, batch)
+    assert torch.equal(flat, record.flatten())
+    assert flat.shape == (len(batch.job_at) * (1 + schema.local_slots),)
     assert torch.allclose(record[:, 0].sum(), loss.nll["action"])
     assert torch.allclose(record[:, 1].sum(), loss.nll["reward"])
     assert torch.allclose(record[:, 2].sum(), loss.nll["done"])
@@ -561,6 +564,7 @@ class _Recorder:
     def __init__(self, config: Config) -> None:
         del config
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.steps: list[int] = []
         self.events: list[tuple[object, ...]] = []
 
     def log_metrics(
@@ -570,7 +574,7 @@ class _Recorder:
         *,
         prefix: str = "",
     ) -> None:
-        del step
+        self.steps.append(step)
         self.calls.append((prefix, dict(metrics)))
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
@@ -622,6 +626,18 @@ def test_series_use_nanochat_names() -> None:
         "train_split/bpb": 0.3,
         "eval/train_split_total_loss": 7.0,
     }
+    assert set(recorder.steps) == {5}
+
+
+def test_series_without_a_prefix_pass_through_unchanged() -> None:
+    config = NanochatSeries.Config()
+    config.tracker = _Recorder.Config()
+    series = config.make()
+    recorder = series.tracker
+    assert isinstance(recorder, _Recorder)
+    series.log_metrics({"loss": 1.0}, 3)
+    assert recorder.calls == [("", {"loss": 1.0})]
+    assert recorder.steps == [3]
 
 
 def test_series_hand_their_directory_to_a_tracker_beneath_an_async_wrapper(

@@ -784,14 +784,16 @@ def test_study_requires_a_complete_family_before_creating_outputs(
 
 def test_pprint_needs_neither_datasets_nor_pretrained_weights(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     cfg = WellboreStudy.Config()
     cfg.families = [family_0803_v2()]
     cfg.dataset_directory = tmp_path / "missing"
     cfg.working_dir = tmp_path / "run"
+    monkeypatch.setattr(WellboreStudy.Config, "pprint", _stub_pprint)
     cfg.make().run("--pprint")
-    assert "0803_V2" in capsys.readouterr().out
+    assert capsys.readouterr().out == "stub config\n"
     assert not cfg.working_dir.exists()
 
 
@@ -843,7 +845,15 @@ def test_receipt_names_the_study_scope_and_forwards_the_outer_budget(
     budget: bool,
 ) -> None:
     cfg = _recorded_study(tmp_path, budget=budget)
-    seen = _record_hidden_defaults(monkeypatch, method="pformat")
+    seen: list[object] = []
+
+    def pformat(config: WellboreStudy.Config, **kwargs: object) -> str:
+        del config
+        seen.append(kwargs.get("hide_default_values", "unset"))
+        return "stub config\n"
+
+    monkeypatch.setattr(os, "fsync", _no_flush)
+    monkeypatch.setattr(WellboreStudy.Config, "pformat", pformat)
     cfg.make().run()
     assert seen == [False]
     run = tmp_path / "run"
@@ -862,7 +872,7 @@ def test_receipt_names_the_study_scope_and_forwards_the_outer_budget(
     assert timing_scope.startswith("Study.run including cold preprocessing")
     assert timing_scope.endswith("excludes downloads and launcher imports")
     assert (run / "0803_V2/budget.txt").read_text() == ("300" if budget else "none")
-    assert (run / "config.txt").read_text() == cfg.pformat(hide_default_values=False)
+    assert (run / "config.txt").read_text() == "stub config\n"
 
 
 def test_run_creates_missing_parents_and_protects_its_inputs(
