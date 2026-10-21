@@ -267,13 +267,18 @@ def test_smooth_matches_pillow_and_keeps_the_border() -> None:
     assert_pillow(ops.smooth, lambda p: p.filter(ImageFilter.SMOOTH), image())
 
 
-@pytest.mark.parametrize("bits", [0, 3, 8])
+@pytest.mark.parametrize("bits", [1, 3, 8])
 def test_posterize_matches_pillow(bits: int) -> None:
     assert_pillow(
         lambda x: ops.posterize(x, bits),
         lambda p: ImageOps.posterize(p, bits),
         image(),
     )
+
+
+def test_posterize_to_no_bits_is_black() -> None:
+    # Pillow 13 refuses ``bits=0``; earlier releases masked every bit away.
+    assert not ops.posterize(image(), 0).any()
 
 
 @pytest.mark.parametrize("threshold", [0.0, 127.5, 255.0])
