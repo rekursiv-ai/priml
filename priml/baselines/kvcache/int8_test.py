@@ -33,14 +33,23 @@ from priml.model.attention.mla import MultiHeadLatentAttention
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from priml.model.transformer.transformer import Transformer
+
 
 _NUM_HEADS: Final = 3
 _CHANNELS_HEAD_CACHE: Final = 4
 _CODE_MAX: Final = 127.0
 
 
+def _small_decoder() -> Transformer.Config:
+    """Return ``decoder()`` at two layers; its 64-wide cache rows stay."""
+    cfg = decoder()
+    cfg.channels_in, cfg.num_layers = 128, 2
+    return cfg
+
+
 def test_int8_cache_counts_its_scales_inside_the_cache_tensors() -> None:
-    model = decoder().make()
+    model = _small_decoder().make()
     max_seq = 64
     default = alloc_layer_cache(
         model,
@@ -255,7 +264,7 @@ def test_a_zero_row_dequantizes_to_zero() -> None:
 
 
 def test_int8_layer_cache_widens_every_slot_the_model_allocates() -> None:
-    model = decoder().make()
+    model = _small_decoder().make()
     default = alloc_layer_cache(
         model,
         batch=2,

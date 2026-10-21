@@ -186,7 +186,7 @@ def test_batch_size_fork_changes_only_the_named_parent_choice() -> None:
     assert fork.cold_loop.experiment_name == "exp001"
     fork.cold_loop.dataset.batch_size = base.cold_loop.dataset.batch_size
     fork.cold_loop.experiment_name = base.cold_loop.experiment_name
-    assert fork.udiff(base) == ""
+    assert fork == base, fork.udiff(base)
 
 
 def test_optimizer_stack_replays_three_updates_bit_for_bit() -> None:

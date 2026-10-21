@@ -681,11 +681,9 @@ def test_both_complete_raptor_model_forwards_replay_source_tensors() -> None:
         ) / 127
         features = model.encode(image)
         assert torch.equal(model.head(features), expected["chunked"])
-        config = _source_raptor_config()
-        config.chunk_size = math.inf
-        unchunked = config.make().eval()
-        unchunked.load_checkpoint(state)
-        assert torch.equal(unchunked(image), expected["unchunked"])
+        # Chunking only splits the encoder batch, so the same weights serve both.
+        model.chunk_size = math.inf
+        assert torch.equal(model(image), expected["unchunked"])
         with torch.no_grad():
             model.head.clsW.view(torch.int32)[0, 0] += 1
         assert not torch.equal(model.head(features), expected["chunked"])
