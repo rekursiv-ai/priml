@@ -112,6 +112,7 @@ def test_update_answers_in_the_incoming_dtype() -> None:
 
 def test_the_e2m1_grid_roundtrips_exactly() -> None:
     magnitudes = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    # _quantize uses one scale per row; its singleton axis spans all 16 codes.
     row = torch.cat((magnitudes, -magnitudes)) * torch.arange(1, 2 * 3 * 5 + 1).reshape(
         2,
         3,
@@ -202,6 +203,7 @@ def test_signed_zero_survives_encoding_and_decoding() -> None:
 
     keys, values = cache.update(incoming, incoming)
 
+    # _quantize packs this four-code signed-zero row into exactly two bytes.
     expected = torch.tensor([0x08, 0x7F], dtype=torch.uint8).expand(2, 3, 5, 2)
     assert torch.equal(cache.k[..., :-SCALE_COLUMNS], expected)
     for actual in (keys, values):
