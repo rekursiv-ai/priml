@@ -140,7 +140,7 @@ def craftax_target_nll(model: nn.Module, media: object) -> Tensor:
     # 0; a padding job at position 0 reads position 0's, as the docstring says.
     action = scored.pop("action").flatten()[(media.job_at.long() - 1).clamp(min=0)]
     local = [value.reshape(jobs, -1) for value in scored.values()]
-    return torch.cat([action[:, None], *local], dim=-1).flatten()
+    return torch.cat([action[:, None], *local], dim=1).flatten()
 
 
 def canonical_records(batch: PackedBatch) -> bytes:
