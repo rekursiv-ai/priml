@@ -48,6 +48,7 @@ from priml.baselines.casmi2026.fusion import (
 from priml.baselines.casmi2026.isolated import (
     ADMISSION_DIR,
     DATASET_ROOT,
+    ELEMENT_MASSES,
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
     ReactionTable,
@@ -56,7 +57,13 @@ from priml.baselines.casmi2026.isolated import (
 )
 from priml.baselines.casmi2026.isolated_test import _reaction_data_write
 from priml.baselines.casmi2026.main_engine import MainRetrieval, ReactionScreen
-from priml.baselines.casmi2026.main_engine_test import _inputs
+from priml.baselines.casmi2026.main_engine_test import (
+    RANKER_NAMES,
+    _inputs,
+    pipeline_stage_a,
+    pipeline_stage_b,
+    ranker_texts,
+)
 from priml.baselines.casmi2026.pubchem import (
     PubChemAssets,
     PubChemGate,
@@ -123,7 +130,11 @@ from priml.baselines.casmi2026.scripts.recipe_preparation import (
     prepare_requests,
 )
 from priml.baselines.casmi2026.second_engine import SecondAssets, SimulationRows
-from priml.baselines.casmi2026.second_engine_test import engine_keys, second_config
+from priml.baselines.casmi2026.second_engine_test import (
+    engine_keys,
+    second_config,
+    second_states,
+)
 from priml.baselines.casmi2026.simulators import (
     GlacierBackend,
     GlacierScheduling,
@@ -137,15 +148,12 @@ from priml.baselines.casmi2026.simulators_test import (
     _molecules,
     _write,
     admission_rows,
-    observe_result,
 )
 from priml.baselines.casmi2026.testing import (
-    float32_comparands,
     identity_rows,
     retrieval_inputs,
     write_identity,
 )
-from priml.testing.golden import assert_tensor_golden, mismatches, read_tensors
 
 
 if TYPE_CHECKING:
@@ -203,139 +211,131 @@ def released_provenance() -> PublicationProvenance:
     return exp000().provenance.make()
 
 
-_BASELINE: Final = _CWD
+def engine_result(
+    smiles: Sequence[str],
+    *,
+    keys: Sequence[str] | None = None,
+    formulas: Sequence[str] | None = None,
+    pids: Sequence[int] | None = None,
+    scores: Sequence[float],
+    library_max: float = 0.0,
+) -> EngineResult:
+    """Wrap literal candidates and ranker scores in the engine result record."""
+    count = len(smiles)
+    rows = np.array(range(count) if pids is None else pids, np.int64)
+    return EngineResult(
+        candidates=CandidateSet(
+            smiles=tuple(smiles),
+            keys=tuple(smiles if keys is None else keys),
+            formulas=tuple(("unused",) * count if formulas is None else formulas),
+            pool_rows=rows,
+            generated=rows < 0,
+            sources=("pool",) * count,
+        ),
+        features=np.zeros((count, 0), np.float32),
+        feature_names=(),
+        scores=np.array(scores, np.float64),
+        diagnostics=EngineDiagnostics(
+            n_cand=count,
+            lib_max=library_max,
+            top_sim=0.0,
+            fzmax=0.0,
+        ),
+    )
 
 
-class _Input(TypedDict):
-    smiles: tuple[str, ...]
-    keys: tuple[str, ...]
-    formulas: tuple[str, ...]
-
-
-def test_complete_outer_shortlists_popularity_and_all_key_decisions() -> None:
-    golden = _BASELINE / "testdata/recipe_policy.pt"
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    for label in ("capped", "flat", "singleton", "empty"):
-        prefix = "main/" + label
-        inputs = json_loads(
-            expected[prefix + "/input"].numpy().tobytes().decode(),
-            _Input,
-        )
-        pids = expected[prefix + "/pids"].numpy()
-        result = EngineResult(
-            candidates=CandidateSet(
-                smiles=inputs["smiles"],
-                keys=inputs["keys"],
-                formulas=inputs["formulas"],
-                pool_rows=pids,
-                generated=pids < 0,
-                sources=("pool",) * len(pids),
-            ),
-            features=np.zeros((len(pids), 0), np.float32),
-            feature_names=(),
-            scores=expected[prefix + "/scores"].numpy(),
-            diagnostics=EngineDiagnostics(
-                n_cand=len(pids),
-                lib_max=0.72,
-                top_sim=0.0,
-                fzmax=0.0,
-            ),
-        )
-        ranked = rank_main(
-            result,
-            popularity=expected[prefix + "/popularity"].numpy(),
+def test_main_shortlist_takes_unique_keys_then_permutes_pool_slots_by_popularity() -> (
+    None
+):
+    popularity = np.array([0.0, 10.0, 20.0])
+    # Equal scores standardize to zero, so popularity alone orders the pool slots.
+    flat = rank_main(
+        engine_result(
+            ("g", "p1", "p2"),
+            formulas=("C0H0", "C1H1", "C2H2"),
+            pids=(-1, 1, 2),
+            scores=(4.0, 4.0, 4.0),
+            library_max=0.72,
+        ),
+        popularity=popularity,
+        limit=60,
+        weight=0.15,
+    )
+    assert flat.library_max == 0.72
+    assert flat.popularity_applied
+    assert flat.smiles == ("g", "p2", "p1")
+    assert flat.formulas == ("C0H0|gen", "C2H2", "C1H1")
+    assert flat.scores == pytest.approx((0.0, 3.0, 1.5))
+    # Key k0 repeats; the limit of two keeps the best k0 and then k2.
+    capped = rank_main(
+        engine_result(
+            ("a", "b", "c", "d"),
+            keys=("k0", "k0", "k1", "k2"),
+            pids=(0, 0, 1, 2),
+            scores=(3.0, 2.5, 1.0, 2.0),
+        ),
+        popularity=popularity,
+        limit=2,
+        weight=0.15,
+    )
+    assert capped.keys == ("k2", "k0")
+    assert capped.smiles == ("d", "a")
+    # z-scores of 3 and 2 are +-1; the second row adds 0.15 * 20 popularity.
+    assert capped.scores == pytest.approx((2.0, 1.0), abs=1e-8)
+    for smiles in (("only",), ()):
+        unchanged = rank_main(
+            engine_result(smiles, scores=(1.0,) * len(smiles)),
+            popularity=popularity,
             limit=60,
             weight=0.15,
         )
-        assert ranked.library_max == 0.72
-        for column in ("input", "pids", "scores", "popularity"):
-            actual[prefix + "/" + column] = expected[prefix + "/" + column].clone()
-        actual[prefix + "/output"] = _text(
-            {
-                "smis": list(ranked.smiles),
-                "keys": list(ranked.keys),
-                "forms": list(ranked.formulas),
-                "n_pp": int(ranked.popularity_applied),
-            },
-        )
-        actual[prefix + "/ranked"] = torch.tensor(ranked.scores, dtype=torch.float64)
-    keys = json_loads(
-        expected["engine/identities"].numpy().tobytes().decode(),
-        dict[str, str | None],
+        assert not unchanged.popularity_applied
+        assert unchanged.smiles == smiles
+        assert unchanged.scores == (1.0,) * len(smiles)
+
+
+def test_second_shortlist_recomputes_keys_retaining_the_first_empty_key() -> None:
+    keys = engine_keys()
+    result = engine_result(
+        ("*C", "invalid", "C", "CC", "CCO", "C"),
+        scores=(8.0, 9.0, 7.0, 4.0, 4.0, 3.0),
     )
-    actual["engine/identities"] = _text(keys)
-    for label in ("capped", "small", "empty", "screened", "none_valid"):
-        prefix = "engine/" + label
-        strings = json_loads(
-            expected[prefix + "/input"].numpy().tobytes().decode(),
-            list[str],
+    ranked = rank_second(result, key=keys.__getitem__, prescreen=80, limit=40)
+    assert ranked is not None
+    # The invalid structure has no key; the repeated methane key is skipped.
+    assert ranked.smiles == ("*C", "C", "CC", "CCO")
+    assert ranked.keys == ("", keys["C"], keys["CC"], keys["CCO"])
+    limited = rank_second(result, key=keys.__getitem__, prescreen=80, limit=2)
+    assert limited is not None
+    assert limited.smiles == ("*C", "C")
+    screened = rank_second(result, key=keys.__getitem__, prescreen=2, limit=40)
+    assert screened is not None
+    assert screened.smiles == ("*C",)
+    none_valid = rank_second(
+        engine_result(("invalid",) * 3, scores=(3.0, 2.0, 4.0)),
+        key=keys.__getitem__,
+        prescreen=80,
+        limit=40,
+    )
+    assert none_valid == RankedSecond(smiles=(), keys=())
+    assert (
+        rank_second(
+            engine_result((), scores=()),
+            key=keys.__getitem__,
+            prescreen=80,
+            limit=40,
         )
-        rows = expected[prefix + "/rows"].numpy()
-        count = len(rows)
-        result = EngineResult(
-            candidates=CandidateSet(
-                smiles=tuple(
-                    strings[index]
-                    for index in from_plain(cast(object, rows.tolist()), list[int])
-                ),
-                keys=("unused provided key",) * count,
-                formulas=("unused formula",) * count,
-                pool_rows=rows,
-                generated=np.zeros(count, np.bool_),
-                sources=("pool",) * count,
-            ),
-            features=np.zeros((count, 0), np.float32),
-            feature_names=(),
-            scores=expected[prefix + "/scores"].numpy(),
-            diagnostics=EngineDiagnostics(
-                n_cand=count,
-                lib_max=0.0,
-                top_sim=0.0,
-                fzmax=0.0,
-            ),
-        )
-        ranked = rank_second(result, key=keys.__getitem__, prescreen=80, limit=40)
-        for column in ("input", "rows", "scores"):
-            actual[prefix + "/" + column] = expected[prefix + "/" + column].clone()
-        actual[prefix + "/output"] = _text(
-            {}
-            if ranked is None
-            else {
-                label: {"smiles": list(ranked.smiles), "keys": list(ranked.keys)},
-            },
-        )
-    assert_tensor_golden(
-        golden,
-        float32_comparands(actual, inputs=("*/scores", "*/popularity")),
+        is None
     )
 
 
 def test_default_prescreen_stops_before_the_eighty_first_novel_structure() -> None:
-    expected = read_tensors(_BASELINE / "testdata/recipe_policy.pt")
-    keys = json_loads(
-        expected["engine/identities"].numpy().tobytes().decode(),
-        dict[str, str | None],
-    )
+    keys = engine_keys()
     strings = ("CCO",) * 80 + ("CCCC",)
-    result = EngineResult(
-        candidates=CandidateSet(
-            smiles=strings,
-            keys=("unused",) * len(strings),
-            formulas=("unused",) * len(strings),
-            pool_rows=np.arange(len(strings)),
-            generated=np.zeros(len(strings), np.bool_),
-            sources=("pool",) * len(strings),
-        ),
-        features=np.zeros((len(strings), 0), np.float32),
-        feature_names=(),
-        scores=np.arange(len(strings), 0, -1, dtype=np.float64),
-        diagnostics=EngineDiagnostics(
-            n_cand=len(strings),
-            lib_max=0.0,
-            top_sim=0.0,
-            fzmax=0.0,
-        ),
+    result = engine_result(
+        strings,
+        keys=("unused",) * len(strings),
+        scores=np.arange(len(strings), 0, -1, dtype=np.float64).tolist(),
     )
     actual = rank_second(result, key=keys.__getitem__, prescreen=80, limit=40)
     assert actual is not None
@@ -858,95 +858,169 @@ def test_tail_mass_preserves_infinities_before_its_later_finite_gate() -> None:
             assert tail_target(query) == expected
 
 
-type _BaseInput = tuple[list[str], list[str], float, list[float], list[str]]
+def outer_main() -> dict[str, RankedMain]:
+    """Return top lists of a gated pair, an ungated molecule and an empty row."""
+    return {
+        mid: RankedMain(
+            smiles=smiles,
+            keys=keys,
+            library_max=maximum,
+            scores=scores,
+            formulas=formulas,
+            popularity_applied=True,
+        )
+        for mid, smiles, keys, maximum, scores, formulas in (
+            (
+                "m02",
+                ("CCCO", "CC(C)O", "CCCC", "CCO"),
+                ("b0", "b1", "b2", "b3"),
+                0.2,
+                (4.0, 3.0, 2.0, 1.0),
+                ("C3H8O", "C3H8O", "C4H10", "C2H6O|gen"),
+            ),
+            (
+                "m01",
+                ("CCN", "CCO", "OCC"),
+                ("n0", "n1", "n2"),
+                0.9,
+                (3.0, 2.0, 1.0),
+                ("C2H7N", "C2H6O", "C2H6O"),
+            ),
+            ("bad", (), (), 0.0, (), ()),
+            ("m03", ("CCO",), ("x0",), 0.2, (2.0,), ("C2H6O",)),
+        )
+    }
 
 
-def test_every_union_panel_reorder_map_and_counter(tmp_path: Path) -> None:
-    golden = _BASELINE / "testdata/list_policy.pt"
-    expected = read_tensors(golden)
+def outer_second() -> dict[str, RankedSecond]:
+    """Return the second engine's lists, one repeating a main key."""
+    return {
+        "m02": RankedSecond(smiles=("CCCO", "COCC", "CCN"), keys=("b0", "e1", "e2")),
+        "m01": RankedSecond(smiles=("COC",), keys=("e3",)),
+        "bad": RankedSecond(smiles=(), keys=()),
+        "m03": RankedSecond(smiles=(), keys=()),
+    }
+
+
+def outer_pubchem() -> dict[str, PreparedPubChem]:
+    """Return PubChem proposals for two gated molecules and one ungated molecule."""
+    return {
+        "m02": {
+            "pc": ["CCO", "COC", "CCN"],
+            "pc_keys": ["p0", "p1", "p2"],
+            "pc_fz": [1.0, 2.0, 0.0],
+            "fz_top": 700.0,
+            "S": 7.0,
+            "top_pop": 5.0,
+            "best_pool_fz": 0.0,
+            "target": 100.0,
+        },
+        "m01": {
+            "pc": ["CCCO", "CC(C)O"],
+            "pc_keys": ["p3", "p4"],
+            "pc_fz": [2.0, 1.0],
+            "fz_top": 0.0,
+            "S": 0.0,
+            "top_pop": 0.0,
+            "best_pool_fz": 0.0,
+            "target": 100.0,
+        },
+        "m03": {
+            "pc": ["CCO", "COC"],
+            "pc_keys": ["p0", "p1"],
+            "pc_fz": [0.0, 1.0],
+            "fz_top": None,
+            "S": None,
+            "top_pop": 0.0,
+            "best_pool_fz": math.nan,
+            "target": 150.0,
+        },
+    }
+
+
+OUTER_FORMULAS: Final = {
+    "CC(C)O": "C3H8O",
+    "CCCO": "C3H8O",
+    "CCN": "C2H7N",
+    "CCO": "C2H6O",
+    "COC": "C2H6O",
+    "COCC": "C3H8O",
+}
+
+
+def outer_scores() -> tuple[
+    dict[str, dict[str, float | None]],
+    dict[str, dict[str, float | None]],
+]:
+    """Return ICE and GLACIER scores, with missing ICE values."""
+    return (
+        {
+            "m02": {"CCO": 1.0, "COC": 0.1, "CCN": None},
+            "m03": {"CCO": None, "COC": None},
+        },
+        {"m02": {"CCO": 1.0, "COC": 0.1}, "m03": {"CCO": 0.9, "COC": 0.2}},
+    )
+
+
+@pytest.mark.parametrize("missing", ["", "engine", "pubchem"])
+def test_unions_order_molecules_by_library_evidence_and_gate_pubchem(
+    tmp_path: Path,
+    missing: str,
+) -> None:
     path = tmp_path / "queries.parquet"
     parquet.write_table(Table.from_pylist(query_rows()), path)
     queries = read_queries(path)
-    formulas = json_loads(
-        expected["inputs/formulas"].numpy().tobytes().decode(),
-        dict[str, str],
+    main = outer_main()
+    second = {} if missing == "engine" else outer_second()
+    pubchem = {} if missing == "pubchem" else outer_pubchem()
+    inputs = simulator_inputs(
+        main,
+        second=second,
+        pubchem=pubchem,
+        queries=queries,
+        formula=OUTER_FORMULAS.__getitem__,
+        budget=released_budget(),
+        gate=released_gate(),
     )
-    actual = {"inputs/formulas": _text(formulas)}
-    for label in ("complete", "no_engine", "no_pc", "no_gl"):
-        prefix = label + "/"
-        base = json_loads(
-            expected[prefix + "input/BASE"].numpy().tobytes().decode(),
-            dict[str, _BaseInput],
-        )
-        main = {
-            mid: RankedMain(
-                smiles=tuple(smiles),
-                keys=tuple(keys),
-                library_max=maximum,
-                scores=tuple(scores),
-                formulas=tuple(forms),
-                popularity_applied=True,
-            )
-            for mid, (smiles, keys, maximum, scores, forms) in base.items()
+    # Ties at library maximum 0.2 keep encounter order.
+    assert inputs.priority == ("bad", "m02", "m03", "m01")
+    assert "bad" not in inputs.candidates
+    for mid, values in inputs.candidates.items():
+        assert len(set(values)) == len(values)
+        sources = {
+            *main[mid].smiles,
+            *(second[mid].smiles if mid in second else ()),
+            *(pubchem[mid]["pc"] if mid in pubchem else ()),
         }
-        second = json_loads(
-            expected[prefix + "input/ENG"].numpy().tobytes().decode(),
-            dict[str, dict[str, list[str]]],
-        )
-        engine = {
-            mid: RankedSecond(smiles=tuple(row["smiles"]), keys=tuple(row["keys"]))
-            for mid, row in second.items()
-        }
-        pc = json_loads(
-            expected[prefix + "input/PC"].numpy().tobytes().decode(),
-            dict[str, PubChemResult],
-        )
-        ice = json_loads(
-            expected[prefix + "input/ICE_SCORES"].numpy().tobytes().decode(),
-            dict[str, dict[str, float | None]],
-        )
-        glacier = json_loads(
-            expected[prefix + "input/GL_SCORES"].numpy().tobytes().decode(),
-            dict[str, dict[str, float | None]],
-        )
-        for name in ("BASE", "ENG", "PC", "ICE_SCORES", "GL_SCORES"):
-            actual[prefix + "input/" + name] = expected[
-                prefix + "input/" + name
-            ].clone()
-        inputs = simulator_inputs(
-            main,
-            second=engine,
-            pubchem=pc,
-            queries=queries,
-            formula=formulas.__getitem__,
-            budget=released_budget(),
-            gate=released_gate(),
-        )
-        actual[prefix + "union/mids"] = _text(list(inputs.priority))
-        actual[prefix + "union/cands"] = _text(
-            {mid: list(values) for mid, values in inputs.candidates.items()},
-        )
-        actual[prefix + "union/items"] = _text(_items(inputs.ice))
-        actual[prefix + "union/gl_items"] = _text(_items(inputs.glacier))
-        actual[prefix + "union/PC"] = _text(inputs.proposals)
-        ranked = rerank_pubchem(
-            main,
-            proposals=inputs.proposals,
-            ice=ice,
-            glacier=glacier,
-            policy=released_policy(),
-            budget=released_budget(),
-        )
-        actual[prefix + "reranked/BASE"] = _text(
-            {
-                mid: (list(row.smiles), list(row.keys), row.library_max)
-                for mid, row in ranked.main.items()
-            },
-        )
-        actual[prefix + "reranked/PC"] = _text(ranked.proposals)
-        actual[prefix + "reranked/ice_stats"] = _text(ranked.ice_stats)
-        actual[prefix + "reranked/gl_stats"] = _text(ranked.glacier_stats)
-    assert_tensor_golden(golden, actual)
+        assert set(values) <= sources
+    assert ("COCC" in inputs.candidates["m02"]) == (missing != "engine")
+    assert ("m03" in inputs.candidates) == (missing != "pubchem")
+    # Only molecules below the library gate prepare PubChem formulas.
+    for mid, row in inputs.proposals.items():
+        if mid == "m01":
+            assert "pc_form" not in row
+        else:
+            assert row.get("pc_form") == [OUTER_FORMULAS[value] for value in row["pc"]]
+    assert all("pc_form" not in row for row in pubchem.values())
+    assert tuple(molecule.mid for molecule in inputs.ice) == tuple(inputs.candidates)
+    assert all(
+        row["adduct"] == "[M+H]+"
+        for molecule in inputs.glacier
+        for row in molecule.spectra
+    )
+    ice, glacier = outer_scores()
+    ranked = rerank_pubchem(
+        main,
+        proposals=inputs.proposals,
+        ice=ice,
+        glacier={} if missing else glacier,
+        policy=released_policy(),
+        budget=released_budget(),
+    )
+    for mid, row in ranked.main.items():
+        assert (row.smiles, row.keys) == (main[mid].smiles, main[mid].keys)
+    assert set(ranked.proposals) == set(inputs.proposals)
+    assert set(ranked.ice_stats) <= {"pc_changed"}
 
 
 def test_empty_reordering_keeps_all_maps_and_counters_absent() -> None:
@@ -1139,34 +1213,45 @@ class _Identity(TypedDict):
     formula: str
 
 
-class Prepared:
-    """Bind every stored primitive input without loading a supplier runtime."""
+def _gap_graph(groups: Sequence[tuple[str, int]]) -> GapGraph:
+    """Weigh a three-atom chain's heavy atoms with their hydrogens."""
+    masses = ELEMENT_MASSES
+    return GapGraph(
+        weights=np.array(
+            [masses[symbol] + count * masses["H"] for symbol, count in groups],
+        ),
+        bonds=np.array([[0, 1], [1, 2]], np.int64),
+        pieces=1,
+    )
 
-    def __init__(self, expected: dict[str, Tensor]) -> None:
-        self.identities = json_loads(
-            expected["inputs/identities"].numpy().tobytes().decode(),
-            dict[str, _Identity],
-        )
-        self.graphs: dict[str, GapGraph | None] = {}
-        count = sum(
-            name.startswith("inputs/gap/") and name.endswith("/smiles")
-            for name in expected
-        )
-        for index in range(count):
-            prefix = f"inputs/gap/{index}"
-            smiles = json_loads(
-                expected[prefix + "/smiles"].numpy().tobytes().decode(),
-                str,
+
+class Prepared:
+    """Serve literal metric identities and fragment-gap graphs."""
+
+    def __init__(self) -> None:
+        self.identities: dict[str, _Identity] = {
+            smiles: {
+                "key": key,
+                "identity": (key, composition),
+                "formula": formula,
+            }
+            for smiles, key, composition, formula in (
+                ("CC(C)O", "KFZMGEQAYNKOFK", (("C", 3), ("O", 1)), "C3H8O"),
+                ("CCCC", "IJDNQMDRQITEOD", (("C", 4),), "C4H10"),
+                ("CCCO", "BDERNNFJNOPAEC", (("C", 3), ("O", 1)), "C3H8O"),
+                ("CCN", "QUSNBJAOOMFDIB", (("C", 2), ("N", 1)), "C2H7N"),
+                ("CCO", "LFQSCWFLJHTTHZ", (("C", 2), ("O", 1)), "C2H6O"),
+                ("COC", "LCGLNKUTAGEVQW", (("C", 2), ("O", 1)), "C2H6O"),
+                ("COCC", "XOBKSJJDNFUZPF", (("C", 3), ("O", 1)), "C3H8O"),
+                # Ethanol written backwards shares ethanol's identity.
+                ("OCC", "LFQSCWFLJHTTHZ", (("C", 2), ("O", 1)), "C2H6O"),
             )
-            self.graphs[smiles] = (
-                GapGraph(
-                    weights=expected[prefix + "/weights"].numpy(),
-                    bonds=expected[prefix + "/bonds"].numpy(),
-                    pieces=int(expected[prefix + "/pieces"]),
-                )
-                if bool(expected[prefix + "/valid"])
-                else None
-            )
+        }
+        self.graphs: dict[str, GapGraph | None] = {
+            "CCN": _gap_graph((("C", 3), ("C", 2), ("N", 2))),
+            "OCC": _gap_graph((("O", 1), ("C", 2), ("C", 3))),
+            "COC": _gap_graph((("C", 3), ("O", 0), ("C", 3))),
+        }
 
     def key(self, smiles: str) -> str | None:
         """Return the staged older key or raise for undeclared strings."""
@@ -1185,58 +1270,63 @@ class Prepared:
         return self.graphs[smiles]
 
 
+SAMPLE_IDS: Final = ("m03", "bad", "m01", "m02")
+
+
+def outer_sample(path: Path) -> Path:
+    """Write the public sample submission, which proposes ethanol for every row."""
+    path.write_text(
+        "molecule_id,smiles\n" + "".join(f"{mid},CCO\n" for mid in SAMPLE_IDS),
+    )
+    return path
+
+
+def outer_tail() -> dict[str, list[str]]:
+    """Return the main engine's tail candidates per molecule."""
+    return {
+        "m02": ["CCCO", "CC(C)O", "CCCC", "CCO"],
+        "m01": ["CCN", "CCO", "OCC"],
+        "bad": [],
+        "m03": ["CCO"],
+    }
+
+
+def outer_bases() -> dict[str, BaseList]:
+    """Strip the ranked main lists to their published base form."""
+    return {
+        mid: BaseList(smiles=row.smiles, keys=row.keys, library_max=row.library_max)
+        for mid, row in outer_main().items()
+    }
+
+
+def outer_proposals() -> dict[str, PreparedPubChem]:
+    """Attach prepared formulas to the gated PubChem proposals."""
+    proposals = outer_pubchem()
+    for mid in ("m02", "m03"):
+        proposals[mid]["pc_form"] = [
+            OUTER_FORMULAS[value] for value in proposals[mid]["pc"]
+        ]
+    return proposals
+
+
 def replay_outputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     case: str = "complete",
-) -> None:
-    """Replay all fields or supply one explicitly malformed controller input."""
+) -> RecipeResults:
+    """Assemble and publish the literal stage outputs, or one malformed input."""
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    golden = _BASELINE / "testdata/recipe_outer.pt"
-    expected = read_tensors(golden)
-    prepared = Prepared(expected)
+    prepared = Prepared()
     query_path = tmp_path / "test.parquet"
     parquet.write_table(Table.from_pylist(query_rows()), query_path)
     queries = read_queries(query_path)
-    sample_ids = json_loads(
-        expected["inputs/sample"].numpy().tobytes().decode(),
-        list[str],
-    )
-    sample = tmp_path / "sample_submission.csv"
-    sample.write_bytes(expected["files/sample_submission.csv"].numpy().tobytes())
-    bases = json_loads(
-        expected["inputs/BASE"].numpy().tobytes().decode(),
-        dict[str, tuple[list[str], list[str], float]],
-    )
-    base = {
-        mid: BaseList(smiles=tuple(smiles), keys=tuple(keys), library_max=maximum)
-        for mid, (smiles, keys, maximum) in bases.items()
-    }
-    engine = json_loads(
-        expected["inputs/ENG"].numpy().tobytes().decode(),
-        dict[str, dict[str, list[str]]],
-    )
-    second = {
-        mid: RankedSecond(smiles=tuple(row["smiles"]), keys=tuple(row["keys"]))
-        for mid, row in engine.items()
-    }
-    pc = json_loads(
-        expected["inputs/PC"].numpy().tobytes().decode(),
-        dict[str, PreparedPubChem],
-    )
-    tail = json_loads(
-        expected["inputs/BASE_TAIL_CANDIDATES"].numpy().tobytes().decode(),
-        dict[str, list[str]],
-    )
-    ice = json_loads(
-        expected["inputs/ICE_SCORES"].numpy().tobytes().decode(),
-        dict[str, dict[str, float | None]],
-    )
-    glacier = json_loads(
-        expected["inputs/GL_SCORES"].numpy().tobytes().decode(),
-        dict[str, dict[str, float | None]],
-    )
+    sample_ids = list(SAMPLE_IDS)
+    sample = outer_sample(tmp_path / "sample_submission.csv")
+    base = outer_bases()
+    second = outer_second()
+    tail = outer_tail()
+    ice, glacier = outer_scores()
     if case == "missing_engine":
         del second["bad"]
     elif case == "missing_base":
@@ -1272,7 +1362,7 @@ def replay_outputs(
         sample_ids,
         base=base,
         base_tail=tail,
-        pubchem=pc,
+        pubchem=outer_proposals(),
         engine=second,
         queries=queries,
         identities=prepared,
@@ -1295,13 +1385,12 @@ def replay_outputs(
         "n_scored": 4,
         "errors": [],
     }
-    output = tmp_path / "output"
     write_results(
-        output,
+        tmp_path / "output",
         results=result,
         sample_ids=sample_ids,
         base_tail=tail,
-        pubchem=pc,
+        pubchem=outer_proposals(),
         engine=second,
         context=PublicationContext(
             sample_csv=sample,
@@ -1312,31 +1401,81 @@ def replay_outputs(
         policy=released_policy(),
         provenance=released_provenance(),
     )
-    actual = {
-        name: tensor.clone()
-        for name, tensor in expected.items()
-        if name.startswith("inputs/")
+    return result
+
+
+def assert_outer_publication(result: RecipeResults, output: Path) -> None:
+    """Check each published list against identities, sources and the sample rows."""
+    prepared = Prepared()
+    pubchem = outer_pubchem()
+    sources = {
+        mid: {
+            *outer_main()[mid].smiles,
+            *outer_second()[mid].smiles,
+            *(pubchem[mid]["pc"] if mid in pubchem else ()),
+            PLACEHOLDER,
+        }
+        for mid in SAMPLE_IDS
     }
-    actual["output/PREFUSION_LISTS"] = _text(result.prefusion)
-    actual["output/FUSION_OVERFLOW"] = _text(result.overflow)
-    actual["output/FRAG_GAP"] = _text(result.gap)
-    actual["output/FACTORIAL_REPORT"] = _text(
-        json_loads((output / "experiment_verification.json").read_text()),
-    )
-    for name in expected:
-        if name.startswith("files/"):
-            actual[name] = torch.tensor(
-                list((output / name.removeprefix("files/")).read_bytes()),
-                dtype=torch.uint8,
-            )
-    assert_tensor_golden(golden, actual)
+    rows = (output / "submission.csv").read_text().splitlines()
+    assert rows[0] == "molecule_id,smiles"
+    assert [row.split(",")[0] for row in rows[1:]] == list(SAMPLE_IDS)
+    for row in rows[1:]:
+        mid, listed = row.split(",")
+        final = listed.split(";")
+        assert final == list(result.submission[mid])
+        # No published list repeats a metric identity.
+        identities = [prepared.identity(value) for value in final]
+        assert len(set(identities)) == len(identities)
+        assert set(final) <= sources[mid]
+        assert set(result.prefusion[mid]) <= sources[mid]
+    assert result.submission["bad"] == [PLACEHOLDER]
+    assert set(result.overflow) <= set(SAMPLE_IDS)
+    assert set(result.gap) <= set(SAMPLE_IDS)
+    for name in (
+        "baseline_submission.csv",
+        "candidate_audit.csv",
+        "experiment_audit.csv",
+        "experiment_audit_factorial.csv",
+        "submission_base.csv",
+        "submission_e004_control.csv",
+        "submission_reference.csv",
+        "candidate_audit.json",
+        "experiment_audit.json",
+        "experiment_audit_factorial.json",
+        "experiment_verification.json",
+        "e004_candidate_inputs.json",
+        "e004_verification.json",
+    ):
+        lines = (output / name).read_text().splitlines()
+        assert lines, name
+    for name in (
+        "submission_base.csv",
+        "submission_reference.csv",
+        "baseline_submission.csv",
+    ):
+        published = (output / name).read_text().splitlines()
+        assert [row.split(",")[0] for row in published[1:]] == list(SAMPLE_IDS), name
+    probe = json_loads((output / "probe_applied.txt").read_text(), dict[str, int])
+    assert probe["rows"] == len(SAMPLE_IDS)
+    manifest = json_loads((output / "run_manifest.json").read_text(), dict[str, object])
+    assert manifest["n_errors"] == 0
+    assert manifest["ice_health"] == manifest["gl_health"] == "ok"
+    assert manifest["families"] == [
+        "derivation",
+        "frag2",
+        "analog_struct",
+        "model_views",
+        "fragnet",
+    ]
 
 
 def test_complete_outer_lists_control_gap_audits_and_every_source_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    replay_outputs(tmp_path, monkeypatch)
+    result = replay_outputs(tmp_path, monkeypatch)
+    assert_outer_publication(result, tmp_path / "output")
 
 
 @pytest.mark.parametrize(
@@ -1387,11 +1526,10 @@ def test_a_processed_tail_without_audit_cannot_publish(
 def test_legacy_gate_key_fallback_full_forty_window_and_prefixes(
     case: str,
 ) -> None:
-    prepared = Prepared(read_tensors(_BASELINE / "testdata/recipe_outer.pt"))
-    keys = engine_keys()
+    prepared = Prepared()
     for count in range(1, 46):
         smiles = "C" * count
-        key = from_plain(keys[smiles], str)
+        key = f"ALKANE{count:08d}"
         prepared.identities[smiles] = {
             "key": key,
             "identity": (key, (("C", count),)),
@@ -2061,16 +2199,14 @@ def test_second_stage_reaches_native_index_models_and_accepts_empty_raw_key(
     config = SecondResource.Config()
     assets = second_config(tmp_path)
     np.save(Path(assets.pool_dir) / "fp_bits.npy", np.arange(8, dtype=np.int64))
-    source = read_tensors(_BASELINE / "testdata/bank.pt")
+    states = second_states()
     assets.bank.model.channels_out = 8
-    for index, pin in enumerate((*assets.bank.merged, *assets.bank.single)):
+    for state, pin in zip(
+        states,
+        (*assets.bank.merged, *assets.bank.single),
+        strict=True,
+    ):
         path = Path(pin.path)
-        prefix = f"model/{index}/"
-        state = {
-            name.removeprefix(prefix): value.clone()
-            for name, value in source.items()
-            if name.startswith(prefix)
-        }
         state["head.3.weight"] = torch.cat(
             # SecondBank adds one output row to the seven-bit source head.
             [state["head.3.weight"], torch.zeros((1, 9))],
@@ -2200,15 +2336,8 @@ def test_main_rejects_incomplete_sid_popularity_manifest_and_ranker_data(
     ):
         _ = config.make().read()
     np.save(popularity / "pool_lsid.npy", np.zeros(3, np.float16))
-    text = _tree_text(
-        read_tensors(_BASELINE / "testdata/main_pipeline.pt"),
-        "ranker/0/",
-    )
-    names = next(
-        line.removeprefix("feature_names=").split()
-        for line in text.splitlines()
-        if line.startswith("feature_names=")
-    )
+    text = ranker_texts()[0]
+    names = list(RANKER_NAMES)
     rankers = Path(config.rankers.path)
     rankers.write_bytes(pickle.dumps({"features": names, "boosters": [text] * 3}))
     config.rankers.sha256 = _seal(rankers)
@@ -2353,13 +2482,7 @@ def test_main_generation_keeps_fallback_pool_aliases_and_all_support_logs(
         ),
         derivation_dir / "identities.parquet",
     )
-    names = (
-        read_tensors(_BASELINE / "testdata/main_pipeline.pt")["selected_names"]
-        .numpy()
-        .tobytes()
-        .decode()
-        .split("\0")
-    )
+    names = list(RANKER_NAMES)
     column = names.index("derivation__dg_n_combo")
     lines = [
         "num_class=1",
@@ -2617,52 +2740,25 @@ def _main_assets(directory: Path) -> MainAssets.Config:
         pickle.dumps({"glob": 0.2, "tf": {}, "env": {1: {}, 2: {}, 3: {}}}),
     )
     config.priors.sha256 = _seal(Path(config.priors.path))
-    control = read_tensors(_BASELINE / "testdata/fragnet.pt")
-    arrays: dict[str, NDArray[np.generic]] = {"alpha": control["stageA/alpha"].numpy()}
+    stage_a = pipeline_stage_a()
+    arrays: dict[str, NDArray[np.generic]] = {"alpha": np.array(stage_a.alpha)}
     chains: list[NDArray[np.object_]] = []
-    for ci in range(2):
-        chain: list[NDArray[np.str_]] = []
-        for li in range(3):
-            chain.append(
-                np.array(
-                    control[f"stageA/chain/{ci}/{li}"]
-                    .numpy()
-                    .tobytes()
-                    .decode()
-                    .split("\0"),
-                ),
-            )
-            arrays[f"k_{ci}_{li}"] = control[f"stageA/keys/{ci}/{li}"].numpy()
-            arrays[f"l_{ci}_{li}"] = control[f"stageA/values/{ci}/{li}"].numpy()
-        chains.append(np.array(chain, dtype=object))
+    for ci, (chain, tables) in enumerate(
+        zip(stage_a.chains, stage_a.tabs, strict=True),
+    ):
+        chains.append(np.array([np.array(level) for level in chain], dtype=object))
+        for li, (keys, values) in enumerate(tables):
+            arrays[f"k_{ci}_{li}"], arrays[f"l_{ci}_{li}"] = keys, values
     arrays["chains"] = np.array(chains, dtype=object)
     config.stage_a.path = directory / "stageA.npz"
     np.savez(Path(config.stage_a.path), allow_pickle=True, **arrays)
     config.stage_a.sha256 = _seal(Path(config.stage_a.path))
     config.stage_b.path = directory / "stageB.txt"
-    Path(config.stage_b.path).write_text(_tree_text(control, "stageB/"))
+    Path(config.stage_b.path).write_text(pipeline_stage_b())
     config.stage_b.sha256 = _seal(Path(config.stage_b.path))
-    main = read_tensors(_BASELINE / "testdata/main_pipeline.pt")
     config.rankers.path = directory / "rankers.pkl"
-    names = main["selected_names"].numpy().tobytes().decode().split("\0")
-    boosters: list[str] = []
-    for i in range(4):
-        lines = _tree_text(main, f"ranker/{i}/").splitlines()
-        boosters.append(
-            "\n".join(
-                "feature_names=" + " ".join(names)
-                if line.startswith("feature_names=")
-                else line
-                for line in lines
-            ),
-        )
     Path(config.rankers.path).write_bytes(
-        pickle.dumps(
-            {
-                "features": names,
-                "boosters": boosters,
-            },
-        ),
+        pickle.dumps({"features": list(RANKER_NAMES), "boosters": ranker_texts()}),
     )
     config.rankers.sha256 = _seal(Path(config.rankers.path))
     config.bank = save_bank(directory, [0])
@@ -2674,27 +2770,8 @@ def _seal(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _tree_text(record: dict[str, Tensor], prefix: str) -> str:
-    text = record[prefix + "header"].numpy().tobytes().decode()
-    for step in range(3):
-        text += f"Tree={step}\n"
-        for name, tensor in record.items():
-            key = prefix + f"tree/{step}/"
-            if name.startswith(key):
-                text += (
-                    name.removeprefix(key)
-                    + "="
-                    + " ".join(str(v) for v in tensor.tolist())
-                    + "\n"
-                )
-    return text + "end of trees\n"
-
-
 class _ViewOptions(TypedDict, total=False):
     merged_counts: Sequence[int]
-
-
-type _MainInput = tuple[list[str], list[str], float, list[float], list[str]]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -2772,36 +2849,13 @@ def test_complete_native_outer_join_preserves_every_field_and_file(
     *,
     precreated: bool,
 ) -> None:
-    result, expected = replay_recipe(tmp_path, monkeypatch, precreated=precreated)
-    assert_recipe_output(result, expected=expected, output=tmp_path / "output")
+    result = replay_recipe(tmp_path, monkeypatch, precreated=precreated)
+    assert_recipe_output(result, output=tmp_path / "output")
 
 
-def assert_recipe_output(
-    result: RecipeResults,
-    *,
-    expected: dict[str, Tensor],
-    output: Path,
-) -> None:
-    """Compare every output and publication byte with the recipe golden."""
-    actual = {
-        name: tensor.clone()
-        for name, tensor in expected.items()
-        if name.startswith("inputs/")
-    }
-    actual["output/PREFUSION_LISTS"] = _text(result.prefusion)
-    actual["output/FUSION_OVERFLOW"] = _text(result.overflow)
-    actual["output/FRAG_GAP"] = _text(result.gap)
-    actual["output/FACTORIAL_REPORT"] = _text(
-        json_loads((output / "experiment_verification.json").read_text()),
-    )
-    for name in expected:
-        if name.startswith("files/"):
-            actual[name] = torch.tensor(
-                list((output / name.removeprefix("files/")).read_bytes()),
-                dtype=torch.uint8,
-            )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+def assert_recipe_output(result: RecipeResults, *, output: Path) -> None:
+    """Check every publication and both simulator receipts of a recipe run."""
+    assert_outer_publication(result, output)
     assert not tuple(output.rglob("*.pending"))
     for name in ("ice", "gl"):
         assert json_loads(
@@ -2854,42 +2908,23 @@ def replay_recipe(
     unhealthy: str = "",
     precreated: bool = False,
     native_entry: bool = False,
-) -> tuple[RecipeResults, dict[str, Tensor]]:
-    """Bind the stored arm outputs at each qualified seam of the recipe."""
+) -> RecipeResults:
+    """Bind the literal arm outputs at each qualified seam of the recipe."""
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/recipe_outer.pt")
-    policy = read_tensors(_BASELINE / "testdata/list_policy.pt")
     query_path = root / "queries.parquet"
     parquet.write_table(Table.from_pylist(query_rows()), query_path)
     queries = read_queries(query_path)
-    sample = root / "sample.csv"
-    sample.write_bytes(expected["files/sample_submission.csv"].numpy().tobytes())
-    base = json_loads(
-        policy["complete/input/BASE"].numpy().tobytes().decode(),
-        dict[str, _MainInput],
-    )
-    main = {
-        mid: RankedMain(
-            smiles=tuple(smiles),
-            keys=tuple(keys),
-            library_max=maximum,
-            scores=tuple(scores),
-            formulas=tuple(forms),
-            popularity_applied=True,
-        )
-        for mid, (smiles, keys, maximum, scores, forms) in base.items()
-    }
-    raw_second = json_loads(
-        policy["complete/input/ENG"].numpy().tobytes().decode(),
-        dict[str, dict[str, list[str]]],
-    )
-    second = {
-        mid: RankedSecond(smiles=tuple(values["smiles"]), keys=tuple(values["keys"]))
-        for mid, values in raw_second.items()
-    }
-    pc = json_loads(
-        policy["complete/input/PC"].numpy().tobytes().decode(),
-        dict[str, PubChemResult],
+    sample = outer_sample(root / "sample.csv")
+    main, second, pc = outer_main(), outer_second(), outer_pubchem()
+    prepared = Prepared()
+    union = simulator_inputs(
+        main,
+        second=second,
+        pubchem=pc,
+        queries=queries,
+        formula=prepared.formula,
+        budget=released_budget(),
+        gate=released_gate(),
     )
     directory = root / "output"
     directory.mkdir()
@@ -2900,23 +2935,21 @@ def replay_recipe(
     ice, gl = (
         _RunStage(
             name=name,
-            items=policy[f"complete/union/{items}"],
-            scores=json_loads(
-                policy[f"complete/input/{scores}"].numpy().tobytes().decode(),
-                dict[str, dict[str, float | None]],
-            ),
+            items=_text(_items(molecules)),
+            scores=scores,
             directory=directory,
             calls=calls,
             status=("budget" if name == "ice" else "error")
             if name == unhealthy
             else "ok",
         )
-        for name, items, scores in (
-            ("ice", "items", "ICE_SCORES"),
-            ("gl", "gl_items", "GL_SCORES"),
+        for name, molecules, scores in zip(
+            ("ice", "gl"),
+            (union.ice, union.glacier),
+            outer_scores(),
+            strict=True,
         )
     )
-    prepared = Prepared(expected)
     result = (native_run if native_entry else run_recipe)(
         queries,
         sample_csv=sample,
@@ -2960,7 +2993,7 @@ def replay_recipe(
     ]
     assert [calls.get_nowait() for _ in expected_calls] == expected_calls
     assert calls.empty()
-    return result, expected
+    return result
 
 
 class _EntryStage:
@@ -3097,6 +3130,12 @@ class DeviceFailureBackend:
         self.counters.releases += 1
 
 
+def _finite(result: SimulatorResult) -> int:
+    return sum(
+        value is not None for row in result.scores.values() for value in row.values()
+    )
+
+
 def test_complete_stages_all_publications_caches_order_and_stops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3108,8 +3147,8 @@ def test_complete_stages_all_publications_caches_order_and_stops(
     )
     asset = tmp_path / "weights.bin"
     asset.write_bytes(b"complete declared scientific data")
-    actual: dict[str, Tensor] = {}
     for family in ("iceberg", "glacier"):
+        results: dict[str, SimulatorResult] = {}
         for case, budget in (("complete", 0.0), ("before", 0.5), ("partial", 2.75)):
             boundary = _Boundary(glacier=family == "glacier")
             backend = FixtureBackend.Config()
@@ -3126,16 +3165,25 @@ def test_complete_stages_all_publications_caches_order_and_stops(
             config.batch_size = config.chunk_jobs = 2
             config.asset_seals = {asset: hashlib.sha256(asset.read_bytes()).hexdigest()}
             result = config.make().run(_molecules(), publish=boundary.publish)
-            actual.update(
-                observe_result(
-                    f"{family}/{case}",
-                    result,
-                    boundary,
-                    glacier=family == "glacier",
-                ),
+            results[case] = result
+            # The stage opens with every admitted candidate unscored and ends on its map.
+            assert all(
+                value is None
+                for row in boundary.publications[0].values()
+                for value in row.values()
             )
-    report = mismatches(read_tensors(_BASELINE / "testdata/simulator_outer.pt"), actual)
-    assert not report, "\n".join(report)
+            assert boundary.publications[-1] == result.scores
+            assert result.jobs.batch_size == 2
+        complete, before, partial = (
+            results[name] for name in ("complete", "before", "partial")
+        )
+        assert complete.status == "ok"
+        assert before.status == partial.status == "budget"
+        assert (
+            before.jobs.predicted <= partial.jobs.predicted <= complete.jobs.predicted
+        )
+        assert _finite(before) <= _finite(partial) <= _finite(complete)
+        assert set(complete.scores) == set(before.scores) == set(partial.scores)
 
 
 def test_defaults_and_bad_checkpoint_pin_cannot_load_a_backend(
@@ -3316,8 +3364,8 @@ def test_native_entry_runs_the_complete_outer_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result, expected = replay_recipe(tmp_path, monkeypatch, native_entry=True)
-    assert_recipe_output(result, expected=expected, output=tmp_path / "output")
+    result = replay_recipe(tmp_path, monkeypatch, native_entry=True)
+    assert_recipe_output(result, output=tmp_path / "output")
     assert (tmp_path / "output/dreams.json").read_text() == (
         '{"used": false, "path": "None"}\n'
     )

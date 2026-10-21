@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 
 import json
 import math
@@ -23,7 +21,7 @@ import torch
 from priml.baselines.casmi2026 import pubchem
 from priml.baselines.casmi2026.chemistry import CandidatePool
 from priml.baselines.casmi2026.dreams import MainBank, keep_count
-from priml.baselines.casmi2026.dreams_test import save_bank
+from priml.baselines.casmi2026.dreams_test import save_bank, source_checkpoint
 from priml.baselines.casmi2026.isolated import (
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
@@ -42,249 +40,169 @@ from priml.baselines.casmi2026.pubchem import (
     logger,
     molecule_logits,
 )
-from priml.baselines.casmi2026.testing import (
-    float32_comparands,
-    retrieval_inputs,
-)
+from priml.baselines.casmi2026.testing import retrieval_inputs
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import assert_tensor_golden, read_tensors
+from priml.testing.golden import mismatches
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
     from priml.baselines.casmi2026.custom_types import SpectrumRequest
     from priml.baselines.casmi2026.pubchem import PubChemDiagnostics, PubChemRecord
 
 
-_BASELINE: Final = _CWD
-
-
-def test_entire_pubchem_runner_bank_screen_and_all_diagnostics(
+def test_probe_lists_distinct_non_pool_keys_after_both_fingerprint_passes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    golden = _BASELINE / "testdata/pubchem.pt"
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    prepared = tmp_path / "prepared"
-    prepared.mkdir()
-    strings = write_pubchem_table(prepared, expected=expected, prefix="chemistry")
-    chemistry = PubChemTable(prepared)
-    records = [chemistry.row(index) for index in range(len(strings))]
-    observe(
-        actual,
-        "chemistry",
-        {
-            "smiles": [row.smiles for row in records],
-            "parsed": np.array([row.parsed for row in records], np.bool_),
-            "raw_valid": np.array([row.raw_valid for row in records], np.bool_),
-            "ecfp4": np.stack([row.ecfp4 for row in records]),
-            "raw_fp": np.stack([row.raw_fp for row in records]),
-            "keys": [row.key for row in records],
-        },
-    )
-    for name, filename in (
-        ("mass", "pc_mass"),
-        ("off", "pc_off"),
-        ("buf", "pc_smiles"),
-        ("ls", "pc_lsid"),
-        ("lp", "pc_lpmid"),
-    ):
-        np.save(tmp_path / (filename + ".npy"), expected["store/" + name].numpy())
+    write_pubchem_table(tmp_path, rows=chemistry_rows())
+    write_store(tmp_path)
     store = PubChemStore.load(tmp_path, popularity=tmp_path)
-    assert store.ls is not None
-    assert store.lp is not None
     for mapped in (store.mass, store.offsets, store.buffer, store.ls, store.lp):
+        assert mapped is not None
         assert not mapped.flags.writeable
-    bits = expected["store/bits"].numpy()
-    for name, value in (
-        ("mass", store.mass),
-        ("off", store.offsets),
-        ("buf", store.buffer),
-        ("ls", store.ls),
-        ("lp", store.lp),
-        ("bits", bits),
-    ):
-        observe(actual, "store/" + name, value)
-    pool_keys = {decode(expected["pool_keys/0"])}
-    observe(actual, "pool_keys", sorted(pool_keys))
-    for name, target, maximum, weight, union, limit, present in (
-        ("normal", 100.0, 3, 0.25, 2, 2, True),
-        ("all", 100.0, 99, 0.0, 2, 25, True),
-        ("missing_pop", 100.0, 3, 0.25, 2, 25, False),
-        ("no_union", 100.0, 3, 0.25, 0, 25, True),
-        ("negative_weight", 100.0, 3, -0.5, 2, 25, True),
-        ("empty", 900.0, 3, 0.25, 2, 25, True),
-        ("invalid", 80.0, 3, 0.25, 2, 25, True),
-        ("no_full", 100.0, 3, 0.25, 2, 25, True),
-        ("all_pool", 100.0, 99, 0.25, 2, 25, True),
-    ):
-        config = PubChemScreen.Config()
-        config.pass_one, config.popularity_weight = maximum, weight
-        config.popularity_union, config.limit = union, limit
-        screen = config.make()
-        selected_store = store if present else PubChemStore.load(tmp_path)
-        selected_chemistry = chemistry
-        if name == "no_full":
-            failed = tmp_path / "failed"
-            failed.mkdir()
-            write_pubchem_table(
-                failed,
-                expected=expected,
-                prefix="chemistry",
-                raw_valid=False,
-            )
-            selected_chemistry = PubChemTable(failed)
-        clock = iter([10.0, 10.125])
-        result = screen.probe(
-            name,
-            target,
-            np.array([-0.7, 0.2, 1.3, -0.1, 0.6, -0.3, 0.8], np.float32),
-            store=selected_store,
-            chemistry=selected_chemistry,
-            bits=bits,
-            pool_keys={row.key for row in records if row.key is not None}
-            if name == "all_pool"
-            else pool_keys,
-            clock=clock.__next__,
+    chemistry = PubChemTable(tmp_path)
+    # z-scores plus a quarter of the popularity rank '', *, COC, OCC, CCO, CCN; the
+    # keyless rows, the pool key LFQ and its duplicate CCO are skipped.
+    smiles, diagnostics = _probe(PubChemScreen.Config(), store=store, table=chemistry)
+    assert smiles == ["COC", "CCN"]
+    assert diagnostics["fz_top"] == 4.0
+    assert diagnostics.get("top_pop") == 5.0
+    assert [diagnostics[name] for name in ("n_window", "n_pass1", "n_pass2")] == [6] * 3
+    assert (diagnostics["n_keyed"], diagnostics["n_in_pool"]) == (6, 1)
+    # With COC's key pooled, the best raw fit outside the pool is OCC's 3.
+    smiles, diagnostics = _probe(
+        PubChemScreen.Config(),
+        store=store,
+        table=chemistry,
+        pool="LCGLNKUTAGEVQW",
+    )
+    assert smiles == ["OCC", "CCN"]
+    assert diagnostics["fz_top"] == 3.0
+    limited = _probe(PubChemScreen.Config(limit=1), store=store, table=chemistry)
+    assert limited[0] == ["COC"]
+    smiles, diagnostics = _probe(
+        PubChemScreen.Config(popularity_weight=-0.5),
+        store=store,
+        table=chemistry,
+    )
+    assert smiles == ["COC", "CCN"]
+    assert diagnostics.get("top_pop") == 0.0
+    for target in (900.0, 80.0):
+        smiles, diagnostics = _probe(
+            PubChemScreen.Config(),
+            store=store,
+            table=chemistry,
+            target=target,
         )
-        observe(actual, "probe/" + name, result)
+        assert smiles == []
+        assert "S" not in diagnostics
+    assert diagnostics["n_window"] == 1
+    assert diagnostics["n_pass1"] == 0
+    incomplete = tmp_path / "incomplete"
+    incomplete.mkdir()
+    write_pubchem_table(incomplete, rows=chemistry_rows(), raw_valid=False)
+    smiles, diagnostics = _probe(
+        PubChemScreen.Config(),
+        store=store,
+        table=PubChemTable(incomplete),
+    )
+    assert smiles == []
+    assert (diagnostics["n_pass1"], diagnostics["n_pass2"]) == (6, 0)
+
+
+def _probe(
+    config: PubChemScreen.Config,
+    *,
+    store: PubChemStore,
+    table: PubChemTable,
+    target: float = 100.0,
+    pool: str = "LFQSCWFLJHTTHZ",
+) -> tuple[list[str], PubChemDiagnostics]:
+    """Probe with one pool key, where row i holds bit i and window rows score 1..6."""
+    clock = iter([10.0, 10.125])
+    _, smiles, _, _, diagnostics = config.make().probe(
+        "m",
+        target,
+        np.arange(1, 7, dtype=np.float32),
+        store=store,
+        chemistry=table,
+        bits=np.arange(1, 7, dtype=np.int64),
+        pool_keys={pool},
+        clock=clock.__next__,
+    )
+    assert diagnostics["secs"] == 0.125
+    return smiles, diagnostics
+
+
+def test_run_screens_the_median_target_and_reports_the_wide_pool_fit(
+    tmp_path: Path,
+) -> None:
+    store, chemistry, pool = _screen_inputs(tmp_path)
+    screen = PubChemScreen.Config(pass_one=3, popularity_union=2, limit=2).make()
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         bank = tiny_pubchem_bank(tmp_path)
-        spectra: list[SpectrumRequest] = [
-            {
-                "mz": [0, 25, 45, 102, 103],
-                "it": [1, 4, 2, 0.004, 9],
-                "prec": 100.0,
-                "adduct": "[M+Na]+",
-                "mode": 1,
-                "ce": 10.0,
-                "ce_n": 0,
-            },
-            {
-                "mz": [25.003, 45, 70],
-                "it": [2, 5, 1],
-                "prec": 120.0,
-                "adduct": "[M+H]+",
-                "mode": 1,
-                "ce": None,
-                "ce_n": 12,
-            },
-            {
-                "mz": [20, 35],
-                "it": [3, 1],
-                "prec": 80.0,
-                "adduct": "unknown",
-                "mode": -1,
-                "ce": float("nan"),
-                "ce_n": 2,
-            },
-            {
-                "mz": [],
-                "it": [],
-                "prec": 90.0,
-                "adduct": "[M-H]-",
-                "mode": -1,
-                "ce": 50.0,
-                "ce_n": 1,
-            },
-        ]
-        source_spectra = [
-            dict(row, mz=np.array(row["mz"]), it=np.array(row["it"])) for row in spectra
-        ]
-        observe(actual, "spectra", source_spectra)
-        single, merged = bank.items(spectra)
-        for call, items in enumerate((single, merged)):
-            observe(
-                actual,
-                f"bank/{call}/items",
-                [
-                    {
-                        "mz": item.mass,
-                        "it": item.intensity,
-                        "prec": item.precursor,
-                        "adduct_ix": item.adduct,
-                        "ce": item.energy,
-                        "ce_known": item.energy_known,
-                        "n_merged": item.merged_count,
-                        "mode": item.mode,
-                    }
-                    for item in items
-                ],
+        assert molecule_logits(bank, []) is None
+        logits = molecule_logits(bank, _query(100.0, "[M+H]+"))
+        wide = molecule_logits(bank, _query(100.004, "[M+H]+"))
+        full, fallback, unpooled, unknown = (
+            screen.run(
+                "m",
+                _query(target, adduct),
+                store=store,
+                chemistry=chemistry,
+                pool=pool,
+                bank=bank,
             )
-            observe(actual, f"bank/{call}/heads", bank.predict(items))
-        observe(actual, "logits", molecule_logits(bank, spectra))
-        observe(actual, "empty_logits", molecule_logits(bank, []))
-        pool = tiny_pubchem_pool(expected)
-        observe(actual, "pool/mass", pool.mass)
-        observe(actual, "pool/packed", pool.packed)
-        input_rows: list[dict[str, object]] = []
-        queries: dict[str, list[SpectrumRequest]] = {}
-        for mid, count, target, adduct in (
-            ("full", 17, 100.0, "[M+H]+"),
-            ("fallback", 2, 100.004, "[M+H]+"),
-            ("no_pool", 3, 150.0, "[M-H]-"),
-            ("unknown", 2, 100.0, "unknown"),
-        ):
-            queries[mid] = []
-            for index in range(count):
-                precursor = (
-                    precursor_mass(target + index * 0.0001, adduct=adduct)
-                    if adduct != "unknown"
-                    else target
-                )
-                input_rows.append(
-                    {
-                        "molecule_id": mid,
-                        "precursor_mz": precursor,
-                        "adduct": adduct,
-                        "ionization_mode": "positive"
-                        if mid != "no_pool"
-                        else "negative",
-                        "ms2_mzs": [25.0, 45.0, 80.0],
-                        "ms2_normalized_intensities": [3.0, 1.0, 0.2],
-                        "collision_energy_ev": [10.0, 20.0] if index % 2 else None,
-                    },
-                )
-                queries[mid].append(
-                    {
-                        "mz": [25.0, 45.0, 80.0],
-                        "it": [3.0, 1.0, 0.2],
-                        "prec": precursor,
-                        "adduct": adduct,
-                        "mode": 1 if mid != "no_pool" else -1,
-                        "ce": 15.0 if index % 2 else float("nan"),
-                        "ce_n": 2 if index % 2 else 1,
-                    },
-                )
-        observe(actual, "runner_inputs", input_rows)
-        config = PubChemScreen.Config()
-        config.pass_one, config.popularity_union, config.limit = 3, 2, 2
-        screen = config.make()
-        results = {
-            mid: value
-            for mid, query in queries.items()
-            if (
-                value := screen.run(
-                    mid,
-                    query,
-                    store=store,
-                    chemistry=chemistry,
-                    pool=pool,
-                    bank=bank,
-                )
+            for target, adduct in (
+                (100.0, "[M+H]+"),
+                (100.004, "[M+H]+"),
+                (150.0, "[M+H]+"),
+                (100.0, "unknown"),
             )
-            is not None
+        )
+    assert logits is not None
+    assert wide is not None
+    assert logits.shape == (7,)
+    assert logits.dtype == np.float32
+    assert full is not None
+    # The median, not the mean, of the neutral masses 100, 100.0001 and 100.0004.
+    assert abs(full["target"] - 100.0001) < 1e-9
+    # No window row holds a pool bit, so ties keep CCO, OCC, COC; both alcohols
+    # carry the pool key.
+    assert (full["pc"], full["pc_keys"]) == (["COC"], ["LCGLNKUTAGEVQW"])
+    # Pool row 0 (100.0005, bit 0) lies within 10 ppm of 100; row 1 (100.0025,
+    # bits 1 and 2) only within 30 ppm of 100.004; nothing lies near 150.
+    assert full["best_pool_fz"] == logits.item(0)
+    assert fallback is not None
+    assert fallback["pc"] == []
+    assert fallback["best_pool_fz"] == wide.item(1) + wide.item(2)
+    assert unpooled is not None
+    assert math.isnan(unpooled["best_pool_fz"])
+    assert unknown is None
+
+
+def _query(target: float, adduct: str) -> list[SpectrumRequest]:
+    """Return spectra 0, 1e-4 and 4e-4 above the target mass; unknown adducts at it."""
+    return [
+        {
+            "mz": [25.0, 45.0, 80.0],
+            "it": [3.0, 1.0, 0.2],
+            "prec": target
+            if adduct == "unknown"
+            else precursor_mass(target + index**2 * 1e-4, adduct=adduct),
+            "adduct": adduct,
+            "mode": 1,
+            "ce": 15.0 if index % 2 else math.nan,
+            "ce_n": 2 if index % 2 else 1,
         }
-        observe(actual, "runner", results)
-    assert_tensor_golden(
-        golden,
-        float32_comparands(actual, inputs=("pool/mass", "store/mass")),
-    )
+        for index in range(3)
+    ]
 
 
 def test_pubchem_majority_ties_retain_first_encounter_and_single_zero_count(
@@ -354,21 +272,35 @@ class _FailingBank:
         raise RuntimeError("prediction failed")
 
 
+class _ViewBank:
+    """Stand in for a bank with two single-spectrum items and one merged item."""
+
+    def items(self, spectra: object) -> tuple[list[str], list[str]]:
+        del spectra
+        return ["first", "second"], ["merged"]
+
+    def predict(self, items: list[str]) -> tuple[NDArray[np.float32], None]:
+        logits = {"first": [1.0, 2.0], "second": [3.0, 6.0], "merged": [6.0, 0.0]}
+        return np.array([logits[item] for item in items], np.float32), None
+
+
+def test_logits_weigh_the_single_and_merged_populations_equally() -> None:
+    # The single mean [2, 4] and the merged mean [6, 0] average to [4, 2].
+    logits = molecule_logits(cast("MainBank", _ViewBank()), [])
+    assert logits is not None
+    assert logits.dtype == np.float32
+    assert logits.tolist() == [4.0, 2.0]
+
+
 def _screen_inputs(
     tmp_path: Path,
 ) -> tuple[PubChemStore, PubChemTable, CandidatePool]:
-    expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
-    write_pubchem_table(tmp_path, expected=expected, prefix="chemistry")
-    for name, filename in (
-        ("mass", "pc_mass"),
-        ("off", "pc_off"),
-        ("buf", "pc_smiles"),
-    ):
-        np.save(tmp_path / (filename + ".npy"), expected["store/" + name].numpy())
+    write_pubchem_table(tmp_path, rows=chemistry_rows())
+    write_store(tmp_path)
     return (
         PubChemStore.load(tmp_path),
         PubChemTable(tmp_path),
-        tiny_pubchem_pool(expected),
+        tiny_pubchem_pool(),
     )
 
 
@@ -483,8 +415,7 @@ def test_run_converts_integer_precursors_in_double_precision_and_names_the_query
 def test_prepared_rows_require_every_field_and_preserve_first_duplicate(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/pubchem_preparation.pt")
-    values = write_pubchem_table(tmp_path, expected=expected, prefix="rows")
+    values = write_pubchem_table(tmp_path, rows=preparation_rows())
     table = PubChemTable(tmp_path)
     assert table.for_smiles("*").parsed
     assert table.for_smiles("*").raw_valid
@@ -580,10 +511,9 @@ def test_pubchem_native_boundaries_keep_missing_staging_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
-    write_pubchem_table(tmp_path, expected=expected, prefix="chemistry")
+    write_pubchem_table(tmp_path, rows=chemistry_rows())
     chemistry = PubChemTable(tmp_path)
-    pool = tiny_pubchem_pool(expected)
+    pool = tiny_pubchem_pool()
     assert math.isnan(
         best_pool_fz(
             pool,
@@ -692,8 +622,7 @@ def test_pubchem_native_boundaries_keep_missing_staging_errors(
 def test_pubchem_store_rejects_malformed_arrays_and_pickle_payloads(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/pubchem_preparation.pt")
-    write_pubchem_table(tmp_path, expected=expected, prefix="rows")
+    write_pubchem_table(tmp_path, rows=preparation_rows())
     (tmp_path / "ecfp4.npy").write_bytes(b"\x80\x04K\x01.")
     with pytest.raises(ValueError, match=r"pickled.*data"):
         PubChemTable(tmp_path)
@@ -764,8 +693,7 @@ def test_pubchem_store_rejects_malformed_arrays_and_pickle_payloads(
 def test_pubchem_pool_and_popularity_promotions_keep_full_precision(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
-    pool = tiny_pubchem_pool(expected)
+    pool = tiny_pubchem_pool()
     pool = replace(pool, packed=np.array([[0b11100000]] * 3, np.uint8))
     logits = np.array([1e8, 1, -1e8, 0, 0, 0, 0], np.float32)
     assert (
@@ -778,7 +706,7 @@ def test_pubchem_pool_and_popularity_promotions_keep_full_precision(
         )
         == 1.0
     )
-    write_pubchem_table(tmp_path, expected=expected, prefix="chemistry")
+    write_pubchem_table(tmp_path, rows=chemistry_rows())
     chemistry = PubChemTable(tmp_path)
     first, second = (
         row
@@ -814,8 +742,7 @@ def test_pubchem_pool_and_popularity_promotions_keep_full_precision(
 def test_screening_edges_keep_the_mask_union_and_limit(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
-    strings = write_pubchem_table(tmp_path, expected=expected, prefix="chemistry")
+    strings = write_pubchem_table(tmp_path, rows=chemistry_rows())
     raw = np.zeros((len(strings), 16_551), np.uint8)
     raw[strings.index("CCN"), :3] = 1
     raw[strings.index("COC"), 1] = 1
@@ -930,8 +857,7 @@ def test_screening_edges_keep_the_mask_union_and_limit(
 def test_first_stage_order_stable_full_order_and_inclusive_mass_bounds(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
-    write_pubchem_table(tmp_path, expected=expected, prefix="chemistry")
+    write_pubchem_table(tmp_path, rows=chemistry_rows())
     table = PubChemTable(tmp_path)
     template = table.for_smiles("CCN")
     records: list[PubChemRecord] = []
@@ -990,7 +916,7 @@ def test_first_stage_order_stable_full_order_and_inclusive_mass_bounds(
     )
     assert store.window(target, ppm=10.0) == (1, ("N", "O", "S"))
     pool = replace(
-        tiny_pubchem_pool(expected),
+        tiny_pubchem_pool(),
         mass=mass[1:4],
         packed=np.array([[128], [128], [64]], np.uint8),
     )
@@ -1006,36 +932,59 @@ def test_first_stage_order_stable_full_order_and_inclusive_mass_bounds(
     )
 
 
+type PreparedRow = tuple[str, bool, str | None]
+
+
+def chemistry_rows() -> list[PreparedRow]:
+    """Return the store's seven structures: parse validity and raw key per row."""
+    return [
+        ("invalid", False, None),
+        ("CCN", True, "QUSNBJAOOMFDIB"),
+        ("CCO", True, "LFQSCWFLJHTTHZ"),
+        ("OCC", True, "LFQSCWFLJHTTHZ"),
+        ("COC", True, "LCGLNKUTAGEVQW"),
+        ("*", True, None),
+        ("", True, None),
+    ]
+
+
+def preparation_rows() -> list[PreparedRow]:
+    """Return eight prepared rows: an alias, a dummy atom, a parse failure and ions."""
+    return [
+        ("CCO", True, "LFQSCWFLJHTTHZ"),
+        ("OCC", True, "LFQSCWFLJHTTHZ"),
+        ("*", True, None),
+        ("invalid", False, None),
+        ("", True, None),
+        ("C/C=C\\C", True, "IAQRGUVFOMOMEM"),
+        ("C[N+](C)(C)C", True, "QEMXHQIAXOOASZ"),
+        ("[U]", True, "JFALSRSLKYAFGM"),
+    ]
+
+
 def write_pubchem_table(
     directory: Path,
     *,
-    expected: dict[str, Tensor],
-    prefix: str,
+    rows: Sequence[PreparedRow],
     raw_valid: bool = True,
 ) -> list[str]:
-    """Write the stored golden inputs in the native file schema."""
-    count = int(expected[prefix + "/smiles/length"])
-    smiles = [decode(expected[f"{prefix}/smiles/{index}"]) for index in range(count)]
+    """Write prepared rows with distinct one-bit fingerprints in the native schema."""
+    smiles = [row[0] for row in rows]
     parquet.write_table(
         Table.from_pydict(
             {
                 "smiles": smiles,
-                "parsed": expected[prefix + "/parsed"].tolist(),
-                "raw_valid": expected[prefix + "/raw_valid"].tolist()
-                if raw_valid
-                else [False] * count,
-                "key": [
-                    None
-                    if f"{prefix}/keys/{index}/none" in expected
-                    else decode(expected[f"{prefix}/keys/{index}"])
-                    for index in range(count)
-                ],
+                "parsed": [row[1] for row in rows],
+                "raw_valid": [row[1] and raw_valid for row in rows],
+                "key": [row[2] for row in rows],
             },
         ),
         directory / "molecules.parquet",
     )
-    for name in ("ecfp4", "raw_fp"):
-        np.save(directory / (name + ".npy"), expected[prefix + "/" + name].numpy())
+    raw = np.zeros((len(rows), 16_551), np.uint8)
+    raw[np.arange(len(rows)), np.arange(len(rows))] = 1
+    np.save(directory / "ecfp4.npy", np.packbits(raw[:, :4096], axis=1))
+    np.save(directory / "raw_fp.npy", np.packbits(raw, axis=1))
     (directory / "manifest.json").write_text(
         json.dumps(
             to_plain(
@@ -1051,32 +1000,42 @@ def write_pubchem_table(
     return smiles
 
 
+def write_store(directory: Path) -> None:
+    """Write the seven-row mass, ASCII and popularity arrays of ``chemistry_rows``."""
+    smiles = [row[0] for row in chemistry_rows()]
+    for name, values in (
+        (
+            "pc_mass",
+            np.array([80.0, 99.999, 99.9995, 100.0, 100.0002, 100.0005, 100.001]),
+        ),
+        ("pc_off", np.cumsum([0, *map(len, smiles)]).astype(np.int64)),
+        ("pc_smiles", np.frombuffer("".join(smiles).encode(), np.uint8)),
+        ("pc_lsid", np.array([0, 1.5, 0, 2, 4, 8, 16], np.float16)),
+        ("pc_lpmid", np.array([0, 0.25, 0.5, 0, 1, 0, 2], np.float16)),
+    ):
+        np.save(directory / f"{name}.npy", values)
+
+
 def tiny_pubchem_bank(directory: Path) -> MainBank:
-    """Load both stored checkpoint inputs, with every state checked."""
-    expected = read_tensors(_BASELINE / "testdata/neural_bank.pt")
+    """Load both tiny source checkpoints with the V3 first-tie adduct policy."""
     config = save_bank(directory, [0, 1])
     config.merged_adduct, config.single_count = first_modal_adduct, keep_count
-    bank = config.make()
-    for index, model in enumerate(bank.models):
-        for name, value in model.released_state().items():
-            if not torch.equal(value, expected[f"model/{index}/{name}"]):
-                raise ValueError(f"Source checkpoint field changed: {index}/{name}")
-    return bank
+    return config.make()
 
 
-def tiny_pubchem_pool(expected: dict[str, Tensor]) -> CandidatePool:
-    """Supply the complete positional pool inputs used by the source runner."""
-    keys = (decode(expected["pool_keys/0"]), "other", "last")
+def tiny_pubchem_pool() -> CandidatePool:
+    """Supply three pool rows near 100 and 140 over seven selected bits."""
+    keys = ("LFQSCWFLJHTTHZ", "other", "last")
     return CandidatePool(
-        mass=expected["pool/mass"].numpy(),
+        mass=np.array([100.0005, 100.0025, 140.0]),
         keys=keys,
         smiles=("CCO", "C", "N"),
         formulas=("C2H6O", "CH4", "H3N"),
         heavy_atoms=np.array([3, 1, 1], np.int32),
         source=np.zeros(3, np.int8),
         train_sid=np.full(3, -1, np.int64),
-        packed=expected["pool/packed"].numpy(),
-        bits=expected["store/bits"].numpy(),
+        packed=np.array([[128], [96], [64]], np.uint8),
+        bits=np.array([80, 1057, 4176, 8272, 10_320, 14_416, 16_484], np.int64),
         fragment_offsets=np.zeros(4, np.int64),
         fragment_mass=np.zeros(0, np.float32),
         key_to_pid={key: index for index, key in enumerate(keys)},
@@ -1092,37 +1051,6 @@ def fail_prediction(*args: object, **kwargs: object) -> object:
 def missing_prediction(*args: object, **kwargs: object) -> None:
     """Reach the original runner's explicit absent-logits skip boundary."""
     del args, kwargs
-
-
-def decode(value: Tensor) -> str:
-    """Decode a stored string without changing its contents."""
-    return bytes(from_plain(value.tolist(), list[int])).decode()
-
-
-def observe(actual: dict[str, Tensor], prefix: str, value: object) -> None:
-    """Compare every field through a dtype-preserving replay tree."""
-    if isinstance(value, np.ndarray):
-        actual[prefix] = torch.from_numpy(value.copy())
-    elif isinstance(value, Tensor):
-        actual[prefix] = value.detach().clone()
-    elif isinstance(value, dict):
-        for name, child in cast(dict[str, object], value).items():
-            observe(actual, prefix + "/" + name, child)
-    elif isinstance(value, (list, tuple)):
-        values = cast(Sequence[object], value)
-        actual[prefix + "/length"] = torch.tensor(len(values))
-        for index, child in enumerate(values):
-            observe(actual, f"{prefix}/{index}", child)
-    elif isinstance(value, str):
-        actual[prefix] = torch.tensor(list(value.encode()), dtype=torch.uint8)
-    elif value is None:
-        actual[prefix + "/none"] = torch.tensor(True)
-    elif isinstance(value, (bool, int)):
-        actual[prefix] = torch.tensor(value)
-    elif isinstance(value, float):
-        actual[prefix] = torch.tensor(value, dtype=torch.float64)
-    else:
-        raise TypeError(type(value))
 
 
 def test_pubchem_constructor_keeps_every_store_row_model_state_and_strict_chemistry(
@@ -1180,7 +1108,6 @@ def test_pubchem_constructor_keeps_every_store_row_model_state_and_strict_chemis
             ),
         ),
     )
-    source = read_tensors(_BASELINE / "testdata/neural_bank.pt")
     config.bank = save_bank(tmp_path, [0, 1])
     with torch.random.fork_rng(devices=[]):
         inputs = config.make().read()
@@ -1204,15 +1131,8 @@ def test_pubchem_constructor_keeps_every_store_row_model_state_and_strict_chemis
         np.arange(4138, dtype=np.uint8).reshape(2, 2069),
     )
     for index, model in enumerate(inputs.bank.models):
-        state = model.released_state()
-        keys = {
-            name.removeprefix(f"model/{index}/")
-            for name in source
-            if name.startswith(f"model/{index}/")
-        }
-        assert state.keys() == keys
-        for name, value in state.items():
-            assert torch.equal(value, source[f"model/{index}/{name}"])
+        source = from_plain(source_checkpoint(index=index)["model"], dict[str, Tensor])
+        assert not mismatches(source, model.released_state())
     assert len(inputs.bank.models) == 2
     with pytest.raises(KeyError, match=r"^'unstaged'$"):
         inputs.chemistry.for_smiles("unstaged")
@@ -1247,36 +1167,71 @@ def write_pool(directory: Path, *, pool: CandidatePool) -> None:
 
 
 def test_complete_pubchem_gate_all_thresholds_rows_and_counters() -> None:
+    base = [f"base{index}" for index in range(27)]
+    unchanged = base[:5]
+    # Gentle slots start at 4, aggressive at 2; the duplicate shares key0 with base0,
+    # so only a promotion, which leads with the raw first proposal, keeps it.
+    gentle = ["base0", "base1", "base2", "proposal1", "base3"]
+    gentle_promoted = ["duplicate", "base0", "base1", "base2", "proposal1"]
+    aggressive = ["duplicate", "base0", "proposal1", "base1", "proposal2"]
     cases = (
-        ("absent", 0.0, 0.0, None, 0.0, 0.0),
-        ("empty", 0.0, 0.0, None, 0.0, 0.0),
-        ("library_equal", 0.9, 1000.0, 7.0, 5.0, 0.0),
-        ("library_below", math.nextafter(0.9, 0.0), 1000.0, 7.0, 5.0, 0.0),
-        ("margin250_equal", 0.0, 250.0, None, 0.0, 0.0),
-        ("margin250_above", 0.0, math.nextafter(250.0, math.inf), None, 0.0, 0.0),
-        ("margin600_equal", 0.0, 600.0, None, 0.0, 0.0),
-        ("margin600_above", 0.0, math.nextafter(600.0, math.inf), None, 0.0, 0.0),
-        ("S_equal", 0.0, 0.0, 6.0, 5.0, 0.0),
-        ("S_above", 0.0, 0.0, math.nextafter(6.0, math.inf), 5.0, 0.0),
-        ("pop_below", 0.0, 0.0, 7.0, math.nextafter(5.0, 0.0), 0.0),
-        ("pop_equal", 0.0, 0.0, 7.0, 5.0, 0.0),
-        ("nan_S", 0.0, 0.0, math.nan, 99.0, 0.0),
-        ("pool_nan", 0.0, -1000.0, None, 0.0, math.nan),
-        ("pool_inf", 0.0, -1000.0, None, 0.0, math.inf),
-        ("top_zero", 0.0, 0.0, None, 0.0, 0.0),
-        ("fallback_fz", 0.0, None, None, 0.0, 0.0),
-        ("base_empty", 0.0, 0.0, None, 0.0, 0.0),
-        ("library_empty", 0.9, 1000.0, 7.0, 5.0, 0.0),
-        ("only_duplicate", 0.0, 0.0, None, 0.0, 0.0),
+        ("absent", 0.0, 0.0, None, 0.0, 0.0, "no_pc", unchanged),
+        ("empty", 0.0, 0.0, None, 0.0, 0.0, "no_pc", unchanged),
+        ("library_equal", 0.9, 1000.0, 7.0, 5.0, 0.0, "untouched", unchanged),
+        (
+            "library_below",
+            math.nextafter(0.9, 0.0),
+            1000.0,
+            7.0,
+            5.0,
+            0.0,
+            "aggressive",
+            aggressive,
+        ),
+        ("margin250_equal", 0.0, 250.0, None, 0.0, 0.0, "gentle", gentle),
+        (
+            "margin250_above",
+            0.0,
+            math.nextafter(250.0, math.inf),
+            None,
+            0.0,
+            0.0,
+            "gentle",
+            gentle_promoted,
+        ),
+        ("margin600_equal", 0.0, 600.0, None, 0.0, 0.0, "gentle", gentle_promoted),
+        (
+            "margin600_above",
+            0.0,
+            math.nextafter(600.0, math.inf),
+            None,
+            0.0,
+            0.0,
+            "aggressive",
+            aggressive,
+        ),
+        ("S_equal", 0.0, 0.0, 6.0, 5.0, 0.0, "gentle", gentle),
+        (
+            "S_above",
+            0.0,
+            0.0,
+            math.nextafter(6.0, math.inf),
+            5.0,
+            0.0,
+            "gentle",
+            gentle_promoted,
+        ),
+        ("pop_below", 0.0, 0.0, 7.0, math.nextafter(5.0, 0.0), 0.0, "gentle", gentle),
+        ("pop_equal", 0.0, 0.0, 7.0, 5.0, 0.0, "gentle", gentle_promoted),
+        ("nan_S", 0.0, 0.0, math.nan, 99.0, 0.0, "gentle", gentle),
+        ("pool_nan", 0.0, -1000.0, None, 0.0, math.nan, "aggressive", aggressive),
+        ("pool_inf", 0.0, -1000.0, None, 0.0, math.inf, "aggressive", aggressive),
+        ("top_zero", 0.0, 0.0, None, 0.0, 0.0, "gentle", gentle),
+        ("fallback_fz", 0.0, None, None, 0.0, 0.0, "aggressive", aggressive),
+        ("only_duplicate", 0.0, 0.0, None, 0.0, 0.0, "gentle", unchanged),
     )
     gate = PubChemGate.Config().make()
-    rows: list[tuple[str, str]] = []
-    stats = {"untouched": 0, "gentle": 0, "aggressive": 0, "no_pc": 0, "promoted": 0}
-    for name, library, fit, score, popularity, pool in cases:
-        base = [f"base{index}" for index in range(27)]
-        base_keys = [f"key{index}" for index in range(27)]
-        if name in {"base_empty", "library_empty"}:
-            base, base_keys = base[:0], base_keys[:0]
+    for name, library, fit, score, popularity, pool, mode, head in cases:
         proposals = ["duplicate", *[f"proposal{index}" for index in range(1, 7)]]
         keys = ["key0", *[f"new{index}" for index in range(1, 7)]]
         if name in {"absent", "empty"}:
@@ -1285,7 +1240,7 @@ def test_complete_pubchem_gate_all_thresholds_rows_and_counters() -> None:
             proposals, keys = proposals[:1], keys[:1]
         result = gate.screen(
             base,
-            base_keys,
+            [f"key{index}" for index in range(27)],
             library_max=library,
             proposals=proposals,
             proposal_keys=keys,
@@ -1295,15 +1250,31 @@ def test_complete_pubchem_gate_all_thresholds_rows_and_counters() -> None:
             outlier=score,
             popularity=popularity,
         )
-        rows.append((name, ";".join(result.candidates)))
-        stats[result.mode] += 1
-        stats["promoted"] += int(result.promoted)
-    golden = _BASELINE / "testdata/pubchem_gate.pt"
-    actual = {
-        "rows": torch.tensor(list(str(rows).encode()), dtype=torch.uint8),
-        "stats": torch.tensor(list(str(stats).encode()), dtype=torch.uint8),
-    }
-    assert_tensor_golden(golden, actual)
+        assert result.mode == mode, name
+        assert result.promoted == (head[0] == "duplicate"), name
+        assert list(result.candidates[:5]) == head, name
+        assert len(result.candidates) == 25, name
+    proposals = ["duplicate", *[f"proposal{index}" for index in range(1, 7)]]
+    keys = ["key0", *[f"new{index}" for index in range(1, 7)]]
+    empty_base = gate.screen(
+        [],
+        [],
+        proposals=proposals,
+        proposal_keys=keys,
+        proposal_scores=[1000.0] * 7,
+        top_fit=0.0,
+        pool_fit=0.0,
+    )
+    assert (empty_base.mode, empty_base.candidates) == ("gentle", tuple(proposals))
+    library_only = gate.screen(
+        [],
+        [],
+        library_max=0.9,
+        proposals=proposals,
+        proposal_keys=keys,
+        proposal_scores=[1000.0] * 7,
+    )
+    assert (library_only.mode, library_only.candidates) == ("untouched", ("CCO",))
 
 
 if __name__ == "__main__":

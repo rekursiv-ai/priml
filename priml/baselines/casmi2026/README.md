@@ -3,7 +3,7 @@
 1. Public `experiments.exp000` reproduces released-checkpoint inference.
 2. `experiments.train_exp000` declares a separate five-minute training protocol.
 3. Scientific preparation runs explicitly outside the project environment.
-4. Goldens minted in-tree from this package pin the numerical boundaries.
+4. Goldens minted in-tree pin the `exp000` networks and FPNet training steps.
 
 ## Competition
 
@@ -105,9 +105,8 @@ Prepare complete data in this order:
 | Fragment gap | Ordered atom masses, bonds and component counts |
 
 The runtime reaction vocabulary and `v6_reactions.tsv` live in `chemistry`.
-Preparation/cache builders stay in `scripts`. Tests use small synthetic rows and
-goldens minted from this package; complete generator execution is a manual data
-step.
+Preparation/cache builders stay in `scripts`. Tests use small synthetic rows;
+complete generator execution is a manual data step.
 
 ## Run public inference
 
@@ -180,18 +179,19 @@ In particular, the Prvsiyan fingerprint dataset carries CC-BY-NC-SA-4.0; the
 notebook license does not relicense data or checkpoints. No original source or
 additional license file ships in this package.
 
-Every output in a PT golden in `testdata/` is minted from this package by its
-test under `pytest --regenerate-b4b`, keyed by native state names. A golden also
-stores replay inputs a test cannot rebuild, such as chemistry-runtime rows,
-fitted trees and checkpoint states, whole beside those outputs. Float64 outputs
-are rounded once to float32 values and keep their float64 dtype. Constant
-tables and small data-pipeline outputs are literals in their tests. Models use
-size-only reductions and three optimization updates, and Torch computations run
-inside `host_agnostic_numerics`. Released checkpoint names map bijectively to
-native state names, with collision, missing, unexpected, shape and dtype
-validation before loading.
+`testdata/` holds the printed `exp000` and `train_exp000` configs, three
+`train_step` updates of the tiny FPNet in `fpnet.pt`, and one initialization
+and forward golden for each other network `exp000` builds: DreamsFP,
+SecondFPNet, Glacier and the ICE generator and intensity models. Each PT golden
+is minted by its test under `pytest --regenerate-b4b` with size-only reductions
+inside `host_agnostic_numerics`; `fpnet.pt` is keyed by native state names and
+the network goldens by released checkpoint names. Float64 outputs are rounded
+once to float32 values and keep their float64 dtype. Every other stage is
+checked on small literal inputs against hand-derived values and structural
+identities. Released checkpoint names map bijectively to native state names,
+with collision, missing, unexpected, shape and dtype validation before loading.
 
-Tiny component/stage replays and the complete native entry replay qualify their
+Tiny component and stage checks and the complete native entry run qualify their
 declared boundaries. They do not establish complete production-cache generation,
 full hidden-workload GPU parity, historical checkpoint training or leaderboard
 score reproduction. Source timing examples used different workloads: twelve

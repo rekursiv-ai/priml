@@ -65,7 +65,7 @@ the remaining scientific families use 2026.03.3. Each command writes a new
 scratch output directory with input and generator digests. Build the spectral
 cache through `data.prepare_data` after the training identities are available.
 
-Tests create a few Arrow/CSV rows in `tmp_path` and replay small checked-in
-numerical records from `testdata/`. They exercise readers and preparation
-functions directly. They do not validate a complete production data build;
-check each generated manifest when preparing the full dataset.
+Tests create a few Arrow/CSV rows in `tmp_path` and check readers and
+preparation functions directly against hand-derived values. They do not
+validate a complete production data build; check each generated manifest when
+preparing the full dataset.

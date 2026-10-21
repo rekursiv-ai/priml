@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 from unittest import mock
 
@@ -36,7 +35,11 @@ from priml.baselines.casmi2026.model import (
     GraphIntensity,
     ReleasedModel,
 )
-from priml.baselines.casmi2026.model_test import prepared_batch, tiny_glacier
+from priml.baselines.casmi2026.model_test import (
+    glacier_inference,
+    prepared_batch,
+    tiny_glacier,
+)
 from priml.baselines.casmi2026.simulators import (
     ADDUCT_ROWS,
     DENSE_NODE_LIMIT,
@@ -88,19 +91,18 @@ from priml.baselines.casmi2026.simulators import (
     take_graphs,
     walk_features,
 )
-from priml.baselines.casmi2026.testing import float32_comparands, set_heads
+from priml.baselines.casmi2026.testing import set_heads
 from priml.model.attention.attention import Attention
 from priml.model.ggnn import GraphBatch
 from priml.model.special import Dropout
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import assert_tensor_golden, mismatches, read_tensors
+from priml.testing.golden import mismatches
 from priml.train.budget import WallBudget
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
+    from collections.abc import Callable, Mapping
+    from pathlib import Path
 
     from priml.baselines.casmi2026.custom_types import (
         IceRow,
@@ -112,7 +114,6 @@ if TYPE_CHECKING:
         PredictedPeaks,
         PreparedPeaks,
         SimulationJob,
-        SimulatorResult,
     )
 
 
@@ -133,9 +134,6 @@ def without_dropout[ConfigT](config: ConfigT) -> ConfigT:
         if isinstance(attention, Attention.Config):
             attention.dropout = 0.0
     return config
-
-
-_BASELINE: Final = _CWD
 
 
 def test_staged_decisions_and_canonical_cache_need_no_chemistry_runtime(
@@ -254,10 +252,6 @@ def _write(directory: Path, rows: list[SimulatorAdmissionRow]) -> None:
         Table.from_pylist(rows, schema=schema),
         directory / "admission.parquet",
     )
-
-
-def _text(value: str) -> Tensor:
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
 
 
 class _Affine(ReleasedModel):
@@ -686,127 +680,76 @@ def test_jobs_and_scores_require_all_missing_energy_predictions() -> None:
     }
 
 
-def test_complete_both_public_simulator_scoring_families() -> None:
-    actual: dict[str, Tensor] = {}
-    for family in ("iceberg", "glacier"):
-        spectra = _spectra()
-        scoring = QueryScoring.Config().make()
-        plan = scoring.plan(spectra)
-        for index, spectrum in enumerate(spectra):
-            label = f"{family}/conditions/{index}"
-            energy = collision_energy(spectrum)
-            actual[f"{label}/energy"] = torch.tensor(energy, dtype=torch.float64)
-            actual[f"{label}/bucket"] = torch.tensor(
-                energy_bucket(energy),
-                dtype=torch.float64,
-            )
-            actual[f"{label}/covered"] = torch.tensor(covered(spectrum))
-            actual[f"{label}/instrument"] = _text(instrument_token(spectrum))
-        for index, spectrum in enumerate(plan):
-            label = f"{family}/plan/{index}"
-            actual[f"{label}/mz"] = torch.from_numpy(spectrum.query[0])
-            actual[f"{label}/weights"] = torch.from_numpy(spectrum.query[1])
-            actual[f"{label}/adduct"] = _text(spectrum.adduct)
-            actual[f"{label}/instrument"] = _text(spectrum.instrument)
-            actual[f"{label}/energy"] = torch.tensor(
-                spectrum.energy,
-                dtype=torch.float64,
-            )
-        jobs = sorted(required_jobs(plan, ["A", "B", "A", "C"]))
-        actual[f"{family}/jobs"] = _text(
-            "\n".join("\t".join(map(str, job)) for job in jobs),
-        )
-        prepared: list[PreparedPeaks] = []
-        for index, prediction in enumerate(_predictions()):
-            mz, intensity = post_prediction(
-                prediction,
-                reduction=(
-                    SumReduction.Config()
-                    if family == "iceberg"
-                    else MaxReduction.Config()
-                ).make(),
-                max_peaks=100,
-            )
-            actual[f"{family}/post/{index}/mz"] = torch.from_numpy(mz)
-            actual[f"{family}/post/{index}/intensity"] = torch.from_numpy(intensity)
-            if len(mz):
-                prepared.append((mz.astype(np.float64), intensity.astype(np.float64)))
-        merged = merge_predictions(prepared)
-        actual[f"{family}/merge/mz"] = torch.from_numpy(merged[0])
-        actual[f"{family}/merge/intensity"] = torch.from_numpy(merged[1])
-        cache: dict[SimulationJob, PreparedPeaks | None] = {}
-        for index, key in enumerate(jobs):
-            candidate, _, _, energy = key
-            cache[key] = (
-                None
-                if candidate == "C" or (candidate == "B" and energy == 40)
-                else prepared[index % len(prepared)]
-            )
-        scores = scoring.score(plan, ["A", "B", "C", "missing"], cache)
-        actual[f"{family}/scores/valid"] = torch.tensor(
-            [value is not None for value in scores.values()],
-        )
-        actual[f"{family}/scores/values"] = torch.tensor(
-            [value if value is not None else 0 for value in scores.values()],
-            dtype=torch.float64,
-        )
-    golden = _BASELINE / "testdata" / "simulator_scoring.pt"
-    assert_tensor_golden(golden, float32_comparands(actual))
-
-
-def _spectra() -> list[SpectrumRequest]:
+def test_plan_keeps_covered_queries_and_scores_average_their_similarities() -> None:
     base: SpectrumRequest = {
-        "mz": [0, 10, 20, 30, 90, 102.1],
-        "it": [1, 1, 0.1, 0.0004, 2, 99],
-        "prec": 100,
+        "mz": [10.0, 20.0, 50.0],
+        "it": [1.0, 0.5, 0.25],
+        "prec": 100.0,
         "mode": "positive",
         "adduct": "[M+H]+",
         "instrument": "Orbitrap",
+        "ce": 17.5,
     }
-    return [
-        {**base, "ce_units": "NCE", "ce_orig": "10;30", "ce_ev": [5]},
-        {
-            **base,
-            "mode": 1,
-            "adduct": "[M+Na]+",
-            "instrument": "timsTOF",
-            "ce_units": "eV",
-            "ce_ev": [10, 15],
-        },
-        {**base, "mode": "POS", "ce": 17.5, "instr": "QTOF"},
-        {**base, "mode": "+", "ce_units": "NCE", "ce_orig": "none", "ce": 25},
-        {**base, "mode": "1", "ce": -5, "instrument": None},
-        {**base, "mode": "negative", "ce": 20},
-        {**base, "adduct": "[M+K]+", "ce": 20},
-        {**base, "ce": float("inf"), "mz": [], "it": []},
-        {**base, "ce_ev": [], "ce": 25, "mz": [200], "it": [1]},
-        {**base, "ce_units": None, "ce": 25},
-        {**base, "ce": None, "instr": "other", "instrument": "ft-icr"},
-        {
-            **base,
-            "ce": 30,
-            "mz": [float(index + 1) for index in range(514)],
-            "it": [1] * 514,
-            "prec": 600,
-        },
+    scoring = QueryScoring.Config().make()
+    plan = scoring.plan(
+        [
+            base,
+            {**base, "mode": "negative"},
+            {**base, "adduct": "[M+Na]+", "instr": "QTOF", "ce": None},
+        ],
+    )
+    assert [(spectrum.adduct, spectrum.instrument) for spectrum in plan] == [
+        ("[M+H]+", "Orbitrap"),
+        ("[M+Na]+", "QTOF"),
     ]
+    assert plan[0].energy == 20.0
+    assert math.isnan(plan[1].energy)
+    assert plan[0].query[0].tolist() == [10.0, 20.0, 50.0]
+    cache: dict[SimulationJob, PreparedPeaks | None] = {
+        ("far", "[M+H]+", "Orbitrap", 20.0): (np.array([500.0]), np.array([1.0])),
+    }
+    assert scoring.score(plan[:1], ["far", "absent"], cache) == {
+        "far": 0.0,
+        "absent": None,
+    }
+    # A copy of the cleaned query scores 1 at 20 eV and a disjoint peak 0 at 40 eV.
+    both = scoring.plan([base, {**base, "ce": 40.0}])
+    cache["half", "[M+H]+", "Orbitrap", 20.0] = (
+        np.array([10.0, 20.0, 50.0]),
+        np.array([1.0, 0.5, 0.25]),
+    )
+    cache["half", "[M+H]+", "Orbitrap", 40.0] = (np.array([500.0]), np.array([1.0]))
+    assert scoring.score(both, ["half"], cache) == {"half": 0.5}
 
 
-def _predictions() -> list[NDArray[np.float32]]:
-    return [
-        np.array(
-            [[10.00004, 1], [10.000049, 2], [20, 0], [30, -1], [0, 1], [-2, 2]],
-            dtype=np.float32,
-        ),
-        np.column_stack(
-            [
-                np.arange(131, dtype=np.float32) + 10,
-                np.arange(131, dtype=np.float32) % 5 + 1,
-            ],
-        ),
-        np.array([[1, 0], [2, -1]], dtype=np.float32),
-        np.empty((0, 2), dtype=np.float32),
-    ]
+def test_post_prediction_keeps_the_strongest_peaks_and_drops_empty_outputs() -> None:
+    raw = np.array([[30, 2], [10, 1], [20, 3], [40, 1]], dtype=np.float32)
+    tied = np.array([[30, 1], [10, 1], [20, 1]], dtype=np.float32)
+    silent = np.array([[10, 0], [-5, -1]], dtype=np.float32)
+    for reduction in (SumReduction.Config().make(), MaxReduction.Config().make()):
+        mz, intensity = post_prediction(raw, reduction=reduction, max_peaks=2)
+        assert mz.tolist() == [20.0, 30.0]
+        assert intensity.tolist() == [1.0, float(np.float32(2 / 3))]
+        assert post_prediction(tied, reduction=reduction, max_peaks=2)[0].tolist() == [
+            10.0,
+            20.0,
+        ]
+        empty = post_prediction(silent, reduction=reduction, max_peaks=2)
+        assert empty[0].shape == empty[1].shape == (0,)
+        assert empty[0].dtype == empty[1].dtype == np.float32
+    # Masses merge at four decimals: 10.0001 and 10.0002 stay apart, 20.00001
+    # and 20.00002 join.
+    close = np.array(
+        [[10.0001, 1], [10.0002, 3], [20.00001, 1], [20.00002, 1]],
+        dtype=np.float32,
+    )
+    for reduction, joined in (
+        (SumReduction.Config().make(), 2 / 3),
+        (MaxReduction.Config().make(), 1 / 3),
+    ):
+        mz, intensity = post_prediction(close, reduction=reduction, max_peaks=4)
+        assert mz.tolist() == np.array([10.0001, 10.0002, 20.0], np.float32).tolist()
+        assert intensity.tolist() == np.array([1 / 3, 1, joined], np.float32).tolist()
 
 
 def test_aliases_rejections_and_bounded_prepared_root_cache(
@@ -999,33 +942,22 @@ def _prepared(directory: Path) -> None:
     )
 
 
-def test_prepared_numeric_backend_replays_the_whole_trained_inference(
+def test_prepared_numeric_backend_replays_the_released_model_inference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/glacier.pt")
     monkeypatch.setattr(
         torch.cuda,
         "device_count",
         lambda: pytest.fail("CPU replay must not enumerate CUDA devices."),
     )
-    with torch.random.fork_rng(devices=[]):
-        trained = tiny_glacier().make()
-    trained.load_state_dict(
-        {
-            name.removeprefix("final/"): value
-            for name, value in expected.items()
-            if name.startswith("final/") and name != "final/rng"
-        },
-    )
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        model = tiny_glacier().make().eval()
+        expected = glacier_inference(model, prepared_batch())
     checkpoint = tmp_path / "checkpoint.pt"
-    torch.save({"state_dict": trained.released_state()}, checkpoint)
-    batch, _, _ = prepared_batch()
-    batch.root_forms.copy_(expected["post/root_forms"])
-    batch.atom_forms.copy_(expected["post/atom_forms"])
-    batch.graph.features.copy_(expected["post/graph_features"])
+    torch.save({"state_dict": model.released_state()}, checkpoint)
     jobs = [(value, "[M+H]+", "Orbitrap", 20.0) for value in ("a", "b", "c")]
-    roots = _NumericRoots(batch=batch, jobs=jobs)
+    roots = _NumericRoots(batch=prepared_batch(), jobs=jobs)
 
     def table(
         directory: Path,
@@ -1060,18 +992,15 @@ def test_prepared_numeric_backend_replays_the_whole_trained_inference(
             "nested tensors is in prototype stage" in str(item.message)
             for item in emitted
         )
-        counts = expected["inference/frags_pred/fragment_count"]
-        masks = expected["inference/frags_pred/fragments"]
+        counts = expected["frags_pred"]["fragment_count"]
+        masks = expected["frags_pred"]["fragments"]
         cursor = 0
         shifts = 2 * (2 * backend.model.config.max_broken + 1)
         for index, count in enumerate(counts):
             length = int(count)
             assert torch.equal(
                 raw["spec"][index],
-                expected["inference/inten_pred_end_to_end/output"][
-                    index,
-                    : length * shifts,
-                ],
+                expected["inten_pred_end_to_end"]["output"][index, : length * shifts],
             )
             assert torch.equal(
                 raw["frag"][index],
@@ -1169,9 +1098,6 @@ def test_glacier_backend_the_default_root_directory_is_where_the_preparer_writes
     None
 ):
     assert GlacierBackend.Config().root_dir == GLACIER_ROOT_DIR
-
-
-_THIS: Final = Path(__file__).resolve()
 
 
 def test_segment_replication_preserves_every_node_edge_and_root_identity() -> None:
@@ -1520,72 +1446,39 @@ def test_root_reader_requires_complete_double_precision_element_masses(
         _ = IceGraphTable(tmp_path)
 
 
-def test_complete_joint_autoregression_and_intensity_from_prepared_roots() -> None:
-    golden = _THIS.parent / "testdata" / "joint.pt"
-    inputs = _ice_roots()
-    actual: dict[str, Tensor] = {}
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        generator, intensity = _models()
-        batch = _batch(inputs)
-        prediction = predict_spectra(
-            generator,
-            intensity,
-            batch,
-            max_nodes=5,
-            max_depth=3,
-            walk_steps=2,
-            threshold=0,
-        )
-        assert not generator.training
-        assert not intensity.training
-        assert all(not parameter.requires_grad for parameter in generator.parameters())
-        assert all(not parameter.requires_grad for parameter in intensity.parameters())
-        actual.update(
-            {
-                f"generation/{key}": value
-                for key, value in prediction.generation.items()
-            },
-        )
-        for key, values in (
-            ("spec", prediction.spectra),
-            ("frag", prediction.fragments),
-        ):
-            actual.update(
-                {f"joint/{key}/{index}": value for index, value in enumerate(values)},
-            )
-        _assert_roots(batch.roots, inputs)
-    assert_tensor_golden(golden, float32_comparands(actual))
-
-
-def test_stopping_threshold_singletons_and_full_capacity() -> None:
-    golden = _THIS.parent / "testdata" / "generation_boundaries.pt"
-    actual: dict[str, Tensor] = {}
+@pytest.mark.parametrize(
+    ("singleton", "threshold", "capacity", "fragments"),
+    [(False, 1.0, 5, 0), (True, 0.0, 5, 1), (False, 0.0, 1, 1)],
+)
+def test_generation_stops_at_the_threshold_a_lone_atom_or_full_capacity(
+    singleton: bool,
+    threshold: float,
+    capacity: int,
+    fragments: int,
+) -> None:
+    inputs = _ice_roots(singleton=singleton)
     with torch.random.fork_rng(devices=[]), torch.no_grad(), host_agnostic_numerics():
         generator, _ = _models()
-        generator.eval()
-        for label, threshold, capacity in (
-            ("threshold", 1.0, 5),
-            ("singleton", 0.0, 5),
-            ("capacity", 0.0, 1),
-        ):
-            inputs = _ice_roots(singleton=label == "singleton")
-            batch = _batch(inputs)
-            generation = grow_fragments(
-                generator,
-                batch,
-                max_nodes=capacity,
-                max_depth=3,
-                walk_steps=2,
-                threshold=threshold,
-            )
-            _assert_roots(batch.roots, inputs)
-            actual.update(
-                {
-                    f"{label}/generation/{key}": value
-                    for key, value in generation.items()
-                },
-            )
-    assert_tensor_golden(golden, float32_comparands(actual))
+        batch = _batch(inputs)
+        generation = grow_fragments(
+            generator.eval(),
+            batch,
+            max_nodes=capacity,
+            max_depth=3,
+            walk_steps=2,
+            threshold=threshold,
+        )
+    _assert_roots(batch.roots, inputs)
+    counts = inputs["root/node_counts"]
+    assert generation["nfrags"].tolist() == [fragments, fragments]
+    assert torch.equal(generation["natoms"], counts)
+    assert torch.equal(
+        generation["frags"][:, 0],
+        torch.arange(int(counts.max()))[None, :] < counts[:, None],
+    )
+    assert not generation["frags"][:, 1:].any()
+    assert generation["probs"].tolist() == [[1.0] + [0.0] * (capacity - 1)] * 2
+    assert not generation["brokens"].any()
 
 
 def test_index_helpers_follow_the_device_of_their_reference_and_mark_prefixes() -> None:
@@ -1603,9 +1496,10 @@ def test_index_helpers_follow_the_device_of_their_reference_and_mark_prefixes() 
 def test_the_intensity_model_receives_exactly_the_generated_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    inputs = _ice_roots()
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         generator, intensity = _models()
-        batch = _batch(_ice_roots())
+        batch = _batch(inputs)
         spy = mock.Mock(wraps=intensity.forward)
         monkeypatch.setattr(intensity, "forward", spy)
         prediction = predict_spectra(
@@ -1617,6 +1511,10 @@ def test_the_intensity_model_receives_exactly_the_generated_geometry(
             walk_steps=2,
             threshold=0,
         )
+    _assert_roots(batch.roots, inputs)
+    for model in (generator, intensity):
+        assert not model.training
+        assert not any(parameter.requires_grad for parameter in model.parameters())
     received = cast("IntensityBatch", spy.call_args.args[0])
     counts = prediction.generation["nfrags"]
     width = int(counts.max())
@@ -1748,30 +1646,28 @@ def test_complete_prediction_backend_without_a_chemistry_runtime(
 ) -> None:
     monkeypatch.setitem(sys.modules, name="rdkit", value=None)
     config = _ice_backend_config(tmp_path)
-    actual: dict[str, Tensor] = {}
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         backend = config.make()
-        for label, adduct, instrument, energy in (
-            ("proton", "[M+H]+", "Orbitrap", 20.0),
-            ("sodium", "[M+Na]+", "QTOF", 40.0),
-        ):
-            predictions = backend.predict(
-                [
-                    (smiles, adduct, instrument, energy)
-                    for smiles in ("CCOC", "C1CCCCC1")
-                ],
-            )
-            for index, prediction in enumerate(predictions):
-                assert prediction is not None
-                actual[f"{label}/{index}/mz"] = torch.from_numpy(prediction[0])
-                actual[f"{label}/{index}/intensity"] = torch.from_numpy(prediction[1])
+        predictions = backend.predict(
+            [
+                ("CCOC", "[M+H]+", "Orbitrap", 20.0),
+                ("C1CCCCC1", "[M+Na]+", "QTOF", 40.0),
+            ],
+        )
         assert backend.feature_failures == 0
         with pytest.raises(ValueError, match="Rejected prepared ICE root"):
             _ = backend.predict([("invalid", "[M+H]+", "Orbitrap", 20.0)])
         with pytest.raises(KeyError):
             _ = backend.predict([("unprepared", "[M+H]+", "Orbitrap", 20.0)])
-    golden = _BASELINE / "testdata" / "ice_backend.pt"
-    assert_tensor_golden(golden, actual)
+    assert len(predictions) == 2
+    for prediction in predictions:
+        assert prediction is not None
+        mz, intensity = prediction
+        assert mz.dtype == intensity.dtype == np.float32
+        assert 0 < len(mz) == len(intensity) <= config.max_peaks
+        assert bool((np.diff(mz) > 0).all())
+        assert bool((intensity > 0).all())
+        assert intensity.max() == 1.0
     released: list[bool] = []
     monkeypatch.setattr(
         torch.cuda,
@@ -1892,133 +1788,138 @@ def test_ice_backend_the_default_root_directory_is_where_the_preparer_writes() -
     assert IceBackend.Config().root_dir == ICE_ROOT_DIR
 
 
-def test_complete_job_schedulers_and_failure_boundaries() -> None:
-    actual: dict[str, Tensor] = {}
-    for case, glacier, budget in (
-        ("ice_complete", False, False),
-        ("ice_budget", False, True),
-        ("gl_complete", True, False),
-        ("gl_budget", True, True),
-        ("gl_failfast", True, False),
+_CONDITION: Final = ("[M+H]+", "Orbitrap", 20.0)
+
+
+def test_glacier_reuses_canonical_predictions_and_orders_by_heavy_atoms() -> None:
+    canonical: dict[str, tuple[str | None, int]] = {
+        "CCCC": ("CCCC", 4),
+        "alias": ("CCCC", 4),
+        "rejected": (None, 0),
+        "warm": ("warm", 4),
+        "CCCCC": ("CCCCC", 5),
+        "empty": ("empty", 6),
+        "feature-error": ("feature-error", 7),
+    }
+    warm = (np.array([5.0]), np.array([1.0]))
+    state = SimulationJobState(batch_size=2)
+    state.canonical_cache[("warm", *_CONDITION)] = warm
+    backend = _Backend(glacier=True)
+    assert (
+        GlacierScheduling.Config()
+        .make()
+        .predict(
+            {(name, *_CONDITION) for name in canonical},
+            canonical=canonical,
+            state=state,
+            backend=backend,
+            budget=_wall(_Clock(), float("inf")),
+        )
+    )
+    assert backend.calls == [
+        [("CCCC", *_CONDITION), ("CCCCC", *_CONDITION)],
+        [("empty", *_CONDITION)],
+    ]
+    assert (state.predicted, state.failed, state.feature_failures) == (4, 1, 1)
+    cache = state.cache
+    four = cache[("CCCC", *_CONDITION)]
+    assert four is not None
+    assert cache[("alias", *_CONDITION)] is four
+    assert four[0].tolist() == [4.0, 5.0]
+    assert four[1].tolist() == [float(np.float32(1 / 3)), 1.0]
+    assert cache[("warm", *_CONDITION)] is warm
+    for name in ("rejected", "empty", "feature-error"):
+        assert cache[(name, *_CONDITION)] is None
+    heavy = {f"m{index}": (f"m{index}", 100) for index in range(7)}
+    wide = _Backend(glacier=True, capacity=8)
+    assert (
+        GlacierScheduling.Config()
+        .make()
+        .predict(
+            {(name, *_CONDITION) for name in heavy},
+            canonical=heavy,
+            state=SimulationJobState(batch_size=32),
+            backend=wide,
+            budget=_wall(_Clock(), float("inf")),
+        )
+    )
+    # GlacierScheduling admits 32 * 1600 // 100**2 = 5 molecules of 100 atoms.
+    assert [len(call) for call in wide.calls] == [5, 2]
+
+
+def test_glacier_aborts_once_its_first_sixty_four_predictions_all_fail() -> None:
+    canonical = {f"bad{index:02}": (f"bad{index:02}", 5) for index in range(70)}
+    state = SimulationJobState(batch_size=32)
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"^All first 64 simulator predictions failed: "
+            r"RuntimeError\('prediction failure'\)$"
+        ),
     ):
-        jobs, canonical = _jobs_jobs(case)
-        clock = _Clock()
-        backend = _Backend(glacier=glacier)
-        state = SimulationJobState(batch_size=32 if glacier else 8)
-        if case == "gl_complete":
-            state.canonical_cache[("warm", "[M+H]+", "Orbitrap", 20.0)] = (
-                np.array([5.0]),
-                np.array([1.0]),
+        _ = (
+            GlacierScheduling.Config()
+            .make()
+            .predict(
+                {(name, *_CONDITION) for name in canonical},
+                canonical=canonical,
+                state=state,
+                backend=_Backend(glacier=True),
+                budget=_wall(_Clock(), float("inf")),
             )
-        finished, error = False, False
-        try:
-            wall = _wall(clock, 0.25 if budget else float("inf"))
-            if glacier:
-                finished = (
-                    GlacierScheduling.Config()
-                    .make()
-                    .predict(
-                        jobs,
-                        canonical=canonical,
-                        state=state,
-                        backend=backend,
-                        budget=wall,
-                    )
-                )
-            else:
-                finished = (
-                    IceScheduling.Config()
-                    .make()
-                    .predict(
-                        jobs,
-                        canonical=canonical,
-                        state=state,
-                        backend=backend,
-                        budget=wall,
-                    )
-                )
-        except RuntimeError:
-            if case != "gl_failfast":
-                raise
-            error = True
-        actual[f"{case}/finished"] = torch.tensor(finished)
-        actual[f"{case}/error"] = torch.tensor(error)
-        actual[f"{case}/batch_size"] = torch.tensor(state.batch_size)
-        actual[f"{case}/counts"] = torch.tensor(
-            [state.predicted, state.failed, state.feature_failures, clock.calls],
         )
-        actual[f"{case}/elapsed"] = torch.tensor(state.seconds, dtype=torch.float64)
-        actual[f"{case}/last_error"] = _text(state.last_error)
-        actual[f"{case}/calls"] = _text(
-            "\n".join(
-                ";".join("\t".join(map(str, job)) for job in call)
-                for call in backend.calls
-            ),
-        )
-        _cache_record(case + "/cache", state.cache, actual)
-        if glacier:
-            _cache_record(case + "/canonical_cache", state.canonical_cache, actual)
-        if case == "gl_failfast":
-            assert state.predicted >= 64
-            assert state.predicted == state.failed
-    golden = _BASELINE / "testdata" / "simulator_jobs.pt"
-    assert_tensor_golden(golden, float32_comparands(actual))
+    assert state.predicted == state.failed == 64
+    # Out-of-memory batches halve the batch size, never below four.
+    assert state.batch_size == 4
 
 
-def test_complete_length_boundaries_and_accumulated_time() -> None:
-    actual: dict[str, Tensor] = {}
-    for length, count in (
-        (60, 9),
-        (61, 9),
-        (90, 5),
-        (91, 5),
-        (140, 5),
-        (141, 3),
-        (62, 9),
-    ):
+def test_glacier_stops_between_batches_once_its_budget_is_spent() -> None:
+    canonical: dict[str, tuple[str | None, int]] = {
+        "CCCC": ("CCCC", 4),
+        "CCCCC": ("CCCCC", 5),
+    }
+    state = SimulationJobState(batch_size=1)
+    backend = _Backend(glacier=True)
+    assert not (
+        GlacierScheduling.Config()
+        .make()
+        .predict(
+            {(name, *_CONDITION) for name in canonical},
+            canonical=canonical,
+            state=state,
+            backend=backend,
+            budget=_wall(_Clock(), 0.25),
+        )
+    )
+    assert backend.calls == [[("CCCC", *_CONDITION)]]
+    # Clock readings at 0, 0.25 and 0.5 admit one batch; 0.75 ends the stage.
+    assert state.seconds == 0.75
+
+
+def test_ice_batches_shrink_with_the_longest_smiles_and_charge_each_reading() -> None:
+    sizes: dict[int, list[int]] = {}
+    for length, count in ((60, 9), (61, 9), (90, 5), (91, 5), (140, 5), (141, 3)):
         names = [
             "C" * index + "N" + "C" * (length - index - 1) for index in range(count)
         ]
-        jobs: set[SimulationJob] = {
-            (name, "[M+H]+", "Orbitrap", 20.0) for name in names
-        }
-        for budget in (False, True) if length == 62 else (False,):
-            label = f"{length}/{'budget' if budget else 'complete'}"
-            clock = _Clock()
-            clock.calls = 400
-            state = SimulationJobState(batch_size=16, seconds=7.0)
-            backend = _Backend(glacier=False, capacity=16)
-            if length == 62 and not budget:
-                state.cache[min(jobs)] = (np.array([5.0]), np.array([1.0]))
-            finished = (
-                IceScheduling.Config()
-                .make()
-                .predict(
-                    jobs,
-                    canonical={},
-                    state=state,
-                    backend=backend,
-                    budget=_wall(clock, 100.25 if budget else float("inf")),
-                )
+        state = SimulationJobState(batch_size=16, seconds=7.0)
+        backend = _Backend(glacier=False, capacity=16)
+        assert (
+            IceScheduling.Config()
+            .make()
+            .predict(
+                {(name, *_CONDITION) for name in names},
+                canonical={},
+                state=state,
+                backend=backend,
+                budget=_wall(_Clock(), float("inf")),
             )
-            actual[label + "/finished"] = torch.tensor(finished)
-            actual[label + "/batch_size"] = torch.tensor(state.batch_size)
-            actual[label + "/counts"] = torch.tensor(
-                [state.predicted, state.failed, state.feature_failures, clock.calls],
-            )
-            actual[label + "/elapsed"] = torch.tensor(
-                state.seconds,
-                dtype=torch.float64,
-            )
-            actual[label + "/calls"] = _text(
-                "\n".join(
-                    ";".join("\t".join(map(str, job)) for job in call)
-                    for call in backend.calls
-                ),
-            )
-            _cache_record(label + "/cache", state.cache, actual)
-    golden = _BASELINE / "testdata" / "simulator_boundaries.pt"
-    assert_tensor_golden(golden, float32_comparands(actual))
+        )
+        assert state.predicted == count
+        sizes[length] = [len(call) for call in backend.calls]
+        # One reading starts the stage, one precedes each batch, one ends it.
+        assert state.seconds == 7.0 + 0.25 * (len(backend.calls) + 1)
+    assert sizes == {60: [9], 61: [8, 1], 90: [5], 91: [4, 1], 140: [4, 1], 141: [2, 1]}
 
 
 def test_failure_diagnostic_retains_first_three_hundred_characters() -> None:
@@ -2027,35 +1928,6 @@ def test_failure_diagnostic_retains_first_three_hundred_characters() -> None:
     assert state.last_error == "ValueError('" + "x" * 288
     state.remember_failure(RuntimeError("short"))
     assert state.last_error == "RuntimeError('short')"
-
-
-def _jobs_jobs(
-    case: str,
-) -> tuple[set[SimulationJob], dict[str, tuple[str | None, int]]]:
-    names = ["C" * length for length in (4, 5, 6, 7, 8, 9, 61, 91, 141)] + [
-        "bad",
-        "empty",
-    ]
-    canonical: dict[str, tuple[str | None, int]] = {}
-    if case.startswith("gl_"):
-        names = ["C" * length for length in (4, 5, 6, 7, 8, 9, 80, 90, 100)] + [
-            "bad",
-            "empty",
-            "feature-error",
-            "alias",
-            "warm",
-            "rejected",
-        ]
-        canonical = {name: (name, len(name)) for name in names}
-        canonical["alias"] = ("CCCC", 4)
-        canonical["rejected"] = (None, 0)
-    if case == "gl_failfast":
-        names = [f"bad{index:02}" for index in range(70)]
-        canonical = {name: (name, 5) for name in names}
-    jobs = {(name, "[M+H]+", "Orbitrap", 20.0) for name in names}
-    if case != "gl_failfast":
-        jobs.update((name, "[M+Na]+", "QTOF", 40.0) for name in names[:2])
-    return jobs, canonical
 
 
 class _Clock:
@@ -2126,60 +1998,91 @@ class _Backend:
         self.releases += 1
 
 
-def _cache_record(
-    prefix: str,
-    cache: dict[SimulationJob, PreparedPeaks | None],
-    record: dict[str, Tensor],
-) -> None:
-    keys = sorted(cache)
-    record[prefix + "/keys"] = _text(
-        "\n".join("\t".join(map(str, key)) for key in keys),
-    )
-    record[prefix + "/valid"] = torch.tensor([cache[key] is not None for key in keys])
-    for index, key in enumerate(keys):
-        peaks = cache[key]
-        if peaks is not None:
-            record[f"{prefix}/{index}/mz"] = torch.from_numpy(peaks[0])
-            record[f"{prefix}/{index}/intensity"] = torch.from_numpy(peaks[1])
-
-
 _SCORING: Final = QueryScoring.Config().make()
 
 
-def test_both_complete_outer_publications_caches_and_budget_boundaries(
+def test_whole_molecule_chunks_publish_in_order_and_share_admission(
     tmp_path: Path,
 ) -> None:
-    golden = _BASELINE / "testdata/simulator_outer.pt"
-    _write(
-        tmp_path,
-        admission_rows(),
-    )
+    _write(tmp_path, admission_rows())
     admission = SimulatorAdmissionTable(tmp_path)
-    actual: dict[str, Tensor] = {}
-    for family in ("iceberg", "glacier"):
-        for case, budget in (("complete", 0.0), ("before", 0.5), ("partial", 2.75)):
-            label = f"{family}/{case}"
-            boundary = _Boundary(glacier=family == "glacier")
-            result = run_simulator(
-                _molecules(),
-                scheduling=_scheduling(family == "glacier"),
-                scoring=_SCORING,
-                admission_factory=lambda: admission,
-                backend_factory=boundary.load,
-                publish=boundary.publish,
-                budget=_budget(_Clock(), budget),
-                batch_size=2,
-                chunk_jobs=2,
-            )
-            actual.update(
-                observe_result(label, result, boundary, glacier=family == "glacier"),
-            )
-            if case == "partial":
-                assert result.jobs.predicted > 0
-                assert result.scored_molecules == 1
-                assert all(value is None for value in result.scores["d"].values())
-            assert result.status == ("ok" if case == "complete" else "budget")
-    assert_tensor_golden(golden, actual)
+    boundary = _Boundary(glacier=False)
+    result = run_simulator(
+        _molecules(),
+        scheduling=_scheduling(False),
+        scoring=_SCORING,
+        admission_factory=lambda: admission,
+        backend_factory=boundary.load,
+        publish=boundary.publish,
+        budget=_budget(_Clock(), 0.0),
+        batch_size=2,
+        chunk_jobs=2,
+    )
+    assert result.status == "ok"
+    # Initial nulls, molecule a's two jobs, then b with d's six, then the final map.
+    assert len(boundary.publications) == 4
+    assert all(value is None for value in boundary.publications[1]["d"].values())
+    assert (result.covered, result.scored_molecules, result.bad_smiles) == (3, 3, 2)
+    a, b, c, d = (result.scores[mid] for mid in "abcd")
+    assert a[""] is None
+    assert b["*"] is None
+    assert c == {"OCC": None}
+    # The backend predicts by SMILES length, so CCO and OCC score alike.
+    assert a["CCO"] is not None
+    assert a["CCO"] == a["OCC"] == b["CCO"]
+    assert d["OCC"] is not None
+    # The C100 prediction shares no peak with the query.
+    assert d["C" * 100] == 0.0
+    assert boundary.publications[-1] == result.scores
+
+
+def test_an_incomplete_chunk_stops_the_stage_before_later_molecules(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, admission_rows())
+    admission = SimulatorAdmissionTable(tmp_path)
+    boundary = _Boundary(glacier=False)
+    result = run_simulator(
+        _molecules(),
+        scheduling=_SpentScheduling(),
+        scoring=_SCORING,
+        admission_factory=lambda: admission,
+        backend_factory=boundary.load,
+        publish=boundary.publish,
+        budget=_budget(_Clock(), 0.0),
+        batch_size=2,
+        chunk_jobs=2,
+    )
+    assert result.status == "budget"
+    assert result.scored_molecules == 0
+    # Only molecule a passes admission; its empty SMILES is the one rejection.
+    assert result.bad_smiles == 1
+    assert len(boundary.publications) == 2
+    assert boundary.publications[0] == boundary.publications[1]
+
+
+class _SpentScheduling:
+    """Admit as ICE does, then report every chunk as stopped by its budget."""
+
+    def check(
+        self,
+        admission: SimulatorAdmissionTable,
+    ) -> Callable[[str], tuple[bool, str]]:
+        """Return the ICE admission decision."""
+        return admission.ice
+
+    def predict(
+        self,
+        jobs: set[SimulationJob],
+        *,
+        canonical: Mapping[str, tuple[str | None, int]],
+        state: SimulationJobState,
+        backend: object,
+        budget: WallBudget,
+    ) -> bool:
+        """Predict nothing and report the chunk incomplete."""
+        del jobs, canonical, state, backend, budget
+        return False
 
 
 def test_empty_input_geometry_and_load_failures_preserve_initial_publication(
@@ -2453,64 +2356,39 @@ def _molecules() -> tuple[SimulationMolecule, ...]:
     return tuple(rows)
 
 
-def _publication(
-    prefix: str,
-    values: dict[str, dict[str, float | None]],
-    record: dict[str, Tensor],
-) -> None:
-    record[prefix + "/keys"] = _text(
-        "\n".join(
-            f"{mid}\t{candidate}" for mid, row in values.items() for candidate in row
-        ),
-    )
-    ordered = [score for row in values.values() for score in row.values()]
-    record[prefix + "/valid"] = torch.tensor([score is not None for score in ordered])
-    record[prefix + "/values"] = torch.tensor(
-        [score if score is not None else 0.0 for score in ordered],
-        dtype=torch.float64,
-    )
+def test_each_family_checks_its_own_admission_column(tmp_path: Path) -> None:
+    rows = admission_rows()
+    _write(tmp_path, rows)
+    admission = SimulatorAdmissionTable(tmp_path)
+    first = {row["smiles"]: row for row in reversed(rows)}
+    ice = IceScheduling.Config().make().check(admission)
+    glacier = GlacierScheduling.Config().make().check(admission)
+    for smiles, row in first.items():
+        assert ice(smiles) == (row["ice_accepted"], row["ice_reason"])
+        assert glacier(smiles) == (row["glacier_accepted"], row["glacier_reason"])
 
 
-def observe_result(
-    prefix: str,
-    result: SimulatorResult,
-    boundary: _Boundary,
-    *,
-    glacier: bool,
-) -> dict[str, Tensor]:
-    """Observe every outer record field through a shared native boundary."""
-    actual = {
-        prefix + "/status": _text(result.status),
-        prefix + "/counts": torch.tensor(
-            [
-                len(result.scores),
-                result.scored_molecules,
-                result.covered,
-                sum(len(row) for row in result.scores.values()),
-                result.scored_candidates,
-                result.jobs.predicted,
-                result.jobs.failed,
-                result.bad_smiles,
-            ],
-        ),
-        prefix + "/elapsed": torch.tensor(result.jobs.seconds, dtype=torch.float64),
-        prefix + "/errors": _text("\n".join(result.errors)),
-        prefix + "/batch_size": torch.tensor(result.jobs.batch_size),
-        prefix + "/feature_failures": torch.tensor(result.jobs.feature_failures),
-        prefix + "/publication_count": torch.tensor(len(boundary.publications)),
-        prefix + "/calls": _text(
-            "\n".join(
-                ";".join("\t".join(map(str, job)) for job in call)
-                for call in boundary.backend.calls
-            ),
-        ),
-    }
-    for index, publication in enumerate(boundary.publications):
-        _publication(f"{prefix}/publication/{index}", publication, actual)
-    _cache_record(prefix + "/cache", result.jobs.cache, actual)
-    if glacier:
-        _cache_record(prefix + "/canonical_cache", result.jobs.canonical_cache, actual)
-    return float32_comparands(actual)
+def test_ice_isolates_a_failing_job_and_keeps_the_rest_of_its_batch() -> None:
+    state = SimulationJobState(batch_size=16)
+    backend = _Backend(glacier=False)
+    jobs = {(name, *_CONDITION) for name in ("CCO", "bad", "CCN")}
+    assert (
+        IceScheduling.Config()
+        .make()
+        .predict(
+            jobs,
+            canonical={},
+            state=state,
+            backend=backend,
+            budget=_wall(_Clock(), float("inf")),
+        )
+    )
+    # The failing batch splits until the bad job fails alone.
+    assert state.cache[("bad", *_CONDITION)] is None
+    assert state.cache[("CCO", *_CONDITION)] is not None
+    assert state.cache[("CCN", *_CONDITION)] is not None
+    assert (state.predicted, state.failed) == (3, 1)
+    assert backend.releases == 2
 
 
 if __name__ == "__main__":

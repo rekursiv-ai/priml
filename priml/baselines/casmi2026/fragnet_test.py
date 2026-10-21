@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 from zipfile import ZipFile
 
 import hashlib
@@ -14,18 +13,14 @@ import sys
 import types
 
 from pyarrow import Table, parquet
-from torch import Tensor
 from treekle import ReadError, to_plain
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.casmi2026 import fragnet
 from priml.baselines.casmi2026.boosting import LightGBMModel
-from priml.baselines.casmi2026.custom_types import (
-    SpectrumRequest,
-)
+from priml.baselines.casmi2026.boosting_test import model_text, stump
 from priml.baselines.casmi2026.fragnet import (
     Fragments,
     FragnetTable,
@@ -44,21 +39,17 @@ from priml.baselines.casmi2026.isolated import (
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
 )
-from priml.baselines.casmi2026.testing import float32_comparands
-from priml.testing.golden import assert_tensor_golden, read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
     from priml.baselines.casmi2026.custom_types import (
         FragnetRecord,
+        SpectrumRequest,
     )
-
-
-_BASELINE: Final = _CWD
 
 
 def test_complete_reader_preserves_duplicates_invalid_rows_and_local_bonds(
@@ -199,204 +190,95 @@ def _write(directory: Path) -> None:
     )
 
 
-GOLDEN: Final = _BASELINE / "testdata" / "fragnet.pt"
+def chain_record() -> FragnetRecord:
+    """Return a three-atom chain whose cleavages weigh 60, 70, 80, 130 and 150."""
+    return {
+        "amass": np.array([60.0, 70.0, 80.0]),
+        "kind": np.array([0, 6, 9], np.int8),
+        "el": np.array([0, 1, 2], np.int8),
+        "nh": np.zeros(3, np.int8),
+        "bonds": np.array([[0, 1], [1, 2]], np.int32),
+        "bring": np.zeros(2, np.int8),
+        "mass": 210.0,
+        "el10": np.zeros(3, np.uint8),
+    }
 
 
-def test_complete_fragmentation_tables_three_updates_and_all_family_outputs(
-    tmp_path: Path,
-) -> None:
-    golden = GOLDEN
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    records: list[FragnetRecord | None] = []
-    for index in range(5):
-        prefix = f"input/{index}/"
-        for name, tensor in expected.items():
-            if name.startswith(prefix):
-                actual[name] = tensor.clone()
-        if not expected[prefix + "valid"].item():
-            records.append(None)
-            continue
-        row: FragnetRecord = {
-            "amass": expected[prefix + "amass"].numpy(),
-            "kind": expected[prefix + "kind"].numpy(),
-            "el": expected[prefix + "el"].numpy(),
-            "nh": expected[prefix + "nh"].numpy(),
-            "bonds": expected[prefix + "bonds"].numpy(),
-            "bring": expected[prefix + "bring"].numpy(),
-            "mass": expected[prefix + "mass"].item(),
-            "el10": expected[prefix + "el10"].numpy(),
-        }
-        records.append(row)
-        for maximum in (2, 30_000):
-            for column, array in enumerate(fragments(row, maximum=maximum)):
-                actual[f"enumeration/{index}/{maximum}/{column}"] = torch.from_numpy(
-                    array,
-                )
-    arrays: dict[str, NDArray[np.generic]] = {"alpha": expected["stageA/alpha"].numpy()}
-    chains: list[NDArray[np.object_]] = []
-    for ci in range(2):
-        chain: list[NDArray[np.str_]] = []
-        for li in range(3):
-            names = (
-                expected[f"stageA/chain/{ci}/{li}"]
-                .numpy()
-                .tobytes()
-                .decode()
-                .split("\0")
-            )
-            chain.append(np.array(names))
-            arrays[f"k_{ci}_{li}"] = expected[f"stageA/keys/{ci}/{li}"].numpy()
-            arrays[f"l_{ci}_{li}"] = expected[f"stageA/values/{ci}/{li}"].numpy()
-        chains.append(np.array(chain, dtype=object))
-    arrays["chains"] = np.array(chains, dtype=object)
-    asset = tmp_path / "stageA.npz"
-    np.savez(asset, allow_pickle=True, **arrays)
-    model_a = StageA.load(asset, hashlib.sha256(asset.read_bytes()).hexdigest())
-    actual["stageA/alpha"] = torch.tensor(model_a.alpha, dtype=torch.float64)
-    for ci, loaded_chain in enumerate(model_a.chains):
-        for li, names in enumerate(loaded_chain):
-            actual[f"stageA/chain/{ci}/{li}"] = torch.tensor(
-                list("\0".join(names).encode()),
-                dtype=torch.uint8,
-            )
-            keys, values = model_a.tabs[ci][li]
-            actual[f"stageA/keys/{ci}/{li}"] = torch.from_numpy(keys)
-            actual[f"stageA/values/{ci}/{li}"] = torch.from_numpy(values)
-    text = expected["stageB/header"].numpy().tobytes().decode()
-    for step in range(3):
-        text += f"Tree={step}\n"
-        prefix = f"stageB/tree/{step}/"
-        for name, tensor in expected.items():
-            if name.startswith(prefix):
-                text += (
-                    name.removeprefix(prefix)
-                    + "="
-                    + " ".join(str(value) for value in tensor.tolist())
-                    + "\n"
-                )
-    model_b = LightGBMModel.parse(text + "end of trees\n")
-    assert model_b.features == stage_b_names()
-    actual["stageB/header"] = expected["stageB/header"].clone()
-    actual["stageB/train"] = expected["stageB/train"].clone()
-    for step, tree in enumerate(model_b.trees):
-        for name, value in tree.columns.items():
-            actual[f"stageB/tree/{step}/{name}"] = torch.from_numpy(value)
-        actual[f"stageB/round/{step + 1}"] = torch.from_numpy(
-            model_b.predict(expected["stageB/train"].numpy(), rounds=step + 1),
-        )
-    spectra: list[SpectrumRequest] = []
-    for index in range(3):
-        prefix = f"spectra/{index}/"
-        spectra.append(
-            {
-                "mz": [
-                    expected[prefix + "mz"][index].item()
-                    for index in range(expected[prefix + "mz"].numel())
-                ],
-                "it": [
-                    expected[prefix + "it"][index].item()
-                    for index in range(expected[prefix + "it"].numel())
-                ],
-                "prec": 250.0,
-                "adduct": ("[M+Na]+", "[M-H]-", "unknown")[index],
-                "mode": (1, -1, 1)[index],
-                "ce": (10.0, 35.0, float("nan"))[index],
-            },
-        )
-        for name in ("mz", "it"):
-            actual[prefix + name] = expected[prefix + name].clone()
-    peaks = prepare_peaks(spectra)
-    assert peaks is not None
-    peak_arrays = {
-        "pk_mz": peaks.pk_mz,
-        "pk_w": peaks.pk_w,
-        "pk_off": peaks.pk_off,
-        "pk_spec": peaks.pk_spec,
-        "sp_del": peaks.sp_del,
-        "sp_nd": peaks.sp_nd,
-        "lo": peaks.lo,
-        "hi": peaks.hi,
-        "top": peaks.top,
-        "wtot": peaks.wtot,
-        "mode": peaks.mode,
-        "ce": peaks.ce,
+def test_features_keep_tied_leaders_and_score_only_explained_candidates() -> None:
+    chain = chain_record()
+    assert fragments(chain)[0].tolist() == [60.0, 150.0, 70.0, 130.0, 80.0]
+    pair: FragnetRecord = {
+        **chain,
+        "amass": np.array([100.0, 110.0]),
+        "kind": np.zeros(2, np.int8),
+        "el": np.zeros(2, np.int8),
+        "nh": np.zeros(2, np.int8),
+        "bonds": np.array([[0, 1]], np.int32),
+        "bring": np.zeros(1, np.int8),
+        "el10": np.zeros(2, np.uint8),
     }
-    actual["peaks/S"] = torch.tensor(peaks.S)
-    for name, value in peak_arrays.items():
-        actual[f"peaks/{name}"] = torch.from_numpy(value)
-    prepared = prepare_candidates(records, peaks)
-    for index, column in enumerate(prepared.cat):
-        actual[f"prepared/cat/{index}"] = torch.from_numpy(column)
-    prepared_arrays = {
-        "coff": prepared.coff,
-        "M": prepared.M,
-        "cls": prepared.cls,
-        "pkix": prepared.pkix,
-        "inv": prepared.inv,
-        "moff": prepared.moff,
-        "mk": prepared.mk,
-        "mc": prepared.mc,
+    # The chain explains both protonated peaks; the pair explains neither.
+    spectrum: SpectrumRequest = {
+        "mz": [61.00727645217, 81.00727645217],
+        "it": [1.0, 1.0],
+        "adduct": "[M+H]+",
+        "mode": 1,
+        "prec": 220.0,
+        "ce": 20.0,
     }
-    actual["prepared/n"] = torch.tensor(prepared.n)
-    for name, value in prepared_arrays.items():
-        actual[f"prepared/{name}"] = torch.from_numpy(value)
-    for mode in (1, -1):
-        fd = categorical_fields(
-            prepared.cat,
-            prepared.M,
-            mode=mode,
-            energy=float("nan") if mode < 0 else 25.0,
-        )
-        for name, array in fd.items():
-            actual[f"fields/{mode}/{name}"] = torch.from_numpy(array)
-        actual[f"stageA/llr/{mode}"] = torch.from_numpy(model_a.llr(fd))
-    for name, mask in (
-        ("all", None),
-        ("mask", np.array([True, False, True, False, False])),
-    ):
-        agg = aggregates(model_a, prepared, peaks, mask=mask)
-        actual[f"aggregate/{name}"] = torch.from_numpy(agg)
-        for spectrum in range(2):
-            actual[f"stageB/features/{name}/{spectrum}"] = torch.from_numpy(
-                stage_b_features(agg[:, spectrum]),
-            )
-    scores = np.array([0.3, 0.3, 0.2, 0.1, 0], np.float32)
-    formulas = ["C2H5Br", "C2H4S", "C2H5I", "C2H5Br", ""]
-    for case, (query, cap, size) in enumerate(
-        (
-            (spectra, 400, 5),
-            (spectra, 2, 5),
-            (spectra, 3, 5),
-            (list[SpectrumRequest](), 400, 5),
-            (spectra, 400, 0),
-        ),
-    ):
-        output = features(
-            records[:size],
-            query,
-            formulas=formulas[:size],
-            model_score=scores[:size],
-            stage_a=model_a,
-            stage_b=model_b,
-            maximum=cap,
-        )
-        actual[f"features/{case}"] = torch.from_numpy(
-            np.column_stack(list(output.values())),
-        )
-    assert_tensor_golden(
-        golden,
-        float32_comparands(
-            actual,
-            inputs=(
-                "input/*",
-                "spectra/*",
-                "stageA/alpha",
-                "stageB/train",
-                "stageB/tree/*",
+    # Explained fragments score 2 and unexplained 0: raw peak scores 2 and 0.
+    table = np.tile(np.array([0.0, 2.0, 2.0, 2.0, 2.0, 2.0], np.float32), (8, 1))
+    stage_a = StageA(
+        chains=((("mode", "ft"),), (("mode", "ft"), ("c1",))),
+        tabs=(
+            ((np.arange(8), table),),
+            (
+                (np.arange(8), table),
+                (np.zeros(0, np.int64), np.zeros((0, 6), np.float32)),
             ),
         ),
+        alpha=80.0,
     )
+    # StageB splits on its sixth column, the explained peak weight.
+    stage_b = LightGBMModel.parse(
+        model_text(stump(5, left=-1.0, right=1.0), features=stage_b_names()),
+    )
+    values = features(
+        [chain, pair, None],
+        [spectrum, spectrum],
+        formulas=["X", "X", "Y"],
+        model_score=np.array([0.3, 0.3, 0.1], np.float32),
+        stage_a=stage_a,
+        stage_b=stage_b,
+        maximum=2,
+    )
+    assert tuple(values)[:4] == ("fn_score", "fn_score_max", "fn_rank", "fn_gap")
+    assert len(values) == 14
+    assert all(array.dtype == np.float32 for array in values.values())
+    # The cap keeps both tied leaders; the third row scores one below the least.
+    assert values["fn_score"].tolist() == [1.0, -1.0, -2.0]
+    assert values["fn_score_max"].tolist() == [1.0, -1.0, -2.0]
+    assert values["fn_gap"].tolist() == [0.0, -2.0, -3.0]
+    # Both leaders tie on the base score, so the lead mean is zero.
+    assert values["fn_vs_lead"].tolist() == [1.0, -1.0, -2.0]
+    assert values["fn_grp_gap"].tolist() == [0.0, -2.0, 0.0]
+    # Raw scores 2, 0 and 0 - 1 sit against the lead mean (2 + 0) / 2.
+    assert values["fn_raw_vs_lead"].tolist() == [1.0, -1.0, -2.0]
+    assert values["fn_raw_gap"].tolist() == [0.0, -2.0, -3.0]
+    assert values["fn_raw_grp_gap"].tolist() == [0.0, -2.0, 0.0]
+    for name in ("fn_rank", "fn_raw_rank", "fn_pk_rank", "fn_fc_rank"):
+        assert values[name].tolist() == [0.0, 0.5, 1.0], name
+    assert values["fn_grp_rank"].tolist() == [0.0, 1.0, 0.0]
+    assert values["fn_sp_rank"].tolist() == [0.0, 1.0, 1.0]
+    empty = features(
+        [chain],
+        [],
+        formulas=["X"],
+        model_score=np.ones(1, np.float32),
+        stage_a=stage_a,
+        stage_b=stage_b,
+    )
+    assert all(array.tolist() == [0.0] for array in empty.values())
 
 
 @pytest.mark.parametrize(
@@ -456,7 +338,10 @@ def test_empty_contexts_and_missing_energy_remain_explicit() -> None:
 
 
 def test_all_six_match_classes_unobservable_windows_and_complete_matches() -> None:
-    masses = np.array([20.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 220.0])
+    # The window is the lightest peak - 0.5 to precursor - 2; 59.4 and 197.5 miss it.
+    masses = np.array(
+        [20.0, 59.4, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 196.9, 197.5, 220.0],
+    )
     ion = 1.00727645217
     hydrogen = 1.00782503207
     spectrum: SpectrumRequest = {
@@ -475,9 +360,9 @@ def test_all_six_match_classes_unobservable_windows_and_complete_matches() -> No
     peaks = prepare_peaks([spectrum])
     assert peaks is not None
     categories, best, offsets, positions, classes = _matches(masses, peaks)
-    assert categories[:, 0].tolist() == [-1, 1, 2, 3, 4, 5, 0, -1]
-    assert best[:, 0].tolist() == [-1, 0, 1, 2, 3, 4, -1, -1]
-    assert offsets.tolist() == [0, 0, 1, 2, 3, 4, 5, 5, 5]
+    assert categories[:, 0].tolist() == [-1, -1, 1, 2, 3, 4, 5, 0, 0, -1, -1]
+    assert best[:, 0].tolist() == [-1, -1, 0, 1, 2, 3, 4, -1, -1, -1, -1]
+    assert offsets.tolist() == [0, 0, 0, 1, 2, 3, 4, 5, 5, 5, 5, 5]
     assert positions.tolist() == [0, 1, 2, 3, 4]
     assert classes.tolist() == [1, 2, 3, 4, 5]
 
@@ -602,6 +487,109 @@ def test_positive_explanations_mask_and_ring_chain_capacity() -> None:
                 average=False,
             ),
         )
+
+
+def test_aggregates_sum_class_kind_peak_and_frequency_channels_by_hand() -> None:
+    # Protonated 60 and 80 Da peaks at intensities 1 and 1/4 weigh 1 and 1/2.
+    peaks = prepare_peaks(
+        [
+            {
+                "mz": [61.00727645217, 81.00727645217],
+                "it": [1.0, 0.25],
+                "adduct": "[M+H]+",
+                "mode": 1,
+                "prec": 220.0,
+                "ce": 20.0,
+            },
+        ],
+    )
+    assert peaks is not None
+    assert peaks.pk_w.tolist() == [1.0, 0.5]
+    # Positive mode keys row 4 + kind: single cuts score -1 unexplained and 3
+    # explained, the double cut -2 unexplained.
+    table = np.zeros((8, 6), np.float32)
+    table[5, :2] = [-1.0, 3.0]
+    table[7, 0] = -2.0
+    stage_a = StageA(
+        chains=((("mode", "ft"),),),
+        tabs=(((np.arange(8), table),),),
+        alpha=80.0,
+    )
+    # The chain cuts 60, 150, 70 (double), 130 and 80 Da; 60 and 80 explain both
+    # peaks, and the record-less candidate explains neither.
+    prepared = prepare_candidates([chain_record(), None], peaks)
+    fragment = [2.0, 6.0, -4.0, 5.0, 2.0]
+    peak = [4.5, 4.5, 1.5, 6.0, 2.0]
+    kind = [4.0, 0.0, -2.0, 4.0, 2.0, 0.0]
+    for mask, frequency in (
+        (None, 0.5),
+        (np.array([False, True]), 0.0),
+        (np.array([True, False]), 1.0),
+    ):
+        values = aggregates(stage_a, prepared, peaks, mask=mask)
+        assert values.shape == (2, 1, 19)
+        # The last three channels discount by the masked explaining share.
+        discount = [value * (1.0 - frequency) for value in (4.5, 4.5, 1.5)]
+        assert values[0, 0].tolist() == [*fragment, *peak, *kind, *discount]
+        # Unexplained top peaks only add their weight to the record-less row.
+        assert values[1, 0].tolist() == [0.0] * 15 + [1.5] + [0.0] * 3
+
+
+def test_llr_backs_off_each_chain_and_counts_the_shared_level_once() -> None:
+    # Positive single and ring cuts key the shared level 5 and 6; key 7 is unseen.
+    fields = {
+        "mode": np.ones(4, np.int64),
+        "ft": np.array([1, 1, 2, 3], np.int64),
+        "c1": np.array([0, 4, 0, 0], np.int64),
+        "size": np.array([0, 2, 0, 0], np.int64),
+    }
+    classes = np.arange(1, 7, dtype=np.float32)
+    shared = np.array([5, 6], np.int64)
+    model = StageA(
+        chains=((("mode", "ft"), ("size",)), (("mode", "ft"), ("c1",))),
+        # Size 2 refines key 5 to 5 * 8 + 2, and c1 0 refines it to 5 * 507.
+        tabs=(
+            (
+                (shared, np.stack([classes, 2 * classes])),
+                (np.array([42], np.int64), 10 * classes[None]),
+            ),
+            (
+                (shared, np.stack([100 * classes, 200 * classes])),
+                (np.array([2535], np.int64), 1000 * classes[None]),
+            ),
+        ),
+        alpha=80.0,
+    )
+    # Chain matches less the shared level: 1+1000-1, 10+100-1, 2+200-2 and none.
+    np.testing.assert_array_equal(
+        model.llr(fields),
+        np.array([1000.0, 109.0, 200.0, 0.0])[:, None] * classes,
+    )
+
+
+def test_peaks_flag_the_five_strongest_of_each_spectrum() -> None:
+    peaks = prepare_peaks(
+        [
+            {
+                "mz": [100.0, 110.0, 120.0, 130.0, 140.0, 150.0],
+                "it": [1.0, 6.0, 3.0, 5.0, 2.0, 4.0],
+                "adduct": "[M+H]+",
+                "mode": 1,
+                "prec": 200.0,
+            },
+            {
+                "mz": [60.0, 70.0, 80.0],
+                "it": [1.0, 1.0, 1.0],
+                "adduct": "[M+H]+",
+                "mode": 1,
+                "prec": 200.0,
+            },
+        ],
+    )
+    assert peaks is not None
+    assert peaks.pk_off.tolist() == [0, 6, 9]
+    # Only the weakest peak of the first spectrum falls outside its top five.
+    assert peaks.top.tolist() == [0, 1, 1, 1, 1, 1, 1, 1, 1]
 
 
 @pytest.mark.parametrize("case", ["version2", "version3", "numeric", "value"])

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Final, cast
@@ -16,12 +16,10 @@ import sys
 import types
 
 from pyarrow import Table, parquet
-from torch import Tensor
 from treekle import ReadError, from_plain, json_loads, to_plain
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.casmi2026.chemistry import (
     CandidatePool,
@@ -66,12 +64,10 @@ from priml.baselines.casmi2026.scripts.rdkit_backend import (
     MolecularContext,
 )
 from priml.baselines.casmi2026.testing import (
-    float32_comparands,
     identity_fingerprints,
     identity_rows,
     write_identity,
 )
-from priml.testing.golden import assert_tensor_golden
 
 
 if TYPE_CHECKING:
@@ -84,12 +80,6 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-
-_BASELINE: Final = _CWD
 
 
 def test_complete_numeric_chemical_assets_and_selected_bit_order(
@@ -430,9 +420,6 @@ def test_identity_types_partial_failures_and_restricted_numpy_loading(
         IdentityTable.Config(working_dir=tmp_path).make()
 
 
-LIBRARY_GOLDEN: Final = _BASELINE / "testdata" / "assets.pt"
-
-
 def test_complete_provided_pool_and_library_state(
     tmp_path: Path,
 ) -> None:
@@ -518,78 +505,70 @@ def test_complete_provided_pool_and_library_state(
     assert pool.keys == ("a", "b", "a", "d", "e", "f", "g", "h", "i")
     assert pool.smiles == ("C", "CC", "CCC", "O", "N", "CO", "CN", "Cl", "Br")
     assert pool.formulas == tuple(formulas)
-    actual: dict[str, Tensor] = {}
-    for name, value in {
-        "off": library.offsets,
-        "mz": library.mz,
-        "it": library.intensity,
-        "struct_mass": library.structure_mass,
-        "sid": library.sid,
-        "lib": library.library,
-        "mode": library.mode,
-        "instr": library.instrument,
-        "adduct_ix": library.adduct,
-        "prec": library.precursor,
-        "n_clean": library.peak_count,
-        "smass": library.mass,
-        "order": library.order,
-        "smass_sorted": library.mass_sorted,
-    }.items():
-        actual[f"library/{name}"] = torch.from_numpy(value.copy())
-    for name, value in {
-        "mass": pool.mass,
-        "n_heavy": pool.heavy_atoms,
-        "src": pool.source,
-        "train_sid": pool.train_sid,
-        "fp_packed": pool.packed,
-        "bits": pool.bits,
-        "frag_off": pool.fragment_offsets,
-        "frag_mass": pool.fragment_mass,
-    }.items():
-        actual[f"pool/{name}"] = torch.from_numpy(value.copy())
+    assert library.offsets.tolist() == [0, *np.cumsum(counts).tolist()]
+    # The unknown SID -1 indexes the last structure, as NumPy does.
+    assert library.mass.tolist() == [
+        100.0,
+        100.0,
+        100.001,
+        99.999,
+        150.0,
+        300.0,
+        300.0,
+        100.001,
+        99.999,
+    ]
+    assert library.order.tolist() == [3, 8, 0, 1, 2, 7, 4, 5, 6]
+    assert np.array_equal(library.mass_sorted, np.sort(library.mass))
+    assert library.mode.dtype == np.int8
+    assert library.adduct.dtype == np.int16
     excluded = np.isin(np.arange(9), [1, 3])
-    for case, (target, mode, exclude) in enumerate(
-        (
-            (100.0, None, None),
-            (100.0, 1, None),
-            (100.0, -1, excluded),
-            (300.0, None, excluded),
-            (40.0, 1, excluded),
-        ),
-    ):
-        actual[f"window/{case}"] = torch.from_numpy(
-            library.window(target, ppm=10.0, excluded=exclude, mode=mode),
-        )
-        actual[f"pool_window/{case}"] = torch.from_numpy(pool.window(target, ppm=10.0))
-    for key, mask in (
-        ("default", None),
-        ("excluded", excluded),
-        ("empty", np.ones(9, dtype=np.bool_)),
-        ("default", np.ones(9, dtype=np.bool_)),
-    ):
-        result = library.representatives(excluded=mask, key=key)
-        for name, values in {
-            "idx": result.indices,
-            "sid": result.sid,
-            "mass": result.mass,
-            "mode": result.mode,
-        }.items():
-            actual[f"reps/{key}/{name}"] = torch.from_numpy(values.copy())
-    indices = np.array([8, 1, 2, 1], dtype=np.int64)
-    actual["fingerprints"] = torch.from_numpy(pool.fingerprints(indices))
-    actual["keys"] = torch.tensor(list(pool.key_to_pid.values()))
-    for pid in range(9):
-        actual[f"fragments/{pid}"] = torch.from_numpy(pool.fragments(pid))
-        vector = pool.formula_vector(pid)
-        actual[f"formula/{pid}"] = (
-            torch.from_numpy(vector)
-            if vector is not None
-            else torch.empty(0, dtype=torch.int64)
-        )
+    near = library.window(100.0, ppm=20.0)
+    assert near.tolist() == [3, 8, 0, 1, 2, 7]
+    assert library.window(100.0, ppm=20.0, mode=1).tolist() == [3, 8, 0, 1, 7]
+    assert library.window(100.0, ppm=20.0, mode=-1).tolist() == [2]
+    assert library.window(100.0, ppm=20.0, excluded=excluded).tolist() == [8, 0, 2, 7]
+    assert library.window(300.0, ppm=10.0, excluded=excluded).tolist() == [5, 6]
+    assert not len(library.window(40.0, ppm=10.0, mode=1))
+    assert pool.window(100.0, ppm=20.0).tolist() == [0, 1, 2]
+    assert pool.window(150.0, ppm=10.0).tolist() == [4]
+    # One most-populated spectrum per SID and polarity; ties keep encounter order.
+    default = library.representatives()
+    assert default.indices.tolist() == [3, 1, 2, 7, 4, 6, 5]
+    assert default.sid.tolist() == [2, 0, 1, 1, 3, -1, 4]
+    assert default.mode.tolist() == [1, 1, -1, 1, -1, -1, 1]
+    assert default.mass.tolist() == library.mass[default.indices].tolist()
+    restricted = library.representatives(excluded=excluded, key="excluded")
+    assert restricted.indices.tolist() == [8, 0, 2, 7, 4, 6, 5]
+    everything = np.ones(9, dtype=np.bool_)
+    assert not len(library.representatives(excluded=everything, key="empty").indices)
+    assert library.representatives(excluded=everything) is default
+    # Packed rows 8, 1 and 2 hold 208/221, 26/39 and 52/65; nine bits are kept.
+    assert pool.fingerprints(np.array([8, 1, 2, 1], dtype=np.int64)).tolist() == [
+        [1, 1, 0, 1, 0, 0, 0, 0, 1],
+        [0, 0, 0, 1, 1, 0, 1, 0, 0],
+        [0, 0, 1, 1, 0, 1, 0, 0, 0],
+        [0, 0, 0, 1, 1, 0, 1, 0, 0],
+    ]
+    assert list(pool.key_to_pid.values()) == [2, 1, 3, 4, 5, 6, 7, 8]
+    fragments = pool.fragments(3)
+    assert fragments.dtype == np.float64
+    assert fragments.tolist() == pool.fragment_mass[6:8].tolist()
+    vectors = [pool.formula_vector(pid) for pid in range(9)]
+    assert [None if vector is None else vector.tolist() for vector in vectors] == [
+        [2, 6, 0, 1, 0, 0, 0, 0, 0, 0],
+        [0, 2, 0, 1, 0, 0, 0, 0, 0, 0],
+        [1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0] * 10,
+        [0] * 10,
+        None,
+        None,
+        None,
+        [0, 0, 0, 0, 0, 0, 1, 2, 1, 1],
+    ]
     assert library.representatives().indices is library.representatives().indices
     assert pool.formula_vector(0) is pool.formula_vector(0)
     assert pool.fingerprints(np.empty(0, dtype=np.int64)).shape == (0, 9)
-    assert_tensor_golden(LIBRARY_GOLDEN, float32_comparands(actual))
 
 
 def test_runtime_reads_all_staged_identities_without_rdkit(tmp_path: Path) -> None:
@@ -686,139 +665,133 @@ def test_identity_provenance_requires_the_declared_schema(
         _ = config.make()
 
 
-SPECTRA_GOLDEN: Final = _BASELINE / "testdata" / "spectra.pt"
-
-
-def test_complete_both_spectral_search_families() -> None:
-    masses = [
-        np.arange(7, dtype=np.float32) * 10 + 10,
-        np.array([], dtype=np.float32),
-        np.array([10.005, 20.015, 31, 55], dtype=np.float32),
-        np.array([110, 120, 130, 140], dtype=np.float32),
-        np.array([10, 10.002, 20, 20.006, 40], dtype=np.float32),
-        np.array([10, 20], dtype=np.float32),
-        np.arange(40, dtype=np.float32) + 1000,
-    ]
-    intensity = [
-        np.array([1, 2, 4, 0.008, 0.00799, 1, 3], dtype=np.float32),
-        np.array([], dtype=np.float32),
-        np.array([1, 0.1, 2, 0.004], dtype=np.float32),
-        np.array([0.2, 0.6, 1, 0.3], dtype=np.float32),
-        np.array([1, 2, 3, 4, 2], dtype=np.float32),
-        np.array([0, -1], dtype=np.float32),
-        np.ones(40, dtype=np.float32),
-    ]
-    store = PeakStore(
+def search_store() -> PeakStore:
+    """Hold an exact copy, a disjoint pair, a silent pair, no peaks and a +10 copy."""
+    masses: tuple[list[int], ...] = (
+        [10, 20, 30],
+        [110, 120],
+        [10, 20],
+        [],
+        [20, 30, 40],
+    )
+    intensity: tuple[list[int], ...] = ([1, 1, 1], [1, 1], [0, 0], [], [1, 1, 1])
+    return PeakStore(
         offsets=np.concatenate([[0], np.cumsum([len(row) for row in masses])]).astype(
             np.int64,
         ),
-        mz=np.concatenate(masses),
-        intensity=np.concatenate(intensity),
+        mz=np.concatenate([np.array(row, np.float32) for row in masses]),
+        intensity=np.concatenate([np.array(row, np.float32) for row in intensity]),
     )
-    candidates = np.array([4, 0, 6, 2, 1, 5, 3, 4], dtype=np.int64)
-    shifts = np.array(
-        [0.00005, 0.0, -1000.0, -1.0, 0.0, 0.0, -100.0, 10.0],
-        dtype=np.float32,
+
+
+def test_main_search_scores_exact_disjoint_silent_and_shifted_rows() -> None:
+    store = search_store()
+    search = MainSearch.Config().make()
+    query = (np.array([10.0, 20.0, 30.0]), np.ones(3))
+    candidates = np.arange(5, dtype=np.int64)
+    direct = search.score(query, store=store, candidates=candidates)
+    assert direct.dtype == np.float32
+    assert direct.item(0) == 1.0
+    assert 0 <= direct.item(1) < 1e-12
+    assert direct.tolist()[2:4] == [0.0, 0.0]
+    # The +10 copy shares two of three peaks: mixture 1/6, 1/3, 1/3, 1/6 scores 2/3.
+    assert direct.item(4) == np.float32(2 / 3)
+    hybrid = search.score(
+        query,
+        store=store,
+        candidates=candidates,
+        shifts=np.array([5e-5, -100.0, 0.0, 0.0, 0.0]),
     )
-    actual: dict[str, Tensor] = {}
-    for case in range(9):
-        query_mass = masses[0].astype(np.float64)
-        query_intensity = intensity[0].astype(np.float64)
-        first, second = MainSearch.Config(), SecondSearch.Config()
-        if case == 1:
-            first.max_peaks = second.max_peaks = 4
-        elif case == 2:
-            first.power = second.power = 0.5
-        elif case == 3:
-            first.entropy_weight = second.entropy_weight = False
-        elif case == 4:
-            query_mass = masses[6].astype(np.float64) + 0.015
-            query_intensity = intensity[6].astype(np.float64)
-        elif case == 5:
-            query_mass = np.empty(0, dtype=np.float64)
-            query_intensity = np.empty(0, dtype=np.float64)
-        elif case == 6:
-            query_intensity.fill(0)
-        elif case == 7:
-            query_mass += 100
-        elif case == 8:
-            query_mass = np.arange(31, dtype=np.float64) + 10
-            query_intensity = np.arange(31, dtype=np.float64) % 3 + 1
-            first.max_peaks = second.max_peaks = 7
-        main_search, second_search = first.make(), second.make()
-        query = (query_mass, query_intensity)
-        for kind in (0, 1):
-            result = main_search.score(
-                query,
-                store=store,
-                candidates=candidates,
-                cosine=bool(kind),
-            )
-            actual[f"main/{case}/direct{kind}"] = torch.from_numpy(result)
-        actual[f"main/{case}/hybrid"] = torch.from_numpy(
-            main_search.score(
-                query,
-                store=store,
-                candidates=candidates,
-                shifts=shifts.astype(np.float64),
-            ),
-        )
-        prepared = second_search.prepare(
-            (query_mass.astype(np.float32), query_intensity.astype(np.float32)),
-        )
-        actual[f"second/{case}/query_mz"] = torch.from_numpy(prepared[0])
-        actual[f"second/{case}/query_weights"] = torch.from_numpy(prepared[1])
-        actual[f"second/{case}/direct"] = torch.from_numpy(
-            second_search.score(prepared, store=store, candidates=candidates),
-        )
-        actual[f"second/{case}/shifted"] = torch.from_numpy(
-            second_search.score(
-                prepared,
-                store=store,
-                candidates=candidates,
-                shifts=shifts,
-            ),
-        )
-        cleaned = second_search.clean_store(store, indices=np.arange(7, dtype=np.int64))
-        actual[f"second/{case}/store_offsets"] = torch.from_numpy(cleaned.offsets)
-        actual[f"second/{case}/store_mz"] = torch.from_numpy(cleaned.mz)
-        actual[f"second/{case}/store_weights"] = torch.from_numpy(cleaned.intensity)
-        actual[f"second/{case}/precleaned"] = torch.from_numpy(
-            second_search.score_prepared(
-                prepared,
-                store=cleaned,
-                start=2,
-                stop=7,
-                shifts=np.array(
-                    [-1.0, -100.0, 10.0, 0.0005, -1000.0],
-                    dtype=np.float32,
-                ),
-            ),
-        )
-    pairs = [
-        (np.array([10, 10.004, 10.008, 20, 30, 40]), np.array([1, 0.1, 0.9, 2, 1, 3])),
-        (np.array([10.003, 20, 35]), np.array([2, 1, 0.5])),
-        (np.array([], dtype=np.float64), np.array([], dtype=np.float64)),
-        (np.array([3, 4]), np.array([0, 0])),
+    assert hybrid.item(0) == direct.item(0)
+    assert np.array_equal(hybrid[2:], direct[2:])
+    # Shifted by -100, the pair explains two query peaks: mixture 5/12, 5/12, 1/6.
+    mixture = 5 / 6 * math.log(12 / 5) + math.log(6) / 6
+    assert hybrid.item(1) == np.float32((math.log(6) - 2 * mixture) / math.log(4) + 1)
+    pair = (np.array([10.0, 20.0]), np.ones(2))
+    cosine = search.score(pair, store=store, candidates=candidates, cosine=True)
+    # Cosine over norms sqrt(1/2 * 1/3): dot 1/3 for the copy, 1/6 for the +10 copy.
+    assert cosine.tolist() == [
+        float(np.float32((2 / 3) ** 0.5)),
+        0.0,
+        0.0,
+        0.0,
+        float(np.float32(6**-0.5)),
     ]
-    for case, (spectra, maximum) in enumerate(
-        ((pairs, None), (pairs, 3), (pairs[:0], None), (pairs[2:], None)),
-    ):
-        merged = merge_main(spectra, tolerance=0.005, max_peaks=maximum)
-        actual[f"merge/{case}/mz"] = torch.from_numpy(merged[0])
-        actual[f"merge/{case}/intensity"] = torch.from_numpy(merged[1])
-    empty = (
-        SecondSearch.Config()
-        .make()
-        .clean_store(store, indices=np.empty(0, dtype=np.int64))
+    silent = (np.zeros(0), np.zeros(0))
+    assert not search.score(silent, store=store, candidates=candidates).any()
+    assert not search.score(
+        silent,
+        store=store,
+        candidates=candidates,
+        cosine=True,
+    ).any()
+    assert not search.score(
+        silent,
+        store=store,
+        candidates=candidates,
+        shifts=np.full(5, -10.0),
+    ).any()
+
+
+def test_second_search_keeps_encounter_order_and_takes_the_better_shift() -> None:
+    store = search_store()
+    search = SecondSearch.Config().make()
+    capped = SecondSearch.Config(max_peaks=2).make()
+    mz, weights = capped.prepare(
+        (np.array([30, 10, 20, 40], np.float32), np.array([1, 4, 2, 3], np.float32)),
     )
-    for name, values in {
-        "offsets": empty.offsets,
-        "mz": empty.mz,
-        "weights": empty.intensity,
-    }.items():
-        actual[f"empty_store/{name}"] = torch.from_numpy(values)
-    assert_tensor_golden(SPECTRA_GOLDEN, actual)
+    assert mz.tolist() == [10.0, 40.0]
+    assert weights.dtype == np.float32
+    assert weights.item(0) > weights.item(1) > 0
+    query = search.prepare(store.row(0))
+    candidates = np.arange(5, dtype=np.int64)
+    direct = search.score(query, store=store, candidates=candidates)
+    assert direct.item(0) == direct.max()
+    assert direct.tolist()[2:4] == [0.0, 0.0]
+    shifts = np.array([5e-4, -100.0, 0.0, 0.0, -10.0], np.float32)
+    shifted = search.score(query, store=store, candidates=candidates, shifts=shifts)
+    assert shifted.item(0) == direct.item(0)
+    assert bool((shifted >= direct).all())
+    assert shifted.item(4) > direct.item(4)
+    cleaned = search.clean_store(store, indices=candidates)
+    assert cleaned.offsets.tolist() == [0, 3, 5, 5, 5, 8]
+    assert np.array_equal(
+        search.score_prepared(query, store=cleaned, start=1, stop=5, shifts=shifts[1:]),
+        search.score(query, store=store, candidates=candidates[1:], shifts=shifts[1:]),
+    )
+    empty = search.clean_store(store, indices=np.empty(0, dtype=np.int64))
+    assert empty.offsets.tolist() == [0]
+    assert empty.mz.shape == empty.intensity.shape == (0,)
+
+
+def test_merging_keeps_the_stronger_near_duplicate_then_caps_by_intensity() -> None:
+    later = [[float(np.float32(10.004)), 20.0], [0.5, 1.0]]
+    assert _merged([([10, 10.004, 20], [1, 2, 4])]) == later
+    assert _merged([([10, 10.004], [2, 1])]) == [[10.0], [1.0]]
+    # Each spectrum normalizes by its own base peak before the two merge.
+    assert _merged([([10], [2]), ([10.003, 30], [4, 8])]) == [
+        [10.0, 30.0],
+        [1.0, 1.0],
+    ]
+    assert _merged([([10, 20, 30], [1, 3, 2])], maximum=1) == [[20.0], [1.0]]
+    assert _merged([([3, 4], [0, 0])]) == _merged([]) == [[], []]
+
+
+def _merged(
+    spectra: list[tuple[list[float], list[float]]],
+    maximum: int | None = None,
+) -> list[list[float]]:
+    """Merge plain spectra and return float32 masses and intensities as lists."""
+    merged = merge_main(
+        [
+            (np.array(mz, np.float64), np.array(intensity, np.float64))
+            for mz, intensity in spectra
+        ],
+        tolerance=0.005,
+        max_peaks=maximum,
+    )
+    assert merged[0].dtype == merged[1].dtype == np.float32
+    return [merged[0].tolist(), merged[1].tolist()]
 
 
 def test_complete_query_cleaning_keeps_stable_peak_orders() -> None:
@@ -885,34 +858,84 @@ def test_complete_query_cleaning_keeps_stable_peak_orders() -> None:
         np.testing.assert_array_equal(actual[1], np.array(peaks[1], np.float32))
 
 
-def test_complete_peak_normalization_and_entropy_weighting() -> None:
-    actual: dict[str, Tensor] = {}
-    for case, (intensity, power, entropy, floor, maximum) in enumerate(
-        (
-            (np.linspace(1.0, 0.1, 20), 1.0, False, 0.0, 256),
-            (np.linspace(1.0, 0.1, 20), 1.0, True, 0.0, 256),
-            (np.geomspace(1.0, 1e-8, 23), 1.0, True, 0.0, 256),
-            (np.linspace(1.0, 0.1, 20), 0.5, True, 0.0, 256),
-            (np.linspace(1.0, 0.1, 20), 1.0, True, 0.3, 7),
-            (np.zeros(3, dtype=np.float64), 1.0, True, 0.0, 256),
-            (np.empty(0, dtype=np.float64), 1.0, False, 0.0, 256),
-        ),
-    ):
-        mz, weights = (
-            MainSearch.Config(
-                power=power,
-                entropy_weight=entropy,
-                floor=floor,
-                max_peaks=maximum,
-            )
-            .make()
-            .prepare((np.arange(len(intensity), dtype=np.float64) + 10, intensity))
-        )
-        actual[f"{case}/mz"] = torch.from_numpy(mz)
-        actual[f"{case}/weights"] = torch.from_numpy(weights)
-    assert_tensor_golden(
-        _BASELINE / "testdata/normalization.pt",
-        float32_comparands(actual),
+def test_main_preparation_normalizes_reweights_low_entropy_and_caps_peaks() -> None:
+    linear = MainSearch.Config(entropy_weight=False)
+    assert _prepared([3.0, 1.0], linear) == [[10, 11], [0.75, 0.25]]
+    assert _prepared(
+        [4.0, 1.0],
+        MainSearch.Config(entropy_weight=False, power=0.5),
+    ) == [[10, 11], [2 / 3, 1 / 3]]
+    # Twenty-one equal peaks have entropy log 21 > 3, so no reweighting applies.
+    assert _prepared([1.0] * 21, MainSearch.Config()) == [
+        list(range(10, 31)),
+        [1 / 21] * 21,
+    ]
+    # A peak exactly at the relative floor stays.
+    assert _prepared([1.0, 0.5, 0.2, 0.1], MainSearch.Config(floor=0.5))[0] == [10, 11]
+    assert _prepared([0.2, 1.0, 0.5], MainSearch.Config(max_peaks=2))[0] == [11, 12]
+    assert _prepared([0.0, 0.0], MainSearch.Config()) == [[], []]
+    assert _prepared([], MainSearch.Config()) == [[], []]
+
+
+def _prepared(intensity: list[float], config: MainSearch.Config) -> list[list[float]]:
+    """Prepare peaks at masses 10, 11, ... and return masses and weights as lists."""
+    values = np.array(intensity, np.float64)
+    mass = np.arange(len(values), dtype=np.float64) + 10
+    mz, weights = config.make().prepare((mass, values))
+    return [mz.tolist(), weights.tolist()]
+
+
+def test_low_entropy_reweighting_gives_both_engines_the_closed_form_shares() -> None:
+    # Weights 3/4 and 1/4 have entropy log 4 - (3/4) log 3 < 3; raised to
+    # 1/4 + entropy/4 and renormalized, the weak share is 1 / (1 + 3**exponent).
+    exponent = 0.25 + (math.log(4) - 0.75 * math.log(3)) / 4
+    weak = 1 / (1 + 3**exponent)
+    mass = np.array([10.0, 11.0])
+    main = MainSearch.Config().make().prepare((mass, np.array([3.0, 1.0])))[1]
+    # Both the weak weight and this closed form sit about 1 ulp from the exact share.
+    assert main.tolist() == pytest.approx([1 - weak, weak], rel=1e-15, abs=0)
+    second = (
+        SecondSearch.Config()
+        .make()
+        .prepare((mass.astype(np.float32), np.array([3.0, 1.0], np.float32)))[1]
+    )
+    assert second.tolist() == np.array([1 - weak, weak], np.float32).tolist()
+
+
+def test_unmatched_query_peaks_enter_both_mixtures_at_their_own_weight() -> None:
+    # Query weights 1/2 and 1/2 at 10 and 20 Da; one candidate peak each.
+    query = (np.array([10.0, 20.0]), np.array([1.0, 1.0]))
+    shifted = PeakStore(
+        offsets=np.array([0, 1], np.int64),
+        mz=np.array([15.0], np.float32),
+        intensity=np.array([1.0], np.float32),
+    )
+    rows = np.array([0], np.int64)
+    # One peak explains 20 Da and 10 Da stays unmatched, so the mixture is
+    # [3/4, 1/4] and the score (log 2 - 2 H(3/4, 1/4)) / log 4 + 1.
+    expected = [float(np.float32(0.75 * math.log2(3) - 0.5))]
+    main = MainSearch.Config().make()
+    hybrid = main.score(query, store=shifted, candidates=rows, shifts=np.array([5.0]))
+    assert hybrid.tolist() == expected
+    direct = replace(shifted, mz=np.array([10.0], np.float32))
+    # Shifted by 10, the directly matched peak keeps 10 Da and leaves 20 Da unmatched.
+    assert (
+        main.score(query, store=direct, candidates=rows, shifts=np.array([10.0]))
+    ).tolist() == expected
+    search = SecondSearch.Config().make()
+    prepared = search.prepare(
+        (query[0].astype(np.float32), query[1].astype(np.float32)),
+    )
+    # The second engine sums the matched pair, then divides the mixture by 2.
+    assert search.score(prepared, store=direct, candidates=rows).tolist() == expected
+    assert (
+        search.score(
+            prepared,
+            store=shifted,
+            candidates=rows,
+            shifts=np.array([5.0], np.float32),
+        ).tolist()
+        == expected
     )
 
 
@@ -2218,6 +2241,24 @@ def test_reaction_asset_writer_keeps_all_requests_outputs_and_provenance(
             chemistry=_DerivativesPreparation(),
         )
     assert parquet.read_table(tmp_path / "empty" / "results.parquet").num_rows == 0
+
+
+def test_shifted_search_keeps_direct_matches_and_adds_the_shifted_peak() -> None:
+    store = PeakStore(
+        offsets=np.array([0, 2], np.int64),
+        mz=np.array([10.0, 15.0], np.float32),
+        intensity=np.array([1.0, 1.0], np.float32),
+    )
+    search = MainSearch.Config().make()
+    query = (np.array([10.0, 20.0]), np.array([1.0, 1.0]))
+    rows = np.array([0], np.int64)
+    # Unshifted, one of two equal peaks matches: the mixture entropy costs one half.
+    assert search.score(query, store=store, candidates=rows).tolist() == pytest.approx(
+        [0.5],
+    )
+    # A 5 Da shift keeps the direct 10 Da match and explains 20 Da by the 15 Da peak.
+    shifted = search.score(query, store=store, candidates=rows, shifts=np.array([5.0]))
+    assert shifted.tolist() == pytest.approx([1.0])
 
 
 if __name__ == "__main__":

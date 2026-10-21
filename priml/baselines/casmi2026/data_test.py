@@ -18,7 +18,6 @@ import tempfile
 import types
 
 from pyarrow import Table, parquet
-from torch import Tensor
 from treekle import from_plain, json_loads, to_plain
 
 import numpy as np
@@ -58,7 +57,6 @@ from priml.baselines.casmi2026.main_engine import (
     MainFragmentTable,
 )
 from priml.baselines.casmi2026.pubchem import PubChemTable
-from priml.baselines.casmi2026.pubchem_test import decode, observe
 from priml.baselines.casmi2026.scripts import (
     admission,
     analog_data,
@@ -113,11 +111,9 @@ from priml.baselines.casmi2026.simulators import (
     SimulatorAdmissionTable,
 )
 from priml.baselines.casmi2026.testing import (
-    float32_comparands,
     identity_rows,
     write_identity,
 )
-from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 if TYPE_CHECKING:
@@ -126,7 +122,6 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from pyarrow import RecordBatch
     from rdkit import Chem
-    from torch import Tensor
 
     from priml.baselines.casmi2026.custom_types import (
         AtomicRow,
@@ -141,12 +136,6 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-
-_BASELINE: Final = _CWD
 
 
 def cache(root: Path) -> SpectrumData.Config:
@@ -2116,149 +2105,6 @@ class _FragmentGapDataGraphs:
 
 
 # fragnet_data_test.py.
-def test_standard_atom_projection_retains_every_field(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    expected = _observations(monkeypatch)
-    chemistry = fragnet_data.FragnetChemistry(IDENTITY_RDKIT)
-    actual: dict[str, Tensor] = {}
-    for index in range(27):
-        prefix = str(index)
-        value = _fragnet_data_decode(expected[f"{prefix}/input"])
-        atoms = chemistry.atoms(value)
-        actual[f"{prefix}/input"] = _fragnet_data_text(value)
-        actual[f"{prefix}/parsed"] = torch.tensor(atoms is not None)
-        if atoms is not None:
-            actual[f"{prefix}/raw/symbols"] = _fragnet_data_text(
-                "\0".join(atoms.symbols),
-            )
-            for name, values in (
-                ("hydrogens", atoms.hydrogens),
-                ("degree", atoms.degree),
-                ("charge", atoms.charge),
-                ("aromatic", atoms.aromatic),
-                ("bonds", atoms.bonds),
-                ("bond_aromatic", atoms.bond_aromatic),
-                ("bond_ring", atoms.bond_ring),
-            ):
-                actual[f"{prefix}/raw/{name}"] = torch.from_numpy(values)
-        record = molecular_record(atoms, masses=ELEMENT_MASSES)
-        actual[f"{prefix}/valid"] = torch.tensor(record is not None)
-        if record is not None:
-            for name in ("amass", "kind", "el", "nh", "bonds", "bring", "el10"):
-                actual[f"{prefix}/{name}"] = torch.from_numpy(record[name])
-            actual[f"{prefix}/mass"] = torch.tensor(record["mass"], dtype=torch.float64)
-    assert_tensor_golden(
-        _SCRIPTS_DIR.parent / "testdata/fragnet_records.pt",
-        float32_comparands(actual),
-    )
-    with pytest.raises(
-        ValueError,
-        match=r"^Fragnet preparation requires RDKit 2026\.03\.3\.$",
-    ):
-        _ = fragnet_data.FragnetChemistry(SIMULATOR_RDKIT)
-
-
-def test_writer_retains_all_duplicate_rows_and_empty_stream_layouts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    expected = _observations(monkeypatch)
-    value = _fragnet_data_decode(expected["0/input"])
-    reference = molecular_record(
-        fragnet_data.FragnetChemistry(IDENTITY_RDKIT).atoms(value),
-        masses=ELEMENT_MASSES,
-    )
-    assert reference is not None
-    invalid = next(
-        _fragnet_data_decode(expected[f"{index}/input"])
-        for index in range(27)
-        if not bool(expected[f"{index}/parsed"])
-    )
-    request, output = tmp_path / "input.parquet", tmp_path / "nested" / "output"
-    smiles = [value] * 3 + [invalid]
-    parquet.write_table(
-        Table.from_pydict({"smiles": smiles, "unrelated": ["unused"] * len(smiles)}),
-        request,
-    )
-    fragnet_data.prepare_fragnet(
-        request,
-        output=output,
-        version=IDENTITY_RDKIT,
-        batch_rows=3,
-    )
-    metadata = parquet.ParquetFile(output / "molecules.parquet")
-    assert metadata.num_row_groups == 2
-    assert metadata.read().column("smiles").to_pylist() == smiles
-    table = FragnetTable(output)
-    for index in range(3):
-        record = table.row(index)
-        assert record is not None
-        for name in ("amass", "kind", "el", "nh", "bonds", "bring", "el10"):
-            np.testing.assert_array_equal(record[name], reference[name], strict=True)
-        assert record["mass"] == reference["mass"]
-    assert table.row(3) is None
-    with pytest.raises(ValueError, match="batch_rows must be positive"):
-        fragnet_data.prepare_fragnet(
-            request,
-            output=tmp_path / "none",
-            version=IDENTITY_RDKIT,
-            batch_rows=0,
-        )
-    with pytest.raises(FileExistsError):
-        fragnet_data.prepare_fragnet(request, output=output, version=IDENTITY_RDKIT)
-    with pytest.raises(ValueError, match="aliases protected input"):
-        fragnet_data.prepare_fragnet(request, output=request, version=IDENTITY_RDKIT)
-    for index, values in enumerate((list[str](), [invalid])):
-        source, destination = (
-            tmp_path / f"empty-{index}.parquet",
-            tmp_path / f"empty-{index}",
-        )
-        parquet.write_table(Table.from_pydict({"smiles": values}), source)
-        fragnet_data.prepare_fragnet(source, output=destination, version=IDENTITY_RDKIT)
-        loaded = FragnetTable(destination)
-        assert len(loaded.metadata) == len(values)
-        assert loaded.bonds.shape == (0, 2)
-        assert loaded.amass.shape == (0,)
-        assert loaded.atom_offsets.tolist() == [0] * (len(values) + 1)
-        assert loaded.bond_offsets.tolist() == [0] * (len(values) + 1)
-        if values:
-            assert loaded.row(0) is None
-
-
-def _observations(monkeypatch: pytest.MonkeyPatch) -> dict[str, Tensor]:
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata/fragnet_records.pt")
-    molecules: dict[str, _ObservedMolecule | None] = {}
-    for index in range(27):
-        prefix = str(index)
-        value = _fragnet_data_decode(expected[f"{prefix}/input"])
-        if not bool(expected[f"{prefix}/parsed"]):
-            molecules[value] = None
-            continue
-        symbols = _fragnet_data_decode(expected[f"{prefix}/raw/symbols"]).split("\0")
-        if symbols == [""]:
-            symbols = list[str]()
-        atoms = [
-            _ObservedAtom(expected, prefix=prefix, index=position, symbol=symbol)
-            for position, symbol in enumerate(symbols)
-        ]
-        bonds = [
-            _ObservedBond(expected, prefix=prefix, index=position)
-            for position in range(len(expected[f"{prefix}/raw/bonds"]))
-        ]
-        molecules[value] = _ObservedMolecule(atoms, bonds=bonds)
-
-    def parse(value: str) -> _ObservedMolecule | None:
-        return molecules[value]
-
-    def context(version: str) -> types.SimpleNamespace:
-        assert version == IDENTITY_RDKIT
-        return types.SimpleNamespace(chem=types.SimpleNamespace(MolFromSmiles=parse))
-
-    monkeypatch.setattr(fragnet_data, "MolecularContext", context)
-    return expected
-
-
 class _ObservedMolecule:
     def __init__(
         self,
@@ -2275,61 +2121,230 @@ class _ObservedMolecule:
         return self.bonds
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
 class _ObservedAtom:
-    def __init__(
-        self,
-        expected: dict[str, Tensor],
-        *,
-        prefix: str,
-        index: int,
-        symbol: str,
-    ) -> None:
-        self.expected, self.prefix, self.index, self.symbol = (
-            expected,
-            prefix,
-            index,
-            symbol,
-        )
+    symbol: str
+    hydrogens: int
+    degree: int
+    charge: int = 0
+    aromatic: bool = False
 
     def GetSymbol(self) -> str:  # noqa: N802 -- Standard scientific-library boundary.
         return self.symbol
 
     def GetTotalNumHs(self) -> int:  # noqa: N802 -- Standard scientific-library boundary.
-        return int(self.expected[f"{self.prefix}/raw/hydrogens"][self.index])
+        return self.hydrogens
 
     def GetDegree(self) -> int:  # noqa: N802 -- Standard scientific-library boundary.
-        return int(self.expected[f"{self.prefix}/raw/degree"][self.index])
+        return self.degree
 
     def GetFormalCharge(self) -> int:  # noqa: N802 -- Standard scientific-library boundary.
-        return int(self.expected[f"{self.prefix}/raw/charge"][self.index])
+        return self.charge
 
     def GetIsAromatic(self) -> bool:  # noqa: N802 -- Standard scientific-library boundary.
-        return bool(self.expected[f"{self.prefix}/raw/aromatic"][self.index])
+        return self.aromatic
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
 class _ObservedBond:
-    def __init__(self, expected: dict[str, Tensor], *, prefix: str, index: int) -> None:
-        self.expected, self.prefix, self.index = expected, prefix, index
+    begin: int
+    end: int
+    aromatic: bool = False
+    ring: bool = False
 
     def GetBeginAtomIdx(self) -> int:  # noqa: N802 -- Standard scientific-library boundary.
-        return int(self.expected[f"{self.prefix}/raw/bonds"][self.index, 0])
+        return self.begin
 
     def GetEndAtomIdx(self) -> int:  # noqa: N802 -- Standard scientific-library boundary.
-        return int(self.expected[f"{self.prefix}/raw/bonds"][self.index, 1])
+        return self.end
 
     def GetIsAromatic(self) -> bool:  # noqa: N802 -- Standard scientific-library boundary.
-        return bool(self.expected[f"{self.prefix}/raw/bond_aromatic"][self.index])
+        return self.aromatic
 
     def IsInRing(self) -> bool:  # noqa: N802 -- Standard scientific-library boundary.
-        return bool(self.expected[f"{self.prefix}/raw/bond_ring"][self.index])
+        return self.ring
 
 
-def _fragnet_data_decode(value: Tensor) -> str:
-    return bytes(from_plain(cast(object, value.tolist()), list[int])).decode()
+def _observed_molecules() -> dict[str, _ObservedMolecule | None]:
+    """Acetic acid, pyrrole, a sodium cation, a wildcard, empty and unparsed rows."""
+    pyrrole = [
+        _ObservedAtom(symbol=symbol, hydrogens=1, degree=2, aromatic=True)
+        for symbol in "CCCNC"
+    ]
+    return {
+        "CC(=O)O": _ObservedMolecule(
+            [
+                _ObservedAtom(symbol=symbol, hydrogens=hydrogens, degree=degree)
+                for symbol, hydrogens, degree in (
+                    ("C", 3, 1),
+                    ("C", 0, 3),
+                    ("O", 0, 1),
+                    ("O", 1, 1),
+                )
+            ],
+            bonds=[
+                _ObservedBond(begin=begin, end=end)
+                for begin, end in ((0, 1), (1, 2), (1, 3))
+            ],
+        ),
+        "c1cc[nH]c1": _ObservedMolecule(
+            pyrrole,
+            bonds=[
+                _ObservedBond(
+                    begin=begin,
+                    end=(begin + 1) % 5,
+                    aromatic=True,
+                    ring=True,
+                )
+                for begin in range(5)
+            ],
+        ),
+        "[Na+]": _ObservedMolecule(
+            [_ObservedAtom(symbol="Na", hydrogens=0, degree=0, charge=1)],
+            bonds=[],
+        ),
+        "*C": _ObservedMolecule(
+            [
+                _ObservedAtom(symbol="*", hydrogens=0, degree=1),
+                _ObservedAtom(symbol="C", hydrogens=3, degree=1),
+            ],
+            bonds=[_ObservedBond(begin=0, end=1)],
+        ),
+        "": _ObservedMolecule([], bonds=[]),
+        "invalid": None,
+    }
 
 
-def _fragnet_data_text(value: str) -> Tensor:
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
+def _observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    molecules = _observed_molecules()
+
+    def context(version: str) -> types.SimpleNamespace:
+        assert version == IDENTITY_RDKIT
+        return types.SimpleNamespace(
+            chem=types.SimpleNamespace(MolFromSmiles=molecules.__getitem__),
+        )
+
+    monkeypatch.setattr(fragnet_data, "MolecularContext", context)
+
+
+def test_standard_atom_projection_retains_every_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _observe(monkeypatch)
+    chemistry = fragnet_data.FragnetChemistry(IDENTITY_RDKIT)
+    acid = chemistry.atoms("CC(=O)O")
+    assert acid is not None
+    assert acid.symbols == ("C", "C", "O", "O")
+    for values, expected in (
+        (acid.hydrogens, [3, 0, 0, 1]),
+        (acid.degree, [1, 3, 1, 1]),
+        (acid.charge, [0, 0, 0, 0]),
+        (acid.aromatic, [0, 0, 0, 0]),
+    ):
+        assert values.dtype == np.int64
+        assert values.tolist() == expected
+    assert acid.bonds.dtype == np.int64
+    assert acid.bonds.tolist() == [[0, 1], [1, 2], [1, 3]]
+    assert acid.bond_aromatic.dtype == acid.bond_ring.dtype == np.bool_
+    assert acid.bond_aromatic.tolist() == acid.bond_ring.tolist() == [False] * 3
+    ring = chemistry.atoms("c1cc[nH]c1")
+    assert ring is not None
+    assert ring.aromatic.tolist() == [1] * 5
+    assert ring.bonds.tolist() == [[0, 1], [1, 2], [2, 3], [3, 4], [4, 0]]
+    assert ring.bond_aromatic.tolist() == ring.bond_ring.tolist() == [True] * 5
+    ion = chemistry.atoms("[Na+]")
+    assert ion is not None
+    assert ion.charge.tolist() == [1]
+    assert ion.bonds.shape == (0, 2)
+    empty = chemistry.atoms("")
+    assert empty is not None
+    assert empty.symbols == ()
+    assert empty.bonds.shape == (0, 2)
+    assert chemistry.atoms("invalid") is None
+    record = molecular_record(ion, masses=ELEMENT_MASSES)
+    assert record is not None
+    assert (record["el"].tolist(), record["el10"].tolist()) == ([6], [9])
+    assert record["mass"] == ELEMENT_MASSES["Na"]
+    for value in ("*C", "", "invalid"):
+        assert molecular_record(chemistry.atoms(value), masses=ELEMENT_MASSES) is None
+    with pytest.raises(
+        ValueError,
+        match=r"^Fragnet preparation requires RDKit 2026\.03\.3\.$",
+    ):
+        _ = fragnet_data.FragnetChemistry(SIMULATOR_RDKIT)
+
+
+def test_writer_retains_all_duplicate_rows_and_empty_stream_layouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _observe(monkeypatch)
+    chemistry = fragnet_data.FragnetChemistry(IDENTITY_RDKIT)
+    request, output = tmp_path / "input.parquet", tmp_path / "nested" / "output"
+    smiles = ["CC(=O)O"] * 3 + ["invalid", "c1cc[nH]c1", "*C"]
+    parquet.write_table(
+        Table.from_pydict({"smiles": smiles, "unrelated": ["unused"] * len(smiles)}),
+        request,
+    )
+    fragnet_data.prepare_fragnet(
+        request,
+        output=output,
+        version=IDENTITY_RDKIT,
+        batch_rows=3,
+    )
+    metadata = parquet.ParquetFile(output / "molecules.parquet")
+    assert metadata.num_row_groups == 2
+    rows = metadata.read()
+    assert rows.column("smiles").to_pylist() == smiles
+    assert rows.column("parsed").to_pylist() == [True] * 3 + [False, True, True]
+    assert rows.column("valid").to_pylist() == [True] * 3 + [False, True, False]
+    assert rows.column("symbols").to_pylist()[5] == ["*", "C"]
+    assert rows.column("bonds").to_pylist()[0] == [[0, 1], [1, 2], [1, 3]]
+    assert rows.column("bond_ring").to_pylist()[3] == []
+    table = FragnetTable(output)
+    assert table.atom_offsets.tolist() == [0, 4, 8, 12, 12, 17, 17]
+    assert table.bond_offsets.tolist() == [0, 3, 6, 9, 9, 14, 14]
+    for index, value in (
+        (0, "CC(=O)O"),
+        (1, "CC(=O)O"),
+        (2, "CC(=O)O"),
+        (4, smiles[4]),
+    ):
+        record = table.row(index)
+        reference = molecular_record(chemistry.atoms(value), masses=ELEMENT_MASSES)
+        assert record is not None
+        assert reference is not None
+        for name in ("amass", "kind", "el", "nh", "bonds", "bring", "el10"):
+            np.testing.assert_array_equal(record[name], reference[name], strict=True)
+        assert record["mass"] == reference["mass"]
+    assert table.row(3) is None
+    assert table.row(5) is None
+    with pytest.raises(ValueError, match="batch_rows must be positive"):
+        fragnet_data.prepare_fragnet(
+            request,
+            output=tmp_path / "none",
+            version=IDENTITY_RDKIT,
+            batch_rows=0,
+        )
+    with pytest.raises(FileExistsError):
+        fragnet_data.prepare_fragnet(request, output=output, version=IDENTITY_RDKIT)
+    with pytest.raises(ValueError, match="aliases protected input"):
+        fragnet_data.prepare_fragnet(request, output=request, version=IDENTITY_RDKIT)
+    for index, values in enumerate((list[str](), ["invalid"])):
+        source, destination = (
+            tmp_path / f"empty-{index}.parquet",
+            tmp_path / f"empty-{index}",
+        )
+        parquet.write_table(Table.from_pydict({"smiles": values}), source)
+        fragnet_data.prepare_fragnet(source, output=destination, version=IDENTITY_RDKIT)
+        loaded = FragnetTable(destination)
+        assert len(loaded.metadata) == len(values)
+        assert loaded.bonds.shape == (0, 2)
+        assert loaded.amass.shape == (0,)
+        assert loaded.atom_offsets.tolist() == [0] * (len(values) + 1)
+        assert loaded.bond_offsets.tolist() == [0] * (len(values) + 1)
+        if values:
+            assert loaded.row(0) is None
 
 
 # glacier_data_test.py.
@@ -3111,33 +3126,45 @@ def test_writer_retains_all_rows_bounded_batches_and_empty_arrays(
 
 
 def test_complete_rounded_fragment_rows_and_cap_encounter_order() -> None:
-    golden = _SCRIPTS_DIR.parent / "testdata" / "main_fragments.pt"
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    for index in range(13):
-        prefix = str(index)
-        for name in ("input", "valid"):
-            actual[f"{prefix}/{name}"] = expected[f"{prefix}/{name}"].clone()
-        graph = None
-        if bool(expected[f"{prefix}/valid"]):
-            for name in ("weights", "bonds"):
-                actual[f"{prefix}/{name}"] = expected[f"{prefix}/{name}"].clone()
-            weights = cast("NDArray[np.float64]", actual[f"{prefix}/weights"].numpy())
-            bonds = cast("NDArray[np.int32]", actual[f"{prefix}/bonds"].numpy())
-            graph = weights, bonds
-            for depth, capacity in ((0, 5), (1, 5), (2, 5), (2, 1)):
-                actual[f"{prefix}/kernel/{depth}/{capacity}"] = torch.from_numpy(
-                    fragment_masses(
-                        weights,
-                        bonds=bonds,
-                        depth=depth,
-                        capacity=capacity,
-                    ),
-                )
-        for depth, row in zip((2, 1), fragment_rows(graph)[1:], strict=True):
-            actual[f"{prefix}/depth{depth}"] = torch.from_numpy(row.astype(np.float64))
-        actual[f"{prefix}/fragments"] = torch.from_numpy(base_fragment_masses(graph))
-    assert_tensor_golden(golden, float32_comparands(actual, inputs=("*/weights",)))
+    # 1 + 2**-10 is exact in binary and rounds up to 1.001 Da.
+    weights = np.array([1.0009765625, 2.0, 4.0])
+    chain = np.array([[0, 1], [1, 2]], dtype=np.int32)
+    deep = [1.001, 2.0, 3.001, 4.0, 6.0, 7.001]
+    shallow = [1.001, 3.001, 4.0, 6.0, 7.001]
+    for depth, capacity, expected in (
+        (2, 200_000, deep),
+        (1, 200_000, shallow),
+        (0, 200_000, shallow),
+        (2, 3, [1.001, 6.0, 7.001]),
+        (2, 2, [1.001, 7.001]),
+        (2, 1, [7.001]),
+    ):
+        masses = fragment_masses(weights, bonds=chain, depth=depth, capacity=capacity)
+        assert masses.tolist() == expected
+    ring = np.array([[0, 1], [1, 2], [2, 0]], dtype=np.int32)
+    assert fragment_masses(weights, bonds=ring, depth=1).tolist() == [7.001]
+    assert fragment_masses(weights, bonds=ring).tolist() == [
+        1.001,
+        2.0,
+        3.001,
+        4.0,
+        5.001,
+        6.0,
+        7.001,
+    ]
+    base, two, one = fragment_rows((weights, chain))
+    assert base.tolist() == deep
+    assert two.dtype == one.dtype == np.float32
+    assert two.tolist() == np.array(deep, np.float32).tolist()
+    assert one.tolist() == np.array(shallow, np.float32).tolist()
+    lone = (np.array([1.0009765625]), np.zeros((0, 2), np.int32))
+    base, two, one = fragment_rows(lone)
+    assert base.tolist() == two.tolist() == one.tolist() == [1.0009765625]
+    assert two is not one
+    assert base_fragment_masses(lone).tolist() == [1.0009765625]
+    base, two, one = fragment_rows(None)
+    assert (base.dtype, two.dtype, one.dtype) == (np.float64, np.float32, np.float32)
+    assert base.shape == two.shape == one.shape == (0,)
 
 
 def test_fragment_graph_preserves_weights_through_nonroot_bond_endpoints() -> None:
@@ -3323,7 +3350,6 @@ def _usage_error(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
 
 
 def test_structures_command_keeps_every_input_and_dispatches(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     flags = _parse("structures", "a.parquet", "b.pkl", "--output", "out")
@@ -3331,23 +3357,42 @@ def test_structures_command_keeps_every_input_and_dispatches(
     assert flags.output == Path("out")
     assert (flags.column, flags.version) == (None, IDENTITY_RDKIT)
     assert (flags.standardize, flags.keep_charged) == (False, False)
-    source = tmp_path / "source.parquet"
-    parquet.write_table(Table.from_pydict({"smiles": ["CCO"]}), source)
+    calls: list[tuple[list[Path], dict[str, object]]] = []
 
-    def construct(version: str) -> Molecules:
+    def prepare(inputs: list[Path], **kwargs: object) -> None:
+        calls.append((inputs, kwargs))
+
+    def construct(version: str) -> str:
         assert version == IDENTITY_RDKIT
-        return Molecules()
+        return "chemistry"
 
+    monkeypatch.setattr(scripts_prepare_data, "prepare", prepare)
     monkeypatch.setattr(scripts_prepare_data, "Chemistry", construct)
-    assert (
-        _run(monkeypatch, "structures", str(source), "--output", str(tmp_path / "o"))
-        == 0
-    )
-    assert ChemicalTable.load(tmp_path / "o").input_smiles == ("CCO",)
+    argv = ("structures", "a.parquet", "b.pkl", "--output", "out")
+    assert _run(monkeypatch, *argv) == 0
+    flagged = ("--column", "structure", "--standardize", "--keep-charged")
+    assert _run(monkeypatch, *argv, *flagged) == 0
+    inputs = [Path("a.parquet"), Path("b.pkl")]
+    options: dict[str, object] = {"output": Path("out"), "chemistry": "chemistry"}
+    assert calls == [
+        (
+            inputs,
+            {**options, "column": None, "standardize": False, "keep_charged": False},
+        ),
+        (
+            inputs,
+            {
+                **options,
+                "column": "structure",
+                "standardize": True,
+                "keep_charged": True,
+            },
+        ),
+    ]
     _usage_error(monkeypatch)
     _usage_error(monkeypatch, "structures", "--output", "out")
-    _usage_error(monkeypatch, "structures", str(source))
-    _usage_error(monkeypatch, "unknown", str(source), "--output", "out")
+    _usage_error(monkeypatch, "structures", "a.parquet")
+    _usage_error(monkeypatch, "unknown", "a.parquet", "--output", "out")
 
 
 def test_simulator_commands_default_to_the_directories_their_readers_use() -> None:
@@ -3571,6 +3616,13 @@ def test_pubchem_preparation_requires_the_exact_scientific_release() -> None:
         _ = PubChemChemistry(SIMULATOR_RDKIT)
 
 
+def _ethanol_bits() -> NDArray[np.uint8]:
+    """Pack ethanol's raw bits 0, 4096, 16384 and 16550 into 2069 bytes."""
+    packed = np.zeros(2069, np.uint8)
+    packed[[0, 512, 2048, 2068]] = [128, 128, 128, 2]
+    return packed
+
+
 def test_complete_primitive_records_and_independent_sdk_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3580,49 +3632,33 @@ def test_complete_primitive_records_and_independent_sdk_failures(
         "GenMACCSKeys",
         ObservedChemistry(IDENTITY_RDKIT).maccs_keys,
     )
-    golden = _SCRIPTS_DIR.parent / "testdata/pubchem_preparation.pt"
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
     chemistry = PubChemChemistry(IDENTITY_RDKIT)
-    strings = [decode(expected[f"rows/smiles/{index}"]) for index in range(8)]
-    parsed: list[bool] = []
-    partial: list[NDArray[np.uint8]] = []
-    valid: list[bool] = []
-    full: list[NDArray[np.uint8]] = []
-    keys: list[str | None] = []
-    for value in strings:
-        is_parsed, ecfp4, is_valid, raw_fp, key = chemistry.record(value)
-        parsed.append(is_parsed)
-        partial.append(ecfp4)
-        valid.append(is_valid)
-        full.append(raw_fp)
-        keys.append(key)
-    observe(
-        actual,
-        "rows",
-        {
-            "smiles": strings,
-            "parsed": np.array(parsed, np.bool_),
-            "raw_valid": np.array(valid, np.bool_),
-            "ecfp4": np.stack(partial),
-            "raw_fp": np.stack(full),
-            "keys": keys,
-        },
-    )
-    assert_tensor_golden(golden, actual)
-    parsed_value, partial_value, valid_value, full_value, key = chemistry.record(
-        "raw_error",
-    )
-    assert parsed_value
-    assert not valid_value
-    assert key == decode(expected["rows/keys/0"])
-    np.testing.assert_array_equal(partial_value, expected["rows/ecfp4"][0].numpy())
-    np.testing.assert_array_equal(full_value, np.zeros(2069, np.uint8))
-    parsed_value, _, valid_value, full_value, key = chemistry.record("key_error")
-    assert parsed_value
-    assert valid_value
-    assert key is None
-    np.testing.assert_array_equal(full_value, expected["rows/raw_fp"][0].numpy())
+    parsed, partial, valid, full, key = chemistry.record("CCO")
+    assert (parsed, valid, key) == (True, True, "LFQSCWFLJHTTHZ")
+    assert partial.dtype == full.dtype == np.uint8
+    np.testing.assert_array_equal(partial, _ethanol_bits()[:512])
+    np.testing.assert_array_equal(full, _ethanol_bits())
+    # The last bit of every generator block lands in that block's last byte.
+    _, partial, _, full, key = chemistry.record("C[N+](C)(C)C")
+    assert key == "QEMXHQIAXOOASZ"
+    assert np.flatnonzero(partial).tolist() == [511]
+    assert np.flatnonzero(full).tolist() == [511, 1023, 1279, 1535, 1791, 2047]
+    assert set(full[full > 0].tolist()) == {1}
+    for value, expected in (
+        ("invalid", (False, False, None)),
+        ("", (True, True, None)),
+    ):
+        parsed, partial, valid, full, key = chemistry.record(value)
+        assert (parsed, valid, key) == expected
+        np.testing.assert_array_equal(partial, np.zeros(512, np.uint8))
+        np.testing.assert_array_equal(full, np.zeros(2069, np.uint8))
+    parsed, partial, valid, full, key = chemistry.record("raw_error")
+    assert (parsed, valid, key) == (True, False, "LFQSCWFLJHTTHZ")
+    np.testing.assert_array_equal(partial, _ethanol_bits()[:512])
+    np.testing.assert_array_equal(full, np.zeros(2069, np.uint8))
+    parsed, partial, valid, full, key = chemistry.record("key_error")
+    assert (parsed, valid, key) == (True, True, None)
+    np.testing.assert_array_equal(full, _ethanol_bits())
 
 
 def test_writer_retains_duplicate_rows_full_layouts_and_empty_requests(
@@ -3635,7 +3671,6 @@ def test_writer_retains_duplicate_rows_full_layouts_and_empty_requests(
         "GenMACCSKeys",
         ObservedChemistry(IDENTITY_RDKIT).maccs_keys,
     )
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata/pubchem_preparation.pt")
     source, destination = tmp_path / "input.parquet", tmp_path / "nested" / "prepared"
     smiles = ["CCO"] * 3 + ["invalid", "", "raw_error", "key_error"]
     parquet.write_table(
@@ -3658,9 +3693,9 @@ def test_writer_retains_duplicate_rows_full_layouts_and_empty_requests(
         record = table.row(index)
         assert record.parsed
         assert record.raw_valid
-        assert record.key == decode(expected["rows/keys/0"])
-        np.testing.assert_array_equal(record.ecfp4, expected["rows/ecfp4"][0].numpy())
-        np.testing.assert_array_equal(record.raw_fp, expected["rows/raw_fp"][0].numpy())
+        assert record.key == "LFQSCWFLJHTTHZ"
+        np.testing.assert_array_equal(record.ecfp4, _ethanol_bits()[:512])
+        np.testing.assert_array_equal(record.raw_fp, _ethanol_bits())
     assert not table.row(3).parsed
     assert table.row(4).parsed
     assert table.row(4).raw_valid
@@ -3721,7 +3756,7 @@ def test_partial_radius_and_full_upstream_key_are_independent_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed = ObservedChemistry(IDENTITY_RDKIT)
-    observed.raw[0, 4096] ^= 1
+    observed.bits["CCO"][4097] = 1
 
     def chemistry(version: str) -> ObservedChemistry:
         assert version == IDENTITY_RDKIT
@@ -3729,35 +3764,42 @@ def test_partial_radius_and_full_upstream_key_are_independent_contracts(
 
     def upstream_key(value: str) -> str:
         assert value == "CCO"
-        return decode(observed.expected["rows/keys/0"]) + "-UHFFFAOYSA-N"
+        return "LFQSCWFLJHTTHZ-UHFFFAOYSA-N"
 
     observed.chem.MolToInchiKey = upstream_key
     monkeypatch.setattr(pubchem_data, "Chemistry", chemistry)
     monkeypatch.setattr(pubchem_data, "GenMACCSKeys", observed.maccs_keys)
     prepared = PubChemChemistry(IDENTITY_RDKIT)
-    _, partial, _, _, key = prepared.record("CCO")
+    _, partial, _, full, key = prepared.record("CCO")
     if field == "partial":
-        np.testing.assert_array_equal(
-            partial,
-            observed.expected["rows/ecfp4"][0].numpy(),
-        )
+        np.testing.assert_array_equal(partial, _ethanol_bits()[:512])
+        assert full[512] == 128 + 64
     else:
-        assert key == decode(observed.expected["rows/keys/0"])
+        assert key == "LFQSCWFLJHTTHZ"
 
 
 class ObservedChemistry:
-    """Replay every full source SDK block through the native standard-library adapter."""
+    """Replay literal parser, fingerprint and key outcomes through the SDK adapter."""
 
     def __init__(self, version: str) -> None:
         assert version == IDENTITY_RDKIT
-        self.expected = read_tensors(
-            _SCRIPTS_DIR.parent / "testdata/pubchem_preparation.pt",
-        )
-        self.raw = np.unpackbits(self.expected["rows/raw_fp"].numpy(), axis=1)
-        self.positions = {
-            decode(self.expected[f"rows/smiles/{index}"]): index for index in range(8)
+        self.bits = {
+            value: np.zeros(16_551, np.uint8)
+            for value in ("CCO", "C[N+](C)(C)C", "", "raw_error", "key_error")
         }
-        self.positions.update(raw_error=0, key_error=0)
+        for value, positions in (
+            ("CCO", [0, 4096, 16_384, 16_550]),
+            ("C[N+](C)(C)C", [4095, 8191, 10_239, 12_287, 14_335, 16_383]),
+            ("raw_error", [0]),
+            ("key_error", [0, 4096, 16_384, 16_550]),
+        ):
+            self.bits[value][positions] = 1
+        self.keys = {
+            "CCO": "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
+            "raw_error": "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
+            "C[N+](C)(C)C": "QEMXHQIAXOOASZ-UHFFFAOYSA-N",
+            "": "",
+        }
         self.chem = types.SimpleNamespace(
             MolFromSmiles=self.parse,
             MolToInchiKey=self.key,
@@ -3774,8 +3816,7 @@ class ObservedChemistry:
         )
 
     def parse(self, value: str) -> str | None:
-        index = self.positions[value]
-        return value if bool(self.expected["rows/parsed"][index]) else None
+        return value if value in self.bits else None
 
     def canonicalize(self, value: str) -> str:
         return value
@@ -3783,21 +3824,13 @@ class ObservedChemistry:
     def key(self, value: str) -> str:
         if value == "key_error":
             raise OSError("independent key error")
-        index = self.positions[value]
-        return (
-            decode(self.expected[f"rows/keys/{index}"])
-            if f"rows/keys/{index}/none" not in self.expected
-            else ""
-        )
+        return self.keys[value]
 
     def maccs_keys(self, value: str) -> list[int]:
         if value == "raw_error":
             raise OSError("independent raw-fingerprint error")
         return from_plain(
-            cast(
-                object,
-                self.raw[self.positions[value], 16_384:16_551].tolist(),
-            ),
+            cast(object, self.bits[value][16_384:16_551].tolist()),
             list[int],
         )
 
@@ -3808,8 +3841,7 @@ class ObservedFingerprint:
 
     def fingerprint(self, value: str) -> NDArray[np.uint8]:
         bounds = (0, 4096, 8192, 10_240, 12_288, 14_336, 16_384)
-        row = self.owner.positions[value]
-        return self.owner.raw[row, bounds[self.index] : bounds[self.index + 1]]
+        return self.owner.bits[value][bounds[self.index] : bounds[self.index + 1]]
 
 
 # ragged_test.py.

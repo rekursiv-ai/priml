@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Final, cast, get_type_hints
+from typing import TYPE_CHECKING, TypedDict, cast, get_type_hints
 
 import json
 import math
@@ -12,12 +11,10 @@ import sys
 
 from numpy.typing import NDArray
 from pyarrow import Table, parquet
-from torch import Tensor
 from treekle import ReadError, from_plain, to_plain
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.casmi2026.custom_types import ReactionHeader, ReactionRequest
 from priml.baselines.casmi2026.isolated import (
@@ -52,13 +49,10 @@ from priml.baselines.casmi2026.isolated import (
     second_neutral_mass,
     v6_reaction_rules,
 )
-from priml.baselines.casmi2026.main_engine_test import Prepared
-from priml.baselines.casmi2026.testing import float32_comparands
-from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-_BASELINE: Final = _CWD
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_element_masses_are_monoisotopic_and_lead_with_the_organic_elements() -> None:
@@ -363,14 +357,27 @@ def _write_graphs(directory: Path) -> None:
     )
 
 
-def test_complete_reaction_vocabulary_and_every_mass_plan() -> None:
-    rules = reaction_rules()
-    deltas = [rule.mass for rule in rules] + [0.0, 0.003, -0.003, 1000.0]
-    actual = {"names": _reactions_text("\0".join(rule.name for rule in rules))}
-    for index, delta in enumerate(deltas):
-        plans = matching_plans(rules, delta, tolerance=0.003, max_reactions=2)
-        actual[f"match/{index}"] = _plans([list(plan) for plan in plans])
-    assert_tensor_golden(_CWD / "testdata" / "derivatives.pt", actual)
+def test_both_vocabularies_keep_their_order_and_list_single_plans_first() -> None:
+    v4, v6 = reaction_rules(), v6_reaction_rules()
+    assert (len(v4), len(v6)) == (46, 71)
+    assert len({rule.name for rule in v6}) == len(v6)
+    assert v6[0] == Reaction(
+        name="hydroxyl_arom",
+        smarts="[c;H1:1]>>[c:1]O",
+        delta=(("O", 1),),
+    )
+    assert v6[3].delta == v4[3].delta == (("C", 1), ("H", 2))
+    # The two dehexose rules are distinct duplicates of one mass.
+    assert (v4[37].name, v4[38].name) == ("dehexose", "dehexose2")
+    assert v4[37].mass == v4[38].mass
+    for rules in (v4, v6):
+        oxygen = matching_plans(rules, 15.9949146196, tolerance=0.003, max_reactions=2)
+        assert oxygen[:3] == [(0,), (1,), (2,)]
+        assert [len(plan) for plan in oxygen] == sorted(len(plan) for plan in oxygen)
+        assert len(oxygen[-1]) == 2
+        assert matching_plans(rules, 1000.0, tolerance=0.003, max_reactions=2) == []
+    assert (37,) in matching_plans(v4, v4[37].mass, tolerance=0.0, max_reactions=1)
+    assert (38,) in matching_plans(v4, v4[37].mass, tolerance=0.0, max_reactions=1)
 
 
 def test_mass_plans_keep_single_before_pair_order_and_cancel_element_counts() -> None:
@@ -404,40 +411,6 @@ def test_reaction_element_table_covers_every_recipe_element(element: str) -> Non
         delta=((element, 1), (element, -1)),
     )
     assert matching_plans((single,), 0.0, tolerance=0.0, max_reactions=1) == [(0,)]
-
-
-def test_complete_v6_grammar_and_all_mass_plan_matches_are_hermetic() -> None:
-    deltas = (0.0, 0.003, -0.003, 15.9949146196, 14.01565006414, 1000.0)
-    rules = v6_reaction_rules()
-    actual = {
-        "names": _reactions_text("\0".join(rule.name for rule in rules)),
-        "smarts": _reactions_text("\0".join(rule.smarts for rule in rules)),
-        "formula_deltas": _reactions_text(
-            "\n".join(
-                ";".join(f"{element}={count}" for element, count in rule.delta)
-                for rule in rules
-            ),
-        ),
-        "masses": torch.tensor([rule.mass for rule in rules], dtype=torch.float64),
-    }
-    for index, delta in enumerate(deltas):
-        plans = matching_plans(rules, delta, tolerance=0.003, max_reactions=2)
-        actual[f"match/{index}"] = _plans([list(plan) for plan in plans])
-    assert_tensor_golden(
-        _CWD / "testdata/v6_derivatives.pt",
-        float32_comparands(actual),
-    )
-
-
-def _plans(values: list[list[int]]) -> Tensor:
-    return torch.tensor(
-        [[plan[0], plan[1] if len(plan) == 2 else -1] for plan in values],
-        dtype=torch.int64,
-    ).reshape(-1, 2)
-
-
-def _reactions_text(value: str) -> Tensor:
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
 
 
 @pytest.mark.parametrize("protocol", [2, 3, 4, 5])
@@ -576,79 +549,199 @@ def test_raw_molecular_data_exposes_real_runtime_annotation_types() -> None:
     assert hints["bond_ring"] == NDArray[np.bool_]
 
 
-def test_mobile_hydrogen_assignments_follow_the_ordered_graph_labels(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setitem(sys.modules, "rdkit", None)
-    golden = _BASELINE / "testdata" / "fragnet_ordering.pt"
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    for index in range(20):
-        prefix = str(index)
-        actual[f"{prefix}/input"] = expected[f"{prefix}/input"].clone()
-        atoms = _atoms(expected, prefix)
-        record = molecular_record(atoms, masses=ELEMENT_MASSES)
-        actual[f"{prefix}/raw/symbols"] = torch.tensor(
-            list("\0".join(atoms.symbols).encode()),
-            dtype=torch.uint8,
-        )
-        for name, values in (
-            ("hydrogens", atoms.hydrogens),
-            ("degree", atoms.degree),
-            ("charge", atoms.charge),
-            ("aromatic", atoms.aromatic),
-            ("bonds", atoms.bonds),
-            ("bond_aromatic", atoms.bond_aromatic),
-            ("bond_ring", atoms.bond_ring),
-        ):
-            actual[f"{prefix}/raw/{name}"] = torch.from_numpy(values)
-        codes = from_plain(
-            cast(object, expected[f"{prefix}/wl/codes"].tolist()),
-            list[int],
-        )
-        actual[f"{prefix}/wl/codes"] = torch.tensor(codes, dtype=torch.int64)
-        actual[f"{prefix}/wl/labels"] = torch.tensor(
-            _labels(_properties(atoms), codes=codes),
-            dtype=torch.int64,
-        )
-        # fragnet_records.pt pins every other molecular_record field.
-        assert record is not None
-        actual[f"{prefix}/nh"] = torch.from_numpy(record["nh"])
-    assert_tensor_golden(golden, actual)
-
-
-def _atoms(expected: dict[str, Tensor], prefix: str) -> FragnetAtoms:
-    text = bytes(
-        from_plain(cast(object, expected[f"{prefix}/raw/symbols"].tolist()), list[int]),
-    ).decode()
+def atoms(
+    symbols: tuple[str, ...],
+    *,
+    hydrogens: list[int],
+    bonds: list[list[int]],
+    aromatic: bool = False,
+) -> FragnetAtoms:
+    """Build neutral primitives whose degrees follow the listed bonds."""
+    edges = np.array(bonds, np.int64).reshape(-1, 2)
+    count = len(symbols)
     return FragnetAtoms(
-        symbols=tuple(text.split("\0")) if text else (),
-        hydrogens=cast(
-            "NDArray[np.int64]",
-            expected[f"{prefix}/raw/hydrogens"].numpy(),
-        ).copy(),
-        degree=cast(
-            "NDArray[np.int64]",
-            expected[f"{prefix}/raw/degree"].numpy(),
-        ).copy(),
-        charge=cast(
-            "NDArray[np.int64]",
-            expected[f"{prefix}/raw/charge"].numpy(),
-        ).copy(),
-        aromatic=cast(
-            "NDArray[np.int64]",
-            expected[f"{prefix}/raw/aromatic"].numpy(),
-        ).copy(),
-        bonds=cast("NDArray[np.int64]", expected[f"{prefix}/raw/bonds"].numpy()).copy(),
-        bond_aromatic=cast(
-            "NDArray[np.bool_]",
-            expected[f"{prefix}/raw/bond_aromatic"].numpy(),
-        ).copy(),
-        bond_ring=cast(
-            "NDArray[np.bool_]",
-            expected[f"{prefix}/raw/bond_ring"].numpy(),
-        ).copy(),
+        symbols=symbols,
+        hydrogens=np.array(hydrogens, np.int64),
+        degree=np.bincount(edges.reshape(-1), minlength=count).astype(np.int64),
+        charge=np.zeros(count, np.int64),
+        aromatic=np.full(count, int(aromatic), np.int64),
+        bonds=edges,
+        bond_aromatic=np.full(len(edges), aromatic),
+        bond_ring=np.full(len(edges), aromatic),
     )
+
+
+def test_mobile_hydrogens_move_within_each_tautomer_group() -> None:
+    masses = ELEMENT_MASSES
+    # Acetic acid: the acid H moves to the first symmetric oxygen of C1.
+    acid = molecular_record(
+        atoms(
+            ("C", "C", "O", "O"),
+            hydrogens=[3, 0, 0, 1],
+            bonds=[[0, 1], [1, 2], [1, 3]],
+        ),
+        masses=masses,
+    )
+    assert acid is not None
+    assert acid["nh"].tolist() == [3, 0, 1, 0]
+    # C1 bears the hydrogen-free terminal oxygen, kind 4.
+    assert acid["kind"].tolist() == [0, 4, 9, 9]
+    assert acid["el"].tolist() == [0, 0, 2, 2]
+    assert acid["amass"].tolist()[2] == masses["O"] + masses["H"]
+    # The enol O-C=C-C=O links both oxygens through the conjugated path.
+    enol = molecular_record(
+        atoms(
+            ("O", "C", "C", "C", "O"),
+            hydrogens=[1, 1, 1, 1, 0],
+            bonds=[[0, 1], [1, 2], [2, 3], [3, 4]],
+        ),
+        masses=masses,
+    )
+    assert enol is not None
+    assert enol["nh"].tolist() == [1, 1, 1, 1, 0]
+    assert enol["kind"].tolist() == [9, 2, 2, 4, 9]
+    # Imidazole's two aromatic nitrogens share one ring component.
+    ring = molecular_record(
+        atoms(
+            ("C", "N", "C", "N", "C"),
+            hydrogens=[1, 1, 1, 0, 1],
+            bonds=[[0, 1], [1, 2], [2, 3], [3, 4], [4, 0]],
+            aromatic=True,
+        ),
+        masses=masses,
+    )
+    assert ring is not None
+    assert ring["nh"].tolist() == [1, 1, 1, 0, 1]
+    assert ring["kind"].tolist() == [3, 5, 3, 5, 3]
+    assert ring["bring"].tolist() == [2] * 5
+    # Four hydrogens exceed the group's three free valences, so none move.
+    crowded = molecular_record(
+        atoms(
+            ("C", "C", "O", "N"),
+            hydrogens=[3, 0, 0, 4],
+            bonds=[[0, 1], [1, 2], [1, 3]],
+        ),
+        masses=masses,
+    )
+    assert crowded is not None
+    assert crowded["nh"].tolist() == [3, 0, 0, 4]
+
+
+def test_mobile_hydrogens_order_by_element_free_valence_and_aryl_neighbor() -> None:
+    acyl = [[0, 1], [1, 2], [1, 3]]
+    # A thionic acid and its thiol tautomer both put the hydrogen on sulfur.
+    for hydrogens in ([3, 0, 1, 0], [3, 0, 0, 1]):
+        thio = molecular_record(
+            atoms(("C", "C", "O", "S"), hydrogens=hydrogens, bonds=acyl),
+            masses=ELEMENT_MASSES,
+        )
+        assert thio is not None
+        assert thio["nh"].tolist() == [3, 0, 0, 1]
+    # An iminol becomes the amide: nitrogen takes both mobile hydrogens.
+    amide = molecular_record(
+        atoms(("C", "C", "O", "N"), hydrogens=[3, 0, 1, 1], bonds=acyl),
+        masses=ELEMENT_MASSES,
+    )
+    assert amide is not None
+    assert amide["nh"].tolist() == [3, 0, 0, 2]
+    # In an amidine the terminal nitrogen has two free valences and fills first.
+    amidine = molecular_record(
+        atoms(
+            ("C", "N", "N", "C"),
+            hydrogens=[1, 1, 1, 3],
+            bonds=[[0, 1], [0, 2], [2, 3]],
+        ),
+        masses=ELEMENT_MASSES,
+    )
+    assert amidine is not None
+    assert amidine["nh"].tolist() == [1, 2, 0, 3]
+    # N-phenyl-N'-methylformamidine: the ring-bonded nitrogen takes the hydrogen.
+    ring = [[index, (index + 1) % 6] for index in range(6)]
+    for hydrogens in ([0, 1, 1, 1, 1, 1, 1, 1, 0, 3], [0, 1, 1, 1, 1, 1, 0, 1, 1, 3]):
+        primitives = atoms(
+            ("C", "C", "C", "C", "C", "C", "N", "C", "N", "C"),
+            hydrogens=hydrogens,
+            bonds=[*ring, [0, 6], [6, 7], [7, 8], [8, 9]],
+        )
+        primitives.aromatic[:6] = 1
+        primitives.bond_aromatic[:6] = primitives.bond_ring[:6] = True
+        aryl = molecular_record(primitives, masses=ELEMENT_MASSES)
+        assert aryl is not None
+        assert aryl["nh"].tolist()[6:] == [1, 1, 0, 3]
+
+
+def test_adjacent_aromatic_nitrogens_share_their_mobile_hydrogen() -> None:
+    ring = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 0]]
+    # Pyrazole with the ring hydrogen on either nitrogen is one tautomer.
+    records = [
+        molecular_record(
+            atoms(
+                ("C", "C", "C", "N", "N"),
+                hydrogens=hydrogens,
+                bonds=ring,
+                aromatic=True,
+            ),
+            masses=ELEMENT_MASSES,
+        )
+        for hydrogens in ([1, 1, 1, 1, 0], [1, 1, 1, 0, 1])
+    ]
+    assert records[0] is not None
+    assert records[1] is not None
+    for name in ("nh", "kind", "amass"):
+        np.testing.assert_array_equal(records[0][name], records[1][name])
+    assert records[0]["nh"].sum() == 4
+    assert records[0]["nh"][:3].tolist() == [1, 1, 1]
+
+
+def test_isolated_heteroatoms_keep_their_kinds_and_an_alkoxide_gains_hydrogen() -> None:
+    primitives = atoms(
+        ("O", "C", "O", "C", "N", "S", "P", "Cl", "O"),
+        hydrogens=[0, 1, 0, 1, 2, 1, 0, 0, 0],
+        bonds=[[0, 1], [1, 2], [2, 3], [1, 3], [3, 4], [4, 5], [5, 6], [6, 7], [6, 8]],
+    )
+    primitives.charge[0] = -1
+    primitives.aromatic[8] = 1
+    primitives.bond_ring[1:4] = True
+    record = molecular_record(primitives, masses=ELEMENT_MASSES)
+    assert record is not None
+    assert record["nh"].tolist() == [1, 1, 0, 1, 2, 1, 0, 0, 0]
+    assert record["kind"].tolist() == [9, 1, 7, 0, 6, 10, 11, 12, 8]
+    assert record["el"].tolist() == [2, 0, 2, 0, 1, 3, 4, 5, 2]
+    assert record["el10"].tolist() == [2, 0, 2, 0, 1, 3, 4, 6, 2]
+    assert record["bring"].tolist() == [0, 1, 1, 1, 0, 0, 0, 0, 0]
+    assert record["amass"].item(4) == ELEMENT_MASSES["N"] + 2 * ELEMENT_MASSES["H"]
+    assert record["mass"] == record["amass"].sum()
+    assert molecular_record(None, masses=ELEMENT_MASSES) is None
+    assert (
+        molecular_record(atoms((), hydrogens=[], bonds=[]), masses=ELEMENT_MASSES)
+        is None
+    )
+    assert (
+        molecular_record(atoms(("Xx",), hydrogens=[0], bonds=[]), masses=ELEMENT_MASSES)
+        is None
+    )
+
+
+def test_labels_refine_equal_environments_five_bonds_deep() -> None:
+    frame = _properties(
+        atoms(
+            ("C", "C", "O", "O"),
+            hydrogens=[3, 0, 0, 1],
+            bonds=[[0, 1], [1, 2], [1, 3]],
+        ),
+    )
+    labels = _labels(frame, codes=[0, 0, 2, 2])
+    assert labels[2] == labels[3]
+    assert len({labels[0], labels[1], labels[2]}) == 3
+    # A 16-ring with one N: five rounds tell carbons apart up to five bonds away.
+    ring = [[index, (index + 1) % 16] for index in range(16)]
+    frame = _properties(
+        atoms(("N", *("C",) * 15), hydrogens=[1] + [2] * 15, bonds=ring),
+    )
+    labels = _labels(frame, codes=[1] + [0] * 15)
+    assert [labels[index] == labels[16 - index] for index in range(1, 6)] == [True] * 5
+    assert len(set(labels[:6])) == 6
+    assert len(set(labels[6:11])) == 1
 
 
 def test_request_identity_materializes_every_default_without_mass_rounding() -> None:
@@ -821,23 +914,61 @@ def _reaction_data_write(
     (directory / "manifest.json").write_text(json.dumps(to_plain(manifest)))
 
 
+class _Staged(TypedDict):
+    smiles: str
+    delta: float
+    tol: float
+    max_steps: int
+    max_per_analog: int
+    allow_isomerisation: bool
+    products: list[tuple[str, tuple[str, ...] | None]]
+
+
 def test_complete_proposals_have_explicit_empty_headers_and_no_runtime_sdk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    prepared = Prepared(read_tensors(_BASELINE / "testdata/generation_inputs.pt"))
+    staged: list[_Staged] = [
+        {
+            "smiles": "CCO",
+            "delta": 14.01565006414,
+            "tol": 0.003,
+            "max_steps": 2,
+            "max_per_analog": 60,
+            "allow_isomerisation": True,
+            "products": [("COCC", ("methyl_O",)), ("CCOC", ("methyl_O", "demethyl_O"))],
+        },
+        {
+            "smiles": "c1ccccc1",
+            "delta": 15.9949146196,
+            "tol": 0.004,
+            "max_steps": 1,
+            "max_per_analog": 30,
+            "allow_isomerisation": False,
+            "products": [("Oc1ccccc1", ("hydroxyl_arom",)), ("unplanned", None)],
+        },
+        {
+            "smiles": "C",
+            "delta": 0.0,
+            "tol": 0.003,
+            "max_steps": 2,
+            "max_per_analog": 60,
+            "allow_isomerisation": True,
+            "products": [],
+        },
+    ]
     requests: list[dict[str, object]] = []
     responses: list[dict[str, object]] = []
     vocabulary = list(
         dict.fromkeys(
             name
-            for row in prepared.inputs["requests"]
+            for row in staged
             for _, combo in row["products"]
             for name in combo or ()
         ),
     )
-    for row in prepared.inputs["requests"]:
+    for row in staged:
         requests.append(
             {
                 "smiles": row["smiles"],
@@ -884,7 +1015,7 @@ def test_complete_proposals_have_explicit_empty_headers_and_no_runtime_sdk(
         ),
     )
     table = ReactionTable(tmp_path)
-    for row in prepared.inputs["requests"]:
+    for row in staged:
         query: ReactionRequest = {
             "smiles": row["smiles"],
             "delta": row["delta"],
@@ -898,7 +1029,7 @@ def test_complete_proposals_have_explicit_empty_headers_and_no_runtime_sdk(
         )
     with pytest.raises(KeyError):
         table.products({"smiles": "unstaged", "delta": 0.0})
-    first = prepared.inputs["requests"][0]
+    first = staged[0]
     with pytest.raises(KeyError):
         table.products(
             {

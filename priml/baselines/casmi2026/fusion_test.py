@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
-import ast
 import json
 import math
 import sys
 
 from pyarrow import Table, parquet
-from torch import Tensor
-from treekle import ReadError, from_plain, to_plain
+from treekle import ReadError, to_plain
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.casmi2026.custom_types import GapGraph, MetricIdentity
 from priml.baselines.casmi2026.fusion import (
@@ -43,21 +39,13 @@ from priml.baselines.casmi2026.fusion import (
     standardized,
 )
 from priml.baselines.casmi2026.isolated import IDENTITY_RDKIT, SIMULATOR_RDKIT
-from priml.baselines.casmi2026.testing import float32_comparands
-from priml.testing.golden import assert_tensor_golden, read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-
-    from numpy.typing import NDArray
+    from pathlib import Path
 
     from priml.baselines.casmi2026.custom_types import GapSpectrum
-
-
-_BASELINE: Final = _CWD
 
 
 def identity(candidate: str) -> str | None:
@@ -153,136 +141,100 @@ def test_every_ranking_entry_rejects_nonpositive_limit(limit: int) -> None:
         _ = insert_engine_second([], [], key=identity, limit=limit)
 
 
-GOLDEN: Final = _BASELINE / "testdata" / "reranking.pt"
+def rerank(column: ScoreColumn, *, top_n: int = 9, min_covered: int = 2) -> list[int]:
+    """Rerank nine candidates in formula groups a {0,2,5}, b {1,4,6} and d {7,8}."""
+    return rerank_groups(
+        [str(index) for index in range(9)],
+        [f"k{index}" for index in range(9)],
+        [9.0, 8.0, 5.0, 6.0, 4.0, 3.0, 0.0, 2.0, 1.0],
+        ["a", "b", "a", "c", "b", "a", "b", "d", "d"],
+        columns=[column],
+        weights=[2.0],
+        top_n=top_n,
+        min_covered=min_covered,
+        tie_eps=1e-9,
+    )
 
 
-def replay() -> dict[str, Tensor]:
-    """Exercise all coverage, fallback-key and tie branches."""
-    candidates = [str(index) for index in range(9)]
-    keys = [f"k{index}" for index in range(9)]
-    formulas = ["a", "b", "a", "c", "b", "a", "b", "d", "d"]
-    scores = [9.0, 8.0, 5.0, 6.0, 4.0, 3.0, 0.0, 2.0, 1.0]
-    covered = {"0": 0.0, "k2": 1.0, "5": 5.0, "1": None, "k1": 0.0, "4": 5.0}
-    second = {"0": 8.0, "2": 4.0, "5": 0.0, "1": "bad", "6": "6"}
-    cases: list[tuple[str, ScoreColumn, int, int]] = [
-        ("complete", covered, 9, 2),
-        ("prefix", covered, 5, 2),
-        ("minimum", covered, 9, 3),
-        ("list", [5.0, None, 0.0, None, 8.0, 9.0], 9, 2),
-        ("nonfinite", {"0": math.nan, "2": math.inf, "5": 1.0}, 9, 2),
-        ("all_none", {"0": None, "2": None}, 9, 2),
-        ("empty", {}, 9, 2),
-    ]
-    record: dict[str, Tensor] = {}
-    arguments = (candidates, keys, scores, formulas)
-    for name, column, prefix, minimum in cases:
-        record[f"single/{name}"] = torch.tensor(
-            rerank_groups(
-                *arguments,
-                columns=[column],
-                weights=[2.0],
-                top_n=prefix,
-                min_covered=minimum,
-                tie_eps=1e-9,
-            ),
-        )
-    record["multi"] = torch.tensor(
-        rerank_groups(
-            *arguments,
-            columns=[covered, second],
-            weights=[2.0, 0.5],
-            top_n=60,
-            min_covered=2,
-            tie_eps=1e-9,
-        ),
-    )
-    record["multi/no_grid"] = torch.tensor(
-        rerank_groups(
-            *arguments,
-            columns=[covered, second],
-            weights=[2.0, 0.5],
-            top_n=60,
-            min_covered=2,
-            tie_eps=0,
-        ),
-    )
-    record["multi/empty"] = torch.tensor(
-        rerank_groups(
-            [],
-            [],
-            [],
-            [],
-            columns=[],
-            weights=[],
-            top_n=60,
-            min_covered=2,
-            tie_eps=1e-9,
-        ),
-    )
-    record["single/empty_rows"] = torch.tensor(
-        rerank_groups(
-            [],
-            [],
-            [],
-            [],
-            columns=[{}],
-            weights=[0.5],
-            top_n=60,
-            min_covered=2,
-            tie_eps=1e-9,
-        ),
-    )
-    for name, values in (
-        ("empty", list[float | None]()),
-        ("one", [1.0, None, math.nan, math.inf]),
-        ("constant", [2.0, 2.0, None]),
-        ("mixed", [0.0, None, 2.0, 5.0, math.nan, math.inf]),
-    ):
-        record[f"z/{name}"] = torch.tensor(standardized(values), dtype=torch.float64)
-    for prefix in (5, 9):
-        record[f"admit/{prefix}"] = torch.tensor(
-            [
-                int(value)
-                for value in simulator_candidates(candidates, formulas, top_n=prefix)
-            ],
-        )
-    record["admit/duplicates"] = torch.tensor(
-        [
-            int(value)
-            for value in simulator_candidates(
-                ["0", "0", "2"],
-                ["a", "a", "a"],
-                top_n=40,
-            )
-        ],
-    )
-    opposing = {"0": 0.0, "1": 1.0}
+def test_reranking_permutes_only_covered_same_formula_groups() -> None:
+    # Group a reads 0, k2 and 5; group b reads k1 and 4; group d has no scores.
+    covered: ScoreColumn = {
+        "0": 0.0,
+        "k2": 1.0,
+        "5": 5.0,
+        "1": None,
+        "k1": 0.0,
+        "4": 5.0,
+    }
+    # Base z (1.09, -0.22, -0.87) plus twice z (-0.76, -0.38, 1.13) ranks 5, 0, 2;
+    # base z (1, 0, -1) plus twice (-0.71, 0.71, 0) ranks 4, 1, 6.
+    assert rerank(covered) == [5, 4, 0, 3, 1, 2, 6, 7, 8]
+    assert rerank(covered, top_n=5) == [2, 4, 0, 3, 1, 5, 6, 7, 8]
+    assert rerank(covered, min_covered=3) == [5, 1, 0, 3, 4, 2, 6, 7, 8]
+    assert rerank([5.0, None, 0.0, None, 8.0, 9.0]) == [0, 1, 5, 3, 4, 2, 6, 7, 8]
+    identity = list(range(9))
+    assert rerank({}) == rerank({"0": None, "2": None}) == identity
+    assert rerank({"0": math.nan, "2": math.inf, "5": 1.0}) == identity
+    second: ScoreColumn = {"0": 8.0, "2": 4.0, "5": 0.0, "1": "bad", "6": "6"}
     for epsilon in (0.0, 1e-9):
-        record[f"ties/{epsilon}"] = torch.tensor(
-            rerank_groups(
-                ["0", "1"],
-                ["0", "1"],
-                [1.0, 0.0],
-                ["a", "a"],
-                columns=[opposing, opposing],
-                weights=[0.5, 0.5],
-                top_n=60,
-                min_covered=2,
-                tie_eps=epsilon,
-            ),
-        )
-    cleaned = [
-        finite_score(value) for value in (None, "bad", "2.5", math.inf, math.nan, 0.0)
-    ]
-    record["clean"] = torch.tensor(
-        [-1.0 if value is None else value for value in cleaned],
-        dtype=torch.float64,
+        assert rerank_groups(
+            [str(index) for index in range(9)],
+            [f"k{index}" for index in range(9)],
+            [9.0, 8.0, 5.0, 6.0, 4.0, 3.0, 0.0, 2.0, 1.0],
+            ["a", "b", "a", "c", "b", "a", "b", "d", "d"],
+            columns=[covered, second],
+            weights=[2.0, 0.5],
+            top_n=60,
+            min_covered=2,
+            tie_eps=epsilon,
+        ) == [5, 4, 0, 3, 1, 2, 6, 7, 8]
+    assert not rerank_groups(
+        [],
+        [],
+        [],
+        [],
+        columns=[{}],
+        weights=[0.5],
+        top_n=60,
+        min_covered=2,
+        tie_eps=1e-9,
     )
-    return record
 
 
-def test_all_simulator_reranking_values() -> None:
-    assert_tensor_golden(GOLDEN, float32_comparands(replay()))
+def test_scores_standardize_finite_values_and_admit_repeated_formulas() -> None:
+    assert [finite_score(value) for value in (None, "bad", "2.5", math.inf, 0.0)] == [
+        None,
+        None,
+        2.5,
+        None,
+        0.0,
+    ]
+    assert standardized([]) == []
+    assert standardized([1.0, None, math.nan, math.inf]) == [0.0] * 4
+    assert standardized([2.0, 2.0, None]) == [0.0] * 3
+    # The finite scores 0, 2 and 4 have mean 2 and sample deviation 2.
+    assert standardized([0.0, None, 2.0, 4.0, math.nan, math.inf]) == [
+        -1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+    ]
+    candidates = [str(index) for index in range(9)]
+    formulas = ["a", "b", "a", "c", "b", "a", "b", "d", "d"]
+    assert simulator_candidates(candidates, formulas, top_n=5) == ["0", "1", "2", "4"]
+    assert simulator_candidates(candidates, formulas, top_n=9) == [
+        "0",
+        "1",
+        "2",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+    ]
+    assert simulator_candidates(["0", "0", "2"], ["a"] * 3, top_n=40) == ["0", "2"]
 
 
 def test_guarded_z_centers_by_population_deviation_and_tolerates_a_flat_group() -> None:
@@ -426,85 +378,147 @@ class Prepared:
         return self.formulas[value]
 
 
-def test_every_fusion_stage_and_all_twenty_final_branches() -> None:
-    golden = _BASELINE / "testdata/fusion.pt"
-    expected = read_tensors(golden)
-    prepared = source_inputs(expected)
-    names = prepared.names
-    actual: dict[str, Tensor] = {}
-    for index, value in enumerate(names):
-        prefix = f"identities/{index}"
-        actual[prefix + "/input"] = text(value)
-        actual[prefix + "/metric"] = text(str(prepared.identity(value)))
-        actual[prefix + "/old"] = text(str(prepared.key(value)))
-        actual[prefix + "/formula"] = text(prepared.formula(value))
-    first = [*names[:7], "CCO", ""]
-    second = [names[3], names[2], names[7], names[4]]
-    fused, keys, scores = vote().legacy(
-        first,
-        second,
-        [prepared.key(value) for value in second],
-        key=prepared.key,
+def fusion_inputs() -> Prepared:
+    """Stage aliases, a same-formula trio, an invalid string and the placeholder."""
+    rows: dict[str, tuple[MetricIdentity | None, str | None, str]] = {
+        "OCC": (("ethanol", (("C", 2), ("O", 1))), "LFQ", "C2H6O"),
+        "C(C)O": (("ethanol", (("C", 2), ("O", 1))), "LFQ", "C2H6O"),
+        "COC": (("ether", (("C", 2), ("O", 1))), "LCG", "C2H6O"),
+        "NCC": (("ethylamine", (("C", 2), ("N", 1))), "QUS", "C2H7N"),
+        "C(C)N": (("ethylamine", (("C", 2), ("N", 1))), "QUS", "C2H7N"),
+        "c1ccccc1": (("benzene", (("C", 6),)), "UHO", "C6H6"),
+        "invalid": (None, None, "invalid"),
+        "OC(C)": (("isomer", (("C", 2), ("O", 1))), "XYZ", "C2H6O"),
+        "CCO": (("ethanol", (("C", 2), ("O", 1))), "LFQ", "C2H6O"),
+        "": (None, None, ""),
+    }
+    return Prepared(
+        names=tuple(rows)[:8],
+        identities={name: row[0] for name, row in rows.items()},
+        keys={name: row[1] for name, row in rows.items()},
+        formulas={name: row[2] for name, row in rows.items()},
     )
-    actual["legacy/smiles"], actual["legacy/keys"] = text(str(fused)), text(str(keys))
-    actual["legacy/scores"] = torch.tensor(scores, dtype=torch.float64)
-    original = [names[0], names[2], names[3], names[7], names[4]]
-    for case in (
-        "placeholder",
-        "no_engine",
-        "unrescored",
-        "glacier",
-        "gl_without_ice",
-        "ice_fallback",
-        "all_none",
-        "fragment_gap",
-        "nonfinite_gl",
-        "key_lookup",
+
+
+PREFUSION: Final = (
+    "OCC",
+    "COC",
+    "C(C)O",
+    "NCC",
+    "c1ccccc1",
+    "invalid",
+    "OC(C)",
+    "CCO",
+    "",
+)
+ENGINE: Final = ("NCC", "COC", "OCC")
+ORIGINAL: Final = ("OCC", "COC", "NCC", "OC(C)", "C(C)N")
+# Votes 0.35, 0.32, 0.317, 0.143 and 0.125 after the alias C(C)O collapses.
+UNRESCORED: Final = ("OCC", "COC", "NCC", "c1ccccc1", "OC(C)")
+# Within C2H6O, base z (0.70, 0.45, -1.15) plus z (-0.58, -0.58, 1.15) ranks OC(C)
+# above COC; half that weight cannot.
+RERANKED: Final = ("OCC", "OC(C)", "NCC", "c1ccccc1", "COC")
+
+
+def trio() -> dict[str, float | None]:
+    """Score only the lowest-voted C2H6O member."""
+    return {"OCC": 0.0, "COC": 0.0, "OC(C)": 1.0}
+
+
+@pytest.mark.parametrize(
+    ("ice", "glacier", "gap", "fallback", "branch", "expected"),
+    [
+        ({}, {}, None, True, "unrescored", UNRESCORED),
+        ({"OCC": 0.1}, trio(), None, False, "glacier", RERANKED),
+        ({}, trio(), None, True, "unrescored", UNRESCORED),
+        (trio(), {}, None, True, "ice_fallback", RERANKED),
+        (trio(), {}, None, False, "unrescored", UNRESCORED),
+        (
+            {"LFQ": 0.0, "LCG": 0.0, "XYZ": 1.0},
+            {},
+            None,
+            True,
+            "ice_fallback",
+            RERANKED,
+        ),
+        ({"OCC": None}, {}, None, True, "ice_fallback", UNRESCORED),
+        ({"OCC": None}, {}, trio(), True, "frag_gap", UNRESCORED),
+        (
+            {"OCC": None},
+            {"OCC": math.nan, "COC": math.inf},
+            None,
+            True,
+            "glacier",
+            UNRESCORED,
+        ),
+    ],
+)
+def test_final_policy_selects_its_branch_and_reranks_the_same_formula_trio(
+    *,
+    ice: dict[str, float | None],
+    glacier: dict[str, float | None],
+    gap: dict[str, float | None] | None,
+    fallback: bool,
+    branch: str,
+    expected: tuple[str, ...],
+) -> None:
+    prepared = fusion_inputs()
+    candidates, audit = fuse(
+        "m",
+        ORIGINAL,
+        prepared=prepared,
+        prefusion=PREFUSION,
+        engine=ENGINE,
+        fallback=fallback,
+        ice=ice,
+        glacier=glacier,
+        gap=gap,
+    )
+    assert candidates == list(expected)
+    assert audit["branch"] == branch
+    assert (audit["candidate_count"], audit["collapsed_source_votes"]) == (5, 1)
+    assert audit["fallback_changed"] == (
+        branch == "ice_fallback" and expected == RERANKED
+    )
+    assert not audit["fallback_changed_top1"]
+    # Engine 2 leads with NCC, which moves to rank two below the fused leader.
+    final, inserted = insert_second(candidates, ENGINE, key=prepared.key, limit=25)
+    assert inserted
+    assert final[:2] == ["OCC", "NCC"]
+    assert sorted(final) == sorted(candidates)
+
+
+def test_unprocessed_rows_and_absent_engines_keep_the_original_list() -> None:
+    prepared = fusion_inputs()
+    for processed, engine, branch in (
+        (False, ENGINE, "placeholder"),
+        (True, None, "no_engine"),
     ):
-        ice: dict[str, float | None] = {}
-        glacier: dict[str, float | None] = {}
-        gap: dict[str, float | None] = {}
-        if case in {"glacier", "ice_fallback", "key_lookup"}:
-            ice = {names[0]: 0.1, names[2]: 0.9, names[3]: 0.8}
-        if case in {"glacier", "gl_without_ice"}:
-            glacier = {names[0]: 0.0, names[2]: 0.5, names[3]: 1.0}
-        if case in {"all_none", "fragment_gap", "nonfinite_gl"}:
-            ice = {names[0]: None}
-        if case == "nonfinite_gl":
-            glacier = {names[0]: math.nan, names[2]: math.inf}
-        if case == "fragment_gap":
-            gap = {names[0]: 0.0, names[2]: 0.7, names[3]: 1.0}
-        if case == "key_lookup":
-            ice = {str(prepared.key(value)): score for value, score in ice.items()}
-        for fallback in (False, True):
-            candidates, audit = fuse(
-                "m",
-                original,
-                prepared=prepared,
-                prefusion=first,
-                engine=None if case == "no_engine" else second,
-                fallback=fallback,
-                ice=ice,
-                glacier=glacier,
-                gap=gap,
-                processed=case != "placeholder",
-            )
-            label = f"{case}/{fallback}"
-            actual[label + "/candidates"] = text(str(candidates))
-            actual[label + "/audit"] = text(str(audit))
-            final, inserted = insert_second(
-                candidates,
-                second,
-                key=prepared.key,
-                limit=25,
-            )
-            actual[label + "/final"] = text(str(final))
-            actual[label + "/inserted"] = torch.tensor(inserted)
-    assert_tensor_golden(golden, float32_comparands(actual))
+        candidates, audit = fuse(
+            "m",
+            ORIGINAL,
+            prepared=prepared,
+            prefusion=PREFUSION,
+            engine=engine,
+            processed=processed,
+        )
+        assert candidates == list(ORIGINAL)
+        assert audit["branch"] == branch
+        assert audit["processed"] == processed
+    _, covered = fuse(
+        "m",
+        ORIGINAL,
+        prepared=prepared,
+        prefusion=PREFUSION,
+        engine=ENGINE,
+        ice={"LFQ": 0.0, "COC": 0.5},
+        glacier=trio(),
+    )
+    assert (covered["ice_finite_count"], covered["gl_finite_count"]) == (2, 3)
 
 
 def test_insertion_flag_is_true_when_rank_two_is_already_occupied() -> None:
-    prepared = source_inputs(read_tensors(_BASELINE / "testdata/fusion.pt"))
+    prepared = fusion_inputs()
     first, second = prepared.names[0], prepared.names[2]
     assert insert_second([first, second], [second], key=prepared.key, limit=25) == (
         [first, second],
@@ -529,7 +543,7 @@ def test_insertion_flag_is_true_when_rank_two_is_already_occupied() -> None:
 
 
 def test_final_policy_keeps_missing_staging_and_window_boundaries() -> None:
-    prepared = source_inputs(read_tensors(_BASELINE / "testdata/fusion.pt"))
+    prepared = fusion_inputs()
     with pytest.raises(ValueError, match="window must be positive"):
         fuse(
             "m",
@@ -640,7 +654,7 @@ def test_insertion_caps_deduplicates_and_keeps_placeholder_tail() -> None:
 
 
 def test_absent_lists_empty_fusion_and_deferred_formula_staging() -> None:
-    prepared = source_inputs(read_tensors(_BASELINE / "testdata/fusion.pt"))
+    prepared = fusion_inputs()
     original = ["CCO"]
     for prefusion, engine in ((None, prepared.names[:1]), ((), ())):
         candidates, audit = fuse(
@@ -692,115 +706,76 @@ def test_absent_lists_empty_fusion_and_deferred_formula_staging() -> None:
         )
 
 
-def source_inputs(expected: dict[str, Tensor]) -> Prepared:
-    """Load the stored scientific inputs from the fusion golden."""
-    names = tuple(decode(expected[f"identities/{index}/input"]) for index in range(8))
-    identities: dict[str, MetricIdentity | None] = {"": None}
-    keys: dict[str, str | None] = {"": None}
-    formulas: dict[str, str] = {"": ""}
-    for index, value in enumerate(names):
-        metric = decode(expected[f"identities/{index}/metric"])
-        identities[value] = (
-            None
-            if metric == "None"
-            else from_plain(
-                cast(object, ast.literal_eval(metric)),
-                tuple[str, tuple[tuple[str, int], ...]],
-            )
-        )
-        old_key = decode(expected[f"identities/{index}/old"])
-        keys[value] = None if old_key == "None" else old_key
-        formulas[value] = decode(expected[f"identities/{index}/formula"])
-    legacy_values = from_plain(
-        cast(object, ast.literal_eval(decode(expected["legacy/smiles"]))),
-        list[str],
+def test_cleavage_levels_skip_unsplit_rings_and_cap_long_chains() -> None:
+    triangle = GapGraph(
+        weights=np.array([1.0, 2.0, 4.0]),
+        bonds=np.array([[0, 1], [1, 2], [2, 0]], dtype=np.int64),
+        pieces=1,
     )
-    legacy_keys = from_plain(
-        cast(object, ast.literal_eval(decode(expected["legacy/keys"]))),
-        list[str],
+    levels = fragment_levels(triangle, max_bonds=[100])
+    assert levels is not None
+    # One cut leaves the ring whole; two cuts free one atom and the bonded pair.
+    assert [level.tolist() for level in levels] == [
+        [7.0],
+        [],
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    ]
+    chain = GapGraph(
+        weights=np.full(102, 14.0),
+        bonds=np.column_stack((np.arange(101), np.arange(1, 102))),
+        pieces=1,
     )
-    keys.update(
-        {
-            value: key
-            for value, key in zip(legacy_values, legacy_keys, strict=True)
-            if value == "CCO"
-        },
-    )
-    return Prepared(names=names, identities=identities, keys=keys, formulas=formulas)
+    # 101 bonds exceed the 100-bond ceiling, so enumeration stops at one cut.
+    levels = fragment_levels(chain, max_bonds=[100])
+    assert levels is not None
+    assert levels[1].tolist() == [14.0 * count for count in range(1, 102)]
+    assert len(levels[2]) == 0
 
 
-def decode(value: Tensor) -> str:
-    """Read an entire stored string without changing its contents."""
-    return bytes(from_plain(value.tolist(), list[int])).decode()
-
-
-def text(value: str) -> Tensor:
-    """Encode a native result string as golden bytes."""
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
-
-
-def test_complete_graph_cleavage_levels_and_fallback_scores_without_rdkit(
+def test_gap_credits_each_peak_by_its_least_cleaved_explanation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    golden = _BASELINE / "testdata/fragment_gap.pt"
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    graphs = _graphs(expected)
-    for index, graph in enumerate(graphs.values()):
-        prefix = str(index)
-        for name in ("input", "valid"):
-            actual[prefix + "/" + name] = expected[prefix + "/" + name].clone()
-        if graph is not None:
-            for name in ("weights", "left", "right", "pieces"):
-                actual[prefix + "/" + name] = expected[prefix + "/" + name].clone()
-        for name, max_bonds in (
-            ("default", [100]),
-            ("one", list[int]()),
-            ("three", [100, 40]),
-            ("caps", [2, 1]),
-        ):
-            levels = fragment_levels(graph, max_bonds=max_bonds)
-            actual[f"{prefix}/{name}/valid"] = torch.tensor(levels is not None)
-            if levels is not None:
-                for level, values in enumerate(levels):
-                    actual[f"{prefix}/{name}/{level}"] = torch.from_numpy(values)
-    prepared = _Graphs(graphs)
-    spectra = gap_spectra()
-    for name in ("default", "baseline", "weighted", "empty", "filtered"):
-        config = FragmentGap.Config()
-        if name == "baseline":
-            config.level_weights = [1.0, 1.0]
-            config.intensity_power = 0.5
-            config.tol = 0.01
-            config.h_shifts = [-2, -1, 0, 1, 2]
-        elif name == "weighted":
-            config.level_weights = [1.0, 0.6, 0.3]
-            config.max_bonds = [100, 40]
-            config.intensity_power = 0.7
-            config.mz_power = 1.2
-        values = config.make().score(
-            [] if name == "empty" else spectra[-1:] if name == "filtered" else spectra,
-            tuple(graphs),
-            graphs=prepared,
-        )
-        actual[name + "/scores/valid"] = torch.tensor(
-            [value is not None for value in values],
-        )
-        # The powers run on the host's libm; one rounding to float32 is portable.
-        actual[name + "/scores/value"] = torch.tensor(
-            [value if value is not None else 0.0 for value in values],
-            dtype=torch.float64,
-        ).float()
-    assert_tensor_golden(golden, float32_comparands(actual, inputs=("*/weights",)))
+    proton = 1.00782503207 - 0.00054857990
+    graphs = _Graphs(
+        {
+            "water": GapGraph(
+                weights=np.array([16.0, 2.0]),
+                bonds=np.array([[0, 1]], dtype=np.int64),
+                pieces=1,
+            ),
+            "invalid": None,
+        },
+    )
+    # The intact 18 and the one-cut 16 explain the first two peaks; 100 is unexplained.
+    spectrum: GapSpectrum = {
+        "mz": [18.0 + proton, 16.0 + proton, 100.0, math.nan],
+        "it": [1.0, 1.0, 2.0, 5.0],
+        "adduct": "[M+H]+",
+        "prec": 0.0,
+        "mode": 1,
+    }
+    halves = FragmentGap.Config(level_weights=[0.5, 0.25]).make()
+    candidates = ["water", "invalid", "water"]
+    assert halves.score([spectrum], candidates, graphs=graphs) == [0.375, None, 0.375]
+    silent: GapSpectrum = {**spectrum, "it": [0.0, -1.0, 0.0, 0.0]}
+    assert halves.score([silent], ["water"], graphs=graphs) == [0.0]
+    # The explained peaks alone credit (1 + 0.5) / 2; spectra average to 0.5625.
+    explained: GapSpectrum = {**spectrum, "mz": spectrum["mz"][:2], "it": [1.0, 1.0]}
+    assert halves.score([spectrum, explained], ["water"], graphs=graphs) == [0.5625]
+    # Weighting by m/z over the largest mass favours the fully explained heavier peak.
+    heavy = FragmentGap.Config(level_weights=[0.5, 0.25], mz_power=1.0).make()
+    (score,) = heavy.score([explained], ["water"], graphs=graphs)
+    heavier, lighter = 18.0 + proton, 16.0 + proton
+    # The closed form rounds 1 ulp below the exact rational credit; the score is exact.
+    assert score == pytest.approx(
+        (heavier + 0.5 * lighter) / (heavier + lighter),
+        rel=2**-52,
+        abs=0,
+    )
 
 
 def test_default_caps_rounding_and_minimum_cleavage_order() -> None:
-    record = read_tensors(_BASELINE / "testdata/fragment_gap.pt")
-    levels = fragment_levels(_graphs(record)["C" * 102], max_bonds=[100])
-    assert levels is not None
-    assert len(levels) == 3
-    assert len(levels[2]) == 0
     graph = GapGraph(
         weights=np.array([0.1, 0.100003, 0.1000001]),
         bonds=np.array([[0, 1], [0, 2]], dtype=np.int64),
@@ -892,28 +867,6 @@ def test_carrier_fallbacks_invalid_configs_and_explicit_coverage() -> None:
     assert config.make().score(invalid_weights, ["candidate"], graphs=graphs) == [0.0]
 
 
-def gap_spectra() -> list[GapSpectrum]:
-    """Return every raw spectrum stored in the golden."""
-    return [
-        {
-            "mz": [31.018389717, 47.049141, float("nan"), 2.0],
-            "it": [1.0, 0.4, 0.2, -1.0],
-            "adduct": "[M+H]+",
-            "prec": 47.049141,
-            "mode": 1,
-        },
-        {
-            "mz": [15.023475, 17.038576, 28.030752],
-            "it": [0.3, 1.0, 0.7],
-            "adduct": "[M-H]-",
-            "prec": 45.0,
-            "mode": -1,
-        },
-        {"mz": [61.023], "it": [1.0], "adduct": "[M+Na]+", "prec": 61.023, "mode": 1},
-        {"mz": [10.0, 20.0], "it": [0.0], "adduct": None, "prec": 0.0, "mode": -1},
-    ]
-
-
 class _Graphs:
     def __init__(self, values: dict[str, GapGraph | None]) -> None:
         self.values = values
@@ -921,30 +874,6 @@ class _Graphs:
     def for_smiles(self, smiles: str) -> GapGraph | None:
         """Require complete prepared data even for invalid source inputs."""
         return self.values[smiles]
-
-
-def _graphs(record: dict[str, Tensor]) -> dict[str, GapGraph | None]:
-    result: dict[str, GapGraph | None] = {}
-    for index in range(8):
-        prefix = str(index)
-        value = record[prefix + "/input"].numpy().tobytes().decode()
-        graph = None
-        if bool(record[prefix + "/valid"]):
-            graph = GapGraph(
-                weights=cast(
-                    "NDArray[np.float64]",
-                    record[prefix + "/weights"].numpy(),
-                ),
-                bonds=np.column_stack(
-                    (
-                        record[prefix + "/left"].numpy(),
-                        record[prefix + "/right"].numpy(),
-                    ),
-                ),
-                pieces=int(record[prefix + "/pieces"].item()),
-            )
-        result[value] = graph
-    return result
 
 
 def test_complete_prepared_rows_keep_first_duplicate_and_need_no_rdkit(

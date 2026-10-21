@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import hashlib
 import json
@@ -12,16 +12,17 @@ import math
 import pickle
 import sys
 
+from numpy.typing import NDArray
 from pyarrow import Table, parquet
 from torch import Tensor
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, to_plain
 
 import numpy as np
 import pytest
 import torch
 
 from priml.baselines.casmi2026.boosting import LightGBMModel
-from priml.baselines.casmi2026.boosting_test import GOLDEN, tiny_text
+from priml.baselines.casmi2026.boosting_test import model_text, stump
 from priml.baselines.casmi2026.chemistry import (
     CandidatePool,
     MainSearch,
@@ -41,19 +42,26 @@ from priml.baselines.casmi2026.dreams import (
 )
 from priml.baselines.casmi2026.dreams_test import (
     checkpoint_config,
+    save_bank,
     source_checkpoint,
 )
-from priml.baselines.casmi2026.fragnet import FragnetTable, StageA
+from priml.baselines.casmi2026.fragnet import (
+    FragnetTable,
+    StageA,
+    stage_b_names,
+)
 from priml.baselines.casmi2026.isolated import (
+    ELEMENT_MASSES,
+    HYDROGEN_MASS,
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
     AnalogRecord,
     AnalogTable,
     ElementGraph,
     IntrinsicTable,
+    adduct_parameters,
     formula_vector as family_data_formula_vector,
     main_ion_deltas,
-    normalize_request,
     record_fields,
 )
 from priml.baselines.casmi2026.main_engine import (
@@ -65,6 +73,7 @@ from priml.baselines.casmi2026.main_engine import (
     DerivationTable,
     GeneratedCandidate,
     GenerationResult,
+    MainBase,
     MainEngine,
     MainFamilyData,
     MainFamilyRows,
@@ -72,6 +81,8 @@ from priml.baselines.casmi2026.main_engine import (
     MainLibraryEvidence,
     MainPoolFamilies,
     MainRetrieval,
+    PolarityMerge,
+    PriorFeatures,
     PriorTables,
     ReactionScreen,
     TreeBank,
@@ -98,24 +109,18 @@ from priml.baselines.casmi2026.main_engine import (
     select_features,
     supports,
     training_smiles,
+    view_features,
 )
-from priml.baselines.casmi2026.testing import (
-    float32_comparands,
-    retrieval_inputs,
-)
+from priml.baselines.casmi2026.scripts.main_fragments import fragment_masses
+from priml.baselines.casmi2026.testing import retrieval_inputs
 from priml.math import stats
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import assert_tensor_golden, read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from numpy.typing import NDArray
-
     from priml.baselines.casmi2026.custom_types import (
+        EngineResult,
         FragnetRecord,
         ProposalPath,
         ReactionProduct,
@@ -124,78 +129,185 @@ if TYPE_CHECKING:
     from priml.math.custom_types import Tensorable
 
 
-_BASELINE: Final = _CWD
-
-
-ANALOG_STRUCTURE_GOLDEN: Final = _BASELINE / "testdata/analog_family.pt"
-
-
-def test_complete_structural_family_with_every_prepared_graph() -> None:
-    golden = ANALOG_STRUCTURE_GOLDEN
-    expected = read_tensors(golden)
-    actual = {
-        name: value.clone()
-        for name, value in expected.items()
-        if name.startswith("input/")
-    }
-    structures: list[list[AnalogRecord]] = []
-    for name, count in (("candidate", 6), ("analog", 16)):
-        rows: list[AnalogRecord] = []
-        for index in range(count):
-            prefix = f"input/{name}/{index}"
-            graphs: list[ElementGraph | None] = [
-                ElementGraph(
-                    elements=expected[f"{prefix}/{graph}/elements"].numpy(),
-                    bonds=expected[f"{prefix}/{graph}/bonds"].numpy(),
-                )
-                if expected[f"{prefix}/{graph}/valid"].item()
-                else None
-                for graph in ("graph", "core")
-            ]
-            strings = {
-                field: expected[prefix + "/" + field].numpy().tobytes().decode()
-                for field in ("smiles", "formula", "element_smiles", "query_smiles")
-            }
-            rows.append(
-                AnalogRecord(
-                    smiles=strings["smiles"],
-                    formula_input=strings["formula"],
-                    hashes=expected[prefix + "/hashes"].numpy(),
-                    numbers=expected[prefix + "/numbers"].numpy(),
-                    formula=expected[prefix + "/formula_vector"].numpy(),
-                    core_smiles=strings["query_smiles"],
-                    element_smiles=strings["element_smiles"],
-                    query_smiles=strings["query_smiles"],
-                    graph=graphs[0],
-                    core=graphs[1],
-                    core_mask=np.zeros(
-                        len(graphs[0].elements) if graphs[0] else 0,
-                        np.bool_,
-                    ),
-                ),
-            )
-        structures.append(rows)
-    candidates, analogs = structures
-    differences = (
-        np.stack([row.formula for row in candidates]).astype(np.int64)[:, None]
-        - np.stack([row.formula for row in analogs]).astype(np.int64)[None]
+def structure(
+    elements: Sequence[int],
+    bonds: Sequence[tuple[int, int]],
+    *,
+    hashes: Sequence[int],
+    numbers: Sequence[int],
+    formula: Sequence[int],
+    core: ElementGraph | None = None,
+) -> AnalogRecord:
+    """Build a prepared structure from literal hashes, counts and element graphs."""
+    return AnalogRecord(
+        smiles="",
+        formula_input=None,
+        hashes=np.array(hashes, np.int64),
+        numbers=np.array(numbers, np.int16),
+        formula=np.array([*formula, *[0] * (10 - len(formula))], np.int16),
+        core_smiles="",
+        element_smiles="",
+        query_smiles="",
+        graph=element_graph(elements, bonds),
+        core=core,
+        core_mask=np.zeros(len(elements), np.bool_),
     )
-    actual["code"] = torch.from_numpy(delta_codes(differences))
-    for case, (size, count) in enumerate(((6, 16), (6, 4), (6, 1), (6, 0), (0, 16))):
-        output = analog_structure_features(
-            candidates[:size],
-            analogs=analogs[:count],
-            similarities=expected["input/similarities"].numpy()[:count],
-            analog_sid=np.arange(count, dtype=np.int64),
-            parent_sid=expected["input/parents"].numpy()[:size],
-            fingerprints=expected["input/fingerprints"].numpy()[:size],
-            analog_fingerprints=expected["input/analog_fp"].numpy()[:count],
-            bits=expected["input/bits"].numpy(),
-        )
-        actual[f"features/{case}"] = torch.from_numpy(
-            np.column_stack(list(output.values())),
-        )
-    assert_tensor_golden(golden, actual)
+
+
+def element_graph(
+    elements: Sequence[int],
+    bonds: Sequence[tuple[int, int]],
+) -> ElementGraph:
+    """Pair atomic numbers with undirected bonds."""
+    return ElementGraph(
+        elements=np.array(elements, np.int16),
+        bonds=np.array(bonds, np.int32).reshape(-1, 2),
+    )
+
+
+def ethanol() -> AnalogRecord:
+    """Hash, count and graph C-C-O without a core."""
+    return structure(
+        (6, 6, 8),
+        ((0, 1), (1, 2)),
+        hashes=(5, 7, 11, 13, 0, 0, 0, 0),
+        numbers=(0, 0, 0, 0, 0, 0, 0, 3),
+        formula=(2, 6, 0, 1),
+    )
+
+
+def propanol() -> AnalogRecord:
+    """Share ethanol's generic hash and first ring hash; keep a C-O core."""
+    return structure(
+        (6, 6, 6, 8),
+        ((0, 1), (1, 2), (2, 3)),
+        hashes=(9, 7, 11, 17, 0, 0, 0, 0),
+        numbers=(1, 0, 0, 0, 0, 0, 0, 4),
+        formula=(3, 8, 0, 1),
+        core=element_graph((6, 8), ((0, 1),)),
+    )
+
+
+# One selected bit in each of ecfp4, fcfp4, rdk6, ap, tt and maccs.
+STRUCTURE_BITS: Final = np.array([10, 8200, 10_300, 12_300, 14_400, 16_400], np.int64)
+
+
+def test_identical_structures_relate_on_every_channel() -> None:
+    values = analog_structure_features(
+        [ethanol(), ethanol()],
+        analogs=[ethanol(), ethanol(), ethanol()],
+        # Maxima take the top analog's unit weight; weighted means divide by the sum.
+        similarities=np.array([1.0, 0.5, 0.25]),
+        analog_sid=np.array([4, 9, 12], np.int64),
+        parent_sid=np.array([-1, -1], np.int64),
+        fingerprints=np.ones((2, 6), np.float32),
+        analog_fingerprints=np.ones((3, 6), np.float32),
+        bits=STRUCTURE_BITS,
+    )
+    assert len(values) == 36
+    assert all(array.dtype == np.float32 for array in values.values())
+    ones = (
+        "sc_el_max",
+        "sc_el_wsum",
+        "sc_gen_max",
+        "sc_gen_wsum",
+        "sc_el_top",
+        "rs_jac_max",
+        "rs_jac_wmean",
+        "rs_cov_max",
+        "rs_big_max",
+        "subf_ca_max",
+        "subf_ac_max",
+        "fx_max",
+        "fx_top",
+        *("bt_" + block for block in ("maccs", "rdk6", "fcfp4", "ap", "tt")),
+    )
+    for name, array in values.items():
+        expected = 1.0 if name in ones else 0.0
+        if name == "st_ap":
+            # Four hash relations and both full containments, out of six.
+            expected = float(np.float32(5 / 6))
+        elif name == "st_rank":
+            # Two tied candidates share the average of ranks 0 and 1.
+            expected = (0 + 1) / 2
+        assert array.tolist() == [expected, expected], name
+
+
+def test_structures_exclude_donors_and_cap_invalid_formula_distance() -> None:
+    blank = structure(
+        (),
+        (),
+        hashes=(0,) * 8,
+        numbers=(0,) * 8,
+        formula=(-1,),
+    )
+    values = analog_structure_features(
+        [propanol(), propanol()],
+        analogs=[ethanol(), replace(blank, graph=None)],
+        similarities=np.array([1.0, 0.5]),
+        analog_sid=np.array([4, 9], np.int64),
+        # The second candidate comes from analog 4, so only analog 9 counts.
+        parent_sid=np.array([-1, 4], np.int64),
+        fingerprints=np.ones((2, 6), np.float32),
+        analog_fingerprints=np.vstack([np.ones(6), np.zeros(6)]).astype(np.float32),
+        bits=STRUCTURE_BITS,
+    )
+    weights = 1.0 + 0.5**4
+    expected = {
+        "sc_el_max": [0.0, 0.0],
+        "sc_gen_max": [1.0, 0.0],
+        "sc_gen_wsum": [1.0 / weights, 0.0],
+        "sc_el_top": [0.0, 0.0],
+        # Ring hashes {11, 17} and {11, 13} share one of three.
+        "rs_jac_max": [1 / 3, 0.0],
+        "rs_jac_wmean": [1 / 3 / weights, 0.0],
+        "rs_cov_max": [0.5, 0.0],
+        "rs_big_max": [1.0, 0.0],
+        # Ethanol holds the C-O core and lies inside C-C-C-O.
+        "sub_ca_max": [0.0, 0.0],
+        "sub_ac_max": [1.0, 0.0],
+        "subf_ca_max": [1.0, 0.0],
+        "subf_ac_max": [0.0, 0.0],
+        # CH2 separates the formulas; an invalid formula sits 50 away.
+        "fd_wmean": [(3.0 + 50.0 * 0.5**4) / weights, 50.0],
+        "fd_top": [3.0, 50.0],
+        "fd_min": [3.0, 50.0],
+        "fx_max": [1.0, 0.0],
+        "fx_top": [1.0, 0.0],
+        "dr_ring_top": [1.0, 1.0],
+        "dr_ring_wabs": [1.0, 1.0],
+        "da_ring_top": [1.0, 1.0],
+        "bt_maccs": [1.0, 0.0],
+        "st_ap": [(1 + 1 / 3 + 1 / 2 + 0.5 + 0.5) / 6, 0.0],
+        "st_rank": [0.0, 1.0],
+        "st_gap": [0.0, -(1 + 1 / 3 + 1 / 2 + 0.5 + 0.5) / 6],
+        "st_fgap": [0.0, -(1 + 1 / 3 + 1 / 2 + 0.5 + 0.5) / 6],
+    }
+    for name, wanted in expected.items():
+        assert values[name].tolist() == pytest.approx(wanted, abs=1e-6), name
+    for name in ("dr_rs_top", "dr_core_top", "dr_rhet_top"):
+        assert values[name].tolist() == [0.0, 0.0]
+
+
+@pytest.mark.parametrize(("size", "count"), [(1, 0), (0, 1)])
+def test_structures_without_candidates_or_analogs_keep_sentinels(
+    size: int,
+    count: int,
+) -> None:
+    values = analog_structure_features(
+        [ethanol()][:size],
+        analogs=[ethanol()][:count],
+        similarities=np.ones(count),
+        analog_sid=np.zeros(count, np.int64),
+        parent_sid=np.full(size, -1, np.int64),
+        fingerprints=np.ones((size, 6), np.float32),
+        analog_fingerprints=np.ones((count, 6), np.float32),
+        bits=STRUCTURE_BITS,
+    )
+    assert len(values) == 36
+    for name, array in values.items():
+        sentinel = -1.0 if name.startswith("fd_") else 0.5 if name == "st_rank" else 0
+        assert array.tolist() == [sentinel] * size, name
 
 
 def test_signed_codes_keep_vector_axes_and_exact_sentinel_boundaries() -> None:
@@ -229,9 +341,6 @@ def test_codes_keep_the_int64_absolute_value_wraparound() -> None:
         np.array([-40, -40 * 81**9], np.int64),
         strict=True,
     )
-
-
-_THIS: Final = Path(__file__).resolve()
 
 
 def test_stable_ranks_reuses_shared_inversion_with_original_permutation(
@@ -287,61 +396,231 @@ def test_main_engine_empty_group_keeps_all94_columns() -> None:
     assert result.shape == (0, 94)
 
 
-def test_entire_frag2_family_with_caps_and_ties() -> None:
-    golden = _BASELINE / "testdata" / "frag2.pt"
-    expected = read_tensors(golden)
-    spectra: list[SpectrumRequest] = [
-        {
-            "mz": from_plain(
-                expected[f"input/spectrum/{index}/mz"].tolist(),
-                list[float],
-            ),
-            "it": from_plain(
-                expected[f"input/spectrum/{index}/it"].tolist(),
-                list[float],
-            ),
-            "prec": 151.0 if index == 2 else 600.0,
-            "adduct": ("[M+H]+", "[M+Na]+", "[M-H]-")[index],
-            "mode": -1 if index == 2 else 1,
-        }
-        for index in range(3)
-    ]
-    scores = expected["input/scores"].numpy()
-    formulas = ("C2H6O", "C2H6O", "C3H8O", "C3H8O", "CH4")
-    depth1 = [expected[f"input/depth1/{index}"].numpy() for index in range(5)]
-    depth2 = [expected[f"input/depth2/{index}"].numpy() for index in range(5)]
-    capabilities = expected["input/capabilities"].numpy()
-    masses, specific, support = diagnostic_losses(capabilities)
-    actual = {
-        name: value for name, value in expected.items() if name.startswith("input/")
+def frag2_spectrum() -> SpectrumRequest:
+    """Place protonated peaks at 50 and 80 Da, with water lost from the first."""
+    proton = main_ion_deltas("[M+H]+")[0]
+    return {
+        "mz": [50.0 + proton, 80.0 + proton],
+        "it": [1.0, 0.25],
+        "prec": 50.0 + proton + 18.010565,
+        "adduct": "[M+H]+",
+        "mode": 1,
     }
-    actual["loss/mass"] = torch.from_numpy(masses)
-    actual["loss/specific"] = torch.from_numpy(specific)
-    actual["loss/support"] = torch.from_numpy(support)
-    for index, (query, limit, count) in enumerate(
-        (
-            (spectra, 600, 5),
-            (spectra, 2, 5),
-            (spectra, 3, 5),
-            (list[SpectrumRequest](), 600, 5),
-            (spectra, 600, 0),
-        ),
+
+
+def _frag2(
+    spectra: Sequence[SpectrumRequest],
+    *,
+    scores: Sequence[float],
+    limit: int = 600,
+) -> dict[str, NDArray[np.float32]]:
+    capabilities = np.zeros((len(scores), 22), np.uint8)
+    capabilities[:1, 0] = 1
+    return frag2_features(
+        spectra,
+        search=MainEngine.Config().fragment_search.make(),
+        formulas=("C3H8O",) * len(scores),
+        model_score=np.array(scores, np.float32),
+        depth1=[np.array([50.0, 130.0]), np.zeros(0)][: len(scores)],
+        depth2=[np.array([50.0, 80.0]), np.array([50.0 + HYDROGEN_MASS])][
+            : len(scores)
+        ],
+        capabilities=capabilities,
+        max_candidates=limit,
+    )
+
+
+def test_frag2_explains_shared_peaks_coverage_and_water_loss_by_hand() -> None:
+    values = _frag2([frag2_spectrum()], scores=(0.5, 0.2))
+    assert len(values) == 31
+    assert all(array.dtype == np.float32 for array in values.values())
+    # Square-root weights are 1 and 0.5; the leader explains both peaks, the other
+    # explains the first with one hydrogen shift and nothing at depth one.
+    base, heavy = math.log(0.1 / 0.5), math.log(0.1 / (5 / 6))
+    background = (base + 0.5 * heavy) / 1.5
+    mixed = (0.25 + 0.5 * 0.375, 0.5 * 0.25)
+    expected = {
+        "disc_max": [0.25 / 1.5, 0.0],
+        "disc_mean": [0.25 / 1.5, 0.0],
+        "disc1_mean": [0.25 / 1.5, 0.0],
+        "idf_frac": [1.0, 0.0],
+        "idf_rank": [0.0, 1.0],
+        "uniq_int": [0.5 / 1.5, 0.0],
+        "top5_expl": [1.0, 0.5],
+        "top5_unexpl": [0.0, 0.5 / 1.5],
+        "grp_disc": [0.25 / 1.5, 0.0],
+        "grp_miss": [0.0, 0.25 / 1.5],
+        "grp_rank": [0.0, 1.0],
+        "grp_gap": [0.0, -1.0],
+        "d1_int": [1 / 1.5, 0.0],
+        "mix_disc": [mixed[0] / 1.5, mixed[1] / 1.5],
+        "mix_rank": [0.0, 1.0],
+        "mix_grp_gap": [0.0, (mixed[1] - mixed[0]) / 1.5],
+        "llr1": [background + math.log(9) / 1.5, background],
+        "cov1": [1.0, 0.0],
+        "covw1": [1.0, 0.0],
+        "cov_rank": [0.0, 1.0],
+        "cov_grp_gap": [0.0, -1.0],
+        "excl_gain": [0.0, 0.0],
+        "excl_loss": [0.0, 0.75 / 1.5],
+        "mix_vs_lead": [0.0, (mixed[1] - mixed[0]) / 1.5],
+        "cov_vs_lead": [0.0, -1.0],
+        "llr_vs_lead": [0.0, -math.log(9) / 1.5],
+        # Only the first candidate can lose water from the first peak.
+        "dl_sup_spec": [0.0, 0.0],
+        "dl_unsup_spec": [0.0, 0.0],
+        "dl_sup_gen": [1 / 1.5, 0.0],
+        "dl_unsup_gen": [0.0, 1 / 1.5],
+        "dl_sup_gap": [0.0, -1 / 1.5],
+    }
+    assert set(values) == set(expected)
+    for name, wanted in expected.items():
+        assert values[name].tolist() == pytest.approx(wanted, abs=1e-6), name
+
+
+def test_frag2_caps_candidates_with_ties_and_skips_empty_inputs() -> None:
+    capped = _frag2([frag2_spectrum()], scores=(0.5, 0.2), limit=1)
+    # The unscored candidate keeps every top-five peak unexplained.
+    assert capped["top5_unexpl"].tolist() == [0.0, 1.0]
+    assert capped["disc_max"].tolist() == [0.0, 0.0]
+    assert capped["d1_int"].tolist() == pytest.approx([1 / 1.5, 0.0], abs=1e-6)
+    tied = _frag2([frag2_spectrum()], scores=(0.5, 0.5), limit=1)
+    assert tied["top5_unexpl"].tolist() == pytest.approx([0.0, 0.5 / 1.5], abs=1e-6)
+    for values in (
+        _frag2([], scores=(0.5, 0.2)),
+        _frag2([{**frag2_spectrum(), "mz": [], "it": []}], scores=(0.5, 0.2)),
     ):
-        values = frag2_features(
-            query,
-            search=MainEngine.Config().fragment_search.make(),
-            formulas=formulas[:count],
-            model_score=scores[:count],
-            depth1=depth1[:count],
-            depth2=depth2[:count],
-            capabilities=capabilities[:count],
-            max_candidates=limit,
-        )
-        assert len(values) == 31
-        actual[f"features/{index}"] = torch.from_numpy(
-            np.column_stack(list(values.values())),
-        )
-    assert_tensor_golden(golden, float32_comparands(actual, inputs=("input/*",)))
+        assert all(array.tolist() == [0.0, 0.0] for array in values.values())
+    assert all(
+        array.shape == (0,) for array in _frag2([frag2_spectrum()], scores=()).values()
+    )
+
+
+def test_diagnostic_losses_bind_singles_and_pairs_to_capabilities() -> None:
+    capabilities = np.zeros((3, 22), np.uint8)
+    capabilities[0, 0] = 1
+    capabilities[1, 10] = 2
+    capabilities[2, 10] = 1
+    masses, specific, support = diagnostic_losses(capabilities)
+    assert masses.shape == specific.shape == (41,)
+    assert masses[0] == 18.010565
+    # The first pair doubles the hexose loss, which needs two hexose sites.
+    assert masses[27] == 162.052824 + 162.052824
+    assert specific.tolist() == [False] * 6 + [True] * 35
+    assert support.dtype == np.bool_
+    assert support[:, 0].tolist() == [True, False, False]
+    assert support[:, 14].tolist() == [False, True, True]
+    assert support[:, 27].tolist() == [False, True, False]
+
+
+def _views(
+    fingerprints: list[list[int]],
+    *,
+    spectra: int = 1,
+    modes: Sequence[int] = (1,),
+) -> dict[str, NDArray[np.float32]]:
+    logits = np.tile(np.array([1.0, 3.0], np.float32), (3, 1, 1))
+    return view_features(
+        np.array(fingerprints, np.float32),
+        logits[:, :spectra],
+        np.tile(logits, (1, len(modes), 1)),
+        np.array(modes, np.int64),
+        # Selected bits fall in the ecfp4 and fcfp4 blocks.
+        np.array([10, 8200], np.int64),
+        pairwise_rank_limit=7,
+    )
+
+
+def test_model_views_rank_scores_spectra_polarities_and_blocks_by_hand() -> None:
+    # All three models score bit logits 1 and 3, so the candidates score 1, 3 and 1.
+    values = _views([[1, 0], [0, 1], [1, 0]])
+    assert len(values) == 36
+    assert all(array.dtype == np.float32 for array in values.values())
+    ranks, gaps = [0.75, 0.0, 0.75], [-0.02, 0.0, -0.02]
+    expected = {
+        **{f"fz{name}_gap": gaps for name in ("A", "B", "D")},
+        **{f"fz{name}_rank": ranks for name in ("A", "B", "D")},
+        **{
+            f"fz{name}_z": [-(0.5**0.5), 2**0.5, -(0.5**0.5)]
+            for name in ("A", "B", "D")
+        },
+        "rank_spread": [0.0] * 3,
+        "rank_worst": ranks,
+        "fzABD_gap": gaps,
+        "fzABD_rank": ranks,
+        "sp_rank_mean": ranks,
+        "sp_rank_min": ranks,
+        "sp_rank_max": ranks,
+        "sp_top3_frac": [1.0] * 3,
+        "sp_gap_mean": gaps,
+        "pol_pos_rank": ranks,
+        "pol_pos_gap": gaps,
+        # No negative item: the polarity defaults to the middle rank.
+        "pol_neg_rank": [0.5] * 3,
+        "pol_neg_gap": [0.0] * 3,
+        "blk_ecfp4_gap": [0.0, -0.01, 0.0],
+        "blk_ecfp4_rank": [0.25, 1.0, 0.25],
+        "blk_fcfp4_gap": [-0.03, 0.0, -0.03],
+        "blk_fcfp4_rank": ranks,
+        **{
+            f"blk_{name}_{field}": [0.0] * 3 if field == "gap" else [0.5] * 3
+            for name in ("ecfp6", "rdk6", "ap", "tt", "maccs")
+            for field in ("gap", "rank")
+        },
+    }
+    assert set(values) == set(expected)
+    for name, wanted in expected.items():
+        assert values[name].tolist() == pytest.approx(wanted, abs=1e-6), name
+
+
+def test_model_views_without_spectra_or_spread_fall_back_to_zero() -> None:
+    silent = _views([[1, 0], [0, 1], [1, 0]], spectra=0, modes=(1, -1))
+    for name in (
+        "sp_rank_mean",
+        "sp_rank_min",
+        "sp_rank_max",
+        "sp_top3_frac",
+        "sp_gap_mean",
+    ):
+        assert silent[name].tolist() == [0.0] * 3, name
+    # The merged view alone halves the scores; the negative item ranks like the positive.
+    assert silent["fzA_gap"].tolist() == pytest.approx([-0.01, 0.0, -0.01], abs=1e-6)
+    assert silent["pol_neg_rank"].tolist() == silent["pol_pos_rank"].tolist()
+    constant = _views([[1, 0]] * 3)
+    assert constant["fzA_z"].tolist() == [0.0] * 3
+    assert constant["fzA_rank"].tolist() == [0.5] * 3
+
+
+def test_spectrum_and_block_views_average_only_the_first_two_models() -> None:
+    # Models A and B score the bits 1 and 3; model D scores them 5 and -3.
+    logits = np.array([[[1.0, 3.0]], [[1.0, 3.0]], [[5.0, -3.0]]], np.float32)
+    values = view_features(
+        np.array([[1, 0], [0, 1], [1, 0]], np.float32),
+        logits,
+        logits,
+        np.array([1], np.int64),
+        np.array([10, 8200], np.int64),
+        pairwise_rank_limit=7,
+    )
+    ranks, gaps = [0.75, 0.0, 0.75], [-0.02, 0.0, -0.02]
+    reversed_ranks = [0.25, 1.0, 0.25]
+    expected = {
+        "fzD_gap": [0.0, -0.08, 0.0],
+        "fzD_rank": reversed_ranks,
+        "rank_spread": [0.5, 1.0, 0.5],
+        # Each candidate's worst rank across the three models.
+        "rank_worst": [0.75, 1.0, 0.75],
+        # All three models average to the scores 7/3, 1 and 7/3.
+        "fzABD_gap": [0.0, (1 - 7 / 3) / 100, 0.0],
+        "fzABD_rank": reversed_ranks,
+        "sp_rank_mean": ranks,
+        "sp_gap_mean": gaps,
+        "blk_ecfp4_gap": [0.0, -0.01, 0.0],
+        "blk_fcfp4_gap": [-0.03, 0.0, -0.03],
+        "blk_fcfp4_rank": ranks,
+    }
+    for name, wanted in expected.items():
+        assert values[name].tolist() == pytest.approx(wanted, abs=1e-6), name
 
 
 def test_formula_vocabulary_retains_all_elements_and_complete_grammar() -> None:
@@ -449,12 +728,19 @@ def test_main_likelihood_is_evaluated_in_float64_and_rounded_once() -> None:
     assert np.array_equal(values["fp_ll"], likelihood / np.float32(7) * 100)
 
 
+def ranker_text(feature: int, *, scale: float = 1.0) -> str:
+    """Serialize three stumps over the first three columns, led by one feature."""
+    return model_text(
+        stump(feature, left=-scale, right=scale),
+        stump((feature + 1) % 3, left=0.5 * scale, right=-0.5 * scale),
+        stump((feature + 2) % 3, left=0.25, right=0.75),
+    )
+
+
 def test_complete_tree_asset_bank_binds_features_and_averages_its_models(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(GOLDEN)
-    cases = (0, 3, 4, 5)
-    models = [tiny_text(expected, case) for case in cases]
+    models = [ranker_text(feature, scale=feature + 1.0) for feature in (0, 1, 2, 0)]
     payload = pickle.dumps(
         {
             "features": ["Column_0", "Column_1", "Column_2"],
@@ -466,7 +752,7 @@ def test_complete_tree_asset_bank_binds_features_and_averages_its_models(
     path = tmp_path / "ranker.pkl"
     _ = path.write_bytes(payload)
     bank = TreeBank.load(path, hashlib.sha256(payload).hexdigest())
-    query = expected["case0/query"].numpy().astype(np.float32)
+    query = np.array([[0.0, 1.0, -1.0], [2.0, 0.0, 3.0], [-1.0, -2.0, 0.0]], np.float32)
     actual = bank.score(query[:, ::-1], ["Column_2", "Column_1", "Column_0"])
     wanted = np.mean(
         [
@@ -476,6 +762,9 @@ def test_complete_tree_asset_bank_binds_features_and_averages_its_models(
         axis=0,
     )
     np.testing.assert_array_equal(actual, wanted, strict=True)
+    # Row 0 sends column 0 left, column 1 right and column 2 left in every stump.
+    first = LightGBMModel.parse(models[0]).predict(query.astype(np.float64))
+    assert first.tolist()[0] == -1.0 - 0.5 + 0.25
     assert len(bank.models) == 4
     assert [len(model.trees) for model in bank.models] == [3, 3, 3, 3]
     with pytest.raises(ValueError, match="missing"):
@@ -483,7 +772,7 @@ def test_complete_tree_asset_bank_binds_features_and_averages_its_models(
 
 
 def test_stage_b_text_is_read_as_a_complete_numeric_tree_asset(tmp_path: Path) -> None:
-    text = tiny_text(read_tensors(GOLDEN), 0)
+    text = ranker_text(0)
     path = tmp_path / "stageB.txt"
     _ = path.write_text(text)
     model = load_tree(path, hashlib.sha256(text.encode()).hexdigest())
@@ -514,7 +803,7 @@ def test_each_booster_must_declare_the_complete_ranker_feature_order(
     payload = pickle.dumps(
         {
             "features": ["wrong"],
-            "boosters": [tiny_text(read_tensors(GOLDEN), 0)],
+            "boosters": [ranker_text(0)],
         },
     )
     path = tmp_path / "ranker.pkl"
@@ -524,54 +813,17 @@ def test_each_booster_must_declare_the_complete_ranker_feature_order(
 
 
 class PreparedPaths:
-    """Present every stored input through the real preparation boundary."""
+    """Serve staged terminal paths and nullable identities from plain tables."""
 
-    def __init__(self, record: dict[str, Tensor]) -> None:
-        self.rows: dict[tuple[str, Combo], tuple[ProposalPath, ...]] = {}
-        self.identities: dict[str, tuple[str | None, str | None]] = {}
-        parents = _derivation_strings(record["input/parents"])
-        combos = [
-            tuple(combo.split("+"))
-            for combo in _derivation_strings(record["input/combos"])
-        ]
-        strings = _derivation_strings(record["input/identity_smiles"])
-        keys, skeletons = (
-            _derivation_strings(record["input/identity_" + kind])
-            for kind in ("key", "skeleton")
+    def __init__(
+        self,
+        rows: dict[tuple[str, Combo], tuple[ProposalPath, ...]] | None = None,
+        identities: dict[str, tuple[str | None, str | None]] | None = None,
+    ) -> None:
+        self.rows: dict[tuple[str, Combo], tuple[ProposalPath, ...]] = dict(rows or {})
+        self.identities: dict[str, tuple[str | None, str | None]] = dict(
+            identities or {},
         )
-        for i, string in enumerate(strings):
-            self.identities[string] = (
-                keys[i] if record["input/identity_key_valid"][i].item() else None,
-                skeletons[i]
-                if record["input/identity_skeleton_valid"][i].item()
-                else None,
-            )
-        for parent in range(len(parents)):
-            for position, combo in enumerate(combos):
-                prefix = f"proposal/{parent * len(combos) + position}/"
-                raw = _derivation_strings(record[prefix + "raw"])
-                standardized = _derivation_strings(record[prefix + "standardized"])
-                rows: list[ProposalPath] = []
-                for index in range(int(record[prefix + "size"].item())):
-                    key, skeleton = self.identity(raw[index])
-                    rows.append(
-                        {
-                            "raw": raw[index],
-                            "standardized": standardized[index]
-                            if record[prefix + "valid"][index].item()
-                            else None,
-                            "key": key,
-                            "skeleton": skeleton,
-                            "environments": from_plain(
-                                cast(
-                                    object,
-                                    record[prefix + "environments"][index].tolist(),
-                                ),
-                                tuple[tuple[int, int, int], ...],
-                            ),
-                        },
-                    )
-                self.rows[parents[parent], combo] = tuple(rows)
 
     def paths(
         self,
@@ -586,137 +838,175 @@ class PreparedPaths:
         return self.identities[smiles]
 
 
-def test_entire_prior_path_family_supports_duplicates_and_all41_features() -> None:
-    golden = _BASELINE / "testdata/derivation.pt"
-    expected = read_tensors(golden)
-    actual = {
-        name: value.clone()
-        for name, value in expected.items()
-        if name.startswith(("input/", "proposal/"))
+def path(
+    raw: str | None,
+    standardized: str | None,
+    *environments: tuple[int, int, int],
+) -> ProposalPath:
+    """Stage one terminal path whose identity the caller resolves."""
+    return {
+        "raw": raw,
+        "standardized": standardized,
+        "key": None,
+        "skeleton": None,
+        "environments": environments,
     }
-    proposals = PreparedPaths(expected)
-    combos = [
-        tuple(combo.split("+"))
-        for combo in _derivation_strings(expected["input/combos"])
-    ]
-    parents = _derivation_strings(expected["input/parents"])
-    tables: PriorTables = {
-        "glob": expected["input/glob"].item(),
-        "tf": {
-            name: (
-                expected["input/tf_counts"][i, 0].item(),
-                expected["input/tf_counts"][i, 1].item(),
-            )
-            for i, name in enumerate(_derivation_strings(expected["input/tf_names"]))
+
+
+def derivation_priors() -> DerivationPriors:
+    """Back methyl ethers off to radius one and demethylation to its transform rate."""
+    proposals = PreparedPaths(
+        {
+            ("CCO", ("methyl_O",)): (
+                path("COCC", "CCOC", (11, 12, 13)),
+                path("COC", "COC", (99, 99, 99)),
+                path(None, "lost", (11, 12, 13)),
+                path("unstandardized", None, (11, 12, 13)),
+                path("CCOC", "CCOC", (99, 99, 99)),
+            ),
+            ("CCCCO", ("demethyl_O",)): (path("CCCO", "CCCO", (5, 5, 5)),),
         },
-        "env": {1: {}, 2: {}, 3: {}},
-    }
-    for i, name in enumerate(_derivation_strings(expected["input/env_names"])):
-        radius, environment = (
-            int(expected["input/env_ids"][i, j].item()) for j in range(2)
-        )
-        tables["env"][radius][name, environment] = (
-            expected["input/env_counts"][i, 0].item(),
-            expected["input/env_counts"][i, 1].item(),
-        )
-    priors = DerivationPriors(tables, proposals=proposals)
-    for parent in range(len(parents)):
-        for position, combo in enumerate(combos):
-            group = priors.group(parents[parent], combo)
-            prefix = f"group/{parent * len(combos) + position}/"
-            actual[prefix + "smiles"] = torch.tensor(
-                list("\0".join(group).encode()),
-                dtype=torch.uint8,
-            )
-            actual[prefix + "values"] = torch.tensor(
-                [
-                    [row.tf_logfr, row.site_logfr, row.sibling_rank, row.siblings]
-                    for row in group.values()
-                ],
-                dtype=torch.float64,
-            ).reshape(-1, 4)
-    actual["mass"] = torch.tensor(
-        [
-            combo_mass(combo)
-            for combo in (*combos, ("dehexose2", "methyl_O", "demethyl_O"))
-        ],
-        dtype=torch.float64,
+        {
+            "CCCO": ("K1", "S1"),
+            "CCOC": ("K2", "S2"),
+            "COC": ("K3", "S3"),
+            # Other spellings: one shares CCOC's key and skeleton, one only its skeleton.
+            "C(C)OC": ("K2", "S2"),
+            "COC(C)": ("K9", "S2"),
+        },
     )
-    smiles = _derivation_strings(expected["input/smiles"])
-    log_ident = _derivation_strings(expected["input/log_ident"])
-    logs: list[DerivationLog] = []
-    for i in range(len(expected["input/logs"])):
-        sid, combo, kind, how = (
-            int(expected["input/logs"][i, j].item()) for j in range(4)
-        )
-        logs.append(
+    return DerivationPriors(
+        {
+            "glob": 0.2,
+            "tf": {"methyl_O": (3.0, 40.0), "demethyl_O": (4.0, 20.0)},
+            "env": {
+                1: {("methyl_O", 11): (10.0, 30.0)},
+                2: {("methyl_O", 12): (1.0, 10.0)},
+                3: {},
+            },
+        },
+        proposals=proposals,
+    )
+
+
+# Smoothed rates (success + 2 * 0.2) / (count + 2) and the radius-one backoff.
+METHYL: Final = (3.0 + 2 * 0.2) / (40.0 + 2)
+DEMETHYL: Final = (4.0 + 2 * 0.2) / (20.0 + 2)
+SITE: Final = (10.0 + 2 * METHYL) / (30.0 + 2)
+
+
+def test_prior_groups_keep_each_products_best_site_and_sibling_rank() -> None:
+    priors = derivation_priors()
+    assert priors.p_transform("methyl_O") == METHYL
+    assert priors.p_transform("unseen") == 0.2
+    # Radius two holds only ten observations, so the backoff stops at radius one.
+    assert priors.p_site("methyl_O", (11, 12, 13)) == SITE
+    assert priors.p_site("methyl_O", (99, 99, 99)) == METHYL
+    group = priors.group("CCO", ("methyl_O",))
+    assert tuple(group) == ("CCOC", "COC")
+    assert group["CCOC"] == PriorFeatures(
+        tf_logfr=math.log(METHYL),
+        site_logfr=math.log(SITE),
+        sibling_rank=1,
+        siblings=2,
+    )
+    assert group["COC"] == PriorFeatures(
+        tf_logfr=math.log(METHYL),
+        site_logfr=math.log(METHYL),
+        sibling_rank=2,
+        siblings=2,
+    )
+    assert priors.group("CCO", ("methyl_O",)) is group
+    assert combo_mass(("methyl_O",)) == pytest.approx(12.0 + 2 * 1.00782503207)
+    assert combo_mass(("methyl_O", "demethyl_O")) == 0.0
+    assert combo_mass(("dehexose2",)) < 0
+
+
+def derivation_context() -> DerivationContext:
+    """Bind a supported pool alcohol, two generated ethers and an unsupported row."""
+    return DerivationContext(
+        smiles=("CCCO", "CCOC", "COC", "OCC"),
+        keys=("K1", "K2", "K3", None),
+        formulas=("C3H8O", "C3H8O", "C2H6O", "C2H6O"),
+        generated=np.array([False, True, True, False]),
+        parent_sid=np.array([-1, 0, 0, -1], np.int64),
+        similarities=np.array([0.0, 0.9, 0.5, 0.0]),
+        combos=(None, ("methyl_O",), ("methyl_O",), None),
+        analog_sid=np.array([0, 1], np.int64),
+        model_score=np.array([0.1, 0.3, 0.2, 0.0], np.float32),
+        parent_smiles=("CCO", "CCCCO"),
+        logs=(
             DerivationLog(
-                parent=sid,
-                similarity=expected["input/log_sim"][i].item(),
-                combo=combos[combo] if combo >= 0 else None,
-                kind="gen" if kind else "pool",
-                how="key" if how else "smi",
-                identity=log_ident[i],
+                parent=1,
+                similarity=0.6,
+                combo=("demethyl_O",),
+                kind="pool",
+                how="smi",
+                identity="CCCO",
             ),
-        )
-    for case, (size, own, log) in enumerate(
-        ((10, True, True), (10, False, False), (0, True, True)),
-    ):
-        context = DerivationContext(
-            smiles=tuple(smiles[:size]),
-            keys=tuple(proposals.identity(smile)[0] for smile in smiles[:size]),
-            formulas=tuple(_derivation_strings(expected["input/formulas"])[:size]),
-            generated=expected["input/generated"].numpy()[:size].astype(np.bool_)
-            if own
-            else np.zeros(size, np.bool_),
-            parent_sid=expected["input/parent_sid"].numpy()[:size],
-            similarities=expected["input/similarities"].numpy()[:size],
-            combos=tuple(
-                combos[int(index)] if int(index) >= 0 else None
-                for index in expected["input/gen_combo"][:size]
-            ),
-            analog_sid=np.array([1, 0, 1], np.int64),
-            model_score=np.array(
-                [0.3, 0.3, 0.2, 0.1, 0.9, 0, 0.8, 0.1, 0.3, -0.1],
-                np.float32,
-            )[:size],
-            parent_smiles=tuple(parents),
-            logs=tuple(logs) if log and size else (),
-        )
-        evidence = supports(context, proposals=proposals)
-        actual[f"support/{case}/indices"] = torch.tensor(
-            [
-                [position, sid, combos.index(combo)]
-                for position, items in enumerate(evidence)
-                for sid, _, combo in items
-            ],
-            dtype=torch.int64,
-        ).reshape(-1, 3)
-        actual[f"support/{case}/similarities"] = torch.tensor(
-            [sim for items in evidence for _, sim, _ in items],
-            dtype=torch.float64,
-        )
-        actual[f"aggregate/{case}"] = torch.from_numpy(
-            np.column_stack(
-                list(
-                    aggregate(
-                        context,
-                        priors=priors,
-                        evidence=evidence,
-                    ).values(),
-                ),
-            ),
-        )
-        actual[f"features/{case}"] = torch.from_numpy(
-            np.column_stack(list(derivation_features(context, priors=priors).values())),
-        )
-    assert_tensor_golden(golden, float32_comparands(actual, inputs=("input/*",)))
+        ),
+    )
+
+
+def test_aggregates_take_each_supports_parent_combo_and_best_prior() -> None:
+    priors = derivation_priors()
+    context = derivation_context()
+    evidence = supports(context, proposals=priors.proposals)
+    assert evidence == [
+        [(1, 0.6, ("demethyl_O",))],
+        [(0, 0.9, ("methyl_O",))],
+        [(0, 0.5, ("methyl_O",))],
+        [],
+    ]
+    values = aggregate(context, priors=priors, evidence=evidence)
+    expected = {
+        "n_par": [1, 1, 1, 0],
+        "best_sim": [0.6, 0.9, 0.5, 0.0],
+        "sum_sim4": [0.6**4, 0.9**4, 0.5**4, 0.0],
+        "min_steps": [1, 1, 1, 0],
+        "par_rank": [1, 0, 0, 10],
+        "n_combo": [1, 1, 1, 0],
+        "tf_logfr": [math.log(DEMETHYL), math.log(METHYL), math.log(METHYL), -25],
+        "site_logfr": [math.log(DEMETHYL), math.log(SITE), math.log(METHYL), -25],
+        "sib_rank": [1, 1, 2, 0],
+        "n_sib": [1, 2, 2, 0],
+        "sib_frac": [0, 0, 1, -1],
+        "prior_miss": [0, 0, 0, 0],
+        "best_sim_nz": [0.6, 0.9, 0.5, 0.0],
+        "best_sim_zd": [0, 0, 0, 0],
+        "zd_only": [0, 0, 0, 0],
+    }
+    assert set(values) == set(expected)
+    for name, wanted in expected.items():
+        assert values[name].tolist() == pytest.approx(wanted), name
+    features = derivation_features(context, priors=priors)
+    assert len(features) == 41
+    assert all(array.dtype == np.float32 for array in features.values())
+    rows = {
+        "dp_hit": [1, 0, 0, 0],
+        "dp_n_par": [1, 0, 0, 0],
+        "dp_best_sim": [0.6, 0, 0, 0],
+        "dp_rank_sim": [0, -1, -1, 1],
+        "dp_iso_n_hit": [math.log(2), math.log(2), 0, 0],
+        "dp_q_n_hit": [math.log(2)] * 4,
+        "dg_n_par": [0, 1, 1, 0],
+        "dg_sib_rank": [0, 1, 2, 0],
+        "dg_rank_site": [-1, 0, 1, -1],
+        "dj_rank_sim": [1 / 3, 0, 2 / 3, 1],
+        "ds_n": [math.log(2), math.log(3), math.log(3), 0],
+        "ds_fz_rank": [0, 0, 1, -1],
+        "ds_fz_gap": [0, 0, -0.1 / 100, -10],
+        "ds_site_rank": [0, 0, 1, -1],
+        "ds_fm_site_rank": [1, 0, 0, -1],
+    }
+    for name, wanted in rows.items():
+        assert features[name].tolist() == pytest.approx(wanted, abs=1e-6), name
 
 
 def test_support_identity_routes_keep_generated_duplicates_and_known_invalid_keys() -> (
     None
 ):
-    proposals = PreparedPaths(read_tensors(_BASELINE / "testdata/derivation.pt"))
+    proposals = PreparedPaths()
     proposals.identities.update(
         fallback=("shared", "skeleton"),
         known_invalid=(None, None),
@@ -787,7 +1077,7 @@ def test_support_identity_routes_keep_generated_duplicates_and_known_invalid_key
 def test_group_rejects_invalid_paths_preserves_empty_products_and_evicts_only_after5000() -> (
     None
 ):
-    proposals = PreparedPaths(read_tensors(_BASELINE / "testdata/derivation.pt"))
+    proposals = PreparedPaths()
     row: ProposalPath = {
         "raw": "",
         "standardized": "",
@@ -817,7 +1107,7 @@ def test_group_rejects_invalid_paths_preserves_empty_products_and_evicts_only_af
 def test_prior_asset_pin_preserves_all_tables_and_metadata_without_runtime_objects(
     tmp_path: Path,
 ) -> None:
-    proposals = PreparedPaths(read_tensors(_BASELINE / "testdata/derivation.pt"))
+    proposals = PreparedPaths()
     tables: PriorTables = {
         "glob": 0.2,
         "tf": {"a": (3.0, 30.0)},
@@ -850,10 +1140,6 @@ def test_prior_asset_pin_preserves_all_tables_and_metadata_without_runtime_objec
             expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             proposals=proposals,
         )
-
-
-def _derivation_strings(value: Tensor) -> list[str]:
-    return value.numpy().tobytes().decode().split("\0") if value.numel() else []
 
 
 def test_complete_paths_keep_invalids_multiplicity_zero_pairs_and_missing_errors(
@@ -1014,76 +1300,144 @@ def test_selected_features_preserve_duplicates_order_dtype_and_empty_rows() -> N
         select_features({"x": np.zeros((3, 1), np.float32)}, names=("x",), count=3)
 
 
-def analog_record(analogs: Sequence[Analog]) -> Tensor:
-    """Retain every source tuple field with its original double conversion."""
-    return torch.tensor(
-        [[a.sid, a.similarity, a.shift, a.natural_product] for a in analogs],
-        dtype=torch.float64,
-    ).reshape(-1, 4)
+def test_representatives_keep_the_richest_spectrum_per_structure_mode_and_library() -> (
+    None
+):
+    library, _, _ = retrieval_inputs()
+    # Rows 0 and 1 share structure, mode and library; row 1 has more peaks.
+    expected = [8, 10, 2, 1, 12, 4, 3, 5, 6, 7, 9, 11]
+    for merge in (PolarityMerge.Config(), None):
+        config = MainRetrieval.Config()
+        config.merge = merge
+        assert config.make().representatives(library).tolist() == expected
+    count = 37
+    ties = replace(
+        library,
+        sid=np.arange(count, dtype=np.int64)[::-1],
+        mode=np.array([-1, 0, 1], dtype=np.int8)[np.arange(count) % 3],
+        library=(np.arange(count) % 11).astype(np.int8),
+        peak_count=(np.arange(count) % 4 + 2).astype(np.int32),
+        mass=np.full(count, 100.0, dtype=np.float64),
+    )
+    # Every row is its own group; equal masses keep structure order.
+    representatives = MainRetrieval.Config().make().representatives(ties)
+    assert representatives.tolist() == list(range(count))[::-1]
+    empty = replace(
+        ties,
+        sid=ties.sid[:0],
+        mode=ties.mode[:0],
+        library=ties.library[:0],
+        peak_count=ties.peak_count[:0],
+        mass=ties.mass[:0],
+    )
+    assert MainRetrieval.Config().make().representatives(empty).shape == (0,)
 
 
-def test_whole_main_engine_retrieval() -> None:
-    library, pool, spectra = retrieval_inputs()
-    actual: dict[str, Tensor] = {}
-    for name, count in (("ties", 37), ("empty", 0)):
-        metadata = replace(
-            library,
-            sid=np.arange(count, dtype=np.int64)[::-1],
-            mode=np.array([-1, 0, 1], dtype=np.int8)[np.arange(count) % 3],
-            library=(np.arange(count) % 11).astype(np.int8),
-            peak_count=(np.arange(count) % 4 + 2).astype(np.int32),
-            mass=np.full(count, 100.0, dtype=np.float64),
+def test_analogs_keep_strict_best_structures_and_every_exclusion() -> None:
+    library, _, spectra = retrieval_inputs()
+    for merge in (PolarityMerge.Config(), None):
+        config = MainRetrieval.Config()
+        config.n_analog = 2
+        config.merge = merge
+        search = config.make()
+        analogs = search.analogs(spectra, library=library, target=100.0)
+        assert 0 < len(analogs) <= 2
+        assert len({analog.sid for analog in analogs}) == len(analogs)
+        similarity = [analog.similarity for analog in analogs]
+        assert similarity == sorted(similarity, reverse=True)
+        # Row 9 (structure 5, library 5, 110 Da) copies the positive query.
+        assert analogs[0] == Analog(
+            sid=5,
+            similarity=1.0,
+            shift=-10.0,
+            natural_product=True,
         )
-        actual[f"main/{name}"] = torch.from_numpy(
-            MainRetrieval.Config().make().representatives(metadata),
+        for analog in analogs:
+            # Shifts move each structure to the target.
+            assert analog.shift == 100.0 - library.structure_mass[analog.sid]
+        withheld = search.analogs(
+            spectra,
+            library=library,
+            target=100.0,
+            excluded_sid=analogs[0].sid,
         )
+        assert analogs[0].sid not in {analog.sid for analog in withheld}
+        masked = search.analogs(
+            spectra,
+            library=library,
+            target=100.0,
+            excluded=np.ones(13, np.bool_),
+        )
+        assert masked == ()
+        other_library = search.analogs(
+            spectra,
+            library=library,
+            target=100.0,
+            excluded_sid=analogs[0].sid,
+            excluded_library=99,
+        )
+        assert other_library == analogs
+        assert search.analogs(spectra, library=library, target=900.0) == ()
+        assert search.analogs(spectra[2:], library=library, target=100.0) == ()
     partition_library = replace(library, library=library.library.copy())
     partition_library.library[0] = 1
-    config_partition = MainRetrieval.Config()
-    config_partition.n_analog = 2
-    partition = config_partition.make()
+    config = MainRetrieval.Config()
+    config.n_analog = 2
+    partition = config.make()
     representatives = partition.representatives(partition_library)
     assert (
         len(representatives[partition_library.mode[representatives] == 1])
-        > 4 * config_partition.n_analog
+        > 4 * config.n_analog
     )
-    actual["main/partition"] = analog_record(
-        partition.analogs(
-            spectra,
-            library=partition_library,
-            target=100.0,
-        ),
+    assert (
+        0
+        < len(partition.analogs(spectra, library=partition_library, target=100.0))
+        <= 2
     )
-    for merged in (True, False):
-        config = MainRetrieval.Config()
-        config.n_analog = 2
-        if not merged:
-            config.merge = None
-        search = config.make()
-        actual[f"main/{merged}/representatives"] = torch.from_numpy(
-            search.representatives(library),
-        )
-        excluded = np.isin(np.arange(13), [1, 5])
-        for case, (query, target, mask, sid, lib) in enumerate(
-            (
-                (spectra, 100.0, None, -1, -1),
-                (spectra, 100.0, excluded, 0, 2),
-                (spectra, 100.0, None, 0, -1),
-                (spectra, 900.0, None, -1, -1),
-                (spectra[2:], 100.0, None, -1, -1),
-            ),
-        ):
-            actual[f"main/{merged}/{case}"] = analog_record(
-                search.analogs(
-                    query,
-                    library=library,
-                    target=target,
-                    excluded=mask,
-                    excluded_sid=sid,
-                    excluded_library=lib,
-                ),
-            )
-    generated = [
+
+
+def test_analogs_keep_the_first_equal_row_and_replace_on_a_better_one() -> None:
+    # Structure 0 has two copies of the query; structure 1 a partial match, then one.
+    library = SpectralLibrary(
+        offsets=np.arange(0, 9, 2, dtype=np.int64),
+        mz=np.array([20, 30, 20, 30, 20, 50, 20, 30], np.float32),
+        intensity=np.tile(np.array([1, 2], np.float32), 4),
+        structure_mass=np.array([100.0, 100.0]),
+        keys=("first", "second"),
+        smiles=("C", "CC"),
+        sid=np.array([0, 0, 1, 1], np.int64),
+        # Library 0 is synthetic; libraries 2 and 10 are natural products.
+        library=np.array([0, 2, 0, 10], np.int8),
+        mode=np.ones(4, np.int8),
+        instrument=np.zeros(4, np.int8),
+        adduct=np.zeros(4, np.int16),
+        precursor=np.full(4, 101.0),
+        peak_count=np.full(4, 2, np.int32),
+        mass=np.full(4, 100.0),
+        order=np.arange(4, dtype=np.int64),
+        mass_sorted=np.full(4, 100.0),
+    )
+    query: SpectrumRequest = {
+        "mz": [20.0, 30.0],
+        "it": [1.0, 2.0],
+        "mode": 1,
+        "prec": 101.0,
+        "adduct": "[M+H]+",
+    }
+    analogs = (
+        MainRetrieval.Config().make().analogs([query], library=library, target=100.0)
+    )
+    assert [(analog.sid, analog.natural_product) for analog in analogs] == [
+        (0, False),
+        (1, True),
+    ]
+    assert analogs[0].similarity == analogs[1].similarity
+    assert [analog.shift for analog in analogs] == [0.0, 0.0]
+
+
+def generated_candidates() -> list[GeneratedCandidate]:
+    """Return an alias of pool key a and a new structure, both near 100 Da."""
+    return [
         GeneratedCandidate(
             smiles="C",
             key="a",
@@ -1109,56 +1463,61 @@ def test_whole_main_engine_retrieval() -> None:
             parent_tanimoto=0.25,
         ),
     ]
-    for case, (target, drop, products) in enumerate(
-        (
-            (100.0, -1, generated),
-            (100.004, -1, list[GeneratedCandidate]()),
-            (100.0, 0, list[GeneratedCandidate]()),
-            (900.0, -1, list[GeneratedCandidate]()),
-            (900.0, -1, generated),
-        ),
-    ):
-        rows = candidates(
-            pool,
-            target=target,
-            ppm=10.0,
-            fallback_ppm=30.0,
-            generated=products,
-            drop_row=drop,
-        )
-        identities = rows.candidates
-        if case == 0:
-            assert identities.smiles == ("C", "CC", "C", "C", "CC")
-            assert identities.keys == ("a", "b", "a", "a", "new")
-            assert identities.formulas == ("CH4", "C2H6", "CH4", "CH4", "C2H6")
-            assert identities.sources == (
-                "pool",
-                "pool",
-                "pool",
-                "generated",
-                "generated",
-            )
-        for name, values in {
-            "pid": identities.pool_rows,
-            "mass": rows.mass,
-            "n_heavy": rows.heavy_atoms,
-            "train_sid": rows.train_sid,
-            "fp": rows.fingerprints,
-            "is_gen": identities.generated.astype(np.float32),
-            "gen_sim": rows.parent_similarity,
-            "gen_steps": rows.steps,
-            "gen_tan": rows.parent_tanimoto,
-        }.items():
-            actual[f"candidates/{case}/{name}"] = torch.from_numpy(values)
-        for position, fragments in enumerate(rows.fragments):
-            if fragments is not None:
-                actual[f"candidates/{case}/fragments/{position}"] = torch.from_numpy(
-                    fragments,
-                )
-    assert_tensor_golden(
-        _THIS.parent / "testdata" / "retrieval.pt",
-        float32_comparands(actual),
+
+
+def test_candidates_append_products_to_the_window_or_its_fallback() -> None:
+    _, pool, _ = retrieval_inputs()
+    generated = generated_candidates()
+    rows = candidates(
+        pool,
+        target=100.0,
+        ppm=10.0,
+        fallback_ppm=30.0,
+        generated=generated,
     )
+    identities = rows.candidates
+    assert identities.smiles == ("C", "CC", "C", "C", "CC")
+    assert identities.keys == ("a", "b", "a", "a", "new")
+    assert identities.formulas == ("CH4", "C2H6", "CH4", "CH4", "C2H6")
+    assert identities.sources == ("pool", "pool", "pool", "generated", "generated")
+    assert identities.pool_rows.tolist() == [0, 1, 2, -1, -1]
+    assert identities.generated.tolist() == [False] * 3 + [True] * 2
+    assert rows.mass.tolist() == [99.999, 100.0, 100.001, 100.0, 100.001]
+    assert rows.heavy_atoms.tolist() == [1, 2, 1, 1, 2]
+    assert rows.train_sid.tolist() == [0, 1, 2, -1, -1]
+    # Packed rows 17 and 33 unpack to bits 3 and 2 of the first seven.
+    assert rows.fingerprints.tolist() == [
+        [0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0],
+        [0, 1, 0, 1, 0, 1, 0],
+        [1, 0, 0, 1, 0, 0, 1],
+    ]
+    assert rows.fingerprints.dtype == np.float32
+    assert rows.fragments[:3] == (None, None, None)
+    assert [row.tolist() for row in rows.fragments[3:] if row is not None] == [
+        [12, 13, 14],
+        [22, 23],
+    ]
+    assert rows.parent_similarity.tolist() == [0, 0, 0, 0.75, 0.5]
+    assert rows.steps.tolist() == [0, 0, 0, 1, 2]
+    assert rows.parent_tanimoto.tolist() == [0, 0, 0, 0.5, 0.25]
+    # No pool mass lies within 10 ppm of 100.004 Da; 30 ppm reaches rows 2 and 3.
+    fallback = candidates(pool, target=100.004, ppm=10.0, fallback_ppm=30.0)
+    assert fallback.candidates.pool_rows.tolist() == [2, 3]
+    dropped = candidates(pool, target=100.0, ppm=10.0, fallback_ppm=30.0, drop_row=0)
+    assert dropped.candidates.pool_rows.tolist() == [1, 2]
+    distant = candidates(pool, target=900.0, ppm=10.0, fallback_ppm=30.0)
+    assert distant.mass.shape == (0,)
+    assert distant.fingerprints.shape == (0, 7)
+    only = candidates(
+        pool,
+        target=900.0,
+        ppm=10.0,
+        fallback_ppm=30.0,
+        generated=generated,
+    )
+    assert only.candidates.sources == ("generated", "generated")
 
 
 def test_candidate_metadata_retains_each_admitted_parent_and_path() -> None:
@@ -1194,146 +1553,195 @@ def test_candidate_metadata_retains_each_admitted_parent_and_path() -> None:
     assert empty.combos == empty.raw == ()
 
 
-ENGINE_GOLDEN: Final = _BASELINE / "testdata" / "engine.pt"
+def full_bank(directory: Path) -> MainBank:
+    """Pin the seeded Full1 checkpoint with its released merged-spectrum rules."""
+    path = directory / "full1.pt"
+    torch.save(source_checkpoint(index=0), path)
+    config = MainBank.Config()
+    config.checkpoints = [checkpoint_config(path, index=0)]
+    config.merged_adduct = modal_adduct
+    config.single_count = keep_count
+    with torch.random.fork_rng(devices=[]):
+        return config.make()
 
 
-def test_whole_main94_and_fragment_evidence(tmp_path: Path) -> None:
-    golden = ENGINE_GOLDEN
-    actual: dict[str, Tensor] = {}
-    library, pool, spectra = retrieval_inputs()
-    for item, energy in zip(spectra, (10.0, None, float("nan")), strict=True):
-        item["ce"] = energy
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        path = tmp_path / "full1.pt"
-        torch.save(
-            source_checkpoint(
-                read_tensors(ENGINE_GOLDEN.with_name("neural_bank.pt")),
-                index=0,
-            ),
-            path,
+def _base(
+    spectra: Sequence[SpectrumRequest],
+    *,
+    target: float = 100.0,
+    bank: MainBank | None = None,
+    fragments: int | None = 600,
+    excluded: NDArray[np.bool_] | None = None,
+    generated: Sequence[GeneratedCandidate] = (),
+) -> MainBase:
+    library, pool, _ = retrieval_inputs()
+    config = MainEngine.Config()
+    if fragments is None:
+        config.fragments = config.subformulas = None
+    else:
+        assert config.fragments is not None
+        config.fragments.max_candidates = fragments
+    return config.make().base(
+        spectra,
+        target=target,
+        library=library,
+        pool=pool,
+        train_fingerprints=(np.arange(9)[:, None] * 17 % 251).astype(np.uint8),
+        bank=bank,
+        excluded=excluded,
+        generated=generated,
+        merged_counts=[0, 12, 2][: len(spectra)],
+    )
+
+
+def test_main_base_binds_library_analog_model_and_fragment_columns(
+    tmp_path: Path,
+) -> None:
+    _, _, spectra = retrieval_inputs()
+    names = main_feature_names()
+    bank = full_bank(tmp_path)
+    # A product holding both pool bits 2 and 3 scores their summed logits.
+    product = replace(
+        generated_candidates()[0],
+        fingerprint=np.array([0, 0, 1, 1, 0, 0, 0], np.float32),
+    )
+    base = _base(spectra, bank=bank, generated=(product,))
+    rows = base.rows
+    assert base.features.shape == (4, 94)
+    assert base.features.dtype == np.float32
+    np.testing.assert_array_equal(rows.candidates.pool_rows, [0, 1, 2, -1])
+    _, scores = _main_model_features(
+        rows,
+        views=bank.views(spectra, merged_counts=[0, 12, 2]),
+    )
+    assert scores[0] == scores[2]
+    assert scores[3] == np.float32(np.float64(scores[0]) + np.float64(scores[1]))
+    np.testing.assert_array_equal(base.features[:, names.index("fz")], scores / 100)
+    diagnostics = base.diagnostics
+    assert (diagnostics.n_cand, diagnostics.n_gen) == (4, 1)
+    assert diagnostics.fzmax == scores.max()
+    assert diagnostics.lib_max == base.features[:, names.index("lib_max")].max()
+    assert base.analogs
+    assert diagnostics.top_sim == float(np.float32(base.analogs[0].similarity))
+    # Library evidence is a similarity in [0, 1]; its mean divides by every query.
+    library = base.features[:, names.index("lib_max")]
+    assert np.all((library >= 0) & (library <= 1))
+    assert np.all(base.features[:, names.index("lib_mean")] <= library)
+    assert library[3] == 0
+    assert base.features[:, names.index("n_query")].tolist() == [3.0] * 4
+    assert base.features[:, names.index("n_pos")].tolist() == [2.0] * 4
+    assert base.features[:, names.index("is_gen")].tolist() == [0, 0, 0, 1]
+    assert (
+        base.features[:, names.index("target_mass")].tolist() == [np.float32(0.1)] * 4
+    )
+    # Pool rows 0 and 2 and the product share CH4; pool row 1 holds C2H6.
+    assert base.features[:, names.index("n_formula")].tolist() == [2.0] * 4
+    assert base.features[:, names.index("formula_share")].tolist() == [
+        np.float32(3 / 4),
+        np.float32(1 / 4),
+        np.float32(3 / 4),
+        np.float32(3 / 4),
+    ]
+    # Every pool row holds two fragments; the product brings three.
+    assert base.features[:, names.index("fr_n")].tolist() == [
+        np.float32(np.log1p(2.0)),
+        np.float32(np.log1p(2.0)),
+        np.float32(np.log1p(2.0)),
+        np.float32(np.log1p(3.0)),
+    ]
+    unscored = _base(spectra)
+    assert not unscored.features[:, names.index("fz")].any()
+    assert unscored.diagnostics.fzmax == 0.0
+    np.testing.assert_array_equal(
+        unscored.features[:, names.index("lib_max")],
+        library[:3],
+    )
+    capped = _base(spectra, bank=bank, fragments=2)
+    # Only the two strongest f.z candidates count fragments; ties keep row order.
+    counted = capped.features[:, names.index("fr_n")] > 0
+    assert np.flatnonzero(~counted).tolist() == [1 if scores[0] > scores[1] else 2]
+    disabled = _base(spectra, bank=bank, fragments=None)
+    for name in ("fr_int", "fr_n", "sf_int", "sf_cnt", "formula_is_top"):
+        assert not disabled.features[:, names.index(name)].any(), name
+    silent = _base([], fragments=None)
+    assert silent.features[:, names.index("n_query")].tolist() == [0.0] * 3
+    # Library rows 0-2 are every spectrum of structure 0, the first pool row.
+    withheld = _base(spectra, excluded=np.isin(np.arange(13), [0, 1, 2, 5]))
+    assert 0 not in {analog.sid for analog in withheld.analogs}
+    assert withheld.features[0, names.index("lib_max")] == 0
+    empty = _base(spectra, target=900.0, bank=bank)
+    assert empty.features.shape == (0, 94)
+    assert empty.diagnostics.n_cand == 0
+
+
+def test_ion_deltas_follow_the_adduct_polarity_and_named_carriers() -> None:
+    proton = adduct_parameters("[M+H]+")[2]
+    deprotonation = adduct_parameters("[M-H]-")[2]
+    assert main_ion_deltas("[M+H]+") == (proton,)
+    assert main_ion_deltas("unknown+") == (proton,)
+    assert main_ion_deltas("unknown") == (deprotonation,)
+    assert main_ion_deltas("[M-H]-") == (deprotonation,)
+    for adduct in ("[M+Na]+", "[M+K]+", "[M+NH4]+"):
+        assert main_ion_deltas(adduct) == (proton, adduct_parameters(adduct)[2])
+    assert main_ion_deltas("[M+Cl]-") == (
+        deprotonation,
+        adduct_parameters("[M+Cl]-")[2],
+    )
+    carrier = 12.0 + 2 * 1.00782503207 + 2 * 15.9949146196 - proton
+    for adduct in ("[M+CH2O2-H]-", "[M+HCOO]-"):
+        assert main_ion_deltas(adduct) == (deprotonation, carrier)
+
+
+def test_fragment_channels_count_shifted_and_strict_matches_by_hand() -> None:
+    proton = main_ion_deltas("[M+H]+")[0]
+    hydrogen = 1.00782503207
+    masses = np.array([10.0, 20.0, 30.0 - 2 * hydrogen, 9000.0])
+    peaks = [
+        (np.array([10.0, 20.0, 30.0, 40.0]) + proton, np.ones(4), "[M+H]+"),
+        (np.array([9000.0, 10.0]) + proton, np.array([1.0, 0.25]), "[M+H]+"),
+    ]
+    # Three of four equal peaks match, one only through a two-hydrogen shift.
+    features = main_fragment_features(masses, peaks=peaks)
+    assert features.dtype == np.float32
+    assert features.tolist() == [1.0, 0.875, 1.0, 1.0, 1.0]
+    first = main_fragment_features(masses, peaks=peaks[:1])
+    assert first.tolist() == [0.75, 0.75, 0.75, 0.75, 0.5]
+    for empty in (
+        main_fragment_features(np.zeros(0), peaks=peaks),
+        main_fragment_features(masses, peaks=[]),
+    ):
+        assert empty.tolist() == [0.0] * 5
+
+
+def test_subformulas_enumerate_bounded_hydrogens_and_score_their_peaks() -> None:
+    hydrogen = 1.00782503207
+    counts = engine_formula_vector("CH4")
+    assert counts is not None
+    complete = [
+        hydrogen,
+        2 * hydrogen,
+        12.0,
+        *(12.0 + h * hydrogen for h in range(1, 5)),
+    ]
+    assert main_subformula_masses(counts, max_out=2_000_000).tolist() == complete
+    # At the cap the masses keep their enumeration order, unsorted.
+    assert main_subformula_masses(counts, max_out=3).tolist() == [
+        hydrogen,
+        2 * hydrogen,
+        12.0,
+    ]
+    proton = main_ion_deltas("[M+H]+")[0]
+    peaks = [(np.array([12.0 + 3 * hydrogen + proton, 50.0]), np.ones(2), "[M+H]+")]
+    features = main_subformula_features("CH4", peaks=peaks, max_out=2_000_000)
+    assert features.tolist() == [0.5, 0.5, 0.5, 0.5]
+    for formula, query in (("NaCl", peaks), ("CH4", peaks[:0])):
+        assert (
+            main_subformula_features(formula, peaks=query, max_out=10).tolist()
+            == [
+                0.0,
+            ]
+            * 4
         )
-        config = MainBank.Config()
-        config.checkpoints = [checkpoint_config(path, index=0)]
-        config.merged_adduct = modal_adduct
-        config.single_count = keep_count
-        bank = config.make()
-        for case, (query, target, neural, enabled, cap, excluded) in enumerate(
-            (
-                (spectra, 100.0, True, True, 2, None),
-                (
-                    spectra,
-                    100.0,
-                    False,
-                    True,
-                    600,
-                    np.isin(np.arange(13), [0, 1, 2, 5]),
-                ),
-                (list[SpectrumRequest](), 100.0, False, False, 600, None),
-                (spectra[:1], 130.0, True, True, 600, None),
-                (spectra, 900.0, True, True, 600, None),
-            ),
-        ):
-            engine = MainEngine.Config()
-            assert engine.fragments is not None
-            engine.fragments.max_candidates = cap
-            if not enabled:
-                engine.fragments = engine.subformulas = None
-            result = engine.make().base(
-                query,
-                target=target,
-                library=library,
-                pool=pool,
-                train_fingerprints=(np.arange(9)[:, None] * 17 % 251).astype(np.uint8),
-                bank=bank if neural else None,
-                excluded=excluded,
-                merged_counts=[0, 12, 2][: len(query)],
-            )
-            rows = result.rows
-            actual[f"base/{case}/features"] = torch.from_numpy(result.features)
-            for name, value in (
-                ("pid", rows.candidates.pool_rows),
-                ("mass", rows.mass),
-                ("n_heavy", rows.heavy_atoms),
-                ("train_sid", rows.train_sid),
-                ("fp", rows.fingerprints),
-                ("is_gen", rows.candidates.generated.astype(np.float32)),
-                ("gen_sim", rows.parent_similarity),
-                ("gen_steps", rows.steps),
-                ("gen_tan", rows.parent_tanimoto),
-            ):
-                actual[f"base/{case}/{name}"] = torch.from_numpy(value)
-            diagnostic = result.diagnostics
-            actual[f"base/{case}/info"] = torch.tensor(
-                [
-                    diagnostic.n_cand,
-                    diagnostic.lib_max,
-                    diagnostic.top_sim,
-                    diagnostic.fzmax,
-                    diagnostic.n_gen,
-                ],
-                dtype=torch.float64,
-            )
-            actual[f"base/{case}/analogs"] = analog_record(result.analogs)
-        peaks = [
-            (
-                np.arange(12, dtype=np.float64) * 10 + 11.00727645217,
-                np.arange(12, dtype=np.float64) / 12 + 0.1,
-                "[M+H]+",
-            ),
-            (
-                np.array([9001.00727645217, 11.00727645217]),
-                np.array([1.0, 0.5]),
-                "[M+Na]+",
-            ),
-        ]
-        masses = np.array([10.0, 20.0, 30.0 - 2 * 1.00782503207, 9000.0], np.float64)
-        for index, label in enumerate(
-            (
-                "[M+H]+",
-                "[M+NH4]+",
-                "[M+Na]+",
-                "[M+K]+",
-                "[M-H]-",
-                "[M+Cl]-",
-                "[M+CH2O2-H]-",
-                "[M+HCOO]-",
-                "unknown+",
-                "unknown",
-            ),
-        ):
-            actual[f"deltas/{index}"] = torch.tensor(
-                main_ion_deltas(label),
-                dtype=torch.float64,
-            )
-            actual[f"fragments/{index}"] = torch.from_numpy(
-                main_fragment_features(
-                    masses,
-                    peaks=[(mass, value, label) for mass, value, _ in peaks],
-                ),
-            )
-        for index, formula in enumerate(
-            ("C2H6O", "CH2NOPS-FClBrI+", "C0H2C", "NaCl", "C.2H", ""),
-        ):
-            vector = engine_formula_vector(formula)
-            actual[f"formula/{index}/valid"] = torch.tensor(vector is not None)
-            actual[f"formula/{index}/counts"] = torch.from_numpy(
-                vector if vector is not None else np.zeros(0, np.int64),
-            )
-            actual[f"formula/{index}/features"] = torch.from_numpy(
-                main_subformula_features(formula, peaks=peaks, max_out=2_000_000),
-            )
-            if vector is not None:
-                for maximum in (30, 2_000_000):
-                    actual[f"formula/{index}/masses/{maximum}"] = torch.from_numpy(
-                        main_subformula_masses(vector, max_out=maximum),
-                    )
-        actual["fragments/empty"] = torch.from_numpy(
-            main_fragment_features(np.zeros(0), peaks=peaks),
-        )
-        actual["fragments/no_peaks"] = torch.from_numpy(
-            main_fragment_features(masses, peaks=[]),
-        )
-    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 def test_main_engine_empty_candidates_preserve_all94_columns() -> None:
@@ -1970,361 +2378,142 @@ class _FamilyDataProposals:
         return (None, None) if smiles == "bad" else ("key", "skeleton")
 
 
-class _Request(TypedDict):
-    smiles: str
-    delta: float
-    tol: float
-    max_steps: int
-    max_per_analog: int
-    allow_isomerisation: bool
-    products: list[tuple[str, tuple[str, ...] | None]]
-
-
-class _Inputs(TypedDict):
-    requests: list[_Request]
-    standardized: dict[str, str | None]
-    keys: dict[str, str | None]
-    properties: dict[str, tuple[str, float, int] | None]
-    fingerprints: list[str]
-    fragments: list[str]
-
-
-class _PlanCall(_Request):
-    sid: int
-    similarity: float
-
-
-class _SourceConfig(TypedDict):
-    parents: int
-    minimum: float
-    per_parent: int
-    total: int
-    tolerance: float
-    ppm: float
-
-
-class _SourceProducts:
-    def __init__(self, rows: list[_PlanCall]) -> None:
-        self.rows = rows
-        self.calls: list[ReactionRequest] = []
-
-    def products(self, request: ReactionRequest) -> tuple[ReactionProduct, ...]:
-        self.calls.append(request)
-        normalized = normalize_request(request)
-        row = next(
-            row
-            for row in self.rows
-            if row["smiles"] == request["smiles"]
-            and float(row["delta"]).hex() == float(request["delta"]).hex()
-            and float(row["tol"]).hex() == float(normalized["tolerance"]).hex()
-        )
-        return tuple({"raw": raw, "combo": combo} for raw, combo in row["products"])
-
-
-class Prepared:
-    """Supply every full source input through strict prepared-data boundaries."""
-
-    def __init__(self, expected: dict[str, Tensor]) -> None:
-        self.inputs = json_loads(decode(expected["preparation/metadata"]), _Inputs)
-        self.fingerprints: dict[str, NDArray[np.uint8]] = {
-            value: expected[f"preparation/fingerprints/{index}"].numpy()
-            for index, value in enumerate(self.inputs["fingerprints"])
-        }
-        self.fragments: dict[str, NDArray[np.float64]] = {
-            value: expected[f"preparation/fragments/{index}"].numpy()
-            for index, value in enumerate(self.inputs["fragments"])
-        }
-
-    def products(self, request: ReactionRequest) -> tuple[ReactionProduct, ...]:
-        assert request.get("application_budget", 800) == 800
-        assert request.get("stage_parents", 24) == 24
-        assert request.get("first_products", 32) == 32
-        assert request.get("later_products", 16) == 16
-        row = next(
-            row
-            for row in self.inputs["requests"]
-            if row["smiles"] == request["smiles"]
-            and float(row["delta"]).hex() == float(request["delta"]).hex()
-            and float(row["tol"]).hex() == float(request.get("tolerance", 0.003)).hex()
-            and row["max_steps"] == request.get("max_steps", 2)
-            and row["max_per_analog"] == request.get("max_products", 60)
-            and row["allow_isomerisation"] == request.get("allow_isomerization", True)
-        )
-        return tuple({"raw": raw, "combo": combo} for raw, combo in row["products"])
-
-    def standardize(self, smiles: str) -> str | None:
-        return self.inputs["standardized"][smiles]
-
-    def key(self, smiles: str) -> str | None:
-        return self.inputs["keys"][smiles]
-
-    def properties(self, smiles: str) -> tuple[str, float, int] | None:
-        return self.inputs["properties"][smiles]
-
-    def fingerprint(self, smiles: str) -> NDArray[np.uint8]:
-        return self.fingerprints[smiles]
-
-    def base_for_smiles(self, smiles: str) -> NDArray[np.float64]:
-        return self.fragments[smiles]
-
-
-def test_complete_generation_all_eight_cases_and_every_admitted_field() -> None:
-    golden = _BASELINE / "testdata/generation_inputs.pt"
-    expected = read_tensors(golden)
-    prepared = Prepared(expected)
-    strings = tuple(decode(expected[f"parents/{index}"]) for index in range(9))
-    actual = {
-        name: value.clone()
-        for name, value in expected.items()
-        if name.startswith(("parents/", "preparation/")) or name == "bits"
-    }
-    for name in (
-        "default",
-        "excluded",
-        "total_cap",
-        "parent_cap",
-        "no_parents",
-        "charged",
-        "salt",
-        "wildcard",
-    ):
-        config = ReactionScreen.Config()
-        config.parents, config.total = from_plain(
-            expected[name + "/limits"].tolist(),
-            tuple[int, int],
-        )
-        analogs = [
-            Analog(
-                sid=int(sid),
-                similarity=similarity,
-                shift=shift,
-                natural_product=bool(row),
-            )
-            for sid, similarity, shift, row in from_plain(
-                expected[name + "/analogs"].tolist(),
-                list[tuple[float, float, float, float]],
-            )
-        ]
-        excluded = decode(expected[name + "/exclude"])
-        result = config.make().run(
-            analogs,
-            target=float(expected[name + "/target"]),
-            excluded={excluded} if excluded else set(),
-            train_smiles=strings,
-            train_mass=expected["parents/mass"].numpy(),
-            train_fingerprints=expected["parents/fingerprints"].numpy(),
-            bits=expected["bits"].numpy(),
-            proposals=prepared,
-            chemistry=prepared,
-            fragments=prepared,
-        )
-        for field in ("target", "limits", "exclude", "analogs"):
-            actual[name + "/" + field] = expected[name + "/" + field].clone()
-        actual[name + "/count"] = torch.tensor(len(result.candidates))
-        actual[name + "/log"] = text(
-            str(
-                [
-                    (
-                        row.parent,
-                        row.similarity,
-                        row.combo,
-                        row.kind,
-                        row.how,
-                        row.identity,
-                    )
-                    for row in result.logs
-                ],
-            ),
-        )
-        for index, product in enumerate(result.candidates):
-            prefix = f"{name}/{index}"
-            for field, value in (
-                ("smiles", product.smiles),
-                ("key", product.key),
-                ("formula", product.formula),
-                ("raw", product.raw),
-                ("combo", str(product.combo)),
-            ):
-                assert value is not None
-                actual[prefix + "/" + field] = text(value)
-            actual[prefix + "/fp"] = torch.from_numpy(product.fingerprint.copy())
-            actual[prefix + "/fragments"] = torch.from_numpy(product.fragments.copy())
-            actual[prefix + "/values"] = torch.tensor(
-                [
-                    product.mass,
-                    product.heavy_atoms,
-                    product.parent_similarity,
-                    product.steps,
-                    product.parent_tanimoto,
-                    product.parent_sid,
-                ],
-                dtype=torch.float64,
-            )
-    assert_tensor_golden(
-        golden,
-        float32_comparands(
-            actual,
-            inputs=("parents/*", "preparation/*", "*/target", "*/analogs"),
-        ),
+def screen_analogs() -> tuple[Analog, ...]:
+    """Rank four parents; the second falls below the 0.3 similarity floor."""
+    return (
+        Analog(sid=1, similarity=0.9),
+        Analog(sid=0, similarity=0.2),
+        Analog(sid=2, similarity=0.5),
+        Analog(sid=3, similarity=0.3),
     )
 
 
-@pytest.mark.parametrize("case", ["default", "parent_cap", "no_parents"])
-def test_planned_requests_keep_parent_order_and_every_budget(case: str) -> None:
-    expected = read_tensors(_BASELINE / "testdata/generation_inputs.pt")
-    prepared = Prepared(expected)
-    parents = tuple(decode(expected[f"parents/{index}"]) for index in range(9))
+@pytest.mark.parametrize(("parents", "chosen"), [(6, (1, 2, 3)), (2, (1, 2)), (0, ())])
+def test_planned_requests_keep_parent_order_and_every_budget(
+    parents: int,
+    chosen: tuple[int, ...],
+) -> None:
     config = ReactionScreen.Config()
-    parent_limit, config.total = from_plain(
-        expected[case + "/limits"].tolist(),
-        tuple[int, int],
-    )
-    config.parents = parent_limit
-    analogs = tuple(
-        Analog(
-            sid=int(sid),
-            similarity=similarity,
-            shift=shift,
-            natural_product=bool(row),
-        )
-        for sid, similarity, shift, row in from_plain(
-            expected[case + "/analogs"].tolist(),
-            list[tuple[float, float, float, float]],
-        )
-    )
+    config.parents = parents
+    train_mass = np.array([46.0, 60.0, 74.0, 1000.0])
     planned = config.make().plan(
-        analogs,
-        target=float(expected[case + "/target"]),
-        train_smiles=parents,
-        train_mass=expected["parents/mass"].numpy(),
+        screen_analogs(),
+        target=100.0,
+        train_smiles=("p0", "p1", "p2", "p3"),
+        train_mass=train_mass,
     )
-    assert (
-        tuple(analog for analog, _ in planned)
-        == tuple(analog for analog in analogs if analog.similarity >= 0.3)[
-            :parent_limit
-        ]
-    )
+    assert tuple(analog.sid for analog, _ in planned) == chosen
     for analog, request in planned:
-        row = next(
-            row
-            for row in prepared.inputs["requests"]
-            if row["smiles"] == parents[analog.sid]
-            and float(row["delta"]).hex() == float(request["delta"]).hex()
-        )
         assert request == {
-            "smiles": row["smiles"],
-            "delta": row["delta"],
-            "tolerance": row["tol"],
-            "max_steps": row["max_steps"],
-            "max_products": row["max_per_analog"],
-            "allow_isomerization": row["allow_isomerisation"],
+            "smiles": f"p{analog.sid}",
+            "delta": 100.0 - train_mass.item(analog.sid),
+            # The 10 ppm window at 100 Da is below the 0.004 Da floor.
+            "tolerance": 0.004,
+            "max_steps": 2,
+            "max_products": 60,
+            "allow_isomerization": True,
             "application_budget": 800,
             "stage_parents": 24,
             "first_products": 32,
             "later_products": 16,
         }
-
-
-def test_whole_relative_window_threshold_and_all_reached_requests() -> None:
-    golden = _BASELINE / "testdata/generation_requests.pt"
-    expected = read_tensors(golden)
-    prepared = Prepared(read_tensors(_BASELINE / "testdata/generation_inputs.pt"))
-    actual = {
-        name: value.clone()
-        for name, value in expected.items()
-        if name.startswith(("parents/", "input/")) or name == "bits"
-    }
-    parents = tuple(decode(expected[f"parents/{index}"]) for index in range(9))
-    analogs = tuple(
-        Analog(sid=int(sid), similarity=sim, shift=shift, natural_product=bool(row))
-        for sid, sim, shift, row in from_plain(
-            expected["input/analogs"].tolist(),
-            list[tuple[float, float, float, float]],
-        )
+    wide = config.make().plan(
+        screen_analogs()[:1],
+        target=1000.0,
+        train_smiles=("p0", "p1"),
+        train_mass=np.array([0.0, 900.0]),
     )
-    for case in ("relative", "parent_cap", "empty"):
-        source = json_loads(decode(expected[case + "/config"]), _SourceConfig)
-        config = ReactionScreen.Config()
-        config.parents = source["parents"]
-        screen = config.make()
-        actual[case + "/config"] = _json_text(
-            {
-                "parents": config.parents,
-                "minimum": config.min_similarity,
-                "per_parent": config.per_parent,
-                "total": config.total,
-                "tolerance": config.tolerance,
-                "ppm": config.ppm,
-            },
-        )
-        target = float(expected[case + "/target"])
-        actual[case + "/target"] = torch.tensor(target, dtype=torch.float64)
-        products = _SourceProducts(
-            json_loads(decode(expected[case + "/requests"]), list[_PlanCall]),
-        )
-        plan = screen.plan(
-            analogs,
-            target=target,
-            train_smiles=parents,
-            train_mass=expected["parents/mass"].numpy(),
-        )
-        result = screen.run(
-            analogs,
-            target=target,
-            excluded=set(),
-            train_smiles=parents,
-            train_mass=expected["parents/mass"].numpy(),
-            train_fingerprints=expected["parents/fingerprints"].numpy(),
-            bits=expected["bits"].numpy(),
-            proposals=products,
-            chemistry=prepared,
-            fragments=prepared,
-        )
-        observed: list[_PlanCall] = []
-        for (analog, request), called in zip(plan, products.calls, strict=True):
-            assert called == request
-            normalized = normalize_request(request)
-            observed.append(
-                {
-                    "sid": analog.sid,
-                    "similarity": analog.similarity,
-                    "smiles": normalized["smiles"],
-                    "delta": normalized["delta"],
-                    "tol": normalized["tolerance"],
-                    "max_steps": normalized["max_steps"],
-                    "max_per_analog": normalized["max_products"],
-                    "allow_isomerisation": normalized["allow_isomerization"],
-                    "products": [],
-                },
-            )
-        actual[case + "/requests"] = _json_text(observed)
-        actual[case + "/count"] = torch.tensor(len(result.candidates))
-        actual[case + "/log"] = _json_text(
-            [
-                (row.parent, row.similarity, row.combo, row.kind, row.how, row.identity)
-                for row in result.logs
-            ],
-        )
-    assert_tensor_golden(golden, actual)
+    assert [request["tolerance"] for _, request in wide] == [0.01] * min(parents, 1)
+
+
+class _Generation:
+    """Serve every parent the same proposals and plain-table chemistry."""
+
+    def __init__(self, products: Sequence[str]) -> None:
+        self.products_ = tuple(products)
+        self.requests: list[ReactionRequest] = []
+
+    def products(self, request: ReactionRequest) -> tuple[ReactionProduct, ...]:
+        self.requests.append(request)
+        return tuple({"raw": raw, "combo": ("methyl_O",)} for raw in self.products_)
+
+    def standardize(self, smiles: str) -> str | None:
+        return smiles.upper()
+
+    def key(self, smiles: str) -> str | None:
+        return "key-" + smiles
+
+    def properties(self, smiles: str) -> tuple[str, float, int] | None:
+        return ("C3H8O", 100.0, len(smiles))
+
+    def fingerprint(self, smiles: str) -> NDArray[np.uint8] | None:
+        del smiles
+        return np.packbits(np.array([1, 0, 1, 0, 0, 0, 0, 0], np.uint8))
+
+    def base_for_smiles(self, smiles: str) -> NDArray[np.float64]:
+        return np.array([float(len(smiles))])
+
+
+def test_generation_admits_each_key_once_logs_repeats_and_stops_at_the_total() -> None:
+    table = _Generation(["ccoc", "CCOC", "coc"])
+    config = ReactionScreen.Config()
+    config.total = 3
+    result = config.make().run(
+        screen_analogs(),
+        target=100.0,
+        excluded={"key-COC"},
+        train_smiles=("p0", "p1", "p2", "p3"),
+        train_mass=np.array([46.0, 60.0, 74.0, 86.0]),
+        train_fingerprints=np.packbits(np.eye(4, 8, dtype=np.uint8), axis=1),
+        bits=np.arange(4, dtype=np.int64),
+        proposals=table,
+        chemistry=table,
+        fragments=table,
+    )
+    # Parent 1 admits CCOC; its repeat and the pooled COC are logged instead.
+    assert [candidate.smiles for candidate in result.candidates] == ["CCOC"]
+    assert [(log.parent, log.kind, log.identity) for log in result.logs] == [
+        (1, "gen", "key-CCOC"),
+        (1, "pool", "key-COC"),
+        (2, "gen", "key-CCOC"),
+        (2, "gen", "key-CCOC"),
+        (2, "pool", "key-COC"),
+        (3, "gen", "key-CCOC"),
+        (3, "gen", "key-CCOC"),
+        (3, "pool", "key-COC"),
+    ]
+    (candidate,) = result.candidates
+    assert (candidate.parent_sid, candidate.parent_similarity) == (1, 0.9)
+    assert (candidate.raw, candidate.combo, candidate.heavy_atoms) == (
+        "ccoc",
+        ("methyl_O",),
+        4,
+    )
+    # Product bits 0 and 2 against parent 1's bit 1 share nothing.
+    assert candidate.fingerprint.tolist() == [1, 0, 1, 0]
+    assert candidate.parent_tanimoto == 0.0
+    assert candidate.fragments.tolist() == [4.0]
+    assert len(table.requests) == 3
+    config.total = 1
+    stopped = config.make().run(
+        screen_analogs(),
+        target=100.0,
+        excluded=set(),
+        train_smiles=("p0", "p1", "p2", "p3"),
+        train_mass=np.array([46.0, 60.0, 74.0, 86.0]),
+        train_fingerprints=np.packbits(np.eye(4, 8, dtype=np.uint8), axis=1),
+        bits=np.arange(4, dtype=np.int64),
+        proposals=table,
+        chemistry=table,
+        fragments=table,
+    )
+    assert [candidate.smiles for candidate in stopped.candidates] == ["CCOC"]
+    assert stopped.logs == ()
+    assert len(table.requests) == 4
 
 
 def test_seen_keys_are_logged_before_missing_properties_and_mass_checks() -> None:
-    expected = read_tensors(_BASELINE / "testdata/generation_inputs.pt")
-    prepared = Prepared(expected)
-    prepared.inputs["requests"] = [
-        {
-            "smiles": "parent",
-            "delta": 100.0,
-            "tol": 0.004,
-            "max_steps": 2,
-            "max_per_analog": 60,
-            "allow_isomerisation": True,
-            "products": [("raw", ("first", "second"))],
-        },
-    ]
-    prepared.inputs["standardized"] = {"raw": "standardized"}
-    prepared.inputs["keys"] = {"standardized": "seen"}
-    prepared.inputs["properties"] = {}
+    table = _Table({})
     result = (
         ReactionScreen.Config()
         .make()
@@ -2336,9 +2525,9 @@ def test_seen_keys_are_logged_before_missing_properties_and_mass_checks() -> Non
             train_mass=np.array([0.0]),
             train_fingerprints=np.array([[0]], np.uint8),
             bits=np.array([0], np.int64),
-            proposals=prepared,
-            chemistry=prepared,
-            fragments=prepared,
+            proposals=_SeenProducts(),
+            chemistry=table,
+            fragments=table,
         )
     )
     assert not result.candidates
@@ -2348,20 +2537,12 @@ def test_seen_keys_are_logged_before_missing_properties_and_mass_checks() -> Non
     ] == [
         (0, 0.75, ("first", "second"), "pool", "key", "seen"),
     ]
-    prepared.inputs["keys"] = {}
-    with pytest.raises(KeyError, match=r"^'standardized'$"):
-        ReactionScreen.Config().make().run(
-            [Analog(sid=0, similarity=0.75)],
-            target=100.0,
-            excluded=set(),
-            train_smiles=("parent",),
-            train_mass=np.array([0.0]),
-            train_fingerprints=np.array([[0]], np.uint8),
-            bits=np.array([0], np.int64),
-            proposals=prepared,
-            chemistry=prepared,
-            fragments=prepared,
-        )
+
+
+class _SeenProducts:
+    def products(self, request: ReactionRequest) -> tuple[ReactionProduct, ...]:
+        assert request["smiles"] == "parent"
+        return ({"raw": "seen", "combo": ("first", "second")},)
 
 
 class _Table:
@@ -2448,70 +2629,163 @@ def test_each_rejected_product_skips_only_itself_inside_the_exact_mass_window() 
     assert [candidate.raw for candidate in relative.candidates] == ["inside"]
 
 
-def decode(value: Tensor) -> str:
-    """Read a stored UTF8 input."""
-    return bytes(from_plain(value.tolist(), list[int])).decode()
+def pipeline_stage_a() -> StageA:
+    """Back off from a shared mode/type table to a carbon-count table."""
+    table = np.full((8, 6), 2.0, np.float32)
+    return StageA(
+        chains=((("mode", "ft"),), (("mode", "ft"), ("c1",))),
+        tabs=(
+            ((np.arange(8), table),),
+            (
+                (np.arange(8), table),
+                (np.zeros(0, np.int64), np.zeros((0, 6), np.float32)),
+            ),
+        ),
+        alpha=80.0,
+    )
 
 
-def text(value: str) -> Tensor:
-    """Retain every byte of an observed source-compatible output."""
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
+def pipeline_stage_b() -> str:
+    """Split the Fragnet booster on its sixth column, the explained peak weight."""
+    return model_text(stump(5, left=-1.0, right=1.0), features=stage_b_names())
 
 
-def _json_text(value: object) -> Tensor:
-    return text(json.dumps(to_plain(value), separators=(",", ":")))
+RANKER_NAMES: Final = (
+    *main_feature_names(),
+    "derivation__dg_n_combo",
+    "derivation__dp_hit",
+    "frag2__disc_max",
+    "analog_struct__st_ap",
+    "model_views__fzA_gap",
+    "fragnet__fn_score",
+)
 
 
-def assert_main_pipeline(
-    tmp_path: Path,
-) -> None:
-    """Replay every public main pipeline field against its golden."""
-    golden = _BASELINE / "testdata/main_pipeline.pt"
-    expected = read_tensors(golden)
-    actual = {
-        k: v.clone()
-        for k, v in expected.items()
-        if k.startswith(("input/", "prepared/", "train/", "proposal/", "identity/"))
+def ranker_texts(names: Sequence[str] = RANKER_NAMES) -> list[str]:
+    """Serialize four three-stump rankers over the released feature names."""
+    columns = [names.index(name) for name in ("fz", "lib_max", "derivation__dp_hit")]
+    return [
+        model_text(
+            stump(columns[index % 3], left=-0.5, right=0.5 * (index + 1)),
+            stump(columns[(index + 1) % 3], left=0.25, right=-0.25),
+            stump(names.index("frag2__disc_max"), left=0.0, right=1.0),
+            features=names,
+        )
+        for index in range(4)
+    ]
+
+
+def _fragnet_record(
+    groups: Sequence[tuple[str, int]],
+    bonds: Sequence[tuple[int, int]],
+) -> FragnetRecord:
+    """Weigh heavy atoms with their hydrogens; codes C=0 and O=2."""
+    masses = ELEMENT_MASSES
+    amass = np.array([masses[symbol] + count * masses["H"] for symbol, count in groups])
+    codes = np.array([2 if symbol == "O" else 0 for symbol, _ in groups], np.int8)
+    return {
+        "amass": amass,
+        "kind": np.zeros(len(groups), np.int8),
+        "el": codes,
+        "nh": np.array([count for _, count in groups], np.int8),
+        "bonds": np.array(bonds, np.int32),
+        "bring": np.zeros(len(bonds), np.int8),
+        "mass": float(amass.sum()),
+        "el10": codes.astype(np.uint8),
     }
-    bits = expected["input/bits"].numpy()
-    train_mass = expected["input/train_mass"].numpy()
+
+
+PIPELINE_MOLECULES: Final = {
+    "CCCO": (
+        (("C", 3), ("C", 2), ("C", 2), ("O", 1)),
+        ((0, 1), (1, 2), (2, 3)),
+        "BDERNNFJNOPAEC",
+    ),
+    "CCOC": (
+        (("C", 3), ("C", 2), ("O", 0), ("C", 3)),
+        ((0, 1), (1, 2), (2, 3)),
+        "XOBKSJJDNFUZPF",
+    ),
+    "CC(C)O": (
+        (("C", 3), ("C", 1), ("C", 3), ("O", 1)),
+        ((0, 1), (1, 2), (1, 3)),
+        "KFZMGEQAYNKOFK",
+    ),
+}
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _Provider:
+    """Serve literal prepared rows of propanol, its ether and its isomer."""
+
+    priors: DerivationPriors
+
+    def select(self, rows: CandidateRows, analogs: Sequence[Analog]) -> MainFamilyRows:
+        smiles = rows.candidates.smiles
+        records = [_fragnet_record(*PIPELINE_MOLECULES[value][:2]) for value in smiles]
+        train = (ethanol(), propanol())
+        capabilities = np.zeros((len(smiles), 22), np.uint8)
+        capabilities[:, 0] = [value != "CCOC" for value in smiles]
+        capabilities[:, 7] = [value == "CCOC" for value in smiles]
+        return MainFamilyRows(
+            candidate_structures=tuple(
+                structure(
+                    [8 if symbol == "O" else 6 for symbol, _ in groups],
+                    bonds,
+                    hashes=(0,) * 8,
+                    numbers=(0,) * 7 + (4,),
+                    formula=(3, 8, 0, 1),
+                )
+                for groups, bonds, _ in (PIPELINE_MOLECULES[value] for value in smiles)
+            ),
+            analog_structures=tuple(train[analog.sid] for analog in analogs),
+            train_smiles=("CCO", "CCCO"),
+            depth1=tuple(
+                fragment_masses(row["amass"], bonds=row["bonds"], depth=1)
+                for row in records
+            ),
+            depth2=tuple(
+                fragment_masses(row["amass"], bonds=row["bonds"]) for row in records
+            ),
+            capabilities=capabilities,
+            fragnet=tuple(records),
+            priors=self.priors,
+        )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Pipeline:
+    """Hold one complete tiny main-engine release and its three queries."""
+
+    target: float
+    spectra: list[SpectrumRequest]
+    library: SpectralLibrary
+    pool: CandidatePool
+    train_fingerprints: NDArray[np.uint8]
+    generated: tuple[GeneratedCandidate, ...]
+    logs: tuple[DerivationLog, ...]
+    provider: _Provider
+    bank: MainBank
+    views_bank: MainBank
+
+
+def pipeline(directory: Path) -> Pipeline:
+    """Build the propanol query against ethanol and propanol training spectra."""
+    train_mass = np.array([46.041864812, 60.057514876])
     mass = np.repeat(train_mass, 2)
     order = np.argsort(mass, kind="mergesort")
     counts = np.array([3, 4, 2, 5], np.int32)
-    pool = CandidatePool(
-        mass=expected["input/pool_mass"].numpy(),
-        keys=_pipeline_strings(expected["input/pool_keys"]),
-        smiles=_pipeline_strings(expected["input/pool_smiles"]),
-        formulas=_pipeline_strings(expected["input/pool_formula"]),
-        heavy_atoms=expected["input/pool_heavy"].numpy(),
-        source=np.array([0], np.int8),
-        train_sid=np.array([1], np.int64),
-        packed=expected["input/pool_fp"].numpy(),
-        bits=bits,
-        fragment_offsets=np.array([0, len(expected["prepared/0/depth2"])], np.int64),
-        fragment_mass=expected["prepared/0/depth2"].numpy().astype(np.float32),
-        key_to_pid={
-            key: i
-            for i, key in enumerate(_pipeline_strings(expected["input/pool_keys"]))
-        },
-    )
     library = SpectralLibrary(
         offsets=np.concatenate([[0], np.cumsum(counts)]).astype(np.int64),
         mz=np.concatenate(
-            [
-                np.arange(counts.item(i), dtype=np.float32) * 10 + 20
-                for i in range(len(counts))
-            ],
+            [np.arange(count, dtype=np.float32) * 10 + 20 for count in counts.tolist()],
         ),
         intensity=np.concatenate(
-            [
-                np.arange(counts.item(i), dtype=np.float32) % 3 + 1
-                for i in range(len(counts))
-            ],
+            [np.arange(count, dtype=np.float32) % 3 + 1 for count in counts.tolist()],
         ),
         structure_mass=train_mass,
-        keys=_pipeline_strings(expected["input/train_keys"]),
-        smiles=_pipeline_strings(expected["input/train_smiles"]),
+        keys=("LFQSCWFLJHTTHZ", "BDERNNFJNOPAEC"),
+        smiles=("CCO", "CCCO"),
         sid=np.array([0, 0, 1, 1], np.int64),
         library=np.array([2, 3, 0, 2], np.int8),
         mode=np.array([1, -1, 1, -1], np.int8),
@@ -2523,29 +2797,101 @@ def assert_main_pipeline(
         order=order,
         mass_sorted=mass[order],
     )
-    smiles, keys, formulas = (
-        _pipeline_strings(expected["candidates/" + k])
-        for k in ("smiles", "key", "formula")
+    propanol_fragments = fragment_masses(
+        _fragnet_record(*PIPELINE_MOLECULES["CCCO"][:2])["amass"],
+        bonds=np.array(PIPELINE_MOLECULES["CCCO"][1], np.int32),
+    )
+    bits = np.array([807, 4903, 8192, 10_802, 12_912, 15_164, 16_466], np.int64)
+    pool = CandidatePool(
+        mass=train_mass[1:],
+        keys=("BDERNNFJNOPAEC",),
+        smiles=("CCCO",),
+        formulas=("C3H8O",),
+        heavy_atoms=np.array([4], np.int32),
+        source=np.array([0], np.int8),
+        train_sid=np.array([1], np.int64),
+        packed=np.array([[254]], np.uint8),
+        bits=bits,
+        fragment_offsets=np.array([0, len(propanol_fragments)], np.int64),
+        fragment_mass=propanol_fragments.astype(np.float32),
+        key_to_pid={"BDERNNFJNOPAEC": 0},
     )
     generated = tuple(
         GeneratedCandidate(
-            smiles=smiles[i],
-            key=keys[i],
-            formula=formulas[i],
-            mass=expected["candidates/mass"][i].item(),
-            heavy_atoms=int(expected["candidates/n_heavy"][i].item()),
-            fingerprint=expected["candidates/fp"][i].numpy(),
-            fragments=expected[f"candidates/frags/{i}/mass"].numpy(),
-            parent_similarity=expected["candidates/gen_sim"][i].item(),
-            steps=int(expected["candidates/gen_steps"][i].item()),
-            parent_tanimoto=expected["candidates/gen_tan"][i].item(),
-            parent_sid=int(expected["context/parent_gen"][j].item()),
-            combo=tuple(_pipeline_strings(expected["context/combo_gen"])[j].split("+")),
-            raw=_pipeline_strings(expected["context/raw_gen"])[j],
+            smiles=smiles,
+            key=PIPELINE_MOLECULES[smiles][2],
+            formula="C3H8O",
+            mass=60.057514876,
+            heavy_atoms=4,
+            fingerprint=np.unpackbits(np.array([packed], np.uint8))[:7].astype(
+                np.float32,
+            ),
+            fragments=fragment_masses(
+                _fragnet_record(*PIPELINE_MOLECULES[smiles][:2])["amass"],
+                bonds=np.array(PIPELINE_MOLECULES[smiles][1], np.int32),
+            ),
+            parent_similarity=similarity,
+            steps=1,
+            parent_tanimoto=tanimoto,
+            parent_sid=parent,
+            combo=combo,
+            raw=smiles,
         )
-        for j, i in enumerate(np.flatnonzero(expected["candidates/is_gen"].numpy()))
+        for smiles, packed, similarity, tanimoto, parent, combo in (
+            ("CCOC", 48, 0.98, 0.4, 0, ("methyl_O",)),
+            ("CC(C)O", 240, 0.74, 0.57, 1, ("hydroxyl_aliph", "dehydroxyl_aliph")),
+        )
     )
-    target = pool.mass.item(0)
+    proposals = PreparedPaths(
+        {
+            ("CCO", ("methyl_O",)): (path("CCOC", "CCOC", (1, 1, 1)),),
+            ("CCCO", ("hydroxyl_aliph", "dehydroxyl_aliph")): (
+                path("CCCO", "CCCO", (2, 2, 2), (3, 3, 3)),
+                path("CC(C)O", "CC(C)O", (4, 4, 4), (5, 5, 5)),
+            ),
+        },
+        {
+            **{smiles: (row[2], smiles) for smiles, row in PIPELINE_MOLECULES.items()},
+            "COCC": ("XOBKSJJDNFUZPF", "CCOC"),
+        },
+    )
+    logs = (
+        DerivationLog(
+            parent=1,
+            similarity=0.74,
+            combo=("hydroxyl_aliph", "dehydroxyl_aliph"),
+            kind="pool",
+            how="key",
+            identity="BDERNNFJNOPAEC",
+        ),
+        DerivationLog(
+            parent=0,
+            similarity=0.98,
+            combo=("methyl_O",),
+            kind="gen",
+            how="smi",
+            identity="COCC",
+        ),
+    )
+    full = directory / "full0.pt"
+    checkpoint = source_checkpoint(index=0)
+    state = {
+        name: value.clone()
+        for name, value in from_plain(checkpoint["model"], dict[str, Tensor]).items()
+    }
+    # Shift the Full1 heads so the two banks disagree.
+    state["head.3.bias"] += 0.125
+    state["elem_head.2.bias"] += 0.25
+    torch.save({**checkpoint, "model": state}, full)
+    config = MainBank.Config()
+    config.checkpoints = [checkpoint_config(full, index=0)]
+    config.merged_adduct = modal_adduct
+    config.single_count = keep_count
+    views = directory / "views"
+    views.mkdir()
+    with torch.random.fork_rng(devices=[]):
+        bank, views_bank = config.make(), save_bank(views, [0, 1, 2]).make()
+    target = train_mass.item(1)
     spectra: list[SpectrumRequest] = [
         {
             "mz": [20, 30, 40, 105],
@@ -2575,501 +2921,200 @@ def assert_main_pipeline(
             "ce_n": 2,
         },
     ]
-    proposals = _PipelineProposals(expected)
-    provider = _Provider(
-        record=expected,
-        priors=DerivationPriors(
-            {
-                "glob": 0.2,
-                "tf": {"methyl_O": (3.0, 40.0), "demethyl_O": (4.0, 20.0)},
-                "env": {1: {}, 2: {}, 3: {}},
-            },
-            proposals=proposals,
-        ),
-    )
-    numeric = expected["context/logs_numeric"]
-    log_text = _pipeline_strings(expected["context/logs_strings"])
-    logs = tuple(
-        DerivationLog(
-            parent=int(numeric[i, 0].item()),
-            similarity=numeric[i, 1].item(),
-            combo=tuple(parts[0].split("+")),
-            kind=identity["kind"],
-            how=identity["how"],
-            identity=parts[3],
-        )
-        for i, line in enumerate(log_text)
-        if line
-        for parts in [line.split("\t")]
-        for identity in [from_plain({"kind": parts[1], "how": parts[2]}, _LogIdentity)]
-    )
-    old = read_tensors(_BASELINE / "testdata/neural_bank.pt")
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        banks: list[MainBank] = []
-        for name, indices in (("full", (0,)), ("views", (0, 1, 2))):
-            paths: list[Path] = []
-            for index in indices:
-                checkpoint = source_checkpoint(old, index=index)
-                if name == "full":
-                    state = from_plain(checkpoint["model"], dict[str, Tensor])
-                    state = {k: v.clone() for k, v in state.items()}
-                    state["head.3.bias"] += 0.125
-                    state["elem_head.2.bias"] += 0.25
-                    checkpoint["model"] = state
-                path = tmp_path / f"{name}{index}.pt"
-                torch.save(checkpoint, path)
-                paths.append(path)
-            config = MainBank.Config()
-            config.checkpoints = [
-                checkpoint_config(path, index=index)
-                for index, path in zip(indices, paths, strict=True)
-            ]
-            if name == "full":
-                config.merged_adduct = modal_adduct
-                config.single_count = keep_count
-            banks.append(config.make())
-        control = read_tensors(_BASELINE / "testdata/fragnet.pt")
-        chains = tuple(
-            tuple(
-                tuple(_pipeline_strings(control[f"stageA/chain/{i}/{j}"]))
-                for j in range(3)
-            )
-            for i in range(2)
-        )
-        tabs = tuple(
-            tuple(
-                (
-                    control[f"stageA/keys/{i}/{j}"].numpy(),
-                    control[f"stageA/values/{i}/{j}"].numpy(),
-                )
-                for j in range(3)
-            )
-            for i in range(2)
-        )
-        stage_a = StageA(chains=chains, tabs=tabs, alpha=control["stageA/alpha"].item())
-        stage_b = _tree(control, "stageB/")
-        engine = MainEngine.Config().make()
-        train_fp = expected["input/train_fp"].numpy()
-        base = engine.base(
-            spectra,
-            target=target,
-            library=library,
-            pool=pool,
-            train_fingerprints=train_fp,
-            bank=banks[0],
-            generated=generated,
-        )
-        values, views = family_features(
-            base,
-            spectra,
-            provider=provider,
-            views_bank=banks[1],
-            train_fingerprints=train_fp,
-            bits=bits,
-            stage_a=stage_a,
-            stage_b=stage_b,
-            logs=logs,
-            search=engine.fragment_search,
-            query_floor=engine.config.query_floor,
-            query_max_peaks=engine.config.query_max_peaks,
-            query_over=engine.config.query_over,
-            max_candidates=engine.config.family_max_candidates,
-            pairwise_rank_limit=engine.config.pairwise_rank_limit,
-        )
-        actual["base"] = torch.from_numpy(base.features)
-        names = tuple(values)
-        actual["families"] = torch.from_numpy(
-            select_features(values, names=names, count=len(base.rows.mass)),
-        )
-        actual["family_names"] = _text("\0".join(names))
-        for name, array in (
-            ("z_s", views.single),
-            ("el_s", views.single_elements),
-            ("z_m", views.merged),
-            ("el_m", views.merged_elements),
-            ("m_modes", views.modes),
-        ):
-            actual["context/" + name] = torch.from_numpy(array)
-        rows = base.rows
-        for name, array in (
-            ("pid", rows.candidates.pool_rows),
-            ("mass", rows.mass),
-            ("n_heavy", rows.heavy_atoms),
-            ("train_sid", rows.train_sid),
-            ("fp", rows.fingerprints),
-            ("is_gen", rows.candidates.generated.astype(np.float32)),
-            ("gen_sim", rows.parent_similarity),
-            ("gen_steps", rows.steps),
-            ("gen_tan", rows.parent_tanimoto),
-        ):
-            actual["candidates/" + name] = torch.from_numpy(array)
-        for name, strings in (
-            ("key", rows.candidates.keys),
-            ("smiles", rows.candidates.smiles),
-            ("formula", rows.candidates.formulas),
-        ):
-            actual["candidates/" + name] = _text("\0".join(strings))
-        for i, row in enumerate(rows.fragments):
-            actual[f"candidates/frags/{i}/valid"] = torch.tensor(row is not None)
-            if row is not None:
-                actual[f"candidates/frags/{i}/mass"] = torch.from_numpy(row)
-        d = base.diagnostics
-        actual["info"] = torch.tensor(
-            [d.n_cand, d.lib_max, d.top_sim, d.fzmax, d.n_gen],
-            dtype=torch.float64,
-        )
-        gi = np.flatnonzero(rows.candidates.generated)
-        context = {
-            "n_cand": torch.tensor(len(rows.mass)),
-            "n_gen": torch.tensor(len(gi)),
-            "pid": torch.from_numpy(rows.candidates.pool_rows.astype(np.int32)),
-            "chan": torch.from_numpy(
-                np.where(rows.candidates.generated, 2, 0).astype(np.int8),
-            ),
-            "key_gen": _text("\0".join(rows.candidates.keys[i] for i in gi)),
-            "smiles_gen": _text("\0".join(rows.candidates.smiles[i] for i in gi)),
-            "formula_gen": _text("\0".join(rows.candidates.formulas[i] for i in gi)),
-            "mass_gen": torch.from_numpy(rows.mass[gi]),
-            "n_heavy_gen": torch.from_numpy(rows.heavy_atoms[gi]),
-            "fp_gen": torch.from_numpy(
-                np.packbits(rows.fingerprints[gi].astype(np.uint8), axis=1),
-            ),
-            "parent_gen": torch.from_numpy(rows.parent_sid[gi]),
-            "gen_sim": torch.from_numpy(rows.parent_similarity[gi]),
-            "gen_steps": torch.from_numpy(rows.steps[gi]),
-            "gen_tan": torch.from_numpy(rows.parent_tanimoto[gi]),
-            "combo_gen": _text("\0".join("+".join(rows.combos[i] or ()) for i in gi)),
-            "raw_gen": _text("\0".join(rows.raw[i] or "" for i in gi)),
-            "raw_valid": torch.tensor([rows.raw[i] is not None for i in gi]),
-            "an_sid": torch.tensor([a.sid for a in base.analogs], dtype=torch.int64),
-            "an_sim": torch.tensor(
-                [a.similarity for a in base.analogs],
-                dtype=torch.float32,
-            ),
-            "an_shift": torch.tensor(
-                [a.shift for a in base.analogs],
-                dtype=torch.float64,
-            ),
-            "an_np": torch.tensor(
-                [a.natural_product for a in base.analogs],
-                dtype=torch.bool,
-            ),
-            "gen_order": _text("\0".join(g.key for g in generated)),
-            "logs_numeric": torch.tensor(
-                [[log.parent, log.similarity] for log in logs],
-                dtype=torch.float64,
-            ).reshape(-1, 2),
-            "logs_strings": _text(
-                "\0".join(
-                    "\t".join(
-                        (
-                            "+".join(log.combo or ()),
-                            log.kind,
-                            log.how,
-                            log.identity or "",
-                        ),
-                    )
-                    for log in logs
-                ),
-            ),
-        }
-        actual.update(("context/" + name, value) for name, value in context.items())
-        selected_names = _pipeline_strings(expected["selected_names"])
-        all_values = {
-            name: base.features[:, i] for i, name in enumerate(main_feature_names())
-        } | values
-        selected = select_features(
-            all_values,
-            names=selected_names,
-            count=len(rows.mass),
-        )
-        actual["selected"] = torch.from_numpy(selected)
-        actual["selected_names"] = _text("\0".join(selected_names))
-        rankers = TreeBank(
-            features=selected_names,
-            models=tuple(_tree(expected, f"ranker/{i}/") for i in range(4)),
-        )
-        train = np.column_stack([np.arange(4) == j % 4 for j in range(160)]).astype(
-            np.float64,
-        )
-        for i, model in enumerate(rankers.models):
-            actual[f"ranker/{i}/header"] = expected[f"ranker/{i}/header"].clone()
-            for step, tree in enumerate(model.trees):
-                for name, array in tree.columns.items():
-                    actual[f"ranker/{i}/tree/{step}/{name}"] = torch.from_numpy(array)
-                actual[f"ranker/{i}/train/{step + 1}"] = torch.from_numpy(
-                    model.predict(train, rounds=step + 1),
-                )
-            actual[f"ranker/{i}/scores"] = torch.from_numpy(
-                model.predict(selected.astype(np.float64)),
-            )
-        actual["scores"] = torch.from_numpy(rankers.score(selected, selected_names))
-        ranked = engine.run(
-            spectra,
-            target=target,
-            library=library,
-            pool=pool,
-            train_fingerprints=train_fp,
-            bank=banks[0],
-            views_bank=banks[1],
-            provider=provider,
-            stage_a=stage_a,
-            stage_b=stage_b,
-            rankers=rankers,
-            generated=generated,
-            logs=logs,
-        )
-        np.testing.assert_array_equal(ranked.features, actual["selected"].numpy())
-        np.testing.assert_array_equal(ranked.scores, actual["scores"].numpy())
-        if ranked.feature_names != selected_names:
-            raise ValueError("Expected ranked.feature_names == selected_names.")
-        if ranked.features.dtype != np.float32:
-            raise ValueError("Expected ranked.features.dtype == np.float32.")
-        if ranked.scores.dtype != np.float64:
-            raise ValueError("Expected ranked.scores.dtype == np.float64.")
-        if ranked.candidates.smiles != rows.candidates.smiles:
-            raise ValueError(
-                "Expected ranked.candidates.smiles == rows.candidates.smiles.",
-            )
-        if ranked.candidates.keys != rows.candidates.keys:
-            raise ValueError("Expected ranked.candidates.keys == rows.candidates.keys.")
-        if ranked.candidates.formulas != rows.candidates.formulas:
-            raise ValueError(
-                "Expected ranked.candidates.formulas == rows.candidates.formulas.",
-            )
-        if ranked.candidates.sources != rows.candidates.sources:
-            raise ValueError(
-                "Expected ranked.candidates.sources == rows.candidates.sources.",
-            )
-        np.testing.assert_array_equal(
-            ranked.candidates.pool_rows,
-            rows.candidates.pool_rows,
-        )
-        np.testing.assert_array_equal(
-            ranked.candidates.generated,
-            rows.candidates.generated,
-        )
-        if ranked.diagnostics != base.diagnostics:
-            raise ValueError("Expected ranked.diagnostics == base.diagnostics.")
-        limited_config = MainEngine.Config()
-        limited_config.max_query_spectra = 3
-        limited = limited_config.make().run(
-            [*spectra, spectra[0]],
-            target=target,
-            library=library,
-            pool=pool,
-            train_fingerprints=train_fp,
-            bank=banks[0],
-            views_bank=banks[1],
-            provider=provider,
-            stage_a=stage_a,
-            stage_b=stage_b,
-            rankers=rankers,
-            generated=generated,
-            logs=logs,
-            merged_counts=(0, 12, 2, 99),
-        )
-        np.testing.assert_array_equal(limited.features, ranked.features)
-        np.testing.assert_array_equal(limited.scores, ranked.scores)
-        if [s.get("ce_n") for s in spectra] != [0, 12, 2]:
-            raise ValueError("Source conditioning metadata was mutated.")
-        empty = engine.run(
-            spectra,
-            target=900.0,
-            library=library,
-            pool=pool,
-            train_fingerprints=train_fp,
-            bank=banks[0],
-            views_bank=banks[1],
-            provider=provider,
-            stage_a=stage_a,
-            stage_b=stage_b,
-            rankers=rankers,
-        )
-        if empty.features.shape != (0, 160):
-            raise ValueError("Expected empty.features.shape == (0, 160).")
-        if empty.features.dtype != np.float32:
-            raise ValueError("Expected empty.features.dtype == np.float32.")
-        if empty.scores.shape != (0,):
-            raise ValueError("Expected empty.scores.shape == (0,).")
-        if empty.scores.dtype != np.float64:
-            raise ValueError("Expected empty.scores.dtype == np.float64.")
-        if empty.feature_names != selected_names:
-            raise ValueError("Expected empty.feature_names == selected_names.")
-    assert_tensor_golden(
-        golden,
-        float32_comparands(
-            actual,
-            inputs=(
-                "input/*",
-                "prepared/*",
-                "candidates/mass",
-                "candidates/frags/*",
-                "context/logs_numeric",
-                "ranker/*/tree/*",
+    return Pipeline(
+        target=target,
+        spectra=spectra,
+        library=library,
+        pool=pool,
+        train_fingerprints=np.array([[242], [254]], np.uint8),
+        generated=generated,
+        logs=logs,
+        provider=_Provider(
+            priors=DerivationPriors(
+                {
+                    "glob": 0.2,
+                    "tf": {"methyl_O": (3.0, 40.0), "demethyl_O": (4.0, 20.0)},
+                    "env": {1: {}, 2: {}, 3: {}},
+                },
+                proposals=proposals,
             ),
         ),
+        bank=bank,
+        views_bank=views_bank,
     )
 
 
-class _LogIdentity(TypedDict):
-    kind: Literal["pool", "gen"]
-    how: Literal["smi", "key"]
-
-
-def _pipeline_strings(value: Tensor) -> tuple[str, ...]:
-    return tuple(value.numpy().tobytes().decode().split("\0"))
-
-
-def _text(value: str) -> Tensor:
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
-
-
-def _tree(record: dict[str, Tensor], prefix: str) -> LightGBMModel:
-    text = record[prefix + "header"].numpy().tobytes().decode()
-    for step in range(3):
-        text += f"Tree={step}\n"
-        key = prefix + f"tree/{step}/"
-        for name, tensor in record.items():
-            if name.startswith(key):
-                text += (
-                    name.removeprefix(key)
-                    + "="
-                    + " ".join(str(v) for v in tensor.tolist())
-                    + "\n"
-                )
-    return LightGBMModel.parse(text + "end of trees\n")
-
-
-def _structure(record: dict[str, Tensor], prefix: str) -> AnalogRecord:
-    smiles, formula, core, element, query = _pipeline_strings(
-        record[prefix + "strings"],
-    )
-    graphs: dict[str, ElementGraph | None] = {}
-    for name in ("graph", "core"):
-        graphs[name] = (
-            ElementGraph(
-                elements=record[prefix + name + "/elements"].numpy(),
-                bonds=record[prefix + name + "/bonds"].numpy(),
-            )
-            if record[prefix + name + "/valid"].item()
-            else None
-        )
-    return AnalogRecord(
-        smiles=smiles,
-        formula_input=formula,
-        hashes=record[prefix + "hashes"].numpy(),
-        numbers=record[prefix + "numbers"].numpy(),
-        formula=record[prefix + "formula"].numpy(),
-        core_smiles=core,
-        element_smiles=element,
-        query_smiles=query,
-        graph=graphs["graph"],
-        core=graphs["core"],
-        core_mask=record[prefix + "core_mask"].numpy(),
+def _run(
+    engine: MainEngine,
+    inputs: Pipeline,
+    rankers: TreeBank,
+    *,
+    spectra: Sequence[SpectrumRequest] | None = None,
+    target: float | None = None,
+    merged_counts: Sequence[int] = (),
+    generated: Sequence[GeneratedCandidate] | None = None,
+) -> EngineResult:
+    return engine.run(
+        inputs.spectra if spectra is None else spectra,
+        target=inputs.target if target is None else target,
+        library=inputs.library,
+        pool=inputs.pool,
+        train_fingerprints=inputs.train_fingerprints,
+        bank=inputs.bank,
+        views_bank=inputs.views_bank,
+        provider=inputs.provider,
+        stage_a=pipeline_stage_a(),
+        stage_b=LightGBMModel.parse(pipeline_stage_b()),
+        rankers=rankers,
+        generated=inputs.generated if generated is None else generated,
+        logs=inputs.logs,
+        merged_counts=merged_counts,
     )
 
 
-class _PipelineProposals:
-    def __init__(self, record: dict[str, Tensor]) -> None:
-        self.identities: dict[str, tuple[str | None, str | None]] = {}
-        smiles = _pipeline_strings(record["identity/smiles"])
-        keys, skeletons = (
-            _pipeline_strings(record["identity/key"]),
-            _pipeline_strings(record["identity/skeleton"]),
-        )
-        for i, s in enumerate(smiles):
-            self.identities[s] = (
-                keys[i] if record["identity/key_valid"][i].item() else None,
-                skeletons[i] if record["identity/skeleton_valid"][i].item() else None,
-            )
-        self.rows: dict[tuple[str, tuple[str, ...]], tuple[ProposalPath, ...]] = {}
-        for i in range(int(record["proposal/count"].item())):
-            prefix = f"proposal/{i}/"
-            parent, combo = (
-                record[prefix + "header"].numpy().tobytes().decode().split("\t")
-            )
-            rows: list[ProposalPath] = []
-            raw, standard = (
-                _pipeline_strings(record[prefix + "raw"]),
-                _pipeline_strings(record[prefix + "standardized"]),
-            )
-            for j in range(int(record[prefix + "size"].item())):
-                key, skeleton = self.identity(raw[j])
-                rows.append(
-                    {
-                        "raw": raw[j],
-                        "standardized": standard[j]
-                        if record[prefix + "valid"][j].item()
-                        else None,
-                        "key": key,
-                        "skeleton": skeleton,
-                        "environments": from_plain(
-                            cast(object, record[prefix + "env"][j].tolist()),
-                            tuple[tuple[int, int, int], ...],
-                        ),
-                    },
-                )
-            self.rows[parent, tuple(combo.split("+"))] = tuple(rows)
+def assert_main_pipeline(tmp_path: Path) -> None:
+    """Compose every family into the released ranker schema and four-model mean."""
+    inputs = pipeline(tmp_path)
+    engine = MainEngine.Config().make()
+    base = engine.base(
+        inputs.spectra,
+        target=inputs.target,
+        library=inputs.library,
+        pool=inputs.pool,
+        train_fingerprints=inputs.train_fingerprints,
+        bank=inputs.bank,
+        generated=inputs.generated,
+    )
+    rows = base.rows
+    assert rows.candidates.smiles == ("CCCO", "CCOC", "CC(C)O")
+    assert rows.candidates.sources == ("pool", "generated", "generated")
+    np.testing.assert_array_equal(rows.candidates.pool_rows, [0, -1, -1])
+    np.testing.assert_array_equal(rows.train_sid, [1, -1, -1])
+    np.testing.assert_array_equal(rows.parent_sid, [-1, 0, 1])
+    np.testing.assert_array_equal(
+        rows.parent_similarity,
+        np.array([0, 0.98, 0.74], np.float32),
+    )
+    assert rows.raw == (None, "CCOC", "CC(C)O")
+    assert base.diagnostics.n_gen == 2
+    values, views = family_features(
+        base,
+        inputs.spectra,
+        provider=inputs.provider,
+        views_bank=inputs.views_bank,
+        train_fingerprints=inputs.train_fingerprints,
+        bits=inputs.pool.bits,
+        stage_a=pipeline_stage_a(),
+        stage_b=LightGBMModel.parse(pipeline_stage_b()),
+        logs=inputs.logs,
+        search=engine.fragment_search,
+        query_floor=engine.config.query_floor,
+        query_max_peaks=engine.config.query_max_peaks,
+        query_over=engine.config.query_over,
+        max_candidates=engine.config.family_max_candidates,
+        pairwise_rank_limit=engine.config.pairwise_rank_limit,
+    )
+    families = ("derivation", "frag2", "analog_struct", "model_views", "fragnet")
+    names = tuple(values)
+    assert tuple(dict.fromkeys(name.split("__")[0] for name in names)) == families
+    for family in families:
+        members = [name for name in names if name.startswith(family + "__")]
+        assert members == sorted(members)
+    assert all(
+        value.shape == (3,) and value.dtype == np.float32 for value in values.values()
+    )
+    assert sum(name.startswith("derivation__") for name in names) == 41
+    assert sum(name.startswith("frag2__") for name in names) == 31
+    assert sum(name.startswith("analog_struct__") for name in names) == 36
+    assert views.single.shape[0] == views.merged.shape[0] == 3
+    assert views.modes.tolist() == [1.0, -1.0]
+    # Both generated rows hold their own derivation support; the pool row holds a log.
+    assert values["derivation__dp_hit"].tolist() == [1, 0, 0]
+    assert values["derivation__dg_n_par"].tolist() == [0, 1, 1]
+    rankers = TreeBank(
+        features=RANKER_NAMES,
+        models=tuple(LightGBMModel.parse(text) for text in ranker_texts()),
+    )
+    combined = {
+        name: base.features[:, i] for i, name in enumerate(main_feature_names())
+    } | values
+    selected = select_features(combined, names=RANKER_NAMES, count=3)
+    ranked = _run(engine, inputs, rankers)
+    np.testing.assert_array_equal(ranked.features, selected)
+    np.testing.assert_array_equal(ranked.scores, rankers.score(selected, RANKER_NAMES))
+    assert ranked.feature_names == RANKER_NAMES
+    assert ranked.features.dtype == np.float32
+    assert ranked.scores.dtype == np.float64
+    assert ranked.candidates.smiles == rows.candidates.smiles
+    assert ranked.candidates.keys == rows.candidates.keys
+    assert ranked.candidates.formulas == rows.candidates.formulas
+    assert ranked.candidates.sources == rows.candidates.sources
+    np.testing.assert_array_equal(
+        ranked.candidates.pool_rows,
+        rows.candidates.pool_rows,
+    )
+    np.testing.assert_array_equal(
+        ranked.candidates.generated,
+        rows.candidates.generated,
+    )
+    assert ranked.diagnostics == base.diagnostics
+    limited_config = MainEngine.Config()
+    limited_config.max_query_spectra = 3
+    limited = _run(
+        limited_config.make(),
+        inputs,
+        rankers,
+        spectra=[*inputs.spectra, inputs.spectra[0]],
+        merged_counts=(0, 12, 2, 99),
+    )
+    np.testing.assert_array_equal(limited.features, ranked.features)
+    np.testing.assert_array_equal(limited.scores, ranked.scores)
+    assert [spectrum.get("ce_n") for spectrum in inputs.spectra] == [0, 12, 2]
+    empty = _run(engine, inputs, rankers, target=900.0, generated=())
+    assert empty.features.shape == (0, len(RANKER_NAMES))
+    assert empty.features.dtype == np.float32
+    assert empty.scores.shape == (0,)
+    assert empty.scores.dtype == np.float64
+    assert empty.feature_names == RANKER_NAMES
 
-    def paths(
-        self,
-        parent_smiles: str,
-        combo: tuple[str, ...],
-    ) -> tuple[ProposalPath, ...]:
-        return self.rows[parent_smiles, combo]
 
-    def identity(self, smiles: str) -> tuple[str | None, str | None]:
-        return self.identities[smiles]
+def test_halogen_subformulas_skip_unavailable_iodine() -> None:
+    counts = engine_formula_vector("CF")
+    assert counts is not None
+    fluorine = 18.99840322
+    assert main_subformula_masses(counts, max_out=100).tolist() == [
+        12.0,
+        fluorine,
+        12.0 + fluorine,
+    ]
 
 
-@dataclass(kw_only=True, slots=True)
-class _Provider:
-    record: dict[str, Tensor]
-    priors: DerivationPriors
-
-    def select(self, rows: CandidateRows, analogs: Sequence[Analog]) -> MainFamilyRows:
-        structures: list[AnalogRecord] = []
-        fragnet: list[FragnetRecord | None] = []
-        for i in range(len(rows.mass)):
-            prefix = f"prepared/{i}/"
-            structures.append(_structure(self.record, prefix))
-            molecular: FragnetRecord | None = None
-            if self.record[prefix + "fragnet_valid"].item():
-                molecular = {
-                    "amass": self.record[prefix + "fragnet/amass"].numpy(),
-                    "kind": self.record[prefix + "fragnet/kind"].numpy(),
-                    "el": self.record[prefix + "fragnet/el"].numpy(),
-                    "nh": self.record[prefix + "fragnet/nh"].numpy(),
-                    "bonds": self.record[prefix + "fragnet/bonds"].numpy(),
-                    "bring": self.record[prefix + "fragnet/bring"].numpy(),
-                    "mass": self.record[prefix + "fragnet/mass"].item(),
-                    "el10": self.record[prefix + "fragnet/el10"].numpy(),
-                }
-            fragnet.append(molecular)
-        return MainFamilyRows(
-            candidate_structures=tuple(structures),
-            analog_structures=tuple(
-                _structure(self.record, f"train/{a.sid}/") for a in analogs
-            ),
-            train_smiles=_pipeline_strings(self.record["input/train_smiles"]),
-            depth1=tuple(
-                self.record[f"prepared/{i}/depth1"].numpy()
-                for i in range(len(rows.mass))
-            ),
-            depth2=tuple(
-                self.record[f"prepared/{i}/depth2"].numpy()
-                for i in range(len(rows.mass))
-            ),
-            capabilities=np.stack(
-                [
-                    self.record[f"prepared/{i}/caps"].numpy()
-                    for i in range(len(rows.mass))
-                ],
-            ),
-            fragnet=tuple(fragnet),
-            priors=self.priors,
-        )
+def test_aggregates_fall_back_to_a_product_with_the_same_key_and_skeleton() -> None:
+    priors = derivation_priors()
+    context = DerivationContext(
+        smiles=("C(C)OC", "COC(C)"),
+        keys=("K2", "K9"),
+        formulas=("C3H8O", "C3H8O"),
+        generated=np.array([True, True]),
+        parent_sid=np.array([0, 0], np.int64),
+        similarities=np.array([0.9, 0.8]),
+        combos=(("methyl_O",), ("methyl_O",)),
+        analog_sid=np.array([0], np.int64),
+        model_score=np.zeros(2, np.float32),
+        parent_smiles=("CCO",),
+        logs=(),
+    )
+    values = aggregate(
+        context,
+        priors=priors,
+        evidence=supports(context, proposals=priors.proposals),
+    )
+    # The first spelling shares CCOC's key and skeleton; the second only its skeleton.
+    assert values["site_logfr"].tolist() == pytest.approx(
+        [math.log(SITE), math.log(METHYL)],
+    )
+    assert values["prior_miss"].tolist() == [0.0, 1.0]
+    assert values["n_sib"].tolist() == [2.0, 0.0]
 
 
 if __name__ == "__main__":

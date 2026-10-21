@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import patch
 
-import ast
 import hashlib
 import math
 import pickle
@@ -21,7 +19,6 @@ import torch
 from priml.baselines.casmi2026 import dreams
 from priml.baselines.casmi2026.dreams import (
     BankCheckpoint,
-    BankItem,
     DreamsStore,
     MainBank,
     clamp_count,
@@ -35,24 +32,14 @@ from priml.baselines.casmi2026.dreams import (
 from priml.baselines.casmi2026.model import DreamAttention, DreamsFP, FPNet
 from priml.baselines.casmi2026.model_test import set_block_heads, tiny_dreams
 from priml.baselines.casmi2026.peaks import prepare_peaks
-from priml.baselines.casmi2026.testing import float32_comparands
 from priml.model.transformer.block import TransformerBlock
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import assert_tensor_golden, read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from priml.baselines.casmi2026.custom_types import SpectrumRequest
-
-
-_BASELINE: Final = _CWD
-
-
-GOLDEN: Final = _BASELINE / "testdata" / "neural_bank.pt"
 
 
 def bank_spectra() -> list[SpectrumRequest]:
@@ -86,16 +73,13 @@ def bank_spectra() -> list[SpectrumRequest]:
     ]
 
 
-def source_checkpoint(record: dict[str, Tensor], *, index: int) -> dict[str, object]:
-    """Adapt the stored checkpoint state to its released envelope."""
-    prefix = f"model/{index}/"
-    state = {
-        name.removeprefix(prefix): value
-        for name, value in record.items()
-        if name.startswith(prefix)
-    }
+def source_checkpoint(*, index: int) -> dict[str, object]:
+    """Wrap a tiny model, seeded by its index, in the released checkpoint envelope."""
+    with torch.random.fork_rng(devices=[]):
+        _ = torch.manual_seed(index)
+        model = (tiny_released_dreams() if index == 2 else tiny_fpnet()).make()
     checkpoint: dict[str, object] = {
-        "model": state,
+        "model": model.released_state(),
         "nbits": 7,
         "d": 8,
         "layers": 1,
@@ -178,87 +162,47 @@ def checkpoint_config(path: Path, *, index: int) -> BankCheckpoint.Config:
 
 def save_bank(directory: Path, indices: Sequence[int]) -> MainBank.Config:
     """Write source checkpoints and declare a bank over them in the given order."""
-    record = read_tensors(GOLDEN)
     config = MainBank.Config()
     for index in indices:
         path = directory / f"model{index}.pt"
-        torch.save(source_checkpoint(record, index=index), path)
+        torch.save(source_checkpoint(index=index), path)
         config.checkpoints.append(checkpoint_config(path, index=index))
     return config
 
 
-def test_entire_full1_model_views_bank(tmp_path: Path) -> None:
-    golden = GOLDEN
-    expected = read_tensors(golden)
-    actual: dict[str, Tensor] = {}
-    paths: list[Path] = []
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        for index in range(3):
-            path = tmp_path / f"model{index}.pt"
-            torch.save(source_checkpoint(expected, index=index), path)
-            paths.append(path)
-        spectra = bank_spectra()
-        banks: dict[str, MainBank] = {}
-        for bank_name, count in (("full1", 1), ("views", 3), ("ab", 2)):
-            config = MainBank.Config()
-            config.checkpoints = [
-                checkpoint_config(path, index=index)
-                for index, path in enumerate(paths[:count])
-            ]
-            config.batch_size = 2
-            banks[bank_name] = config.make()
-        single, merged = banks["views"].items(spectra, merged_counts=[0, 12, 2, 1])
-        for name, items in (
-            ("single", single),
-            ("merged", merged),
-            ("empty", list[BankItem]()),
-        ):
-            if items:
-                for i, value in enumerate(collate_main(items)):
-                    actual[f"collate/{name}/{i}"] = value
-            for bank_name, bank in banks.items():
-                if name == "single" and bank_name == "views":
-                    for index, model in enumerate(bank.models):
-                        for key, value in model.released_state().items():
-                            actual[f"model/{index}/{key}"] = value.detach().clone()
-                    views = bank.views(spectra, merged_counts=[0, 12, 2, 1])
-                    assert np.array_equal(views.modes, np.array([1, -1], np.float32))
-                    assert np.array_equal(
-                        views.single,
-                        expected["views/single/True/z"].numpy(),
-                    )
-                    assert np.array_equal(
-                        views.single_elements,
-                        expected["views/single/True/e"].numpy(),
-                    )
-                    assert np.array_equal(
-                        views.merged,
-                        expected["views/merged/True/z"].numpy(),
-                    )
-                    assert np.array_equal(
-                        views.merged_elements,
-                        expected["views/merged/True/e"].numpy(),
-                    )
-                for each in (True, False):
-                    z, e = bank.predict(items, each=each)
-                    actual[f"{bank_name}/{name}/{each}/z"] = torch.from_numpy(z)
-                    actual[f"{bank_name}/{name}/{each}/e"] = torch.from_numpy(e)
-        for name, mass, intensity, precursor, maximum in (
-            ("empty", list[float](), list[float](), 100.0, 160),
-            ("nonpositive", [1, 2], [-1, 0], 100.0, 160),
-            ("over", [103, 104], [1, 2], 100.0, 160),
-            ("top", np.arange(9) + 10, np.array([5, 3, 3, 7, 1, 6, 2, 8, 4]), 100.0, 3),
-        ):
-            prepared_mass, prepared_intensity = prepare_peaks(
-                np.asarray(mass),
-                np.asarray(intensity),
-                precursor=precursor,
-                max_peaks=maximum,
-                floor=0.001,
-            )
-            actual[f"peaks/{name}/mass"] = torch.from_numpy(prepared_mass)
-            actual[f"peaks/{name}/intensity"] = torch.from_numpy(prepared_intensity)
-    assert_tensor_golden(golden, actual)
+def test_bank_keeps_or_averages_the_model_axis_of_single_and_merged_items(
+    tmp_path: Path,
+) -> None:
+    config = save_bank(tmp_path, [0, 1, 2])
+    config.batch_size = 2
+    bank = config.make()
+    spectra = bank_spectra()
+    single, merged = bank.items(spectra, merged_counts=[0, 12, 2, 1])
+    assert [item.merged_count for item in single] == [1, 8, 2, 1]
+    # One merged item per present polarity, positive first; counts cap at eight.
+    assert [(item.mode, item.merged_count) for item in merged] == [(1, 8), (-1, 3)]
+    assert [(item.precursor, item.energy) for item in merged] == [(110, 10), (85, 50)]
+    mz, _, pad, *_, count, _ = collate_main(single)
+    # Peaks above the precursor by more than two drop; empty items keep one slot.
+    assert mz.shape == pad.shape == (4, 4)
+    assert pad.tolist()[3] == [False, True, True, True]
+    assert count.tolist() == [0.25, 2.0, 0.5, 0.25]
+    for items in (single, merged):
+        logits, elements = bank.predict(items, each=True)
+        assert logits.shape == (3, len(items), 7)
+        assert elements.shape == (3, len(items), 10)
+        mean = bank.predict(items)
+        assert np.array_equal(mean[0], torch.from_numpy(logits).mean(0).numpy())
+        assert np.array_equal(mean[1], torch.from_numpy(elements).mean(0).numpy())
+    views = bank.views(spectra, merged_counts=[0, 12, 2, 1])
+    assert np.array_equal(views.single, bank.predict(single, each=True)[0])
+    assert np.array_equal(views.merged_elements, bank.predict(merged, each=True)[1])
+    assert views.modes.tolist() == [1, -1]
+    assert [array.shape for array in bank.predict([], each=True)] == [
+        (3, 0, 7),
+        (3, 0, 10),
+    ]
+    assert [array.shape for array in bank.predict([])] == [(0, 7), (0, 10)]
 
 
 def test_bank_metadata_adduct_and_validation_boundaries(tmp_path: Path) -> None:
@@ -289,7 +233,7 @@ def test_bank_metadata_adduct_and_validation_boundaries(tmp_path: Path) -> None:
 
 def test_bank_checkpoints_must_share_one_fingerprint_width(tmp_path: Path) -> None:
     config = save_bank(tmp_path, [0])
-    narrow = source_checkpoint(read_tensors(GOLDEN), index=0)
+    narrow = source_checkpoint(index=0)
     state = from_plain(narrow["model"], dict[str, Tensor])
     for name in ("head.3.weight", "head.3.bias"):
         state[name] = state[name][:6]
@@ -305,7 +249,7 @@ def test_bank_checkpoints_must_share_one_fingerprint_width(tmp_path: Path) -> No
 
 
 def test_checkpoint_pin_geometry_and_architecture_are_verified(tmp_path: Path) -> None:
-    checkpoint = source_checkpoint(read_tensors(GOLDEN), index=2)
+    checkpoint = source_checkpoint(index=2)
     path = tmp_path / "model.pt"
     torch.save(checkpoint, path)
     pinned = checkpoint_config(path, index=2)
@@ -338,7 +282,7 @@ def test_checkpoint_pin_geometry_and_architecture_are_verified(tmp_path: Path) -
         with pytest.raises(ValueError, match=r"Unknown|precursor|faithful"):
             _ = pinned.make()
         checkpoint[name] = original
-    fpnet = source_checkpoint(read_tensors(GOLDEN), index=0)
+    fpnet = source_checkpoint(index=0)
     torch.save(fpnet, path)
     declared_fpnet = checkpoint_config(path, index=0)
     assert isinstance(declared_fpnet.model, FPNet.Config)
@@ -378,7 +322,7 @@ def test_dreams_precision_recipe_preserves_training_only_under_bfloat16(
     dtype: torch.dtype | None,
     tmp_path: Path,
 ) -> None:
-    checkpoint = source_checkpoint(read_tensors(GOLDEN), index=2)
+    checkpoint = source_checkpoint(index=2)
     bcfg = from_plain(checkpoint["bcfg"], dict[str, object])
     bcfg["attn_fp32"] = trained
     checkpoint["bcfg"] = bcfg
@@ -404,136 +348,51 @@ def test_neural_items_consume_source_ce_n_without_an_override(tmp_path: Path) ->
     spectra = bank_spectra()
     for spectrum, count in zip(spectra, (0, 12, 2, 1), strict=True):
         spectrum["ce_n"] = count
-    single, merged = save_bank(tmp_path, [0]).make().items(spectra)
-    expected = read_tensors(GOLDEN)
-    for name, items in (("single", single), ("merged", merged)):
-        for index, value in enumerate(collate_main(items)):
-            assert torch.equal(value, expected[f"collate/{name}/{index}"])
+    bank = save_bank(tmp_path, [0]).make()
+    explicit = bank.items(bank_spectra(), merged_counts=[0, 12, 2, 1])
+    for recorded, overridden in zip(bank.items(spectra), explicit, strict=True):
+        for left, right in zip(
+            collate_main(recorded),
+            collate_main(overridden),
+            strict=True,
+        ):
+            assert torch.equal(left, right)
+    assert [item.merged_count for item in bank.items(bank_spectra())[0]] == [1] * 4
 
 
 LIMIT: Final = 25
 
 
-def test_whole_optional_index_queries_and_every_tail_field(
-    tmp_path: Path,
-) -> None:
-    golden = _BASELINE / "testdata/dreams_store.pt"
-    expected = read_tensors(golden)
-    assert len(expected) == 158
-    mass = expected["inputs/mass"].numpy().copy()
-    smiles = from_plain(
-        cast(object, ast.literal_eval(decode(expected["inputs/smiles"]))),
-        tuple[str | bytes, ...],
-    )
-    identities = from_plain(
-        cast(object, ast.literal_eval(decode(expected["inputs/identities"]))),
-        dict[str, tuple[str, tuple[tuple[str, int], ...]] | None],
-    )
-    np.save(tmp_path / "dreams_np_mass.npy", mass)
-    np.save(tmp_path / "dreams_np_smiles.npy", np.array(smiles, dtype=object))
-    actual = {
-        "inputs/mass": torch.from_numpy(mass),
-        "inputs/smiles": text(str(smiles)),
-        "inputs/identities": text(str(identities)),
-    }
-    for label in (
-        "ranked",
-        "dreams",
-        "empty",
-        "full",
-        "negative",
-        "zero",
-        "nan",
-        "infinite",
-        "outside",
-        "inactive",
-        "invalid",
-        "monotone",
-    ):
-        original = decode(expected[label + "/original"])
-        extra = from_plain(
-            cast(object, ast.literal_eval(decode(expected[label + "/extra"]))),
-            tuple[str, ...],
-        )
-        target = from_plain(expected[label + "/target"].item(), float)
-        active = from_plain(expected[label + "/active"].item(), bool)
-        available = from_plain(expected[label + "/available"].item(), bool)
-        store = DreamsStore.load(tmp_path) if available else None
-        actual[label + "/original"] = text(original)
-        actual[label + "/extra"] = text(str(extra))
-        actual[label + "/target"] = torch.tensor(target, dtype=torch.float64)
-        actual[label + "/active"] = torch.tensor(active)
-        actual[label + "/available"] = torch.tensor(available)
-        try:
-            candidates, audit = safe_tail(
-                label,
-                original.split(";"),
-                extra,
-                target=target,
-                identity=identities.__getitem__,
-                limit=LIMIT,
-                dreams=store,
-                processed=active,
-            )
-        except AssertionError as error:
-            actual[label + "/assertion"] = torch.tensor(True)
-            actual[label + "/error"] = text(str(error))
-            actual[label + "/output"] = text("[]")
-            actual[label + "/audit"] = text("[]")
-            actual[label + "/dreams_used"] = torch.tensor(0)
-        else:
-            actual[label + "/assertion"] = torch.tensor(False)
-            actual[label + "/error"] = text("")
-            actual[label + "/output"] = text(str([(label, ";".join(candidates))]))
-            actual[label + "/audit"] = text(str([] if audit is None else [audit]))
-            actual[label + "/dreams_used"] = torch.tensor(
-                0 if audit is None else audit["dreams_added"],
-            )
-        loaded = store is not None and store.index is not None
-        actual[label + "/loaded"] = torch.tensor(loaded)
-        if store is not None and store.index is not None:
-            selection = store.select(target)
-            actual[label + "/_lo"] = torch.tensor(selection.low)
-            actual[label + "/_hi"] = torch.tensor(selection.high)
-            actual[label + "/_ix"] = torch.from_numpy(selection.rows.copy())
-            actual[label + "/mass_candidates"] = text(str(list(selection.smiles)))
-            if label == "dreams":
-                actual["index/_dm_mass"] = torch.from_numpy(store.index.mass.copy())
-                actual["index/_dm_order"] = torch.from_numpy(store.index.order.copy())
-                actual["index/_dm_sorted"] = torch.from_numpy(
-                    store.index.sorted_mass.copy(),
-                )
-    fp32 = expected["float32/input"].numpy().copy()
-    np.save(tmp_path / "dreams_np_mass.npy", fp32)
+def test_store_selects_the_relative_window_in_distance_order(tmp_path: Path) -> None:
     np.save(
-        tmp_path / "dreams_np_smiles.npy",
-        np.array(["CCCO", "CC", "COCC"], dtype="U4"),
+        tmp_path / "dreams_np_mass.npy",
+        np.array([100.0005, 99.9999, 100.002, 101.0], np.float32),
     )
+    np.save(tmp_path / "dreams_np_smiles.npy", np.array(["a", "b", "c", "d"]))
     store = DreamsStore.load(tmp_path)
     assert store is not None
-    candidates, audit = safe_tail(
-        "float32",
-        ["CCO"],
-        [],
-        target=100.0,
-        identity=identities.__getitem__,
-        limit=LIMIT,
-        dreams=store,
-    )
     selection = store.select(100.0)
     assert store.index is not None
-    actual["float32/input"] = torch.from_numpy(fp32)
-    actual["float32/_dm_mass"] = torch.from_numpy(store.index.mass.copy())
-    actual["float32/_dm_order"] = torch.from_numpy(store.index.order.copy())
-    actual["float32/_dm_sorted"] = torch.from_numpy(store.index.sorted_mass.copy())
-    actual["float32/_ix"] = torch.from_numpy(selection.rows.copy())
-    actual["float32/_mass_candidates"] = text(str(list(selection.smiles)))
-    actual["float32/_out"] = text(str([("float32", ";".join(candidates))]))
-    actual["float32/_audit_rows"] = text(str([audit]))
-    assert_tensor_golden(
-        golden,
-        float32_comparands(actual, inputs=("*/target", "inputs/*")),
+    assert store.index.mass.dtype == np.float64
+    assert store.index.order.tolist() == [1, 0, 2, 3]
+    # The 10 ppm window around 100 spans [99.999, 100.001].
+    assert (selection.low, selection.high) == (0, 2)
+    assert selection.rows.tolist() == [1, 0]
+    assert selection.smiles == ("b", "a")
+    result, audit = safe_tail(
+        "m",
+        ["c"],
+        [],
+        target=100.0,
+        identity=identity,
+        limit=2,
+        dreams=store,
     )
+    assert result == ["c", "b"]
+    assert audit is not None
+    assert audit["dreams_added"] == 1
+    # The original keeps its first rank, so nothing counts as promoted.
+    assert audit["promoted_original"] == 0
 
 
 def identity(value: str) -> str | None:
@@ -735,16 +594,6 @@ def test_present_array_failures_propagate_and_only_selected_bytes_decode(
     assert malformed is not None
     with pytest.raises(TypeError, match="NumPy array"):
         malformed.candidates(100.0)
-
-
-def decode(value: Tensor) -> str:
-    """Read stored text without trimming any characters."""
-    return bytes(from_plain(value.tolist(), list[int])).decode()
-
-
-def text(value: str) -> Tensor:
-    """Encode a native string as golden bytes."""
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
 
 
 if __name__ == "__main__":
