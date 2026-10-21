@@ -28,10 +28,7 @@ from priml.baselines.wellbore_geology.model import (
     bilinear_cost,
     retained_stage_configs,
 )
-from priml.baselines.wellbore_geology.testing import (
-    named_state,
-    tiny_model_config,
-)
+from priml.baselines.wellbore_geology.testing import tiny_model_config
 from priml.cost import cost, map_cost, set_cost, traffic
 from priml.model.conv import Conv2d
 from priml.model.convnext import ConvNeXtBlock, ConvNeXtStage
@@ -44,7 +41,7 @@ from priml.model.special import Activation, Dropout
 from priml.model.swiglu import SwiGLU, gelu, relu, silu
 from priml.testing.bfb import host_agnostic_numerics, portable_half_precision
 from priml.testing.cost import assert_cost_matches_torch
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden
 
 
 if TYPE_CHECKING:
@@ -884,19 +881,14 @@ def test_complete_model_cost_counts_retained_stages_and_all_heads(heads: bool) -
     )
 
 
-@pytest.mark.parametrize("dropout", [0.0, 0.05])
-@pytest.mark.parametrize("mutation", ["none", "ulp", "torch_draw", "python_draw"])
-def test_whole_fresh_constructor_and_rng(dropout: float, mutation: str) -> None:
-    config = tiny_model_config(dropout=dropout)
+def test_whole_fresh_constructor_and_rng() -> None:
+    # The nexus family keeps each decoder site's own dropout.
+    config = tiny_model_config(dropout=-1)
     torch.manual_seed(27)
     random.seed(31)
     with host_agnostic_numerics():
         model = config.make()
-        if mutation == "torch_draw":
-            torch.rand(())
-        elif mutation == "python_draw":
-            random.getrandbits(32)
-        actual = {name: value.clone() for name, value in named_state(model).items()}
+        actual = {name: value.clone() for name, value in model.state_dict().items()}
         actual.update(
             {f"buffer/{name}": value.clone() for name, value in model.named_buffers()},
         )
@@ -906,51 +898,19 @@ def test_whole_fresh_constructor_and_rng(dropout: float, mutation: str) -> None:
             random.getstate()[1],
             dtype=torch.int64,
         )
-    if mutation == "ulp":
-        weight = actual["alignment_head.weight"]
-        weight.view(-1)[0] = torch.nextafter(
-            weight.view(-1)[0],
-            weight.new_tensor(float("inf")),
-        )
-    differences = mismatches(
-        read_tensors(_CWD / "testdata" / "constructor.pt"),
-        actual,
-    )
-    assert bool(differences) == (mutation != "none"), differences
+    assert_tensor_golden(_CWD / "testdata" / "constructor.pt", actual)
 
 
-@pytest.mark.parametrize(
-    ("family", "dropout"),
-    [
-        ("0719_v1", 0.05),
-        ("0724_v1", 0.05),
-        ("0729_v3", 0.05),
-        ("0801_v1", 0.0),
-        ("0801_v2", 0.0),
-        ("0803_v2", 0.0),
-    ],
-)
-def test_complete_source_initial_state_loads_into_native_layers(
-    family: str,
-    dropout: float,
-) -> None:
-    expected = read_tensors(_CWD / "testdata" / family / "train_step.pt")
+@pytest.mark.parametrize("dropout", [0.0, 0.05])
+def test_tiny_model_keeps_every_stage_and_the_posterior_mean(dropout: float) -> None:
     config = tiny_model_config(dropout=dropout)
     with host_agnostic_numerics():
         model = config.make()
-        initial = {
-            key.removeprefix("initial/")
-            .replace(".mlp.fc1.", ".mlp.up_proj.")
-            .replace(".mlp.fc2.", ".mlp.down_proj."): value
-            for key, value in expected.items()
-            if key.startswith("initial/")
-        }
-        model.load_state_dict(initial, strict=True)
         assert sum(parameter.numel() for parameter in model.parameters()) == 1_121
         assert isinstance(model.get_submodule("proj_out"), Conv2d)
         assert isinstance(model.get_submodule("unet_gr_rmse_head.0"), Linear)
         assert isinstance(model.get_submodule("unet.stem.bn2"), BatchNorm2d)
-        # The immutable source records fix this complete two-well geometry.
+        # The train-step records fix this complete two-well geometry.
         value = (torch.arange(2 * 3 * 16 * 32).reshape(2, 3, 16, 32) % 17).float() / 19
         prediction, extra = model(value)
         assert prediction.shape == (2, 16)

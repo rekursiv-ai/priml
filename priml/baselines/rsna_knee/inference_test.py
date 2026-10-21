@@ -1,11 +1,11 @@
-"""Check the released inference stages against their source captures."""
+"""Check the released inference stages on frozen literal model outputs."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import partial, partialmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import csv
 import hashlib
@@ -55,7 +55,11 @@ from priml.baselines.rsna_knee.inference import (
 )
 from priml.baselines.rsna_knee.model import R7
 from priml.baselines.rsna_knee.support_test import (
+    FLUID_COEFFICIENTS,
+    STATE_COEFFICIENTS,
     corrupt_deflate,
+    frozen_folds,
+    frozen_raptor_logits,
     postprocess_assets,
     r7_stage_config,
     raptor_stage_config,
@@ -64,7 +68,6 @@ from priml.baselines.rsna_knee.support_test import (
 )
 from priml.model.coatnet import CoAtNet
 from priml.model.vnet import VNet
-from priml.testing.golden import read_tensors
 
 
 if TYPE_CHECKING:
@@ -74,9 +77,6 @@ if TYPE_CHECKING:
 
     from priml.baselines.rsna_knee.imaging import StudyInputs
     from priml.model.ae.checkpoint import LocalFile
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 def _skip_flush(descriptor: int) -> None:
@@ -148,27 +148,36 @@ def test_rank_blend_rejects_excessive_model_failures(failed_model: str) -> None:
         exp000().blend.make()(list(inputs.values()), list(scored.values()))
 
 
-def test_rank_blend_matches_pinned_source_with_every_study_fallback() -> None:
-    # Two failures need at least 67 studies to satisfy the source's 3% stop.
-    values = np.arange(67 * 3).reshape(67, 3)
-    raw384 = ((values % 13) + 1) / 15.0
-    raw224 = ((values % 11) + 1) / 13.0
-    ours = ((values % 7) + 1) / 9.0
-    raw384[[0, 1]] = 0.5
-    raw224[[0, 2]] = 0.5
-    scored = np.ones(67, dtype=np.bool_)
-    scored[[0, 3]] = False
-    golden = _CWD / "testdata" / "rank_blend.pt"
-    expected = read_tensors(golden)["predictions"].numpy()
-    actual = exp000().blend.make()(
-        [raw384, raw224, ours],
-        [
-            ~np.equal(raw384, 0.5).all(axis=1),
-            ~np.equal(raw224, 0.5).all(axis=1),
-            scored,
-        ],
+def test_rank_blend_falls_back_on_the_members_that_scored_each_study() -> None:
+    config = exp000().blend
+    for group in config.groups:
+        for member in group.members:
+            member.max_failure_fraction = 1.0
+    # Rows: all scored; Raptor failed; Raptor-224 failed; R7 failed; all failed.
+    scored = [
+        np.array([True, False, True, True, False]),
+        np.array([True, True, False, True, False]),
+        np.array([True, True, True, False, False]),
+    ]
+    scores = [
+        np.array([[0.1], [0.9], [0.3], [0.2], [0.5]]),
+        np.array([[0.6], [0.5], [0.9], [0.4], [0.5]]),
+        np.array([[0.2], [0.9], [0.5], [0.1], [0.5]]),
+    ]
+    # Each member ranks only its own scored rows; each weight renormalizes over them.
+    raptor = [0.65 * (1 / 3) + 0.35 * 1.0, 2 / 3, 1.0, 0.65 * (2 / 3) + 0.35 * (1 / 3)]
+    r7 = [1 / 3, 1.0, 2 / 3]
+    expected = [
+        0.5 * raptor[0] + 0.5 * r7[0],
+        0.5 * raptor[1] + 0.5 * r7[1],
+        0.5 * raptor[2] + 0.5 * r7[2],
+        raptor[3],
+        0.5,
+    ]
+    np.testing.assert_array_equal(
+        config.make()(scores, scored),
+        np.array(expected, dtype=np.float32)[:, None],
     )
-    np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
@@ -471,11 +480,11 @@ def test_unbound_folds_start_without_models() -> None:
 
 
 def test_released_asset_hash_is_checked_before_deserializing(tmp_path: Path) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
+    logits = frozen_raptor_logits()
     path = tmp_path / "model.pt"
-    torch.save({"model": {"logits": expected["raptor/logits"]}}, path)
+    torch.save({"model": {"logits": logits}}, path)
     asset = released_state(path, key="model").make()
-    assert torch.equal(asset.state()["logits"], expected["raptor/logits"])
+    assert torch.equal(asset.state()["logits"], logits)
     path.write_bytes(b"altered checkpoint")
     with pytest.raises(RuntimeError, match="hashes to"):
         asset.state()
@@ -521,9 +530,16 @@ def test_checkpoint_paths_resolve_beneath_the_resource_root(tmp_path: Path) -> N
     assert config.copy_tree().finalize().file.path == Path("/datasets/model.pt")
 
 
+def _r7_inputs() -> tuple[Tensor, Tensor]:
+    """Return two six-pixel uint8 windows and their nine metadata columns."""
+    # R7Score centers its crop on both axes by the last dim, so windows are square.
+    images = (torch.arange(2 * 3 * 6 * 6) % 256).to(torch.uint8).reshape(2, 3, 6, 6)
+    return images, torch.arange(2 * 9, dtype=torch.float32).reshape(2, 9) / 8
+
+
 class _Fold:
-    def __init__(self, record: dict[str, Tensor], index: int) -> None:
-        self.record, self.index = record, index
+    def __init__(self, folds: dict[str, Tensor], index: int, *, rescue: bool) -> None:
+        self.folds, self.index, self.rescue = folds, index, rescue
         self.calls = 0
 
     def __call__(
@@ -536,18 +552,19 @@ class _Fold:
     ) -> tuple[Tensor, Tensor, Tensor]:
         assert chunk == 192
         assert not torch.is_grad_enabled()
-        for label, value in (("inputs", images), ("meta", metadata), ("mask", mask)):
-            expected = self.record[f"r7/{label}/{self.index}"][self.calls]
-            assert value.dtype == expected.dtype
-            assert torch.equal(value, expected)
+        full, meta = _r7_inputs()
+        # R7Score crops the centered four pixels and scores one study at a time.
+        assert torch.equal(images, full[None, :, :, 1:5, 1:5])
+        assert torch.equal(metadata, meta[None])
+        assert torch.equal(mask, torch.ones(1, 2, dtype=torch.bool))
         self.calls += 1
-        logits = self.record["r7/logits"][self.index].clone()
-        if self.index == 1 and self.calls == 1:
+        logits = self.folds["logits"][self.index].clone()
+        if self.rescue and self.calls == 1:
             logits[0, 0] = float("nan")
         return (
             logits,
-            self.record["r7/states"][self.index].clone(),
-            self.record["r7/binaries"][self.index].clone(),
+            self.folds["states"][self.index].clone(),
+            self.folds["binaries"][self.index].clone(),
         )
 
     def state_readout(self, states: Tensor, binaries: Tensor) -> Tensor:
@@ -555,12 +572,13 @@ class _Fold:
             assert value.dtype == torch.float32
             torch.testing.assert_close(
                 value,
-                self.record[f"r7/{name}"][self.index].float(),
+                self.folds[name][self.index].float(),
                 rtol=0,
                 atol=0,
                 equal_nan=True,
             )
-        return self.record["r7/readout"][self.index][None].clone()
+        # R7Score scores one study and keeps row 0 of its 84-column state readout.
+        return torch.full((1, 84), float(self.index))
 
 
 class _Raptor(nn.Module):
@@ -587,59 +605,63 @@ class _Raptor(nn.Module):
         return self.logits[min(self.calls - 1, len(self.logits) - 1)].clone()
 
 
-def test_all_four_source_fold_calls_crop_dtype_rescue_and_state_nan() -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
-    models = [_Fold(expected, index) for index in range(4)]
-    score = R7Score.Config(device="cpu", crop=4).make()
-    actual = score(models, expected["r7/images"], expected["r7/metadata"])
+def _sigmoid(logits: Tensor) -> NDArray[np.float32]:
+    return torch.sigmoid(logits.float()).numpy()
+
+
+def _views() -> list[Tensor]:
+    """Return a plain and a mirrored set of 94 normalized 2x2-pixel windows."""
+    # RaptorWindows interpolates every window to a square output_size.
+    plain = torch.arange(94 * 3 * 2 * 2, dtype=torch.float32).reshape(94, 3, 2, 2) / 64
+    return [plain, -plain]
+
+
+def test_all_four_folds_crop_rescue_nonfinite_findings_and_read_every_state() -> None:
+    folds = frozen_folds()
+    # A state NaN does not trigger the released finding-logit rescue.
+    folds["states"][2, 0, 3, 1] = float("nan")
+    models = [_Fold(folds, index, rescue=index == 1) for index in range(4)]
+    images, metadata = _r7_inputs()
+    actual = R7Score.Config(device="cpu", crop=4).make()(models, images, metadata)
     assert actual.logits.dtype == torch.float32
-    assert torch.equal(actual.logits, expected["r7/stacked"])
-    assert torch.equal(actual.logits.mean(0), expected["r7/mean"])
-    assert actual.states.dtype == torch.float32
-    torch.testing.assert_close(
-        actual.states,
-        expected["r7/readout"],
-        rtol=0,
-        atol=0,
-        equal_nan=True,
-    )
+    assert torch.equal(actual.logits, folds["logits"][:, 0].float())
     assert torch.equal(
-        torch.tensor([model.calls for model in models]),
-        expected["r7/counts"],
+        actual.states,
+        torch.arange(4, dtype=torch.float32)[:, None].expand(4, 84),
     )
+    assert [model.calls for model in models] == [1, 2, 1, 1]
 
 
-def test_source_raptor_pair_sigmoids_each_pass_before_float32_numpy_average() -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
-    model = _Raptor(expected["raptor/inputs"], expected["raptor/logits"]).eval()
-    actual = RaptorScore.Config(device="cpu").make()(
-        model,
-        [expected["raptor/plain"], expected["raptor/mirror"]],
-    )
+def test_raptor_pair_sigmoids_each_pass_before_the_float32_average() -> None:
+    logits, views = frozen_raptor_logits(), _views()
+    model = _Raptor(torch.stack([view[None] for view in views]), logits).eval()
+    actual = RaptorScore.Config(device="cpu").make()(model, views)
     assert actual.dtype == np.float32
-    assert torch.equal(torch.from_numpy(actual), expected["raptor/pair"])
+    np.testing.assert_array_equal(
+        actual,
+        (_sigmoid(logits[0, 0]) + _sigmoid(logits[1, 0])) / 2,
+    )
     assert model.calls == 2
 
 
-def test_source_224_sigmoid_tails_match_all_original_bits() -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
-    model = _Raptor(
-        expected["raptor/inputs"][:1],
-        expected["raptor224/tail_logits"][None],
-    ).eval()
+def test_accepting_policy_passes_nonfinite_and_saturated_logits_to_the_sigmoid() -> (
+    None
+):
+    plain = _views()[0]
+    logits = torch.tensor([[-math.inf, -1e4, 0.0, 1e4, math.inf, math.nan] * 2])
+    model = _Raptor(plain[None, None], logits[None]).eval()
     score = RaptorScore.Config(device="cpu", check_logits=accept_logits).make()
-    actual = torch.from_numpy(score(model, [expected["raptor/plain"]]))
-    assert torch.equal(
-        actual.view(torch.int32),
-        expected["raptor224/tail_probability"].view(torch.int32),
+    np.testing.assert_array_equal(
+        score(model, [plain]),
+        np.array([0.0, 0.0, 0.5, 1.0, 1.0, math.nan] * 2, dtype=np.float32),
     )
 
 
-def test_source_224_runtime_error_retries_the_complete_same_input() -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
+def test_runtime_error_retries_the_complete_same_input_at_the_next_precision() -> None:
+    logits, plain = frozen_raptor_logits(), _views()[0]
     model = _Raptor(
-        expected["raptor224/inputs"],
-        expected["raptor/logits"][:1],
+        torch.stack([plain[None]] * 2),
+        logits[:1],
         failure=RuntimeError,
     ).eval()
     score = RaptorScore.Config(
@@ -647,32 +669,31 @@ def test_source_224_runtime_error_retries_the_complete_same_input() -> None:
         dtypes_autocast=[torch.float16, None],
         check_logits=accept_logits,
     ).make()
-    actual = score(model, [expected["raptor/plain"]])
+    actual = score(model, [plain])
     assert actual.dtype == np.float32
-    assert torch.equal(torch.from_numpy(actual), expected["raptor224/probability"])
+    np.testing.assert_array_equal(actual, _sigmoid(logits[0, 0]))
     assert model.calls == 2
 
 
 def test_first_arm_does_not_rescue_runtime_failures_or_nonfinite_logits() -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
-    inputs = expected["raptor/inputs"][:1]
-    logits = expected["raptor/logits"][:1]
+    plain = _views()[0]
+    inputs, logits = plain[None, None], frozen_raptor_logits()[:1]
     model = _Raptor(inputs, logits, failure=RuntimeError).eval()
     score = RaptorScore.Config(device="cpu").make()
     with pytest.raises(RuntimeError, match=r"^Frozen model failure\.$"):
-        score(model, [expected["raptor/plain"]])
+        score(model, [plain])
     assert model.calls == 1
     model = _Raptor(inputs, logits * float("nan")).eval()
     with pytest.raises(FloatingPointError, match=r"^Raptor logits are nonfinite\.$"):
-        score(model, [expected["raptor/plain"]])
+        score(model, [plain])
     assert model.calls == 1
 
 
 def test_disabled_finite_policy_performs_no_finite_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
-    model = _Raptor(expected["raptor/inputs"], expected["raptor/logits"]).eval()
+    logits, views = frozen_raptor_logits(), _views()
+    model = _Raptor(torch.stack([view[None] for view in views]), logits).eval()
     calls: list[Tensor] = []
     original = torch.isfinite
 
@@ -684,12 +705,12 @@ def test_disabled_finite_policy_performs_no_finite_check(
     config = RaptorScore.Config()
     config.device = "cpu"
     config.check_logits = accept_logits
-    actual = config.make()(
-        model,
-        [expected["raptor/plain"], expected["raptor/mirror"]],
-    )
+    actual = config.make()(model, views)
     assert calls == []
-    assert torch.equal(torch.from_numpy(actual), expected["raptor/pair"])
+    np.testing.assert_array_equal(
+        actual,
+        (_sigmoid(logits[0, 0]) + _sigmoid(logits[1, 0])) / 2,
+    )
 
 
 @contextmanager
@@ -709,7 +730,7 @@ def test_scoring_device_autocast_and_cache_rescue_contract(
     monkeypatch: pytest.MonkeyPatch,
     device: str,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
+    logits, plain = frozen_raptor_logits(), _views()[0]
     transfers: list[torch.device | None] = []
     contexts: list[tuple[str, torch.dtype | None, bool]] = []
     caches: list[int] = []
@@ -722,8 +743,8 @@ def test_scoring_device_autocast_and_cache_rescue_contract(
     monkeypatch.setattr(torch, "autocast", partial(_autocast, calls=contexts))
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: caches.append(1))
     model = _Raptor(
-        expected["raptor224/inputs"],
-        expected["raptor/logits"][:1],
+        torch.stack([plain[None]] * 2),
+        logits[:1],
         failure=RuntimeError,
     ).eval()
     config = RaptorScore.Config(
@@ -731,8 +752,10 @@ def test_scoring_device_autocast_and_cache_rescue_contract(
         check_logits=accept_logits,
         dtypes_autocast=[torch.float16, None],
     )
-    actual = config.make()(model, [expected["raptor/plain"]])
-    assert torch.equal(torch.from_numpy(actual), expected["raptor224/probability"])
+    np.testing.assert_array_equal(
+        config.make()(model, [plain]),
+        _sigmoid(logits[0, 0]),
+    )
     assert transfers == [torch.device(device)]
     assert contexts == [
         (device, torch.float16, device == "cuda"),
@@ -744,7 +767,7 @@ def test_scoring_device_autocast_and_cache_rescue_contract(
 def test_runtime_error_during_device_to_host_copy_retries_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
+    logits, plain = frozen_raptor_logits(), _views()[0]
     original = Tensor.cpu
     copies: list[int] = []
 
@@ -753,14 +776,13 @@ def test_runtime_error_during_device_to_host_copy_retries_the_model(
         "cpu",
         partialmethod(_copy, copies=copies, original=original),
     )
-    model = _Raptor(expected["raptor224/inputs"], expected["raptor/logits"][:1]).eval()
+    model = _Raptor(torch.stack([plain[None]] * 2), logits[:1]).eval()
     score = RaptorScore.Config(
         device="cpu",
         check_logits=accept_logits,
         dtypes_autocast=[torch.float16, None],
     ).make()
-    actual = score(model, [expected["raptor/plain"]])
-    assert torch.equal(torch.from_numpy(actual), expected["raptor224/probability"])
+    np.testing.assert_array_equal(score(model, [plain]), _sigmoid(logits[0, 0]))
     assert model.calls == len(copies) == 2
 
 
@@ -784,25 +806,26 @@ def test_each_r7_fold_keeps_its_device_precision_and_float32_readout_boundary(
     device: str,
     dtype: torch.dtype | None,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     contexts: list[tuple[str, torch.dtype | None, bool]] = []
     monkeypatch.setattr(torch, "autocast", partial(_autocast, calls=contexts))
-    model = _Fold(expected, 0)
+    folds = frozen_folds()
+    images, metadata = _r7_inputs()
     result = (
         R7Score.Config(device=device, crop=4)
         .make()
         .forward(
-            model,
-            expected["r7/inputs/0"][0],
-            expected["r7/meta/0"][0],
-            expected["r7/mask/0"][0],
+            _Fold(folds, 0, rescue=False),
+            images[None, :, :, 1:5, 1:5],
+            metadata[None],
+            # R7Score.__call__ masks one study's windows before calling forward.
+            torch.ones(1, 2, dtype=torch.bool),
             dtype=dtype,
         )
     )
     assert contexts == [(device, dtype, device == "cuda" and dtype is not None)]
     for actual, name in zip(result, ("logits", "states", "binaries"), strict=True):
         assert actual.dtype == torch.float32
-        assert torch.equal(actual, expected[f"r7/{name}"][0].float())
+        assert torch.equal(actual, folds[name][0].float())
 
 
 def test_scoring_requires_at_least_one_autocast_precision() -> None:
@@ -815,42 +838,84 @@ def _path(file: LocalFile.Config) -> Path:
     return Path(file.path)
 
 
-def test_both_stackers_and_serialization_replay_complete_source_outputs(
+def _stacker_inputs() -> tuple[Tensor, Tensor]:
+    """Return four folds' logits and state readouts with dyadic stacker features."""
+    logits = ((torch.arange(4 * 12) % 5 - 2) / 8).reshape(4, 12)
+    logits[:, [FINDINGS.index("Effusion"), FINDINGS.index("Baker's")]] = 1.0
+    states = torch.zeros(4, 84)
+    # Baker's six categories follow the first nine findings' 51 categories.
+    states[:, 51:57] = torch.tensor([0.5, 0.25, 0.125, 0.0625, 0.5, 0.25])
+    states[:, 80] = 0.375
+    return logits, states
+
+
+def _logistic(logit: float) -> float:
+    """Return the logistic of a nonnegative logit."""
+    return 1 / (1 + math.exp(-logit))
+
+
+@pytest.mark.parametrize(
+    ("volume", "log_volume"),
+    [
+        (None, None),
+        (0.0, 0.0),
+        # The same NumPy float64 log1p call as production.
+        (13.7, np.log1p(np.array(13.7, dtype=np.float64)).item()),
+        (-1.0, None),
+        (float("nan"), None),
+        (float("inf"), None),
+    ],
+)
+def test_both_stackers_replace_their_findings_and_serialize_nine_digits(
     tmp_path: Path,
+    volume: float | None,
+    log_volume: float | None,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "stackers.pt")
-    postprocess = postprocess_assets(tmp_path).make()
-    for index, volume in enumerate((None, 0.0, 13.7, -1.0, float("nan"), float("inf"))):
-        fluid = None if volume is None else {"eff_sag_p99_open": volume}
-        result = postprocess(expected["logits"], expected["states"], fluid)
-        assert not result.failures
-        assert torch.equal(
-            torch.from_numpy(result.probabilities),
-            expected[f"{index}/probabilities"],
+    logits, states = _stacker_inputs()
+    fluid = None if volume is None else {"eff_sag_p99_open": volume}
+    result = postprocess_assets(tmp_path).make()(logits, states, fluid)
+    assert not result.failures
+    expected = torch.sigmoid(logits.mean(0)).double().numpy()
+    b0, b_z, b_lv, b_miss = FLUID_COEFFICIENTS
+    # Missing, negative or nonfinite volumes use the missing-volume weight instead.
+    expected[FINDINGS.index("Effusion")] = _logistic(
+        b0 + (b_z + (b_miss if log_volume is None else b_lv * log_volume)),
+    )
+    # Baker's: intercept 0.5, z weight 0.25 and six dyadic category features.
+    category = sum(
+        weight * value
+        for weight, value in zip(
+            STATE_COEFFICIENTS[2:],
+            (0.5, 0.25, 0.125, 0.0625, 0.5, 0.25),
+            strict=True,
         )
-        assert torch.equal(
-            torch.from_numpy(result.serialized),
-            expected[f"{index}/serialized"],
-        )
+    )
+    expected[FINDINGS.index("Baker's")] = _logistic(
+        STATE_COEFFICIENTS[0] + STATE_COEFFICIENTS[1] + category,
+    )
+    np.testing.assert_array_equal(result.probabilities, expected)
+    np.testing.assert_array_equal(
+        result.serialized,
+        [float(f"{value:.9g}") for value in expected],
+    )
 
 
 def test_bad_state_features_preserve_model_and_fluid_probabilities(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "stackers.pt")
+    logits, states = _stacker_inputs()
     postprocess = postprocess_assets(tmp_path).make()
     # R7Postprocess needs the complete state layout; width one exercises fallback.
-    result = postprocess(expected["logits"], torch.zeros(4, 1), None)
-    base = torch.sigmoid(expected["logits"].mean(0)).double().numpy()
+    result = postprocess(logits, torch.zeros(4, 1), None)
+    base = torch.sigmoid(logits.mean(0)).double().numpy()
+    effusion = _logistic(0.25 + 1.0 - 0.75)
     assert result.failures
     assert result.probabilities[9] == base[9]
-    assert result.probabilities[7] == float(expected["0/probabilities"][7])
-    states = expected["states"].clone()
+    assert result.probabilities[7] == effusion
     states[:, 51] = float("nan")
-    result = postprocess(expected["logits"], states, None)
+    result = postprocess(logits, states, None)
     assert result.failures
     assert result.probabilities[9] == base[9]
-    logits = expected["logits"].clone()
     logits[0, 0] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         postprocess(logits, states, None)
@@ -1002,20 +1067,22 @@ def test_invalid_priors_and_unadopted_classes_have_explicit_behavior(
     config = postprocess_assets(tmp_path)
     _change(_path(config.fluid_file), ("classes", "Effusion", "adopt"), False)
     _change(_path(config.state_file), ("classes", "Baker's", "adopt"), False)
-    expected = read_tensors(_CWD / "testdata" / "stackers.pt")
-    result = config.make()(expected["logits"], expected["states"], None)
+    logits, states = _stacker_inputs()
+    result = config.make()(logits, states, None)
     assert not result.failures
     assert torch.equal(
         torch.from_numpy(result.probabilities),
-        torch.sigmoid(expected["logits"].mean(0)).double(),
+        torch.sigmoid(logits.mean(0)).double(),
     )
 
 
 def test_optional_volume_features_and_dropped_features_keep_coefficient_order(
     tmp_path: Path,
 ) -> None:
+    logits, states = _stacker_inputs()
+    (tmp_path / "default").mkdir()
+    default = postprocess_assets(tmp_path / "default").make()(logits, states, None)
     config = postprocess_assets(tmp_path)
-    expected = read_tensors(_CWD / "testdata" / "stackers.pt")
     _change(
         _path(config.state_file),
         ("classes", "Baker's", "volume_column"),
@@ -1030,15 +1097,12 @@ def test_optional_volume_features_and_dropped_features_keep_coefficient_order(
     _change(
         _path(config.state_file),
         ("classes", "Baker's", "coef"),
-        [*[float(value) for value in expected["state_coefficients"][1:]], 0.0],
+        [*STATE_COEFFICIENTS[1:], 0.0],
     )
-    model = config.make()
-    result = model(expected["logits"], expected["states"], {"bak_sag_p99_open": 2.5})
+    result = config.make()(logits, states, {"bak_sag_p99_open": 2.5})
     assert not result.failures
-    assert torch.equal(
-        torch.from_numpy(result.probabilities),
-        expected["0/probabilities"],
-    )
+    # A zero-weight missing-volume feature leaves the default probabilities intact.
+    np.testing.assert_array_equal(result.probabilities, default.probabilities)
 
 
 def test_typed_assets_reject_invalid_unused_fields(tmp_path: Path) -> None:
@@ -1056,6 +1120,13 @@ def test_typed_assets_reject_invalid_unused_fields(tmp_path: Path) -> None:
 def test_inactive_rows_do_not_skip_later_adopted_rows_and_baker_volume_is_valid(
     tmp_path: Path,
 ) -> None:
+    logits, states = _stacker_inputs()
+    (tmp_path / "default").mkdir()
+    default = postprocess_assets(tmp_path / "default").make()(
+        logits,
+        states,
+        {"eff_sag_p99_open": 13.7},
+    )
     config = postprocess_assets(tmp_path)
     for path, name in (
         (_path(config.fluid_file), "Effusion"),
@@ -1071,23 +1142,15 @@ def test_inactive_rows_do_not_skip_later_adopted_rows_and_baker_volume_is_valid(
         "bak_sag_p99_open",
     )
     _change(_path(config.fluid_file), ("classes", "Effusion", "view_id"), 5)
-    expected = read_tensors(_CWD / "testdata" / "stackers.pt")
-    result = config.make()(
-        expected["logits"],
-        expected["states"],
-        {"bak_sag_p99_open": 13.7},
-    )
-    assert torch.equal(
-        torch.from_numpy(result.probabilities),
-        expected["2/probabilities"],
-    )
+    result = config.make()(logits, states, {"bak_sag_p99_open": 13.7})
+    np.testing.assert_array_equal(result.probabilities, default.probabilities)
 
 
 def test_binary_state_features_and_volume_coefficients_affect_scores(
     tmp_path: Path,
 ) -> None:
     config = postprocess_assets(tmp_path)
-    expected = read_tensors(_CWD / "testdata" / "stackers.pt")
+    logits, states = _stacker_inputs()
     _change(
         _path(config.state_file),
         ("classes", "MCL"),
@@ -1104,10 +1167,8 @@ def test_binary_state_features_and_volume_coefficients_affect_scores(
         },
     )
     model = config.make()
-    result = model(expected["logits"], expected["states"], None)
-    assert result.probabilities.item(1) == 1 / (
-        1 + math.exp(-expected["states"].double().mean(0)[80].item())
-    )
+    result = model(logits, states, None)
+    assert result.probabilities.item(1) == _logistic(0.375)
     _change(
         _path(config.state_file),
         ("classes", "Baker's", "features"),
@@ -1124,13 +1185,9 @@ def test_binary_state_features_and_volume_coefficients_affect_scores(
         ("classes", "Baker's", "volume_column"),
         "bak_sag_p99_open",
     )
-    result = config.make()(
-        expected["logits"],
-        expected["states"],
-        {"bak_sag_p99_open": 2.5},
-    )
+    result = config.make()(logits, states, {"bak_sag_p99_open": 2.5})
     log_volume: NDArray[np.float64] = np.log1p(np.array([2.5], dtype=np.float64))
-    assert result.probabilities.item(9) == 1 / (1 + math.exp(-log_volume.item(0)))
+    assert result.probabilities.item(9) == _logistic(log_volume.item(0))
 
 
 def test_spec_checksum_requests_nonsecurity_md5_on_restricted_backends(
@@ -1148,22 +1205,21 @@ def test_spec_checksum_requests_nonsecurity_md5_on_restricted_backends(
     assert config.make().state
 
 
+def _pair() -> Tensor:
+    """Return the frozen Raptor's two-pass probability average."""
+    logits = frozen_raptor_logits()
+    return torch.from_numpy((_sigmoid(logits[0, 0]) + _sigmoid(logits[1, 0])) / 2)
+
+
 def test_full_raptor_stage_runs_both_views_even_for_an_empty_study(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = study_inputs(tmp_path).make()
-    config = raptor_stage_config(
-        tmp_path / "raptor.pt",
-        logits=expected["raptor/logits"],
-    )
+    config = raptor_stage_config(tmp_path / "raptor.pt", logits=frozen_raptor_logits())
     config.views = [unchanged, anatomical_mirror]
     result = config.make()(data)
     assert result.values.dtype == np.float32
-    assert torch.equal(
-        torch.from_numpy(result.values),
-        expected["raptor/pair"].repeat(2, 1),
-    )
+    assert torch.equal(torch.from_numpy(result.values), _pair().repeat(2, 1))
     assert result.scored.tolist() == [True, True]
     assert result.failures == {}
 
@@ -1171,10 +1227,8 @@ def test_full_raptor_stage_runs_both_views_even_for_an_empty_study(
 def test_four_fold_anatomy_stage_keeps_stackers_and_mean_fills_failed_studies(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = study_inputs(tmp_path).make()
-    config = r7_stage_config(tmp_path, expected)
-    result = config.make()(data)
+    result = r7_stage_config(tmp_path).make()(data)
     assert result.values.dtype == np.float64
     assert result.values.shape == (2, 12)
     assert result.scored.tolist() == [True, False]
@@ -1235,21 +1289,14 @@ def test_native_input_damage_keeps_raptor_zero_bag_and_next_study_scoring(
     tmp_path: Path,
     damage: str,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = _damaged_study(tmp_path, damage=damage)
-    config = raptor_stage_config(
-        tmp_path / "raptor.pt",
-        logits=expected["raptor/logits"],
-    )
+    config = raptor_stage_config(tmp_path / "raptor.pt", logits=frozen_raptor_logits())
     config.views = [unchanged, anatomical_mirror]
     result = config.make()(data)
     assert data.ids == ["study", "empty", "zz-good"]
     assert result.scored.tolist() == [True, True, True]
     assert result.failures == {}
-    assert torch.equal(
-        torch.from_numpy(result.values),
-        expected["raptor/pair"].repeat(3, 1),
-    )
+    assert torch.equal(torch.from_numpy(result.values), _pair().repeat(3, 1))
     if damage == "spacing":
         assert len(result.notes) == 1
         assert result.notes[0]["uid"] == "study"
@@ -1259,9 +1306,8 @@ def test_native_input_damage_keeps_raptor_zero_bag_and_next_study_scoring(
 def test_corrupt_deflate_mean_fills_r7_failure_and_scores_next_study(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = _damaged_study(tmp_path, damage="deflate")
-    result = r7_stage_config(tmp_path, expected=expected).make()(data)
+    result = r7_stage_config(tmp_path).make()(data)
     assert result.scored.tolist() == [False, False, True]
     assert list(result.failures) == ["study", "empty"]
     assert torch.equal(
@@ -1326,12 +1372,11 @@ def test_raptor_preparation_errors_score_zero_bags_and_log_inference_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = study_inputs(tmp_path).make()
     monkeypatch.setattr(data, "load", _missing)
     config = raptor_stage_config(
         tmp_path / "nonfinite.pt",
-        logits=expected["raptor/logits"] * float("nan"),
+        logits=frozen_raptor_logits() * float("nan"),
     )
     config.views = [unchanged, anatomical_mirror]
     result = config.make()(data)
@@ -1345,12 +1390,8 @@ def test_raptor_timeout_aborts_the_complete_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = study_inputs(tmp_path).make()
-    config = raptor_stage_config(
-        tmp_path / "raptor.pt",
-        logits=expected["raptor/logits"],
-    )
+    config = raptor_stage_config(tmp_path / "raptor.pt", logits=frozen_raptor_logits())
     config.time_limit = 1.0
     times = iter((0.0, 2.0))
     monkeypatch.setattr(
@@ -1365,9 +1406,8 @@ def test_r7_deadline_retains_the_first_study_and_mean_fills_unreached_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     data = study_inputs(tmp_path).make()
-    config = r7_stage_config(tmp_path, expected)
+    config = r7_stage_config(tmp_path)
     monkeypatch.setattr(
         "priml.baselines.rsna_knee.inference.time.monotonic",
         lambda: 1.0,
@@ -1396,8 +1436,16 @@ def test_numpy_rank_consumers_keep_cpu_placement_under_an_ambient_device(
     assert actual.dtype == expected.dtype
 
 
+def test_ordinal_ranks_break_ties_in_study_order() -> None:
+    # Over 16 rows: NumPy's default sort keeps short tie runs in order, hiding a bug.
+    rows = np.arange(17)
+    values = np.stack([np.full(17, 0.5), np.where(rows % 2, 0.25, 0.75)], axis=1)
+    expected = np.stack([rows, np.where(rows % 2, rows // 2, 8 + rows // 2)], axis=1)
+    assert np.array_equal(_ordinal_ranks(values), (expected / 16).astype(np.float32))
+    assert _ordinal_ranks(np.array([[0.5, 0.25]])).tolist() == [[0.0, 0.0]]
+
+
 def _recipe(root: Path) -> PublicRecipe.Config:
-    expected = read_tensors(_CWD / "testdata" / "inference.pt")
     config = PublicRecipe.Config()
     config.base_dir = None
     data = root / "raw"
@@ -1406,14 +1454,14 @@ def _recipe(root: Path) -> PublicRecipe.Config:
     config.working_dir = root / "output"
     config.raptor384 = raptor_stage_config(
         root / "raptor.pt",
-        logits=expected["raptor/logits"],
+        logits=frozen_raptor_logits(),
     )
     config.raptor384.views = [unchanged, anatomical_mirror]
     config.raptor224 = raptor_stage_config(
         root / "raptor.pt",
-        logits=expected["raptor/logits"],
+        logits=frozen_raptor_logits(),
     )
-    config.r7 = r7_stage_config(root, expected)
+    config.r7 = r7_stage_config(root)
     config.blend = exp000().blend
     return config
 
@@ -1472,26 +1520,30 @@ def test_native_recipe_writes_every_stage_and_final_submission(
     ]
 
 
+def _competition(root: Path, *, ids: list[str], sample: list[str]) -> StudyData:
+    """Write competition CSVs without series rows and read them as study data."""
+    with (root / "test.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["StudyInstanceUID"])
+        writer.writerows([[uid] for uid in ids])
+    with (root / "sample_submission.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["StudyInstanceUID", *reversed(FINDINGS)])
+        writer.writerows([[uid, *([0.0] * 12)] for uid in sample])
+    (root / "test_series.csv").write_text(
+        "StudyInstanceUID,SeriesInstanceUID,Anatomical_Plane\n",
+    )
+    return StudyData.Config(input_dir=root).make()
+
+
 @pytest.mark.parametrize("layout", ["test_series", "test_images"])
-def test_complete_csv_controller_and_final_blend_replay_source(
+def test_r7_controller_orders_studies_by_file_count_and_interleaves_halves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     layout: str,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "pipeline.pt")
-    ids, sample = ["zeta", "alpha", "empty", "beta"], ["beta", "empty", "zeta", "alpha"]
-    with (tmp_path / "test.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["StudyInstanceUID"])
-        writer.writerows([[uid] for uid in ids])
-    with (tmp_path / "sample_submission.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["StudyInstanceUID", *reversed(FINDINGS)])
-        writer.writerows([[uid, *([0.0] * 12)] for uid in sample])
-    (tmp_path / "test_series.csv").write_text(
-        "StudyInstanceUID,SeriesInstanceUID,Anatomical_Plane\n",
-    )
-    data = StudyData.Config(input_dir=tmp_path).make()
+    ids = ["zeta", "alpha", "empty", "beta"]
+    data = _competition(tmp_path, ids=ids, sample=["beta", "empty", "zeta", "alpha"])
     for uid, count in zip(ids, (5, 8, 0, 2), strict=True):
         directory = tmp_path / "test_series" / uid / "series"
         directory.mkdir(parents=True)
@@ -1499,128 +1551,73 @@ def test_complete_csv_controller_and_final_blend_replay_source(
             (directory / f"{index}.dcm").touch()
     if layout == "test_images":
         (tmp_path / "test_series").rename(tmp_path / layout)
-    calls: list[int] = []
+    calls: list[str] = []
 
     def load(uid: str) -> StudyInputs:
-        calls.append(ids.index(uid))
+        calls.append(uid)
         raise OSError("Frozen worker failure.")
 
     monkeypatch.setattr(data, "load", load)
-    stage = r7_stage_config(
-        tmp_path,
-        read_tensors(_CWD / "testdata" / "inference.pt"),
-    )
-    assert not stage.make()(data).scored.any()
-    assert torch.equal(torch.tensor(calls), expected["controller/order"])
-    values = ((np.arange(48).reshape(4, 12) * 17 % 47) + 0.25) / 48
-    values = np.asarray(
-        [
-            [float(f"{float(values.item(index, column)):.9g}") for column in range(12)]
-            for index in range(4)
-        ],
-        dtype=np.float64,
-    )
+    assert not r7_stage_config(tmp_path).make()(data).scored.any()
+    # Descending file counts alpha, zeta, beta, empty; even positions run first.
+    assert calls == ["alpha", "beta", "zeta", "empty"]
+
+
+def test_mean_fill_and_decimal_csv_follow_the_sample_order(tmp_path: Path) -> None:
+    ids, sample = ["zeta", "alpha", "empty", "beta"], ["beta", "empty", "zeta", "alpha"]
+    data = _competition(tmp_path, ids=ids, sample=sample)
+    columns = np.arange(12) / 64
     result = StageScores(
-        values=values,
-        scored=np.asarray([True, True, False, True], dtype=np.bool_),
+        values=np.array([0.25, 0.5, 0.0, 0.75])[:, None] + columns,
+        scored=np.array([True, True, False, True]),
         failures={"empty": "frozen worker failure"},
     )
     _mean_fill(result, ids=ids, sample_ids=sample)
-    _write_scores(
-        tmp_path / "ours_sub.csv",
-        values=result.values,
-        data=data,
-        order=sample,
-        decimals=True,
+    # The scored rows 0.75, 0.25 and 0.5 (plus each column offset) average to 0.5.
+    np.testing.assert_array_equal(result.values[2], 0.5 + columns)
+    path = tmp_path / "ours_sub.csv"
+    _write_scores(path, values=result.values, data=data, order=sample, decimals=True)
+    rows = {"beta": 0.75, "empty": 0.5, "zeta": 0.25, "alpha": 0.5}
+    assert path.read_bytes().decode() == "".join(
+        line + "\r\n"
+        for line in [
+            ",".join(["StudyInstanceUID", *reversed(FINDINGS)]),
+            *(
+                ",".join([uid, *(str(rows[uid] + offset) for offset in columns[::-1])])
+                for uid in sample
+            ),
+        ]
     )
-    mismatches: list[str] = []
-    if (tmp_path / "ours_sub.csv").read_bytes() != expected[
-        "controller/bytes"
-    ].numpy().tobytes():
-        mismatches.append("controller/bytes")
-    for name, multiplier, modulus, offset, denominator in (
-        ("raptor", 7, 41, 0.5, 43),
-        ("raptor224", 11, 37, 0.75, 41),
+
+
+def test_raw_csvs_use_canonical_columns_and_submissions_the_sample_columns(
+    tmp_path: Path,
+) -> None:
+    data = _competition(tmp_path, ids=["a", "b"], sample=["b", "a"])
+    values = np.array([[1 / 3] * 12, [0.5] * 12], dtype=np.float32)
+    for name, canonical, labels in (
+        ("raw", True, list(FINDINGS)),
+        ("sub", False, list(reversed(FINDINGS))),
     ):
-        raw = np.asarray(
-            ((np.arange(48).reshape(4, 12) * multiplier % modulus) + offset)
-            / denominator,
-            dtype=np.float32,
-        )
-        for suffix, predictions in (
-            ("raw", raw),
-            ("sub", (raw.argsort(0).argsort(0) / 3).astype(np.float32)),
-        ):
-            path = tmp_path / f"{name}_{suffix}.csv"
-            _write_scores(
-                path,
-                values=predictions,
-                data=data,
-                order=ids,
-                decimals=False,
-                canonical=suffix == "raw",
-            )
-            if (
-                path.read_bytes()
-                != expected[f"{name}_{suffix}/bytes"].numpy().tobytes()
-            ):
-                mismatches.append(f"{name}_{suffix}/bytes")
-            # The native reader must accept the source's complete raw column order.
-            path.write_bytes(expected[f"{name}_{suffix}/bytes"].numpy().tobytes())
-    parsed: dict[str, NDArray[np.float64]] = {}
-    for name in (
-        "raptor_raw",
-        "raptor_sub",
-        "raptor224_raw",
-        "raptor224_sub",
-        "ours_sub",
-    ):
-        try:
-            parsed[name] = _read_scores(tmp_path / f"{name}.csv", data=data)
-        except ValueError:
-            mismatches.append(f"{name}/columns")
-            continue
-        if not np.array_equal(parsed[name], expected[f"{name}/parsed"].numpy()):
-            mismatches.append(f"{name}/parsed")
-    if len(parsed) == 5:
-        correlations = _correlations(
-            parsed["raptor_raw"],
-            raw224=parsed["raptor224_raw"],
-            ours=parsed["ours_sub"],
-            sub384=parsed["raptor_sub"],
-            sub224=parsed["raptor224_sub"],
-        )
-        for name, values_by_label in correlations.items():
-            if not np.array_equal(
-                np.asarray([values_by_label[label] for label in FINDINGS]),
-                expected[f"correlation/{name}"].numpy(),
-            ):
-                mismatches.append(f"correlation/{name}")
-        predictions = exp000().blend.make()(
-            [parsed["raptor_raw"], parsed["raptor224_raw"], parsed["ours_sub"]],
-            [
-                ~np.equal(parsed["raptor_raw"], 0.5).all(axis=1),
-                ~np.equal(parsed["raptor224_raw"], 0.5).all(axis=1),
-                result.scored,
-            ],
-        )
+        path = tmp_path / f"{name}.csv"
         _write_scores(
-            tmp_path / "submission.csv",
-            values=predictions,
+            path,
+            values=values,
             data=data,
-            order=ids,
+            order=data.ids,
             decimals=False,
+            canonical=canonical,
         )
-        if (tmp_path / "submission.csv").read_bytes() != expected[
-            "submission/bytes"
-        ].numpy().tobytes():
-            mismatches.append("submission/bytes")
-        if not np.array_equal(
-            _read_scores(tmp_path / "submission.csv", data=data),
-            expected["submission/parsed"].numpy(),
-        ):
-            mismatches.append("submission/parsed")
-    assert not mismatches, mismatches
+        # Float32 text keeps the shortest round-trip digits and newline endings.
+        assert path.read_text() == (
+            f"StudyInstanceUID,{','.join(labels)}\n"
+            f"a,{','.join(['0.33333334'] * 12)}\n"
+            f"b,{','.join(['0.5'] * 12)}\n"
+        )
+        np.testing.assert_array_equal(
+            _read_scores(path, data=data),
+            [[float("0.33333334")] * 12, [0.5] * 12],
+        )
 
 
 def test_native_recipe_retains_failure_receipt_before_propagating(
@@ -1874,7 +1871,8 @@ def _rank_csvs(
     config = StudyData.Config()
     config.input_dir = root
     data = config.make()
-    ranks = (raw.argsort(0).argsort(0) / max(len(raw) - 1, 1)).astype(np.float32)
+    order = raw.argsort(0, kind="stable")
+    ranks = (order.argsort(0) / max(len(raw) - 1, 1)).astype(np.float32)
     for name, values in (("raw", raw), ("sub", ranks)):
         _write_scores(
             root / f"{name}.csv",

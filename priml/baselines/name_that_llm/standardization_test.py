@@ -2,18 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Final
-
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.name_that_llm.standardization import StandardScaler
-from priml.testing.golden import mismatches, read_tensors
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("dtype", argvalues=[np.float32, np.float64])
@@ -35,46 +27,30 @@ def test_standardization_preserves_precision_and_input(
     )
 
 
-@pytest.mark.parametrize("dtype", argvalues=[np.float32, np.float64])
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-@pytest.mark.parametrize("case", argvalues=[0, 1])
-def test_standardization_replays_all_fitted_state_and_outputs(
-    dtype: type[np.float32 | np.float64],
-    corrupt: bool,
-    case: int,
-) -> None:
-    values = np.arange(35, dtype=np.float64).reshape(7, 5) * 0.17
-    values[:, 1] = 3
-    values[:, 3] = 1e12 + np.arange(7) * 1e-4
-    values[:, 4] = np.sin(np.arange(7)) if case == 0 else 100 + np.arange(7) * 1e-8
-    fit = values.astype(dtype)
-    predict = (values[:3] * 0.71).astype(dtype)
-    scaler = StandardScaler.Config().make().fit(fit)
-    if corrupt:
-        scaler.mean_[:1] = np.nextafter(scaler.mean_[:1], np.inf)
-    actual = {
-        "n_features_in_": torch.tensor(scaler.n_features_in_),
-        "n_samples_seen_": torch.from_numpy(np.asarray(scaler.n_samples_seen_)),
-        "mean_": torch.from_numpy(scaler.mean_),
-        "var_": torch.from_numpy(scaler.var_),
-        "scale_": torch.from_numpy(scaler.scale_),
-        "fit": torch.from_numpy(scaler.transform(fit)),
-        "predict": torch.from_numpy(scaler.transform(predict)),
-    }
-    assert set(vars(scaler)) == set(actual) - {"fit", "predict"}
-    prefix = f"{np.dtype(dtype).name}/{case}/"
-    expected = {
-        name.removeprefix(prefix): value
-        for name, value in read_tensors(
-            _CWD / "testdata" / "standardization.pt",
-        ).items()
-        if name.startswith(prefix)
-    }
-    report = mismatches(expected, actual=actual)
-    if corrupt:
-        assert any(item.startswith("mean_:") for item in report), report
-    else:
-        assert not report, "\n".join(report)
+def test_standardization_fits_exact_moments_and_leaves_noise_unscaled() -> None:
+    features = np.array(
+        [[0, 2**52], [0, 2**52], [4, 2**52], [4, 2**52 + 2]],
+        dtype=np.float64,
+    )
+    scaler = StandardScaler.Config().make().fit(features)
+    # The second column's sum rounds to 4 * 2**52, so its mean is 2**52, not 2**52
+    # + 1/2; the centred sum 2 corrects the variance to the exact 3/4.
+    assert scaler.n_features_in_ == 2
+    assert scaler.n_samples_seen_ == 4
+    assert scaler.mean_.tolist() == [2, 2**52]
+    assert scaler.var_.tolist() == [4, 3 / 4]
+    # A variance below (4 * 2**52 * eps)**2 = 16 is rounding noise: scale one.
+    assert scaler.scale_.tolist() == [2, 1]
+    assert scaler.transform(features).tolist() == [[-1, 0], [-1, 0], [1, 0], [1, 2]]
+
+
+def test_standardization_accumulates_single_precision_means_in_double() -> None:
+    features = np.array([[2**24, 0], [1, 0], [1, 4], [2, 4]], dtype=np.float32)
+    # A float32 sum absorbs each 1 into 2**24 and would leave the mean 2**22 + 1/2.
+    assert StandardScaler.Config().make().fit(features).mean_.tolist() == [
+        2**22 + 1,
+        2,
+    ]
 
 
 @pytest.mark.parametrize("fit", argvalues=[False, True])

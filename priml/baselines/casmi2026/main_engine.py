@@ -1243,7 +1243,9 @@ def _main_explanation_features(
             fractions.append(weights[matched].sum().item() / total)
             counts.append(matched.mean(dtype=np.float64).item())
             tops.append(
-                matched[np.argsort(-weights)[:10]].mean(dtype=np.float64).item(),
+                matched[np.argsort(-weights, kind="stable")[:10]]
+                .mean(dtype=np.float64)
+                .item(),
             )
             strict.append(weights[matched_strict].sum().item() / total)
     if not fractions:
@@ -2219,7 +2221,7 @@ class MainRetrieval:
         excluded_sid: int = -1,
         excluded_library: int = -1,
     ) -> tuple[Analog, ...]:
-        """Keep strict-best SID evidence after source-order partial selection.
+        """Keep strict-best SID evidence among each query's top-scoring rows.
 
         Args:
           spectra: Complete query spectra before the caller's query-count cap.
@@ -2268,11 +2270,8 @@ class MainRetrieval:
                 candidates=selected,
                 shifts=shifts,
             )
-            maximum = min(4 * self.config.n_analog, len(scores))
-            positions = (
-                np.argpartition(-scores, maximum - 1)[:maximum]
-                if maximum < len(scores)
-                else np.arange(len(scores))
+            positions = np.sort(
+                np.argsort(-scores, kind="stable")[: 4 * self.config.n_analog],
             )
             for position in positions:
                 row = selected.item(position)
@@ -2432,7 +2431,7 @@ class FragmentChannels:
         """
         selected = np.arange(len(rows.mass))
         if len(selected) > self.max_candidates:
-            selected = np.argsort(-model_score)[: self.max_candidates]
+            selected = np.argsort(-model_score, kind="stable")[: self.max_candidates]
         fragment = np.zeros((len(rows.mass), 5), np.float32)
         counts = np.zeros(len(rows.mass), np.float32)
         for position in selected:
@@ -2633,8 +2632,8 @@ class MainEngine:
             else None
         )
         model_score = (
-            np.asarray(
-                rows.fingerprints
+            (
+                rows.fingerprints.astype(np.float64)
                 @ (
                     0.5
                     * (
@@ -2644,9 +2643,8 @@ class MainEngine:
                             dtype=np.float32,
                         )
                     )
-                ),
-                np.float32,
-            )
+                ).astype(np.float64)
+            ).astype(np.float32)
             if views is not None
             else np.zeros(count, np.float32)
         )
@@ -3657,22 +3655,27 @@ def _main_model_features(
     if views is not None:
         zs = views.single.mean(0, dtype=np.float32).mean(0, dtype=np.float32)
         zm = views.merged.mean(0, dtype=np.float32).mean(0, dtype=np.float32)
-        single, merged = fingerprints @ zs, fingerprints @ zm
+        wide = fingerprints.astype(np.float64)
+        single = (wide @ zs.astype(np.float64)).astype(np.float32)
+        merged = (wide @ zm.astype(np.float64)).astype(np.float32)
         logits = 0.5 * (zs + zm)
-        scores = np.asarray(fingerprints @ logits, np.float32)
-        probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -30, 30)))
-        probability = np.clip(probability, 1e-6, 1 - 1e-6)
-        # Preserve the source float32 row reduction independently of BLAS kernels.
-        likelihood = (fingerprints * np.log(probability)).sum(1) + (
-            (1 - fingerprints) * np.log(1 - probability)
+        scores = (wide @ logits.astype(np.float64)).astype(np.float32)
+        decay = np.exp(-np.clip(logits, -30, 30).astype(np.float64)).astype(np.float32)
+        probability = np.clip(1.0 / (1.0 + decay), 1e-6, 1 - 1e-6)
+        likelihood = (
+            fingerprints * np.log(probability.astype(np.float64)).astype(np.float32)
+        ).sum(1) + (
+            (1 - fingerprints)
+            * np.log((1 - probability).astype(np.float64)).astype(np.float32)
         ).sum(1)
         hard = (probability > 0.5).astype(np.float32)
         intersection = fingerprints @ hard
+        agreement = (wide @ probability.astype(np.float64)).astype(np.float32)
+        norm = np.float32(np.linalg.norm(probability.astype(np.float64)))
         features.update(
             fp_ll=likelihood / max(1.0, width) * 100,
             fp_ll_gap=(likelihood - likelihood.max()) / 100.0,
-            fp_cos=(fingerprints @ probability)
-            / (np.sqrt(cardinality) * np.linalg.norm(probability) + 1e-9),
+            fp_cos=agreement / (np.sqrt(cardinality) * norm + 1e-9),
             fp_tan=tanimoto(intersection, cardinality, hard.sum()),
         )
         element_prediction = 0.5 * (
@@ -3694,7 +3697,9 @@ def _main_model_features(
             el_rank=_stable_ranks(-total),
         )
     maximum = scores.max().item()
-    soft = np.asarray(np.exp((scores - maximum) / width**0.5 * 4.0), np.float32)
+    soft = np.exp(
+        ((scores - maximum) / width**0.5 * 4.0).astype(np.float64),
+    ).astype(np.float32)
     soft = soft / soft.sum()
     ordered = np.sort(scores)[::-1]
     features.update(
@@ -3705,7 +3710,11 @@ def _main_model_features(
         fz_norm=scores / np.sqrt(np.maximum(cardinality, 1)) / 10.0,
         fz_top=np.equal(scores, maximum).astype(np.float32),
         fz_softmax=soft,
-        fz_grp_ent=-(soft * np.log(soft + 1e-12)).sum().item(),
+        fz_grp_ent=-(
+            soft * np.log((soft + 1e-12).astype(np.float64)).astype(np.float32)
+        )
+        .sum()
+        .item(),
         fz_grp_gap=((ordered[:1] - ordered[1:2]) / 100.0).item(0) if count > 1 else 0.0,
         fz_single=single / 100.0,
         fz_single_gap=(single - single.max()) / 100.0,

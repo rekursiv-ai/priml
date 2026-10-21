@@ -43,7 +43,8 @@ from priml.baselines.casmi2026.fusion import (
     standardized,
 )
 from priml.baselines.casmi2026.isolated import IDENTITY_RDKIT, SIMULATOR_RDKIT
-from priml.testing.golden import mismatches, read_tensors
+from priml.baselines.casmi2026.testing import float32_comparands
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -156,7 +157,7 @@ GOLDEN: Final = _BASELINE / "testdata" / "reranking.pt"
 
 
 def replay() -> dict[str, Tensor]:
-    """Exercise all independent source coverage, fallback-key and tie branches."""
+    """Exercise all coverage, fallback-key and tie branches."""
     candidates = [str(index) for index in range(9)]
     keys = [f"k{index}" for index in range(9)]
     formulas = ["a", "b", "a", "c", "b", "a", "b", "d", "d"]
@@ -280,9 +281,8 @@ def replay() -> dict[str, Tensor]:
     return record
 
 
-def test_all_simulator_reranking_values_match_source() -> None:
-    report = mismatches(read_tensors(GOLDEN), replay())
-    assert not report, "\n".join(report)
+def test_all_simulator_reranking_values() -> None:
+    assert_tensor_golden(GOLDEN, float32_comparands(replay()))
 
 
 def test_guarded_z_centers_by_population_deviation_and_tolerates_a_flat_group() -> None:
@@ -426,8 +426,9 @@ class Prepared:
         return self.formulas[value]
 
 
-def test_every_whole_source_fusion_stage_and_all_twenty_final_branches() -> None:
-    expected = read_tensors(_BASELINE / "testdata/fusion.pt")
+def test_every_fusion_stage_and_all_twenty_final_branches() -> None:
+    golden = _BASELINE / "testdata/fusion.pt"
+    expected = read_tensors(golden)
     prepared = source_inputs(expected)
     names = prepared.names
     actual: dict[str, Tensor] = {}
@@ -499,8 +500,7 @@ def test_every_whole_source_fusion_stage_and_all_twenty_final_branches() -> None
             )
             actual[label + "/final"] = text(str(final))
             actual[label + "/inserted"] = torch.tensor(inserted)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 def test_insertion_flag_is_true_when_rank_two_is_already_occupied() -> None:
@@ -693,7 +693,7 @@ def test_absent_lists_empty_fusion_and_deferred_formula_staging() -> None:
 
 
 def source_inputs(expected: dict[str, Tensor]) -> Prepared:
-    """Load only complete independent scientific inputs from the unchanged witness."""
+    """Load the stored scientific inputs from the fusion golden."""
     names = tuple(decode(expected[f"identities/{index}/input"]) for index in range(8))
     identities: dict[str, MetricIdentity | None] = {"": None}
     keys: dict[str, str | None] = {"": None}
@@ -730,20 +730,21 @@ def source_inputs(expected: dict[str, Tensor]) -> Prepared:
 
 
 def decode(value: Tensor) -> str:
-    """Read an entire source string without changing its contents."""
+    """Read an entire stored string without changing its contents."""
     return bytes(from_plain(value.tolist(), list[int])).decode()
 
 
 def text(value: str) -> Tensor:
-    """Observe complete native result strings in the source witness's exact format."""
+    """Encode a native result string as golden bytes."""
     return torch.tensor(list(value.encode()), dtype=torch.uint8)
 
 
-def test_complete_source_graph_cleavage_levels_and_fallback_scores_without_rdkit(
+def test_complete_graph_cleavage_levels_and_fallback_scores_without_rdkit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/fragment_gap.pt")
+    golden = _BASELINE / "testdata/fragment_gap.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     graphs = _graphs(expected)
     for index, graph in enumerate(graphs.values()):
@@ -786,12 +787,12 @@ def test_complete_source_graph_cleavage_levels_and_fallback_scores_without_rdkit
         actual[name + "/scores/valid"] = torch.tensor(
             [value is not None for value in values],
         )
+        # The powers run on the host's libm; one rounding to float32 is portable.
         actual[name + "/scores/value"] = torch.tensor(
             [value if value is not None else 0.0 for value in values],
             dtype=torch.float64,
-        )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+        ).float()
+    assert_tensor_golden(golden, float32_comparands(actual, inputs=("*/weights",)))
 
 
 def test_default_caps_rounding_and_minimum_cleavage_order() -> None:
@@ -892,7 +893,7 @@ def test_carrier_fallbacks_invalid_configs_and_explicit_coverage() -> None:
 
 
 def gap_spectra() -> list[GapSpectrum]:
-    """Return every complete raw spectrum from the immutable source control."""
+    """Return every raw spectrum stored in the golden."""
     return [
         {
             "mz": [31.018389717, 47.049141, float("nan"), 2.0],

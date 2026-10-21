@@ -53,14 +53,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pyarrow import parquet
-    from scipy import special
 
     from priml.baselines.casmi2026.custom_types import PredictionMatrix
 else:
     from wrapt import lazy_import
 
     parquet = lazy_import("pyarrow.parquet")
-    special = lazy_import("scipy.special")
 
 
 SECOND_ADDUCTS: Final = (
@@ -195,7 +193,7 @@ class SecondPeaks:
                 config.per_window,
             )
             masses, values = masses[selection], values[selection]
-        order = np.argsort(masses)
+        order = np.argsort(masses, kind="stable")
         return masses[order].astype(np.float32), np.sqrt(
             values[order] / values.max(),
         ).astype(np.float32)
@@ -225,7 +223,7 @@ class SecondPeaks:
         values = np.concatenate(
             [value / max(float(value.max()), 1e-9) for _, value in present],
         )
-        order = np.argsort(masses)
+        order = np.argsort(masses, kind="stable")
         masses, values = masses[order], values[order]
         rejected_mask = np.zeros(len(masses), np.bool_)
         for index in range(1, len(masses)):
@@ -309,7 +307,7 @@ def _balanced_indices(
     window: float,
     per_window: int,
 ) -> NDArray[np.int64]:
-    order = np.argsort(-intensity)
+    order = np.argsort(-intensity, kind="stable")
     buckets = (masses // window).astype(np.int64)
     counts: dict[int, int] = {}
     selected: list[int] = []
@@ -322,7 +320,7 @@ def _balanced_indices(
             selected.append(index)
     indices = np.asarray(selected, np.int64)
     if len(indices) > maximum:
-        return indices[np.argsort(-intensity[indices])[:maximum]]
+        return indices[np.argsort(-intensity[indices], kind="stable")[:maximum]]
     if len(indices) < maximum:
         chosen = set(selected)
         remaining = [
@@ -1145,9 +1143,14 @@ class SecondEngine:
                 top_sim=channels.analogs[0].similarity
                 if channels is not None and channels.analogs
                 else 0.0,
-                fzmax=(pool.fingerprints(base.rows).astype(np.float32) @ base.logits)
-                .max()
-                .item()
+                fzmax=float(
+                    np.float32(
+                        (
+                            pool.fingerprints(base.rows)
+                            @ base.logits.astype(np.float64)
+                        ).max(),
+                    ),
+                )
                 if count and base.logits is not None
                 else 0.0,
             ),
@@ -1421,9 +1424,11 @@ class HistogramBoosting:
             [len(values) + 1 for values in self.thresholds],
             dtype=np.uint32,
         )
-        probability = np.average(labels, weights=weights)
         epsilon = 10 * np.finfo(np.float64).eps
-        self.baseline[:] = special.logit(np.clip(probability, epsilon, 1 - epsilon))
+        probability = float(
+            np.clip(np.average(labels, weights=weights), epsilon, 1 - epsilon),
+        )
+        self.baseline[:] = math.log(probability) - math.log1p(-probability)
         raw = np.full(len(data), self.baseline.item(), dtype=np.float64)
         binned = self.binned(data)
         missing = np.any(np.equal(binned, self.config.max_bins), axis=0)
@@ -1624,7 +1629,7 @@ class HistogramBoosting:
         keep = ~np.isnan(values)
         if weights is not None:
             keep &= np.not_equal(weights, 0)
-        order = np.argsort(values[keep])
+        order = np.argsort(values[keep], kind="stable")
         ordered = values[keep][order]
         distinct = np.unique(ordered)
         if len(distinct) <= self.config.max_bins:
@@ -1636,11 +1641,7 @@ class HistogramBoosting:
                 method="averaged_inverted_cdf",
             )
         else:
-            ordered_weights = weights[keep][order]
-            # The empirical quantile sorts its own input, including tied values.
-            order = np.argsort(ordered)
-            ordered, ordered_weights = ordered[order], ordered_weights[order]
-            cdf = np.cumsum(ordered_weights)
+            cdf = np.cumsum(weights[keep][order])
             thresholds = np.empty(self.config.max_bins - 1, dtype=np.float64)
             percentiles = np.linspace(0, 100, self.config.max_bins + 1)[1:-1]
             for index in range(len(percentiles)):
@@ -2036,7 +2037,10 @@ class HistogramBoosting:
 
     def predict_proba(self, data: PredictionMatrix) -> NDArray[np.float64]:
         """Return negative/positive class probabilities in that order."""
-        probability = special.expit(self.stages(data)[-1, :])
+        probability = np.array(
+            [_sigmoid(value) for value in self.stages(data)[-1, :].tolist()],
+            dtype=np.float64,
+        )
         return np.column_stack([1 - probability, probability])
 
 
@@ -2151,7 +2155,7 @@ def blend_histograms(
     *,
     weight_fingerprint: float,
 ) -> NDArray[np.float64]:
-    """Combine ordinal quicksort ranks and the source's tiny fingerprint score tiebreak.
+    """Combine ordinal ranks and the source's tiny fingerprint score tiebreak.
 
     Args:
       fingerprint: Eight-model fingerprint-based probabilities in candidate order.
@@ -2548,7 +2552,7 @@ def _model_evidence(
 ) -> list[FloatArray]:
     if logits is None:
         return [np.zeros(len(candidates), np.float32)] * 6
-    scores = candidates @ np.asarray(logits, np.float32)
+    scores = (candidates @ np.asarray(logits, np.float64)).astype(np.float32)
     normalized = scores / np.sqrt(np.maximum(cardinality, 1.0))
     return [
         population_z(scores),
@@ -2569,7 +2573,9 @@ def _model_interactions(
     count = len(candidates)
     if logits is None or not count:
         return [np.zeros(count, np.float32)] * 6
-    ranks = ordinal_ranks(candidates @ np.asarray(logits, np.float32))
+    ranks = ordinal_ranks(
+        (candidates @ np.asarray(logits, np.float64)).astype(np.float32),
+    )
     library_agreement = (
         1.0 - ranks.item(int(np.argmax(library))) if library.max() > 0 else 0.0
     )
@@ -2675,3 +2681,10 @@ def _explanation(
         nearest = np.clip(indices + offset, 0, len(ions) - 1)
         matched |= np.abs(ions[nearest] - query[0]) <= 0.01
     return float(weights[matched].sum() / total)
+
+
+def _sigmoid(value: float) -> float:
+    try:
+        return 1.0 / (1.0 + math.exp(-value))
+    except OverflowError:
+        return 0.0

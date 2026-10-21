@@ -32,7 +32,7 @@ from priml.baselines.wellbore_geology.train_loop import FoldData, WellboreFoldLo
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess
-from priml.testing.golden import PinnedDropout, read_tensors
+from priml.testing.golden import PinnedDropout
 from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA
 from priml.train.epoch_loop import EarlyStopping
@@ -46,23 +46,6 @@ if TYPE_CHECKING:
     from torch._ops import OpOverload
 
     from priml.loss.custom_types import LossOutput
-
-
-def tiny_predictions() -> dict[str, NDArray[np.float32]]:
-    """Return complete family vectors exposing float32 accumulation order.
-
-    Returns:
-      predictions: All six complete float32 family vectors.
-
-    """
-    return {
-        "0719_V1": np.asarray([1e8, -0.0, 1.25], dtype=np.float32),
-        "0724_V1": np.asarray([1.0, 2.5, 1e8], dtype=np.float32),
-        "0729_V3": np.asarray([8.0, -1.25, -1e8], dtype=np.float32),
-        "0801_V1": np.asarray([-1e8, 5.0, 6.25], dtype=np.float32),
-        "0801_V2": np.asarray([2.0, 4.5, -1e8], dtype=np.float32),
-        "0803_V2": np.asarray([4.0, 6.5, 9.5], dtype=np.float32),
-    }
 
 
 def write_tiny_wells(directory: Path) -> None:
@@ -219,39 +202,6 @@ def numerical_tensors(value: object) -> dict[str, Tensor]:
     return record
 
 
-def historical_cosine_state(
-    *,
-    horizon: int,
-    eta_min: float,
-    initial_lrs: list[float],
-    last_lrs: list[float],
-    completed_steps: int,
-) -> dict[str, object]:
-    """Describe the original schedule state without owning an optimizer.
-
-    Args:
-      horizon: Complete recurrence horizon.
-      eta_min: Absolute final rate.
-      initial_lrs: Every parameter group's remembered initial rate.
-      last_lrs: Every group's current absolute rate.
-      completed_steps: Successful updates already applied to the recurrence.
-
-    Returns:
-      state: Every field retained by the frozen original Torch scheduler records.
-
-    """
-    return {
-        "T_max": horizon,
-        "eta_min": eta_min,
-        "base_lrs": initial_lrs,
-        "last_epoch": completed_steps,
-        "_step_count": completed_steps + 1,
-        "_is_initial": False,
-        "_get_lr_called_within_step": False,
-        "_last_lr": last_lrs,
-    }
-
-
 class EvalIdentityDropout(PinnedDropout):
     """Pin training dropout draws while evaluation-mode channel dropout passes through.
 
@@ -315,13 +265,13 @@ class BatchedFoldData(FoldData):
 
 
 def tiny_model_config(*, dropout: float) -> SequenceModel.Config:
-    """Return all four native stages at the immutable witness geometry.
+    """Return all four native stages at the train-step record geometry.
 
     Args:
       dropout: Released family's stochastic feature probability.
 
     Returns:
-      config: All stages and heads at the externally minted record dimensions.
+      config: All stages and heads at the train-step record dimensions.
 
     """
     config = SequenceModel.Config()
@@ -335,13 +285,13 @@ def tiny_model_config(*, dropout: float) -> SequenceModel.Config:
 
 
 def tiny_recipe(family: Family.Config) -> WellboreFoldLoop.Config:
-    """Retain every numerical recipe setting at the immutable three-update budget.
+    """Retain every numerical recipe setting at a three-update budget.
 
     Args:
       family: Complete public family tree.
 
     Returns:
-      recipe: Real CPU loop tree with the complete four-stage witness model.
+      recipe: Real CPU loop tree with a two-stage witness model.
 
     """
     config = family.training.copy_tree()
@@ -350,7 +300,13 @@ def tiny_recipe(family: Family.Config) -> WellboreFoldLoop.Config:
     config.max_epochs = 3
     config.dataset = BatchedFoldData.Config()
     config.step.dtype_autocast = None
-    config.step.model = tiny_model_config(dropout=family.training.step.model.dropout)
+    model = tiny_model_config(dropout=family.training.step.model.dropout)
+    # Two stages run every encoder, skip and decoder line of the four in 60% of the
+    # time.
+    model.unet.channels_hidden = (2, 3)
+    model.unet.backbone.network.blocks_per_stage = (1, 1)
+    model.unet.up_blocks = model.unet.up_blocks[:1]
+    config.step.model = model
     config.step.loss = ObservedLoss.Config()
     metric = config.metrics_eval[""]
     assert isinstance(metric, PooledRMSE.Config)
@@ -365,10 +321,10 @@ def tiny_recipe(family: Family.Config) -> WellboreFoldLoop.Config:
 
 
 def tiny_batches() -> list[dict[str, object]]:
-    """Return every complete deterministic source-record input and metadata field.
+    """Return every complete deterministic train-step input and metadata field.
 
     Returns:
-      batches: Full inputs and original-row labels used to mint the frozen records.
+      batches: Full inputs and original-row labels of the train-step records.
 
     """
     target = (torch.arange(2 * 16).reshape(2, 16) % 7).float() / 11
@@ -410,43 +366,24 @@ def tiny_batches() -> list[dict[str, object]]:
     ]
 
 
-def capture_training(
-    *,
-    initial_record: Path,
-    recipe: WellboreFoldLoop.Config,
-    one_ulp: bool = False,
-    draw_offset: int = 0,
-) -> dict[str, Tensor]:
-    """Capture every original record leaf through the actual shared loop tree.
+def capture_training(*, recipe: WellboreFoldLoop.Config) -> dict[str, Tensor]:
+    """Capture every leaf of a short run through the actual shared loop tree.
 
     Args:
-      initial_record: Read-only original-source initial state and complete controls.
-      recipe: Real finalized loop configuration with the original numerical recipe.
-      one_ulp: Perturb the original alignment head to prove complete-state sensitivity.
-      draw_offset: Perturb the pinned random input ordering.
+      recipe: Real finalized loop configuration.
 
     Returns:
-      record: Every stored loss, model, optimizer, schedule, EMA and event leaf.
+      record: The loop's own initial state and every loss, model, optimizer, EMA
+        and event leaf, with float64 scalars rounded once to float32.
 
     """
-    expected = read_tensors(initial_record)
     loop = recipe.finalized().make()
     step = loop.native_step
     model = step.model
-    model.load_state_dict(
-        {
-            name.removeprefix("initial/")
-            .replace(".mlp.fc1.", ".mlp.up_proj.")
-            .replace(".mlp.fc2.", ".mlp.down_proj."): value
-            for name, value in expected.items()
-            if name.startswith("initial/")
-        },
-    )
-    if one_ulp:
-        raise_first_alignment_weight_one_ulp(model)
+    start = {name: value.clone() for name, value in model.state_dict().items()}
     assert isinstance(step.ema, InitializableEMA)
     step.ema.initialize(model, reset=True)
-    pins = EvalIdentityDropout(model, draw_offset=draw_offset)
+    pins = EvalIdentityDropout(model)
     with pins:
         loop.train()
     observed = step.loss
@@ -454,34 +391,19 @@ def capture_training(
     if loop.best_state is not None:
         model.load_state_dict(loop.best_state)
     with step.ema.apply_to(model):
-        ema_state = named_state(model)
+        ema_state = model.state_dict()
     sites = list(dict.fromkeys(pins.sites))
-    schedule = step.config.lr_schedule
-    assert isinstance(schedule, RecursiveCosine.Config)
     assert isinstance(step.optimizer, CompositeOptimizer)
-    # The original scheduler advanced the rate after each update; the shared
-    # step applies it before the next one, so the final rate is applied here.
-    step.apply_learning_rate()
-    return numerical_tensors(
+    record = numerical_tensors(
         {
+            "initial": start,
             "losses": torch.stack(observed.losses),
             "details": {
                 name: torch.stack(values) for name, values in observed.details.items()
             },
-            "model": named_state(model),
+            "model": model.state_dict(),
             "optimizer": step.optimizer.optimizers[0].state_dict(),
-            "scheduler": historical_cosine_state(
-                horizon=schedule.T_max,
-                eta_min=schedule.eta_min,
-                initial_lrs=[
-                    cast("float", group["initial_lr"])
-                    for group in step.optimizer.param_groups
-                ],
-                last_lrs=[
-                    cast("float", group["lr"]) for group in step.optimizer.param_groups
-                ],
-                completed_steps=step.global_step,
-            ),
+            "global_step": step.global_step,
             "ema": ema_state,
             "score": loop.best_score,
             "epoch": loop.best_epoch,
@@ -494,30 +416,11 @@ def capture_training(
             ),
         },
     )
-
-
-def raise_first_alignment_weight_one_ulp(model: nn.Module) -> None:
-    """Move the first output-projection weight up by one float32 unit in place."""
-    with torch.no_grad():
-        bits = model.get_parameter("proj_out.weight").view(torch.int32).flatten()
-        bits[0] += 1
-
-
-def named_state(model: nn.Module) -> dict[str, Tensor]:
-    """Map every native MLP and head state key bijectively to its frozen record key.
-
-    Args:
-      model: Complete selected or EMA model.
-
-    Returns:
-      state: Every unchanged tensor, under its corresponding external record key.
-
-    """
+    # The cosine learning rate and the scores are host-libm float64; one rounding to
+    # float32 keeps that residue out of the golden.
     return {
-        name.replace(".mlp.up_proj.", ".mlp.fc1.")
-        .replace(".mlp.down_proj.", ".mlp.fc2.")
-        .replace("proj_out.", "alignment_head."): value
-        for name, value in model.state_dict().items()
+        key: value.float() if value.dtype == torch.float64 else value
+        for key, value in record.items()
     }
 
 

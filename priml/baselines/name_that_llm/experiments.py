@@ -35,8 +35,8 @@ def exp000() -> Benchmark.Config:
 
     Results:
       Public source: 0.475 leaderboard, 0.513400447427293 grouped CV.
-      Rewrite runtime and full-data score: TBD. Tiny source-minted CPU records
-      validate numerical components. No training-time cap applies.
+      Rewrite runtime and full-data score: TBD. Tiny CPU goldens minted in-tree
+      pin the three branches and the encoder. No training-time cap applies.
 
     """
     config = Benchmark.Config()

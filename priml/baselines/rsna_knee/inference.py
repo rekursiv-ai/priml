@@ -1702,7 +1702,8 @@ def _ordinal_ranks(
 ) -> NDArray[np.float32]:
     inputs = np.asarray(values, dtype=np.float32)
     ranks = np.empty(inputs.shape, dtype=np.float64)
-    order = inputs.argsort(0)
+    # Failed studies tie at one score; NumPy's default sort may reorder tied rows.
+    order = inputs.argsort(0, kind="stable")
     for column in range(len(inputs.T)):
         ranks[:, column] = ordinal_ranks(
             inputs[:, column],

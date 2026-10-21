@@ -1,10 +1,15 @@
-"""Freeze the full experiment tree and the smoke run's dimension-only changes."""
+"""Freeze the full experiment tree, its fitted branches and the forks' deltas."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import math
+
+import numpy as np
+import pytest
+import torch
 
 from priml.baselines.name_that_llm.experiments import (
     exp000,
@@ -12,12 +17,60 @@ from priml.baselines.name_that_llm.experiments import (
     exp002,
     exp_smoke,
 )
+from priml.baselines.name_that_llm.model import (
+    CenteredHeads,
+    QwenHeads,
+    SvmBranch,
+)
 from priml.baselines.name_that_llm.scripts.prepare_data import prepare_data
-from priml.testing.golden import assert_pprint_golden
+from priml.baselines.name_that_llm.testing import (
+    NumericalTrace,
+    completed_record,
+    float32_comparands,
+    miniature_split,
+    recipe,
+)
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import assert_pprint_golden, assert_tensor_golden_part
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_exp000_pprint() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
+
+
+@pytest.mark.parametrize("branch", argvalues=["plain", "centred", "svm"])
+def test_exp000_branch_replays_every_fitted_state_and_output(branch: str) -> None:
+    config = recipe()
+    plain, centred, svm = (
+        config.branches[name] for name in ("plain", "centred", "svm")
+    )
+    assert isinstance(plain, QwenHeads.Config)
+    assert isinstance(centred, CenteredHeads.Config)
+    assert isinstance(svm, SvmBranch.Config)
+    # Three updates per solver pin every fit; the solver tests cover convergence.
+    for solver in (
+        plain.classifier.optimizer,
+        centred.heads.classifier.optimizer,
+        svm.classifier.optimizer,
+        svm.calibration.optimizer,
+    ):
+        solver.max_iter = 3
+    # Distinct rows, so the centred branch's singleton fallback names its source row.
+    earlier = {"plain": np.arange(9, dtype=np.float64).reshape(3, 3) / 36}
+    with host_agnostic_numerics(), NumericalTrace() as trace:
+        output = config.branches[branch].make()(miniature_split(), earlier)
+    record = completed_record(trace, outputs={"output": torch.from_numpy(output)})
+    assert_tensor_golden_part(
+        _CWD / "testdata" / "exp000.pt",
+        prefix=f"{branch}/",
+        record={
+            f"{branch}/{name}": value
+            for name, value in float32_comparands(record).items()
+        },
+    )
 
 
 def test_exp000_names_its_own_output() -> None:

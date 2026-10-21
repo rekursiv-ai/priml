@@ -931,7 +931,7 @@ class ParticlePrior:
         expected = self.weights * (budget - int(counts.sum()))
         counts += np.floor(expected).astype(np.int64)
         remaining = budget - int(counts.sum())
-        priority = np.argsort(expected - np.floor(expected))[::-1]
+        priority = np.argsort(expected - np.floor(expected), kind="stable")[::-1]
         counts[priority[:remaining]] += 1
         result = np.repeat(np.arange(len(counts), dtype=np.int64), counts)
         np.random.default_rng(self.config.base_seed + 100_003 * budget).shuffle(result)
@@ -961,7 +961,7 @@ class ParticlePrior:
                 ],
                 [np.full(steps, np.nan, dtype=np.float32) for _ in range(2)],
             )
-        order = np.argsort(well.reference_depth)
+        order = np.argsort(well.reference_depth, kind="stable")
         depth = well.reference_depth[order]
         raw_curve = well.reference_gamma[order].copy()
         primary = self.tracking.calibration(

@@ -1,10 +1,13 @@
-"""Replay whole torch-solver heads after three iterations and after convergence."""
+"""Pin the logistic objective, its probabilities and the quasi-Newton solver."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
+
+import math
+
+from numpy.typing import NDArray
 
 import numpy as np
 import pytest
@@ -12,15 +15,11 @@ import torch
 
 from priml.baselines.name_that_llm import logistic
 from priml.baselines.name_that_llm.logistic import LBFGS, LogisticRegression
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-
-_CWD: Final = Path(__file__).resolve().parent
+    from collections.abc import Callable
 
 
 @pytest.mark.parametrize("target_rows", argvalues=[3, 5])
@@ -28,7 +27,10 @@ def test_logistic_rejects_misaligned_targets_before_mutating_fit_state(
     target_rows: int,
 ) -> None:
     model = LogisticRegression.Config().make()
-    with pytest.raises(ValueError, match="aligned"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Expected training features aligned with targets\.$",
+    ):
         model.fit(
             np.zeros((4, 2), dtype=np.float32),
             targets=np.arange(target_rows, dtype=np.int64),
@@ -37,165 +39,121 @@ def test_logistic_rejects_misaligned_targets_before_mutating_fit_state(
     assert model.classes_.size == 0
 
 
-@pytest.mark.parametrize("max_iter", argvalues=[3, 5000])
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_logistic_replays_complete_fitted_state_and_probabilities(
-    max_iter: int,
-    corrupt: bool,
-) -> None:
-    fit = np.sin(np.arange(45).reshape(9, 5) / 7).astype(np.float32)
-    predict = np.cos(np.arange(20).reshape(4, 5) / 11).astype(np.float32)
-    targets = np.tile(np.array([2, 5, 9], dtype=np.int64), reps=3)
-    config = LogisticRegression.Config()
-    config.inverse_regularization = 0.002  # The embedding heads of exp000 use this C.
-    config.optimizer.max_iter = max_iter
-    with host_agnostic_numerics():
-        model = config.make().fit(fit, targets=targets)
-    if corrupt:
-        model.coef_[:1, :1] = np.nextafter(model.coef_[:1, :1], np.inf)
-    actual = {"predict": torch.from_numpy(model.predict_proba(predict))}
-    for name, value in cast("dict[str, object]", vars(model)).items():
-        if name.endswith("_"):
-            assert isinstance(value, (int, np.generic, np.ndarray))
-            actual[name] = torch.from_numpy(np.asarray(value))
-    prefix = f"{max_iter}/"
-    expected = {
-        name.removeprefix(prefix): value
-        for name, value in read_tensors(_CWD / "testdata" / "logistic.pt").items()
-        if name.startswith(prefix)
-    }
-    report = mismatches(expected, actual=actual)
-    if corrupt:
-        assert any(item.startswith("coef_:") for item in report), report
-    else:
-        assert not report, "\n".join(report)
-
-
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_logistic_probabilities_keep_source_underflow_and_normal_tail_bits(
-    corrupt: bool,
-) -> None:
+def test_logistic_probabilities_keep_underflow_subnormal_and_uniform_rows() -> None:
     model = LogisticRegression.Config().make()
     model.coef_ = np.eye(3, M=5, dtype=np.float32)
     model.intercept_ = np.zeros(3, dtype=np.float32)
-    if corrupt:
-        model.coef_[:1, :1] = np.nextafter(model.coef_[:1, :1], np.inf)
-    actual = model.predict_proba(
+    probabilities = model.predict_proba(
         np.array(
             [
                 [-150, -104, 0, 0, 0],
                 [-103, -100, 0, 0, 0],
-                [-90, -88, 0, 0, 0],
-                [-37, -18, 0, 0, 0],
-                [-2, -0.5, 0, 0, 0],
-                [-0.0001, -0.00001, 0, 0, 0],
+                [0, -150, 0, 0, 0],
                 [0, 0, 0, 0, 0],
             ],
             dtype=np.float32,
         ),
     )
-    # These are all 21 binary32 values from the unchanged x86 public classifier.
-    expected = (
-        np.array(
-            [
-                0x00000000,
-                0x00000000,
-                0x3F800000,
-                0x00000001,
-                0x0000001B,
-                0x3F800000,
-                0x0008EC28,
-                0x0041EDC4,
-                0x3F800000,
-                0x24C4C239,
-                0x3282D315,
-                0x3F800000,
-                0x3D9F1EDC,
-                0x3EB2483F,
-                0x3F12F806,
-                0x3EAAA7E7,
-                0x3EAAABD5,
-                0x3EAAAC45,
-                0x3EAAAAAB,
-                0x3EAAAAAB,
-                0x3EAAAAAB,
-            ],
-            dtype=np.uint32,
-        )
-        .view(np.float32)
-        .reshape((7, 3))
-    )
-    report = mismatches(
-        {"probabilities": torch.from_numpy(expected)},
-        actual={"probabilities": torch.from_numpy(actual)},
-    )
-    assert bool(report) is corrupt, report
+    # Logits at or below -104 underflow to zero; -103 and -100 stay subnormal.
+    assert probabilities[0].tolist() == [0, 0, 1]
+    assert probabilities[1].view(np.uint32).tolist()[:2] == [1, 27]
+    assert probabilities[2].tolist() == [0.5, 0, 0.5]
+    assert probabilities[3].tolist() == [np.float32(1) / np.float32(3)] * 3
 
 
-def test_probability_exponential_keeps_the_source_special_values() -> None:
-    actual = logistic._exp32(
-        np.array(
-            [np.nan, np.inf, 88.72283935546875, -np.inf, -103.97208404541015625, 0],
-            dtype=np.float32,
-        ),
+def test_logistic_probabilities_add_each_class_intercept() -> None:
+    model = LogisticRegression.Config().make()
+    model.coef_ = np.zeros((3, 2), dtype=np.float32)
+    model.intercept_ = np.array([0, 0, 1], dtype=np.float32)
+    probabilities = model.predict_proba(np.ones((4, 2), dtype=np.float32))
+    exponential = np.float32(np.exp(-1.0))
+    expected = np.array([exponential, exponential, 1], dtype=np.float32) / (
+        exponential + exponential + 1
     )
-    expected = np.array([np.nan, np.inf, np.inf, 0, 0, 1], dtype=np.float32)
-    assert actual.tobytes() == expected.tobytes()
+    assert np.array_equal(probabilities, a2=np.tile(expected, reps=(4, 1)))
+
+
+def test_probabilities_round_each_float64_score_once() -> None:
+    model = LogisticRegression.Config().make()
+    # (1 + 2**-12)**2 needs 25 bits: float32 rounds each product, so every float32
+    # order, fused or not, scores the first class 0 or 2**-24, not the exact 2**-23.
+    model.coef_ = np.array(
+        [[1 + 2**-12, -2 - 2**-10, 1 + 2**-12, 0], [0] * 4, [0] * 4],
+        dtype=np.float32,
+    )
+    model.intercept_ = np.array([0, 2**-23, 0], dtype=np.float32)
+    probabilities = model.predict_proba(
+        np.array([[1 + 2**-12, 1, 1 + 2**-12, 0], [0] * 4], dtype=np.float32),
+    )
+    # The first row ties its first two classes; the second scores the intercept alone.
+    assert probabilities[0, 0] == probabilities[0, 1] > probabilities[0, 2]
+    assert probabilities[1, 1] > probabilities[1, 0] == probabilities[1, 2]
+
+
+def test_fit_sums_gradients_in_float64_and_unpacks_the_solver_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    solver = _FirstGradient()
+    monkeypatch.setattr(LBFGS, "minimize", solver)
+    features = np.zeros((8, 5), dtype=np.float32)
+    # A row gives each class it is not labelled 1/4 / 8 = 1/32, so the last class sums
+    # 1 + 2**-24 + 2**-50 in column 1: every float32 order rounds 1 + 2**-24 down at
+    # the tie, while the exact sum lies above it and rounds to 1 + 2**-23.
+    features[:3, 1] = [32, 32 * 2**-24, 32 * 2**-50]
+    model = (
+        LogisticRegression.Config()
+        .make()
+        .fit(features, targets=np.tile(np.arange(4, dtype=np.int64), reps=2))
+    )
+    assert solver.gradients[0].reshape((4, 6), order="F")[3, 1] == 1 + 2**-23
+    # The solver returned 0, 1, ... laid out column-major by class, then column.
+    assert model.coef_.tolist() == [[k + 4 * j for j in range(5)] for k in range(4)]
+    assert model.intercept_.tolist() == [k + 4 * 5 for k in range(4)]
+    assert model.n_iter_.tolist() == [7]
 
 
 @pytest.mark.parametrize(
-    ("length", "expected"),
+    ("coefficients", "expected"),
     argvalues=[
-        (6, "0x1.6fc1cc0000000p+2"),
-        (15, "0x1.bb82200000000p+3"),
-        (16, "0x1.d72ecc0000000p+3"),
-        (17, "0x1.f2a04c0000000p+3"),
-        (73_727, "0x1.7817580000000p+14"),
-        (73_728, "0x1.78193e0000000p+14"),
-        (73_729, "0x1.781b2a0000000p+14"),
+        # 2**24 + 3 is a float32 tie that rounds to 2**24 + 4; a float32 sum
+        # absorbs each 1 into 2**24.
+        ([2**12, 1, 1, 1], 2**24 + 4),
+        # (1 + 2**-23)**2 rounded alone leaves 5 + 2**-22, a tie that rounds to 5.
+        ([2, 1 + 2**-23], 5 + 2**-21),
     ],
 )
-def test_regularizer_replays_complete_captured_source_scalars(
-    length: int,
-    expected: str,
+def test_regularizer_rounds_the_float64_square_sum_once(
+    coefficients: list[float],
+    expected: float,
 ) -> None:
-    coefficients = ((np.arange(length, dtype=np.float32) % 509 - 254) / 257).astype(
-        np.float32,
+    weights = np.zeros((3, 5), dtype=np.float32)
+    weights[0, : len(coefficients)] = coefficients
+    objective = logistic._Objective(
+        features=np.zeros((2, 4)),
+        targets=np.array([0, 2], dtype=np.int64),
+        penalty=2,
     )
-    # Unchanged x86 source captures cover short vectors, tails and public width.
-    assert float(logistic._norm_squared32(coefficients)).hex() == expected
+    loss, _ = objective(weights.ravel(order="F"))
+    # Zero features give each row the uniform loss log(3).
+    assert loss == float(np.float32(math.log(3))) + expected
 
 
-def test_regularizer_fuses_each_binary32_accumulation() -> None:
-    coefficients = np.zeros(128, dtype=np.float32)
-    coefficients[0], coefficients[64] = 2, 1 + 2**-23
-    expected = np.float32(5 + 2**-21)
-    assert logistic._norm_squared32(coefficients) == expected
-    unfused = np.float32(4 + float(np.float32((1 + 2**-23) * (1 + 2**-23))))
-    assert unfused != expected
+def test_objective_rounds_the_penalty_gradient_once() -> None:
+    weights = np.zeros((3, 5), dtype=np.float32)
+    weights[1, 2] = 1 + 2**-15
+    objective = logistic._Objective(
+        features=np.zeros((2, 4)),
+        targets=np.array([0, 2], dtype=np.int64),
+        penalty=1 + 2**-24 - 2**-40,
+    )
+    _, gradient = objective(weights.ravel(order="F"))
+    # A float32 penalty rounds to 1; the exact product lies just above the midpoint
+    # 1 + 2**-15 + 2**-24, so one rounding gives 1 + 2**-15 + 2**-23.
+    assert gradient.reshape((3, 5), order="F")[1, 2] == 1 + 2**-15 + 2**-23
 
 
-@pytest.mark.parametrize("dtype", argvalues=[torch.float32, torch.float64])
-def test_regularizer_keeps_the_source_block_boundary_and_input_precision(
-    dtype: torch.dtype,
-) -> None:
-    coefficients = np.zeros(32, dtype=np.float32)
-    coefficients[0] = 2**12
-    coefficients[[4, 8, 12]] = 1
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    try:
-        actual = logistic._norm_squared32(coefficients)
-    finally:
-        torch.set_default_dtype(previous)
-    assert actual == np.float32(2**24 + 2)
-    assert actual.dtype == np.dtype(np.float32)
-
-
-def test_public_width_objective_keeps_captured_source_loss_and_complete_gradient() -> (
-    None
-):
-    features = np.zeros((2, 4096), dtype=np.float32)
+def test_public_width_objective_returns_the_closed_form_loss_and_gradient() -> None:
+    features = np.zeros((2, 4096))
     targets = np.array([0, 17], dtype=np.int64)
     weights = np.zeros((18, 4097), dtype=np.float32, order="F")
     weights[:, :-1] = (
@@ -205,8 +163,10 @@ def test_public_width_objective_keeps_captured_source_loss_and_complete_gradient
     )
     objective = logistic._Objective(features=features, targets=targets, penalty=0.125)
     loss, gradient = objective(weights.ravel(order="F"))
-    # The unchanged source under its declared thread contract supplies this scalar.
-    assert float(loss).hex() == "0x1.78d239da00000p+10"
+    squares = np.square(weights.astype(np.float64)).ravel().tolist()
+    # Zero features leave each row the loss log(18); half the penalty is 1 / 16.
+    regularizer = float(np.float32(math.fsum(squares))) / 16
+    assert loss == float(np.float32(math.log(18))) + regularizer
     expected = weights * np.float32(0.125)
     probability = np.float32(1 / 18)
     expected[:, -1] = probability
@@ -237,7 +197,10 @@ def test_multinomial_head_rejects_nonmultinomial_targets(classes: int) -> None:
 def test_head_rejects_invalid_inverse_regularization(inverse: float) -> None:
     config = LogisticRegression.Config()
     config.inverse_regularization = inverse
-    with pytest.raises(ValueError, match="positive inverse regularization"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Expected positive inverse regularization\.$",
+    ):
         config.make()
 
 
@@ -251,7 +214,7 @@ def test_solver_rejects_invalid_update_and_history_counts(
     config.history_size = history
     with pytest.raises(
         ValueError,
-        match="nonnegative updates and a positive history",
+        match=r"^Expected nonnegative updates and a positive history\.$",
     ):
         config.make()
 
@@ -267,7 +230,10 @@ def test_solver_rejects_invalid_stopping_tolerances(
     config = LBFGS.Config()
     config.tolerance_gradient = gradient
     config.tolerance_change = change
-    with pytest.raises(ValueError, match="nonnegative stopping tolerances"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Expected nonnegative stopping tolerances\.$",
+    ):
         config.make()
 
 
@@ -371,6 +337,21 @@ def test_solver_converges_through_a_full_correction_history() -> None:
     assert updates > 10
     assert _rosenbrock(result)[0] < 1e-12
     np.testing.assert_allclose(result, [1.0, 1.0], rtol=0, atol=1e-6)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FirstGradient:
+    """Record the objective's gradient at the start; a non-function stays unbound."""
+
+    gradients: list[NDArray[np.float32]] = field(default_factory=list)
+
+    def __call__(
+        self,
+        objective: Callable[[NDArray[np.float32]], tuple[float, NDArray[np.float32]]],
+        initial: NDArray[np.float32],
+    ) -> tuple[NDArray[np.float64], int]:
+        self.gradients.append(objective(initial)[1])
+        return np.arange(initial.size, dtype=np.float64), 7
 
 
 @dataclass(slots=True, kw_only=True)

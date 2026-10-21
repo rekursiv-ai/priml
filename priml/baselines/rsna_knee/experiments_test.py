@@ -1,14 +1,11 @@
-"""Pin the released-inference and cold-training experiment configurations.
-
-The finalized inference recipe is too large for one golden, so each test pins a
-disjoint set of its subtrees; together they cover every field.
-"""
+"""Pin the released-inference and cold-training experiment configurations."""
 
 from __future__ import annotations
 
-from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import Final, cast
+
+import math
 
 from configgle import PartialConfig
 from torch import Tensor
@@ -20,7 +17,10 @@ from priml.baselines.rsna_knee.experiments import (
     train_exp000,
     train_exp001,
 )
+from priml.baselines.rsna_knee.imaging import unchanged
+from priml.baselines.rsna_knee.inference import accept_logits
 from priml.loss.simple_loss import SimpleLoss, bce_with_logits
+from priml.model.coatnet import CoAtNet
 from priml.model.linear import Linear
 from priml.optimizers.composite import CompositeOptimizer
 from priml.testing.bfb import host_agnostic_numerics
@@ -33,115 +33,33 @@ from priml.testing.golden import (
 from priml.train.parallelism import NoParallel
 
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from configgle import Maker
-
-    from priml.baselines.rsna_knee.inference import PublicRecipe
-
-
 _CWD: Final = Path(__file__).resolve().parent
 
 
-class _Subtrees:
-    """Render named subtrees of one finalized recipe as a single pprint."""
-
-    def __init__(self, **subtrees: object) -> None:
-        self.subtrees = subtrees
-
-    def pformat(self, **kwargs: object) -> str:
-        """Render each subtree under its name, keeping the golden's own options."""
-        parts: list[str] = []
-        for name, subtree in self.subtrees.items():
-            pformat = cast(
-                "Callable[..., str] | None",
-                getattr(subtree, "pformat", None),
-            )
-            parts.append(f"{name}: {pformat(**kwargs) if pformat else repr(subtree)}")
-        return "\n".join(parts)
+def test_released_recipe_pins_every_finalized_field() -> None:
+    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
 
 
-@cache
-def _recipe() -> PublicRecipe.Config:
-    return exp000().copy_tree().finalize()
-
-
-def test_recipe_top_level_configuration() -> None:
-    config = _recipe()
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp000",
-        config=cast(
-            "Maker[object]",
-            _Subtrees(
-                study_name=config.study_name,
-                experiment_name=config.experiment_name,
-                base_dir=config.base_dir,
-                working_dir=config.working_dir,
-                data=config.data,
-                blend=config.blend,
-                budget=config.budget,
-            ),
-        ),
-    )
-
-
-def test_raptor384_configuration() -> None:
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp000_raptor384",
-        config=cast("Maker[object]", _Subtrees(raptor384=_recipe().raptor384)),
-    )
-
-
-def test_raptor224_configuration() -> None:
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp000_raptor224",
-        config=cast("Maker[object]", _Subtrees(raptor224=_recipe().raptor224)),
-    )
-
-
-def test_r7_model_configuration() -> None:
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp000_r7_model",
-        config=cast("Maker[object]", _Subtrees(model=_recipe().r7.model)),
-    )
-
-
-def test_r7_auxiliary_model_configuration() -> None:
-    r7 = _recipe().r7
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp000_r7_auxiliary",
-        config=cast("Maker[object]", _Subtrees(anatomy=r7.anatomy, side=r7.side)),
-    )
-
-
-def test_r7_remaining_configuration() -> None:
-    r7 = _recipe().r7
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp000_r7_rest",
-        config=cast(
-            "Maker[object]",
-            _Subtrees(
-                base_dir=r7.base_dir,
-                checkpoints=r7.checkpoints,
-                anatomy_checkpoint=r7.anatomy_checkpoint,
-                side_checkpoint=r7.side_checkpoint,
-                preparation=r7.preparation,
-                score=r7.score,
-                postprocess=r7.postprocess,
-                execution=r7.execution,
-                cudnn_benchmark=r7.cudnn_benchmark,
-                allow_tf32_cudnn=r7.allow_tf32_cudnn,
-                allow_tf32_matmul=r7.allow_tf32_matmul,
-            ),
-        ),
-    )
+def test_second_raptor_arm_changes_only_its_released_choices() -> None:
+    config = exp000()
+    arm, parent = config.raptor224, config.raptor384
+    assert isinstance(arm.model.backbone, CoAtNet.Config)
+    assert isinstance(parent.model.backbone, CoAtNet.Config)
+    assert arm.model.backbone.image_size == (224, 224)
+    assert arm.model.chunk_size == math.inf
+    assert arm.windows.crop_size == 307
+    assert arm.views == [unchanged]
+    assert arm.score.dtypes_autocast == [torch.float16, None]
+    assert arm.score.check_logits is accept_logits
+    arm.checkpoint.file.path = parent.checkpoint.file.path
+    arm.checkpoint.file.sha256 = parent.checkpoint.file.sha256
+    arm.model.backbone.image_size = parent.model.backbone.image_size
+    arm.model.chunk_size = parent.model.chunk_size
+    arm.windows.crop_size = parent.windows.crop_size
+    arm.views = parent.views
+    arm.score.dtypes_autocast = parent.score.dtypes_autocast
+    arm.score.check_logits = parent.score.check_logits
+    assert arm == parent, arm.udiff(parent)
 
 
 def test_cold_training_tree_finalizes_without_source_data_or_a_gpu() -> None:

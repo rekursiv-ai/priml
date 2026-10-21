@@ -16,18 +16,12 @@ import numpy as np
 
 if TYPE_CHECKING:
     import torch
-
-    from priml.math.fused import fma32
 else:
     from wrapt import lazy_import
 
     torch = lazy_import("torch")
-    fma32 = lazy_import("priml.math.fused", "fma32")
 
 
-# Bit parity with scikit-learn's solver, SciPy's L-BFGS-B, is deferred: SciPy calls
-# OpenBLAS dnrm2, which rounds per ISA (x87 on x86), so no golden minted from it
-# replays on aarch64. The goldens pin this torch solver instead.
 class LBFGS:
     """Configure the dense quasi-Newton solve used by the embedding heads."""
 
@@ -140,7 +134,7 @@ class LogisticRegression:
         if len(self.classes_) < 3:
             raise ValueError("Expected at least three classes for a multinomial head.")
         objective = _Objective(
-            features=np.ascontiguousarray(features),
+            features=np.ascontiguousarray(features, dtype=np.float64),
             targets=encoded,
             penalty=1 / (self.config.inverse_regularization * len(features)),
         )
@@ -169,11 +163,11 @@ class LogisticRegression:
           probabilities: Softmax probabilities in sorted fitted-label order.
 
         """
-        probabilities = features @ self.coef_.T + self.intercept_
+        probabilities = _logits(features, coef=self.coef_, intercept=self.intercept_)
         probabilities -= probabilities.max(axis=1, keepdims=True)
-        # The source bits come from NumPy's x86 SIMD exp; elsewhere np.exp calls
-        # libm expf, which rounds differently.
-        probabilities = _exp32(probabilities)
+        # NumPy's float32 exp differs per ISA; float64 rounded once differs only at
+        # float32 near-ties.
+        probabilities = np.exp(probabilities.astype(np.float64)).astype(np.float32)
         probabilities /= probabilities.sum(axis=1, keepdims=True)
         return probabilities
 
@@ -193,7 +187,7 @@ class _Evaluation[Float: np.float32 | np.float64]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Objective:
-    features: np.ndarray[tuple[int, int], np.dtype[np.float32]]
+    features: np.ndarray[tuple[int, int], np.dtype[np.float64]]
     targets: NDArray[np.int64]
     penalty: float
 
@@ -203,27 +197,42 @@ class _Objective:
     ) -> tuple[float, np.ndarray[tuple[int], np.dtype[Float]]]:
         columns = self.features.shape[1]
         weights = parameters.reshape((-1, columns + 1), order="F")
-        logits = self.features @ weights[:, :-1].astype(np.float32).T + weights[
-            :,
-            -1,
-        ].astype(np.float32)
+        logits = _logits(
+            self.features,
+            coef=weights[:, :-1].astype(np.float32),
+            intercept=weights[:, -1].astype(np.float32),
+        )
         losses, point_gradient = _multinomial_points(logits, targets=self.targets)
         flattened = weights[:, :-1].ravel(order="K")
+        # A BLAS dot product here would round in the host kernel's lane order.
         norm_squared = (
-            _norm_squared32(cast("NDArray[np.float32]", flattened))
-            if flattened.dtype == np.float32
-            else flattened @ flattened
+            np.square(flattened.astype(np.float64)).sum().astype(flattened.dtype)
         )
         loss = float(losses.sum() / len(self.features)) + float(
             0.5 * self.penalty * norm_squared,
         )
         point_gradient /= len(self.features)
         gradient = np.empty_like(weights, order="F")
-        gradient[:, :-1] = (
-            point_gradient.T @ self.features + self.penalty * weights[:, :-1]
-        )
+        # Summed in float64 and rounded once on assignment, as the logits are.
+        gradient[:, :-1] = point_gradient.T @ self.features + self.penalty * weights[
+            :,
+            :-1,
+        ].astype(np.float64)
         gradient[:, -1] = point_gradient.sum(axis=0)
         return loss, gradient.ravel(order="F")
+
+
+def _logits(
+    features: NDArray[np.float32] | NDArray[np.float64],
+    coef: NDArray[np.float32],
+    intercept: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Return affine class scores, summed in float64 and rounded once to float32."""
+    # A float32 BLAS product rounds per kernel (FMA, blocking); float64 rounded once
+    # differs only at float32 near-ties.
+    return (features.astype(np.float64, copy=False) @ coef.T + intercept).astype(
+        np.float32,
+    )
 
 
 def _multinomial_points(
@@ -246,80 +255,3 @@ def _multinomial_points(
         )
         gradient[row] = exponentials / total - (np.arange(len(values)) == target)
     return losses, gradient
-
-
-def _norm_squared32(values: NDArray[np.float32]) -> np.float32:
-    # Fixed source accumulation avoids host-selected BLAS rounding changes.
-    terms = torch.from_numpy(values)
-    boundary32 = len(values) // 32 * 32
-    boundary64 = boundary32 // 64 * 64
-    accumulators = terms.new_zeros((4, 16))
-    for start in range(0, boundary64, 64):
-        chunk = terms[start : start + 64].reshape(4, 16)
-        accumulators = fma32(chunk, y=chunk, addend=accumulators)
-    accumulators = accumulators[:, :8] + accumulators[:, 8:]
-    if boundary64 < boundary32:
-        chunk = terms[boundary64:boundary32].reshape(4, 8)
-        accumulators = fma32(chunk, y=chunk, addend=accumulators)
-    reduced = ((accumulators[0] + accumulators[1]) + accumulators[2]) + accumulators[3]
-    reduced = reduced[:4] + reduced[4:]
-    combined = (reduced[0] + reduced[1]) + (reduced[2] + reduced[3])
-    tail = 0.0
-    for value in terms[boundary32:] * terms[boundary32:]:
-        tail += float(value)
-    return np.float32(float(combined) + tail)
-
-
-def _exp32(values: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Return NumPy 2.5's x86 AVX2 and AVX-512 binary32 exp on every host."""
-    (
-        maximum,
-        minimum,
-        log2e,
-        shifter,
-        ln2_high,
-        ln2_low,
-        zero,
-        *numerator_coefficients,
-        q2,
-        q1,
-        q0,
-    ) = torch.tensor(
-        [
-            88.72283935546875,
-            -103.97208404541015625,
-            1.442695040888963407359924681001892137,
-            1.5 * 2**23,
-            -6.93145752e-1,
-            -1.42860677e-6,
-            0,
-            5.082762527590693718096e-04,
-            6.757896990527504603057e-03,
-            5.114512081637298353406e-02,
-            2.473615434895520810817e-01,
-            7.257664613233124478488e-01,
-            9.999999999980870924916e-01,
-            2.159509375685829852307e-02,
-            -2.742335390411667452936e-01,
-            1,
-        ],
-        dtype=torch.float32,
-    )
-    x = torch.from_numpy(values)
-    nan, overflow, underflow = x.isnan(), x >= maximum, x <= minimum
-    x = torch.where(nan | overflow | underflow, zero, x)
-    quadrant = x * log2e
-    quadrant = (quadrant + shifter) - shifter
-    for ln2 in (ln2_high, ln2_low, zero):
-        x = fma32(quadrant, y=ln2, addend=x)
-    numerator, *rest = numerator_coefficients
-    for coefficient in rest:
-        numerator = fma32(numerator, y=x, addend=coefficient)
-    denominator = fma32(fma32(q2, y=x, addend=q1), y=x, addend=q0)
-    # One rounding of the quotient times 2**quadrant, as scalef and AVX2's
-    # divide by a power of two both give, subnormal results included.
-    power = ((quadrant.to(torch.int64) + 1023) << 52).view(torch.float64)
-    result = ((numerator / denominator).double() * power).float()
-    result = torch.where(nan, math.nan, result)
-    result = torch.where(overflow, math.inf, result)
-    return torch.where(underflow, zero, result).numpy()

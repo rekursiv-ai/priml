@@ -358,7 +358,7 @@ class PubChemScreen:
                     count = min(self.config.popularity_union, int(partial_valid.sum()))
                     positions = np.union1d(
                         positions,
-                        np.argpartition(-population_scores, count - 1)[:count],
+                        np.argsort(-population_scores, kind="stable")[:count],
                     )
             full_scores: list[float] = []
             full_positions: list[int] = []
@@ -367,7 +367,9 @@ class PubChemScreen:
                 if record.raw_valid:
                     fingerprint = np.unpackbits(record.raw_fp)[:16_551]
                     full_scores.append(
-                        float(fingerprint[bits].astype(np.float32) @ logits),
+                        float(
+                            np.float32(fingerprint[bits] @ logits.astype(np.float64)),
+                        ),
                     )
                     full_positions.append(int(index))
             diagnostics["n_pass2"] = len(full_positions)
@@ -763,13 +765,13 @@ def _partial_rows(
     for index, row in enumerate(records):
         if row.parsed:
             fingerprints[index] = np.unpackbits(row.ecfp4)[raw]
-    scores = fingerprints @ logits[selected].astype(np.float32)
+    scores = (fingerprints @ logits[selected].astype(np.float64)).astype(np.float32)
     scores[~valid] = -np.inf
     count = min(maximum, int(valid.sum()))
     if not count:
         return np.zeros(0, np.int64)
     return (
-        np.argpartition(-scores, count - 1)[:count]
+        np.argsort(-scores, kind="stable")[:count]
         if count < len(records)
         else np.where(valid)[0]
     )

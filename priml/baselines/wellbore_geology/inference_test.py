@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from itertools import accumulate
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import csv
@@ -37,17 +36,26 @@ from priml.baselines.wellbore_geology.inference import (
     submission_rows,
     write_table,
 )
-from priml.baselines.wellbore_geology.metrics import pooled_rmse
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import mismatches
 from priml.train.ema import NoEMA
 from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
 
-_CWD: Final = Path(__file__).resolve().parent
+FAMILY_ROWS: Final = {
+    "0719_V1": [1e8, -0.0, 1.25],
+    "0724_V1": [1.0, 2.5, 1e8],
+    "0729_V3": [8.0, -1.25, -1e8],
+    "0801_V1": [-1e8, 5.0, 6.25],
+    "0801_V2": [2.0, 4.5, -1e8],
+    "0803_V2": [4.0, 6.5, 9.5],
+}
+"""Three rows per family whose cancellation exposes regrouped float32 arithmetic."""
 
 
 @pytest.mark.parametrize(
@@ -79,23 +87,25 @@ def test_each_geographic_bound_is_strict(name: str, boundary: float) -> None:
 @pytest.mark.parametrize("geographic", [False, True])
 def test_blend_uses_all_members_in_reference_order(geographic: bool) -> None:
     predictions = {
-        "0719_V1": np.asarray([1e8, -0.0, 1.25], dtype=np.float32),
-        "0724_V1": np.asarray([1.0, 2.5, 1e8], dtype=np.float32),
-        "0729_V3": np.asarray([8.0, -1.25, -1e8], dtype=np.float32),
-        "0801_V1": np.asarray([-1e8, 5.0, 6.25], dtype=np.float32),
-        "0801_V2": np.asarray([2.0, 4.5, -1e8], dtype=np.float32),
-        "0803_V2": np.asarray([4.0, 6.5, 9.5], dtype=np.float32),
+        name: np.asarray(values, dtype=np.float32)
+        for name, values in FAMILY_ROWS.items()
     }
     result = WellBlend.Config().make()(predictions, geographic=geographic)
-    # The cancellation in these inputs makes regrouped arithmetic observably wrong.
-    expected = np.asarray(
+    assert result.dtype == np.float32
+    np.testing.assert_array_equal(
+        result,
+        _blend_of_family_rows(geographic=geographic),
+        strict=True,
+    )
+
+
+def _blend_of_family_rows(*, geographic: bool) -> NDArray[np.float32]:
+    return np.asarray(
         [2.0, 14.75 / 3.5, 9.5 / 3.5]
         if geographic
         else [0.0, 4.375 / 2.5, -49_999_992.0 / 2.5],
         dtype=np.float32,
     )
-    assert result.dtype == np.float32
-    np.testing.assert_array_equal(result, expected, strict=True)
 
 
 def test_blend_rejects_misaligned_predictions() -> None:
@@ -171,31 +181,206 @@ def test_native_artifacts_feed_pooled_metric_and_complete_submission(
 
 
 @pytest.mark.parametrize(
-    ("family", "particle", "diagnostics", "window", "blend"),
-    [
-        ("0719_v1", False, 0, 1025, 0.6828376753426914),
-        ("0724_v1", False, 3, 1025, 0.6828376753426914),
-        ("0729_v3", True, 4, 1025, 0.6828376753426914),
-        ("0801_v1", False, 4, 577, 0.7261960515627183),
-        ("0801_v2", False, 4, 577, 0.7261960515627183),
-        ("0803_v2", True, 4, 577, 0.7261960515627183),
-    ],
+    ("particle", "diagnostics"),
+    [(False, 0), (False, 3), (False, 4), (True, 4)],
 )
-def test_complete_original_prediction_artifacts(
+def test_prediction_artifacts_keep_every_column_through_arrow(
     tmp_path: Path,
     *,
-    family: str,
     particle: bool,
     diagnostics: int,
-    window: int,
-    blend: float,
 ) -> None:
+    oof, test = _prediction_artifacts(
+        particle=particle,
+        diagnostics=diagnostics,
+        blend=0.7261960515627183,
+    )
+    assert "TVT" not in test.column_order
+    for name, frame in (("oof", oof), ("test", test)):
+        path = tmp_path / f"{name}.parquet"
+        write_table(path, frame)
+        restored = read_table(path)
+        assert restored.column_order == frame.column_order
+        assert (
+            mismatches(
+                _capture(frame, prefix=name),
+                actual=_capture(restored, prefix=name),
+            )
+            == []
+        )
+
+
+def test_builder_expands_bins_into_physical_rows_sidecars_and_lookups() -> None:
+    config = _small_builder()
+    config.expansion.target_stats = (1.0, 2.0)
+    config.smoothing.blend = 0
+    config.diagnostic_names = ("geo_nbr_distance",)
+    builder = config.make()
+    # Suffix rows 0 to 5 read bins 2, 2, 3, 3, 4 and 4; row 6 repeats bin 4.
+    bins = np.asarray([[9, 9, 1, 2, 3, 9], [9, 9, 4, 5, 6, 9]], dtype=np.float32)
+    metadata: list[dict[str, object]] = [
+        {
+            "well_id": well,
+            "suffix_len": count,
+            "submit_indices": np.arange(4, 4 + count),
+            "suffix_z": np.zeros(count, dtype=np.float32),
+            "tvt0": anchor,
+            "TVT": np.full(count, anchor + 3, dtype=np.float32),
+            "geo_prior_TVT": np.full(count, anchor + 2, dtype=np.float32),
+            "pf_tvt_rel_pred": np.asarray([9, 9, 0.5, 0.25, 0.75, 9], dtype=np.float32),
+        }
+        for well, count, anchor in (("bravo", 5, 1000.0), ("alpha", 7, 1100.0))
+    ]
+    prior = {
+        well: RelativeSurface(
+            values=np.zeros(11, dtype=np.float32),
+            diagnostics={
+                "geo_nbr_distance": (np.arange(11) / 16).astype(np.float32),
+            },
+        )
+        for well in ("bravo", "alpha")
+    }
+    # Gamma is twice the depth less 1900 on both curves, which stop at 1110.
+    curves = {
+        well: RawWell(
+            well_id=well,
+            horizontal={},
+            reference_depth=990 + np.arange(121.0),
+            reference_gamma=80 + 2 * np.arange(121.0),
+        )
+        for well in ("bravo", "alpha")
+    }
+    table = builder.lookup_gamma(
+        builder.attach_diagnostics(
+            builder(bins, metadata=metadata, include_target=True),
+            prior=prior,
+        ),
+        curves=curves,
+    )
+    expanded = np.asarray([1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6, 6], dtype=np.float32)
+    anchor = np.repeat(np.asarray([1000, 1100], dtype=np.float32), [5, 7])
+    relative = expanded * 2 + 1
+    physical = anchor + relative
+    particle = anchor + np.asarray(
+        [0.5, 0.5, 0.25, 0.25, 0.75, 0.5, 0.5, 0.25, 0.25, 0.75, 0.75, 0.75],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(table.rows.tvt, physical, strict=True)
+    np.testing.assert_array_equal(table.rows.target, anchor + 3, strict=True)
+    columns = table.diagnostics
+    for name, values in (
+        ("pred", expanded),
+        ("target_pred", relative),
+        ("TVT_pred_raw", physical),
+        ("pred_sg_smooth", physical),
+        ("PF_TVT", particle),
+        ("geo_prior_TVT", anchor + 2),
+        ("a", np.full(12, 2.0)),
+        ("b", anchor.astype(np.float64) + 1),
+        ("target_a", np.full(12, 2.0)),
+        ("target_b", np.full(12, 1.0)),
+        (
+            "geo_nbr_distance",
+            np.concatenate([np.arange(4, 9), np.arange(4, 11)]).astype(np.float32) / 16,
+        ),
+        # Depths beyond 1110 lie past the curve and look up nothing.
+        ("pred_lookup_GR", np.where(physical <= 1110, 2 * physical - 1900, np.nan)),
+        ("PF_lookup_GR", 2 * particle - 1900),
+        ("geo_prior_lookup_GR", 2 * (anchor + 2) - 1900),
+    ):
+        np.testing.assert_array_equal(columns[name], values, strict=True)
+    assert table.strings == {"target_mode": ("unet",) * 12}
+
+
+def test_repeats_average_each_row_keep_the_first_sidecars_and_look_up_again() -> None:
+    columns = ("well_id", "submit_index", "Z", "TVT_pred", "pred", "a", "TVT")
+    tables = [
+        PredictionTable(
+            rows=PredictionRows(
+                well_ids=("bravo", "alpha"),
+                submit_indices=np.asarray([4, 5], dtype=np.int64),
+                tvt=np.asarray([1000 + shift, 1100 - shift], dtype=np.float32),
+                z=np.zeros(2, dtype=np.float32),
+                target=np.asarray([1, 2], dtype=np.float32),
+            ),
+            diagnostics={
+                "pred": np.asarray([shift, -shift], dtype=np.float32),
+                "a": np.full(2, shift, dtype=np.float64),
+                "pred_lookup_GR": np.full(2, 7, dtype=np.float32),
+            },
+            strings={"target_mode": (f"repeat{shift}",) * 2},
+            column_order=(*columns[:6], "pred_lookup_GR", *columns[6:]),
+        )
+        for shift in (-1, 0, 4)
+    ]
+    curves = {
+        well: RawWell(
+            well_id=well,
+            horizontal={},
+            reference_depth=990 + np.arange(121.0),
+            reference_gamma=80 + 2 * np.arange(121.0),
+        )
+        for well in ("bravo", "alpha")
+    }
+    averaged = _small_builder().make().average_repeats(tables, curves=curves, repeats=3)
+    # Each row's three shifts -1, 0 and 4 average to 1.
+    assert averaged.rows.well_ids == ("bravo", "alpha")
+    np.testing.assert_array_equal(averaged.rows.submit_indices, [4, 5])
+    tvt = np.asarray([1001, 1099], dtype=np.float32)
+    np.testing.assert_array_equal(averaged.rows.tvt, tvt, strict=True)
+    np.testing.assert_array_equal(
+        averaged.diagnostics["pred"],
+        np.asarray([1, -1], dtype=np.float32),
+        strict=True,
+    )
+    np.testing.assert_array_equal(averaged.diagnostics["a"], [-1.0, -1.0], strict=True)
+    np.testing.assert_array_equal(
+        averaged.diagnostics["pred_lookup_GR"],
+        2 * tvt - 1900,
+        strict=True,
+    )
+    assert averaged.strings == {"target_mode": ("repeat-1",) * 2}
+    assert averaged.column_order == tables[0].column_order
+
+
+def test_distance_summary_repeats_each_wells_tenth_percentile() -> None:
+    nan = np.nan
+    table = PredictionTable(
+        rows=PredictionRows(
+            well_ids=("a",) * 5 + ("b",) * 2 + ("c",),
+            submit_indices=np.arange(8),
+            tvt=np.zeros(8, dtype=np.float32),
+            z=np.zeros(8, dtype=np.float32),
+            target=None,
+        ),
+        diagnostics={
+            "geo_nbr_distance": np.asarray(
+                [4, 0, 1, 3, 2, nan, 5, nan],
+                dtype=np.float32,
+            ),
+        },
+    )
+    summary = _small_builder().make().summarize_distance(table)
+    # Well a's tenth percentile lies 0.4 of the way from 0 to 1; b keeps its one
+    # finite distance and c has none.
+    np.testing.assert_array_equal(
+        summary.diagnostics["geo_nbr_distance_q10"],
+        np.asarray([0.4] * 5 + [5] * 2 + [nan], dtype=np.float32),
+        strict=True,
+    )
+
+
+def _prediction_artifacts(
+    *,
+    particle: bool,
+    diagnostics: int,
+    blend: float,
+) -> tuple[PredictionTable, PredictionTable]:
     config = PredictionBuilder.Config()
     config.expansion.prefix_rows = 4
     config.expansion.target_rows = 6
     config.expansion.downsample = 2
     config.expansion.target_stats = (1.591691, 15.853182)
-    config.smoothing.window = window
     config.smoothing.blend = blend
     config.diagnostic_names = config.diagnostic_names[:diagnostics]
     builder = config.make()
@@ -249,32 +434,7 @@ def test_complete_original_prediction_artifacts(
     test = builder.attach_diagnostics(test, prior=prior)
     if diagnostics:
         test = builder.summarize_distance(test)
-    test = builder.lookup_gamma(test, curves=curves)
-    assert "TVT" not in test.column_order
-    for name, frame in (("oof", oof), ("test", test)):
-        path = tmp_path / f"{name}.parquet"
-        write_table(path, frame)
-        restored = read_table(path)
-        assert restored.column_order == frame.column_order
-        assert (
-            mismatches(
-                _capture(frame, prefix=name),
-                actual=_capture(restored, prefix=name),
-            )
-            == []
-        )
-    assert oof.rows.target is not None
-    oof_rmse = pooled_rmse(oof.rows.target, prediction=oof.rows.tvt)
-    record = {
-        **_capture(oof, prefix="oof"),
-        **_capture(test, prefix="test"),
-        "oof_rmse": torch.tensor(oof_rmse, dtype=torch.float64),
-    }
-    report = mismatches(
-        read_tensors(_CWD / "testdata" / f"predictions_{family}.pt"),
-        actual=record,
-    )
-    assert not report, "\n".join(report)
+    return oof, builder.lookup_gamma(test, curves=curves)
 
 
 def test_complete_metadata_is_coerced_at_the_original_precision_boundary() -> None:
@@ -378,50 +538,158 @@ def _small_builder() -> PredictionBuilder.Config:
     return config
 
 
-@pytest.mark.parametrize(
-    ("family", "window", "blend"),
-    [("0719_v1", 1025, 0.6828376753426914), ("0803_v2", 577, 0.7261960515627183)],
-)
-def test_complete_original_unclipped_surface_smoothing(
-    family: str,
-    window: int,
-    blend: float,
-) -> None:
-    rows = np.arange(1031, dtype=np.float32)
-    raw = (1000 + (rows % 17) / 19 + (rows // 17) / 31).astype(np.float32)
-    height = (rows / 13 - 100).astype(np.float32)
-    config = SurfaceSmoothing.Config()
-    config.window = window
-    config.blend = blend
-    frame = config.make()(
-        PredictionTable(
-            rows=PredictionRows(
-                well_ids=("well",) * len(rows),
-                submit_indices=np.arange(len(rows), dtype=np.int64),
-                tvt=raw,
-                z=height,
-                target=None,
-            ),
+@pytest.mark.parametrize("summarize", [False, True])
+def test_build_annotates_summarizes_then_looks_up_each_well(summarize: bool) -> None:
+    config = _small_builder()
+    builder = config.make()
+    metadata, prior = _observations(
+        repeat=0,
+        particle=True,
+        names=config.diagnostic_names,
+    )
+    bins = np.arange(12, dtype=np.float32).reshape(2, 6) / np.float32(8)
+    curves = _curves()
+    built = builder.build(
+        bins,
+        metadata=metadata,
+        include_target=True,
+        prior=prior,
+        curves=curves,
+        summarize=summarize,
+    )
+    expected = builder.attach_diagnostics(
+        builder(bins, metadata=metadata, include_target=True),
+        prior=prior,
+    )
+    if summarize:
+        expected = builder.summarize_distance(expected)
+    expected = builder.lookup_gamma(expected, curves=curves)
+    assert ("geo_nbr_distance_q10" in built.column_order) == summarize
+    assert built.column_order == expected.column_order
+    assert (
+        mismatches(
+            _capture(expected, prefix="rows"),
+            actual=_capture(built, prefix="rows"),
+        )
+        == []
+    )
+
+
+def test_gamma_lookup_keeps_tied_depths_in_row_order_and_includes_curve_ends() -> None:
+    # Seventeen descending rows reach NumPy's unstable sort kernels; rows 5 and 6
+    # tie at depth 15.
+    depth = np.arange(20, 3, -1, dtype=np.float64)
+    depth[6] = depth[5]
+    table = PredictionTable(
+        rows=PredictionRows(
+            well_ids=("well",) * 3,
+            submit_indices=np.arange(3, dtype=np.int64),
+            tvt=np.asarray([15, 4, 20], dtype=np.float32),
+            z=np.zeros(3, dtype=np.float32),
+            target=None,
         ),
     )
-    record = {
-        "TVT_sg_surface": torch.from_numpy(frame.diagnostics["TVT_sg_surface"]),
-        "TVT_pred": torch.from_numpy(frame.rows.tvt),
-        "window": torch.tensor(config.window),
-        "polyorder": torch.tensor(config.polyorder),
-        "blend": torch.tensor(config.blend, dtype=torch.float64),
-    }
-    report = mismatches(
-        read_tensors(_CWD / "testdata" / f"smoothing_{family}.pt"),
-        actual=record,
+    curve = RawWell(
+        well_id="well",
+        horizontal={},
+        reference_depth=depth,
+        reference_gamma=np.arange(17, dtype=np.float64) * 10,
     )
-    assert not report, "\n".join(report)
+    result = _small_builder().make().lookup_gamma(table, curves={"well": curve})
+    # Interpolation at a repeated depth returns the gamma of the last tied row.
+    # The shallowest and deepest curve rows, 4 and 20, read their own gamma.
+    assert result.diagnostics["pred_lookup_GR"].tolist() == [60, 160, 0]
+
+
+@pytest.mark.parametrize("window", [5, 4])
+def test_surface_smoothing_fits_local_lines_and_end_windows(window: int) -> None:
+    raw = np.asarray([0, 10, 0, 10, 0, 10, 0, 10, 40], dtype=np.float32) + 1000
+    height = np.arange(9, dtype=np.float32) / 4 - 100
+    config = SurfaceSmoothing.Config(window=window, blend=0.5)
+    frame = config.make()(_well_rows(raw, height=height))
+    # Interior rows average five neighbors; the first and last two rows evaluate the
+    # least-squares line through the five end rows.
+    np.testing.assert_array_equal(
+        frame.diagnostics["TVT_sg_surface"],
+        np.asarray([4, 4, 4, 6, 4, 6, 12, 20, 28], dtype=np.float32) + 1000,
+        strict=True,
+    )
+    np.testing.assert_array_equal(
+        frame.rows.tvt,
+        np.asarray([2, 7, 2, 8, 2, 8, 6, 15, 34], dtype=np.float32) + 1000,
+        strict=True,
+    )
     np.testing.assert_array_equal(frame.diagnostics["TVT_pred_raw"], raw, strict=True)
     np.testing.assert_array_equal(frame.rows.z, height, strict=True)
     np.testing.assert_array_equal(
         frame.rows.tvt,
         frame.diagnostics["pred_sg_smooth"],
         strict=True,
+    )
+
+
+@pytest.mark.parametrize("rows", [9, 10])
+def test_surface_window_shrinks_to_the_longest_odd_well_prefix(rows: int) -> None:
+    raw = np.asarray([0, 10, 0, 10, 0, 10, 0, 10, 40, 1], dtype=np.float32)[:rows]
+    frame = SurfaceSmoothing.Config(window=1025).make()(
+        _well_rows(raw, height=np.zeros(rows, dtype=np.float32)),
+    )
+    smoothed = frame.diagnostics["TVT_sg_surface"]
+    # The first nine rows fit one line: mean 80 / 9, slope 8 / 3 per row.
+    np.testing.assert_array_equal(
+        smoothed[:5],
+        np.asarray([(24 * row - 16) / 9 for row in range(5)], dtype=np.float32),
+        strict=True,
+    )
+    assert smoothed[5] == np.float32(81 / 9 if rows == 10 else 104 / 9)
+
+
+def test_surface_smoothing_keeps_short_wells_and_fits_each_well_separately() -> None:
+    # A local quadratic fit reproduces a quadratic; no value is zero, where the
+    # fit's float64 residue would survive the cast.
+    quadratic = (np.arange(7, dtype=np.float32) + 1) ** 2
+    frame = SurfaceSmoothing.Config(window=5, polyorder=2).make()(
+        PredictionTable(
+            rows=PredictionRows(
+                well_ids=("long", "short", *("long",) * 6, "short"),
+                submit_indices=np.arange(9, dtype=np.int64),
+                tvt=np.asarray(
+                    [quadratic[0], 7, *quadratic[1:], -3],
+                    dtype=np.float32,
+                ),
+                z=np.zeros(9, dtype=np.float32),
+                target=None,
+            ),
+        ),
+    )
+    np.testing.assert_array_equal(
+        frame.diagnostics["TVT_sg_surface"],
+        np.asarray([quadratic[0], 7, *quadratic[1:], -3], dtype=np.float32),
+        strict=True,
+    )
+    cubic = SurfaceSmoothing.Config(window=3, polyorder=3).make()(
+        _well_rows(np.asarray([0, 5, 1], dtype=np.float32), height=np.zeros(3)),
+    )
+    np.testing.assert_array_equal(
+        cubic.diagnostics["TVT_sg_surface"],
+        np.asarray([0, 5, 1], dtype=np.float32),
+        strict=True,
+    )
+
+
+def _well_rows(
+    raw: NDArray[np.float32],
+    *,
+    height: NDArray[np.generic],
+) -> PredictionTable:
+    return PredictionTable(
+        rows=PredictionRows(
+            well_ids=("well",) * len(raw),
+            submit_indices=np.arange(len(raw), dtype=np.int64),
+            tvt=raw,
+            z=height.astype(np.float32),
+            target=None,
+        ),
     )
 
 
@@ -550,7 +818,7 @@ def test_single_family_prediction_preserves_all_rows_and_diagnostics(
 
 
 def tables() -> dict[str, PredictionTable]:
-    """Build every exact-boundary case represented in the immutable source PT."""
+    """Build one row group per strict geographic bound, plus a safe and a NaN well."""
     safe = {
         "geo_nbr_distance": 100.0,
         "geo_nbr_distance_q10": 50.0,
@@ -562,14 +830,6 @@ def tables() -> dict[str, PredictionTable]:
     for name, boundary in zip(safe, (2459, 1426, 0.96, 1.45, 0.315), strict=True):
         cases[name] = {**safe, name: boundary}
     cases["nan"] = {**safe, "geo_nbr_distance": float("nan")}
-    predictions = {
-        "0719_V1": [1e8, -0.0, 1.25],
-        "0724_V1": [1.0, 2.5, 1e8],
-        "0729_V3": [8.0, -1.25, -1e8],
-        "0801_V1": [-1e8, 5.0, 6.25],
-        "0801_V2": [2.0, 4.5, -1e8],
-        "0803_V2": [4.0, 6.5, 9.5],
-    }
     return {
         name: PredictionTable(
             rows=PredictionRows(
@@ -590,11 +850,11 @@ def tables() -> dict[str, PredictionTable]:
                 for key in safe
             },
         )
-        for name, values in predictions.items()
+        for name, values in FAMILY_ROWS.items()
     }
 
 
-def test_complete_original_ensemble_rows_and_alignment_are_unchanged() -> None:
+def test_ensemble_sorts_and_aligns_every_family_row() -> None:
     original = tables()
     frame = original["0719_V1"]
     original["0719_V1"] = replace(
@@ -610,40 +870,34 @@ def test_complete_original_ensemble_rows_and_alignment_are_unchanged() -> None:
     )
     actual = TableBlend.Config().make()(original)
     reference = original["0801_V2"].rows
-    ordering = np.lexsort((reference.submit_indices, np.asarray(reference.well_ids)))
-    expected = read_tensors(_CWD / "testdata" / "components.pt")["ensemble"].numpy()[
-        ordering
-    ]
-    np.testing.assert_array_equal(actual.final, expected, strict=True)
+    np.testing.assert_array_equal(actual.final, _sorted_ensemble(), strict=True)
     assert len(actual.rows.tvt) == 21
     assert actual.rows.well_ids == tuple(sorted(reference.well_ids))
     np.testing.assert_array_equal(actual.rows.submit_indices, np.tile([2, 3, 4], 7))
     assert all(table.final is None for table in original.values())
 
 
-def test_complete_grouped_means_keep_each_original_column_precision() -> None:
-    values = np.linspace(0.9, 1.1, 35, dtype=np.float32)
-    values[2::11] = np.nan
-    diagnostics = {
-        "geo_nbr_distance": values * np.float32(2459),
-        "geo_radial_extrap_score": values * np.float32(1.45),
-        "geo_nbr_path_alignment": values * np.float32(0.96),
-        "geo_nbr_distance_q10": values * np.float32(1426),
-        "geo_prefix_weight_ratio": values * np.float32(0.315),
-    }
-    record: dict[str, torch.Tensor] = {}
-    for dtype in (np.float32, np.float64):
-        for name, data in diagnostics.items():
-            groups = np.asarray(
-                [diagnostic_mean(data.astype(dtype)[group::3]) for group in range(3)],
-                dtype=dtype,
-            )
-            record[f"{np.dtype(dtype).name}/{name}"] = torch.from_numpy(groups)
-    report = mismatches(
-        read_tensors(_CWD / "testdata" / "diagnostic_mean.pt"),
-        actual=record,
-    )
-    assert not report, "\n".join(report)
+@pytest.mark.parametrize(
+    ("values", "mean"),
+    [
+        # Float32 rounds the sum to 5.0999999, a third of which is 1.6999999, not 1.7.
+        (np.asarray([1, np.nan, 3, 1.1], dtype=np.float32), np.float32(1.7)),
+        # The mean of 1, 1 and 0.1 rounds to 0.7; their float64 sum / 3 rounds up.
+        (np.asarray([1, 1, np.nan, 0.1], dtype=np.float64), np.float64(0.7)),
+        # Opposite infinities average to NaN in both precisions.
+        (np.asarray([np.inf, 1, -np.inf], dtype=np.float32), np.float32(np.nan)),
+        (np.asarray([np.inf, 1, -np.inf], dtype=np.float64), np.float64(np.nan)),
+        (np.full(2, np.nan, dtype=np.float32), np.float32(np.nan)),
+        (np.zeros(0, dtype=np.float64), np.float64(np.nan)),
+    ],
+)
+def test_diagnostic_means_skip_missing_values_and_round_once_in_their_precision(
+    values: NDArray[np.float32] | NDArray[np.float64],
+    mean: np.float32 | np.float64,
+) -> None:
+    actual = diagnostic_mean(values)
+    assert type(actual) is type(mean)
+    np.testing.assert_array_equal(actual, mean, strict=True)
 
 
 def _cast_diagnostics(
@@ -661,21 +915,24 @@ def _cast_diagnostics(
     return cast_to
 
 
-def test_complete_ensemble_preserves_source_column_precision_at_strict_bounds() -> None:
-    record: dict[str, torch.Tensor] = {}
+def test_ensemble_gates_float32_and_float64_diagnostics_at_strict_bounds() -> None:
     for dtype in (np.float32, np.float64):
         frames = {
             name: replace(frame, diagnostics=_cast_diagnostics(frame, dtype))
             for name, frame in tables().items()
         }
         final = TableBlend.Config().make()(frames).final
-        assert final is not None
-        record[np.dtype(dtype).name] = torch.from_numpy(final)
-    report = mismatches(
-        read_tensors(_CWD / "testdata" / "ensemble_precision.pt"),
-        actual=record,
-    )
-    assert not report, "\n".join(report)
+        np.testing.assert_array_equal(final, _sorted_ensemble(), strict=True)
+
+
+def _sorted_ensemble() -> NDArray[np.float64]:
+    """Return the blend of ``tables()`` in sorted well order; ``safe`` is geographic."""
+    return np.concatenate(
+        [
+            np.tile(_blend_of_family_rows(geographic=False), 6),
+            _blend_of_family_rows(geographic=True),
+        ],
+    ).astype(np.float64)
 
 
 @pytest.mark.parametrize("final_exists", [False, True])

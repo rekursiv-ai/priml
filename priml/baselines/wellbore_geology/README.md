@@ -129,38 +129,39 @@ commands. Fresh inference runs as
 `uv --quiet run --frozen python -m priml priml.baselines.wellbore_geology.pipeline.family_prediction`
 with `--configuration`, `--directory` and `--output`; training launches it
 itself. `testing.py` holds the replay and fixture tools; production does not
-import them. Complete source records remain together under `testdata/`.
+import them. Goldens live under `testdata/`.
 
 ## Numerical controls
 
-Ordinary CPU tests consume immutable whole source-minted PT records:
+CPU tests compare against goldens minted in-tree by this package:
 
 ```sh
 uv --quiet run --frozen pytest priml/baselines/wellbore_geology -n0 -pno:randomly
 ```
 
-The independent scientific source is revision
-`fade6112ffebd9e27c08ac7f053e8d4c3d5c319a`. Source execution was confined to
-external capture workspaces. The shipped runtime and tests use native Priml
-components and numeric records; they do not load that checkout or its Python
-files, configuration dictionaries or notebook.
+A golden test writes a missing record and fails, so the new file is inspected
+before a rerun accepts it. `--regenerate-b4b` (tensors) or `--regenerate-golden`
+(config text) rewrites an existing record. Tensor records compute inside
+`host_agnostic_numerics()` from `priml.testing.bfb`.
+No test loads the scientific source (revision
+`fade6112ffebd9e27c08ac7f053e8d4c3d5c319a`) or imports another implementation.
+Two computations follow outside implementations: the quadratic features solve
+their 3-by-3 normal equations in LAPACK's left-looking LU order with fused
+multiply-adds, and the particle tracker's random stream reproduces NumPy's
+legacy `RandomState`.
 
-Six complete three-update controls retain all four backbone stages, decoder,
-heads, losses, AdamW state/groups, cosine state, EMA and validation history in
-1,121-parameter CPU FP32 networks. Common complete initial tensors form the
-input boundary. Stochastic families retain thirteen named dropout sites and
-thirty-nine draws. One-float32-ULP weight changes and shifted draw order are
-negative controls. Every record remains whole and below 32 KiB. Complete replay
-uses the approved occasional 400 ms CPU allowance.
-
-Separate whole records cover all six published schedules, data loading,
-worker streams, augmentation, particle dynamics and backward paths, geographic
-folds/priors, original-row prediction columns, full smoothing windows, repeat
-means, insertion-order float32 means across fifteen model outputs and ordered
-geographic blending. Record precision, shapes, columns and
-text ordering remain intact. These controls establish their declared CPU
-boundaries; full-width GPU numerics, historical initialization and public-score
-reproduction require separate measurements.
+Only `exp000`, the nexus, has records, five in all. The study has a config
+print (`exp000_study.txt`), and so does its latest family (`exp000_0803_v2.txt`).
+That family also has three augmented model inputs with their random streams
+(`augmentation.pt`) and a three-update record (`train_step.pt`) of a two-stage,
+345-parameter CPU float32 network: decoder, heads, losses, AdamW state, EMA and
+validation history, starting from the loop's own initialization. The tiny
+four-stage model has a construction record (`constructor.pt`). Every other
+family and every fork has a delta test against its parent.
+Data preparation, folds, geographic and particle priors and prediction columns
+have unit tests with hand-checkable values. Every tensor record stays below
+32 KiB. Full-width GPU numerics and public-score reproduction need separate
+measurements.
 
 [kaggle]: https://www.kaggle.com/competitions/rogii-wellbore-geology-prediction
 [winner]: https://github.com/IAmAValidUsername/kaggle_ROGII_1st_place_solution_Ruby

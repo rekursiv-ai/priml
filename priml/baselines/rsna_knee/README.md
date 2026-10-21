@@ -38,26 +38,23 @@ inference. It does not reconstruct historical training.
 
 ## Measured scope
 
-- Native CPU replay tests use complete numerical `.pt` witnesses minted by
-  original implementations outside this package. Every new witness is at most
-  32 KiB. Model witnesses retain every parameter and buffer of their declared
-  tiny-width architecture; the production configurations retain full widths
-  and all selected model families. Each owning test module states its source
-  identity, size adaptations, and proof limits in its opening docstring.
-- Cold-constructor witnesses compare every native initial tensor and RNG
-  position before loading captured weights. The Tiny encoder retains all
-  eighteen blocks and all 1,000 initializer classes; finding-head witnesses
-  cover feature widths three and four. Reset replays the same draw order.
-- Physical preparation witnesses retain complete encoded DICOM files,
-  geometry, side rebuilds, anatomical inputs, anchors, rendered rows, fluid
-  volumes, windows, and metadata. Scoring witnesses retain all four frozen
-  fold outputs, every state readout, precision rescue, Raptor pass sigmoids,
-  mirror averaging, and the 224 retry. Frozen model boundaries do not prove
-  learned end-to-end GPU inference.
-- A complete four-study controller and CSV witness checks scheduling,
-  failed-row mean-fill, both raw/rank CSV pairs, float64 parsing, all Spearman
-  diagnostics, and final float32 submission bytes. It uses frozen probabilities
-  and retains all twelve findings and deliberately permuted row/column orders.
+- Released-source parity is a port-time check recorded in git history. Every
+  checked-in golden is minted in-tree from this package by the test that reads
+  it: tensors with `--regenerate-b4b` inside `host_agnostic_numerics`,
+  configurations with `--regenerate-golden`. No test compares against bits
+  produced by another implementation.
+- Goldens cover the nexus only: the finalized `exp000` and `train_exp000`
+  configurations; tiny-width forwards of every `exp000` model family (R7,
+  Raptor, ResNet34 laterality, VNet anatomy) with literal weights; the
+  `train_exp000` Tiny encoder's seeded construction and forward; and three
+  updates through `train_exp000`'s own train step and optimizer stack. Every
+  binary golden is at most 32 KiB.
+- DICOM decoding, physical preparation, rendering, anchors, side correction,
+  fluid volumes, windows, scoring, stackers, blending and CSV output are unit
+  tests with hand-checkable expectations: small synthetic DICOM files in
+  native, deflated, RLE, JPEG and JPEG 2000 transfer syntaxes, literal arrays
+  and closed-form values. Frozen model boundaries do not prove learned
+  end-to-end GPU inference.
 - Complete learned native GPU inference, mixed-precision convolution parity,
   and current cold-training timing remain unmeasured. A historical H200
   source-runtime run took 168.29 seconds for three test studies and matched
@@ -68,17 +65,10 @@ inference. It does not reconstruct historical training.
   studies, and macro AUC 0.620330512741227. All 58 PatientIDs were available
   and groups were disjoint. That receipt does not establish current
   constructor initialization, current numerical parity, or current timing.
-- Original programs, loaders, notebook extraction, runtime setup, source-side
-  execution, and mint tools stay outside Priml and the PR. The native test
-  suite only replays numerical records.
+- Original programs, loaders, notebook extraction and runtime setup stay
+  outside Priml.
 
-Canonical captures ran on Linux x86_64 on 2026-10-17; `series.pt` was captured
-on 2026-10-18. The frozen source transport revision is
-`50e6369fabab545861c6c675ce2084ed8c4640d3`. Model captures use Torch
-2.11.0+cu128 and `host_agnostic_numerics`; source libraries are timm 1.0.25,
-MONAI 0.6, TorchVision 0.26.0+cu128, pydicom 3.0.1, scikit-learn 1.9.1 and
-pandas 2.3.3 where applicable. Earlier ARM captures remain external history.
-The shared released-source SHA-256 identities are:
+Released-source SHA-256 identities:
 
 - `compact_infer.py`: `8401812cd63737ec99839d317c4037c4efb445d1baec892fa7481bb30399cc2d`.
 - `raptor_run.py`: `663e33fcf6022c7470fc0fa3d23e8d57292dc147e2c07609ad5e960588a3162a`.

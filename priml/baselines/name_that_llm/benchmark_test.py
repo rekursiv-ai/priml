@@ -39,9 +39,13 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def wiring_config(tmp_path: Path) -> Benchmark.Config:
+def hub_extra() -> None:
     # A run records the installed ``transformers`` version, priml's ``hub`` extra.
     pytest.importorskip("transformers")
+
+
+@pytest.fixture
+def wiring_config(tmp_path: Path) -> Benchmark.Config:
     with (tmp_path / "train.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["id", "prompt_id", "text", "model"])
@@ -126,6 +130,7 @@ def test_unset_identity_uses_the_launched_factory_and_retains_overrides(
     )
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_wiring_records_score_inputs_timing_and_submission(
     wiring_config: Benchmark.Config,
 ) -> None:
@@ -187,6 +192,7 @@ def test_all_branches_reach_the_public_source_blend(
     )
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_failed_run_preserves_durable_error(wiring_config: Benchmark.Config) -> None:
     wiring_config.dataset.directory = Path(wiring_config.dataset.directory) / "missing"
     with pytest.raises(FileNotFoundError):
@@ -200,6 +206,7 @@ def test_failed_run_preserves_durable_error(wiring_config: Benchmark.Config) -> 
     assert "elapsed_seconds" in result
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_over_budget_candidate_cannot_receive_a_score(
     wiring_config: Benchmark.Config,
 ) -> None:
@@ -225,6 +232,7 @@ def test_invalid_budget_is_rejected_before_io(
     assert not Path(wiring_config.working_dir).exists()
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_result_publication_counts_toward_budget(
     wiring_config: Benchmark.Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -251,6 +259,7 @@ def test_result_publication_counts_toward_budget(
     assert "TimeoutError" in str(result["error"])
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_configured_budget_checks_extraction_before_any_fold_score(
     wiring_config: Benchmark.Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -282,6 +291,7 @@ def test_configured_budget_checks_extraction_before_any_fold_score(
     assert observed == {}
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_explicit_receipt_path_is_retained_without_mutating_config(
     wiring_config: Benchmark.Config,
     tmp_path: Path,
@@ -303,6 +313,7 @@ def test_existing_output_directory_is_rejected(wiring_config: Benchmark.Config) 
     assert (directory / "result.json").read_text() == "previous result\n"
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_extraction_exception_identity_reaches_the_caller(
     wiring_config: Benchmark.Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -328,6 +339,7 @@ def test_extraction_exception_identity_reaches_the_caller(
     assert result.get("error") == f"RuntimeError: {error}"
 
 
+@pytest.mark.usefixtures("hub_extra")
 def test_cuda_encoder_without_an_accelerator_fails_the_run(
     wiring_config: Benchmark.Config,
     monkeypatch: pytest.MonkeyPatch,

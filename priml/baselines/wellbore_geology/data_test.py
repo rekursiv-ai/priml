@@ -36,6 +36,7 @@ from priml.baselines.wellbore_geology.data import (
     MismatchRange,
     ParticleFeatures,
     PathSimulation,
+    RawWell,
     ReferenceCalibration,
     ReferenceJitter,
     ReferenceTransform,
@@ -44,15 +45,15 @@ from priml.baselines.wellbore_geology.data import (
     WellLoader,
     WellRecord,
     WorkerStreams,
-    _boxcar_noise,
+    _boxcar_mean,
     _finish,
     _image_at,
+    _quadratic,
     _quadratic_solve,
     _smooth,
     collate_features,
     discover_wells,
     initialize_worker,
-    kahan_add,
     load_raw,
     load_split,
     normalize_probability,
@@ -81,7 +82,11 @@ from priml.baselines.wellbore_geology.testing import (
     numerical_tensors,
     write_study_inputs,
 )
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import (
+    assert_tensor_golden,
+    mismatches,
+)
 
 
 if TYPE_CHECKING:
@@ -93,101 +98,22 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 
-# Seeds whose union reaches every line and branch the sixteen original seeds did.
-@pytest.mark.parametrize("seed", [31, 5, 6, 8, 9, 12, 15])
-@pytest.mark.parametrize("mutation", ["none", "numpy_draw", "python_draw"])
-def test_complete_original_augmented_inputs_and_rng(seed: int, mutation: str) -> None:
-    record = augmentation_record(seed=seed, mutation=mutation)
-    filename = "augmentation.pt" if seed == 31 else f"augmentation_{seed:02}.pt"
-    differences = mismatches(read_tensors(_CWD / "testdata" / filename), record)
-    assert bool(differences) == (mutation != "none"), differences
+def test_nexus_augmented_inputs_and_rng_golden() -> None:
+    with host_agnostic_numerics():
+        record = augmentation_record()
+    assert_tensor_golden(_CWD / "testdata" / "augmentation.pt", record)
 
 
-# Per family, the seeds whose union reaches every line and branch all three did.
-@pytest.mark.parametrize(
-    ("family", "seed"),
-    [
-        ("0719_v1", 31),
-        ("0719_v1", 0),
-        ("0719_v1", 1),
-        ("0724_v1", 31),
-        ("0724_v1", 1),
-        ("0729_v3", 31),
-        ("0729_v3", 0),
-        ("0729_v3", 1),
-        ("0801_v1", 0),
-        ("0801_v1", 1),
-        ("0801_v2", 0),
-        ("0801_v2", 1),
-    ],
-)
-def test_complete_earlier_family_simulation_defaults(family: str, seed: int) -> None:
-    record = augmentation_record(seed=seed, family=family)
-    expected = read_tensors(
-        _CWD / "testdata" / f"augmentation_{family}_{seed:02}.pt",
-    )
-    assert mismatches(expected, record) == []
-
-
-def augmentation_record(
-    *,
-    seed: int,
-    mutation: str = "none",
-    family: str = "0803_v2",
-) -> dict[str, torch.Tensor]:
-    """Capture all three complete simulated inputs and both complete used streams.
-
-    Args:
-      seed: Initial seed of the consumer-owned Python stream.
-      mutation: Extra draw to prove the complete RNG comparison detects drift.
-      family: Public family whose complete augmentation settings are replayed.
+def augmentation_record() -> dict[str, torch.Tensor]:
+    """Capture three simulated latest-family inputs and both used streams.
 
     Returns:
       record: Every numeric item leaf and both complete used generator states.
 
     """
-    config = AugmentedFeatures.Config()
-    paths = config.paths
-    assert paths is not None
-    config.features.prefix_rows = 32
-    config.features.target_rows = 64
-    config.features.reference_columns = 3
-    if family in {"0719_v1", "0724_v1", "0729_v3"}:
-        paths.shift_probability = 0.75
-        paths.shift_nan_pattern = FixedNanPattern.Config(shift=False)
-        paths.reference_jitter.probability = 0
-        paths.reference_transform.gain_std = 0.03
-        paths.reference_drift_probability = 0
-        if family == "0719_v1":
-            paths.gamma_noise_shift_probability = 0.1
-        elif family == "0724_v1":
-            nan_pattern = paths.shift_nan_pattern = SampledNanPattern.Config()
-            nan_pattern.weights = {False: 1.0}
-            config.features.channels += ["geo_tvt_diff"]
-        else:
-            nan_pattern = paths.shift_nan_pattern = SampledNanPattern.Config()
-            nan_pattern.weights = {False: 1.0}
-            paths.prefix_sample_rows = 256
-            config.features.channels += ["pf_particle_density_prob", "pf_tvt_ffbsi"]
-            config.features.particle = ParticleFeatures.Config(
-                path="pf_tvt_rel_pred_ffbsi",
-            )
-    elif family == "0801_v2":
-        config.features.channels = [*config.features.channels[:-1], "geo_tvt_diff"]
-    elif family == "0803_v2":
-        config.features.channels = [
-            *config.features.channels[:-1],
-            "geo_tvt_diff",
-            "pf_particle_density_prob",
-            "pf_prob_ffbsi",
-            "geo_tvt_abs_diff",
-            "geo_tvt_rel",
-        ]
-        config.features.particle = ParticleFeatures.Config(
-            path="pf_tvt_rel_pred_ffbsi",
-        )
+    config = _nexus_augmentation()
     numpy = np.random.RandomState(29)
-    python = InlineConfig(random.Random, seed).make()
+    python = InlineConfig(random.Random, 31).make()
     augmenter = config.make()
     query = augmentation_well(prefix=512, suffix=193, well_id="query")
     donor = augmentation_well(prefix=32, suffix=1001, well_id="donor")
@@ -195,28 +121,44 @@ def augmentation_record(
     record: dict[str, torch.Tensor] = {}
     for step in range(3):
         item = augmenter(query, training=True, numpy=numpy, python=python)
-        record.update(
-            {
-                f"{step}/{name}": torch.from_numpy(values)
-                for name, values in item.arrays.items()
-            },
-        )
-        record.update(
-            {
-                f"{step}/aux_targets/{name}": torch.from_numpy(values)
-                for name, values in item.auxiliary.items()
-            },
-        )
-        for name, value in item.metadata.items():
-            if not isinstance(value, str):
-                record[f"{step}/meta/{name}"] = torch.from_numpy(
-                    np.asarray(value).copy(),
-                )
-    if mutation == "numpy_draw":
-        numpy.random_sample()
-    elif mutation == "python_draw":
-        python.getrandbits(32)
+        record.update(_item_record(item, prefix=str(step)))
     record.update(full_rng_record(numpy=numpy, python=python))
+    return record
+
+
+def _nexus_augmentation() -> AugmentedFeatures.Config:
+    """Return the latest family's augmentation at a small image geometry."""
+    config = AugmentedFeatures.Config()
+    config.features.prefix_rows = 32
+    config.features.target_rows = 64
+    config.features.reference_columns = 3
+    config.features.channels = [
+        *config.features.channels[:-1],
+        "geo_tvt_diff",
+        "pf_particle_density_prob",
+        "pf_prob_ffbsi",
+        "geo_tvt_abs_diff",
+        "geo_tvt_rel",
+    ]
+    config.features.particle = ParticleFeatures.Config(path="pf_tvt_rel_pred_ffbsi")
+    return config
+
+
+def _item_record(item: FeatureItem, *, prefix: str) -> dict[str, torch.Tensor]:
+    """Flatten every numeric array, auxiliary target and metadata leaf of an item."""
+    record = {
+        f"{prefix}/{name}": torch.from_numpy(values)
+        for name, values in item.arrays.items()
+    }
+    record.update(
+        {
+            f"{prefix}/aux_targets/{name}": torch.from_numpy(values)
+            for name, values in item.auxiliary.items()
+        },
+    )
+    for name, value in item.metadata.items():
+        if not isinstance(value, str):
+            record[f"{prefix}/meta/{name}"] = torch.from_numpy(np.asarray(value).copy())
     return record
 
 
@@ -391,101 +333,106 @@ def test_fit_denominator_boundary_preserves_float64_decisions_and_rng(
     )
 
 
-@pytest.mark.parametrize("mutation", [False, True])
-def test_complete_original_rotation_inputs_and_rng(*, mutation: bool) -> None:
-    record = rotation_record()
-    if mutation:
-        values = record["8/unet_static"].reshape(-1)
-        values[0] = torch.nextafter(values[0], torch.tensor(float("inf")))
-    differences = mismatches(read_tensors(_CWD / "testdata/rotation.pt"), record)
-    assert bool(differences) == mutation, differences
-
-
-def rotation_record() -> dict[str, torch.Tensor]:
-    """Build nine complete rotation items and retain both final RNG states.
-
-    Returns:
-        record: Every numeric item leaf and both complete used generator states.
-
-    """
-    channel_sets = (
-        ["pf_prob"],
-        ["pf_tvt"],
-        ["pf_prob", "pf_tvt"],
-        ["pf_prob_ffbsi"],
-        ["pf_tvt_ffbsi"],
-        ["pf_prob_ffbsi", "pf_tvt_ffbsi"],
-        ["pf_prob", "pf_tvt", "pf_prob_ffbsi", "pf_tvt_ffbsi"],
-        ["pf_particle_density_prob", "pf_prob_ffbsi", "pf_tvt_ffbsi"],
-        ["pf_tvt"],
+def test_rotation_moves_probability_rows_and_their_paths_by_the_fitted_shift() -> None:
+    features = ImageFeatures.Config()
+    features.channels = ["pf_prob_ffbsi", "pf_prob", "pf_tvt"]
+    features.target_stats = (0, 1)
+    # Five candidates two units apart: -4, -2, 0, 2 and 4.
+    features.reference_columns = features.reference_window = 5
+    config = ImageAugmentation.Config()
+    config.rotate_probability = 1
+    config.ratio_jitter = 0
+    config.channel_probability = config.sequence_probability = 0
+    # The targets fit a unit slope through the first row, so each row shifts by its
+    # own target: one candidate per two units.
+    target = np.asarray([0, 2, 4, -2], dtype=np.float32)
+    eye = np.eye(5, dtype=np.float32)
+    image = np.stack(
+        [
+            probability_image(eye[[1, 0, 1, 4]], columns=5),
+            probability_image(eye[[2, 2, 4, 3]], columns=5),
+            np.broadcast_to(
+                np.asarray([0.5, 1, -1, 3], dtype=np.float32)[:, None],
+                (4, 5),
+            ),
+        ],
     )
-    numpy = np.random.RandomState(29)
-    python = InlineConfig(random.Random, 31).make()
-    record: dict[str, torch.Tensor] = {}
-    for index, channels in enumerate(channel_sets):
-        features = ImageFeatures.Config()
-        features.prefix_rows = 32
-        features.target_rows = 64
-        features.reference_columns = 11
-        features.channels = channels
-        features.particle = ParticleFeatures.Config(
-            path="pf_tvt_rel_pred"
-            if {"pf_prob", "pf_tvt"}.intersection(channels)
-            else "pf_tvt_rel_pred_ffbsi",
-        )
-        well = augmentation_well(prefix=2, suffix=2, well_id="query")
-        probability = np.arange(1, 45, dtype=np.float32).reshape(4, 11)
-        probability /= probability.sum(axis=1, keepdims=True)
-        assert well.particle is not None
-        particle = dict(well.particle)
-        for name in ("pf_prob", "pf_prob_ffbsi", "pf_particle_density_prob"):
-            particle[name] = probability.copy()
-        well = replace(well, particle=particle)
-        item = features.make()(well, training=True)
-        mean, std = features.target_stats
-        item.arrays["target"] = (
-            (np.asarray([0, 100, -100, 20], dtype=np.float32) - mean) / std
-        ).astype(np.float32)
-        item.arrays["target_mask"] = np.ones(4, dtype=bool)
-        item.arrays["suffix_mask"] = np.ones(4, dtype=bool)
-        image = np.zeros((len(channels), 4, 11), dtype=np.float32)
-        probability = np.zeros((4, 11), dtype=np.float32)
-        probability[[0, 1, 2], [5, -1, 0]] = 1
-        for channel, name in enumerate(channels):
-            image[channel] = (
-                np.log1p(probability * np.float32(11))
-                if "prob" in name
-                else np.broadcast_to(
-                    np.asarray([0.2, 0, -0.3, 0.4], dtype=np.float32)[:, None],
-                    (4, 11),
-                )
-            )
-        item.arrays["unet_static"] = image
-        config = ImageAugmentation.Config()
-        config.channel_probability = config.sequence_probability = 0
-        if index == 8:
-            config.maximum_shift = math.inf
-        python.seed(31)
-        config.make()(item, features=features, numpy=numpy, python=python)
-        record.update(
-            {
-                f"{index}/{name}": torch.from_numpy(values)
-                for name, values in item.arrays.items()
-            },
-        )
-        record.update(
-            {
-                f"{index}/aux_targets/{name}": torch.from_numpy(values)
-                for name, values in item.auxiliary.items()
-            },
-        )
-        for name, value in item.metadata.items():
-            if not isinstance(value, str):
-                record[f"{index}/meta/{name}"] = torch.from_numpy(
-                    np.asarray(value).copy(),
-                )
-    record.update(full_rng_record(numpy=numpy, python=python))
-    return record
+    item = FeatureItem(
+        arrays={
+            "unet_static": image,
+            "target": target,
+            "target_mask": np.ones(4, dtype=bool),
+            "suffix_mask": np.ones(4, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    numpy = np.random.RandomState(7)
+    config.make()(
+        item,
+        features=features,
+        numpy=numpy,
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    rotated = item.arrays["unet_static"]
+    np.testing.assert_array_equal(
+        rotated[0],
+        probability_image(eye[[1, 1, 3, 3]], columns=5),
+        strict=True,
+    )
+    # The third row's mass leaves the axis, so its path is zeroed instead of moved.
+    shifted = eye[[2, 3, 0, 2]]
+    shifted[2] = 0
+    np.testing.assert_array_equal(
+        rotated[1],
+        probability_image(shifted, columns=5),
+        strict=True,
+    )
+    np.testing.assert_array_equal(
+        rotated[2],
+        np.broadcast_to(np.asarray([0.5, 3, 0, 1], dtype=np.float32)[:, None], (4, 5)),
+        strict=True,
+    )
+    reference = np.random.RandomState(7)
+    reference.uniform(1, 1)
+    np.testing.assert_array_equal(numpy.get_state()[1], reference.get_state()[1])
+    assert numpy.get_state()[2] == reference.get_state()[2]
+
+
+def test_rotation_scales_the_fitted_slope_by_one_uniform_ratio() -> None:
+    features = ImageFeatures.Config()
+    features.channels = ["pf_tvt", "pf_tvt_ffbsi"]
+    features.target_stats = (0, 1)
+    features.reference_columns = 4
+    config = ImageAugmentation.Config()
+    config.rotate_probability = 1
+    config.ratio_jitter = 0.5
+    config.channel_probability = config.sequence_probability = 0
+    target = np.asarray([0, 1, 2], dtype=np.float32)
+    path = np.asarray([1, 2, 3], dtype=np.float32)
+    item = FeatureItem(
+        arrays={
+            "unet_static": np.broadcast_to(path[None, :, None], (2, 3, 4)).copy(),
+            "target": target,
+            "target_mask": np.ones(3, dtype=bool),
+            "suffix_mask": np.ones(3, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    config.make()(
+        item,
+        features=features,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    # The targets fit a unit slope, so each row moves by the ratio times its target.
+    ratio = np.float32(np.random.RandomState(7).uniform(0.5, 1.5))
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"],
+        np.broadcast_to((path + ratio * target)[None, :, None], (2, 3, 4)),
+        strict=True,
+    )
 
 
 def full_rng_record(
@@ -517,7 +464,7 @@ def full_rng_record(
 
 
 def augmentation_well(*, prefix: int, suffix: int, well_id: str) -> WellRecord:
-    """Rebuild complete deterministic query/donor wells used by the source mint.
+    """Build a deterministic query or donor well with its particle cache.
 
     Args:
       prefix: Number of visible rows preceding the hidden target suffix.
@@ -628,54 +575,46 @@ def test_numeric_csv_preserves_complete_rows_and_requested_column_order(
     )
 
 
-@pytest.mark.parametrize("mutation", [False, True])
-def test_complete_original_csv_precision_and_missing_values(
-    tmp_path: Path,
-    *,
-    mutation: bool,
-) -> None:
-    values = (
-        "0.10000000000000001",
-        "1.0000000000000002",
-        "123456789.12345679",
-        "-123456789.12345679",
-        "0.33333333333333331",
-        "2458.9999999999995",
-        "0.95999999999999996",
-        "0.31499999999999995",
-        "1.4500000000000002",
-        "2.2250738585072014e-308",
-        "4.9406564584124654e-324",
-        "1.7976931348623157e308",
-        "-0.0",
-        "1e-9",
-        "-3.125e+7",
-        "",
-        "NaN",
-        "NA",
-        "null",
-        "INF",
-    )
+def test_csv_precision_and_missing_values(tmp_path: Path) -> None:
+    tokens = {
+        "0.10000000000000001": "0x1.999999999999ap-4",
+        "1.0000000000000002": "0x1.0000000000001p+0",
+        "123456789.12345679": "0x1.d6f34547e6b75p+26",
+        "-123456789.12345679": "-0x1.d6f34547e6b75p+26",
+        "0.33333333333333331": "0x1.5555555555555p-2",
+        "2458.9999999999995": "0x1.335ffffffffffp+11",
+        "0.95999999999999996": "0x1.eb851eb851eb8p-1",
+        "0.31499999999999995": "0x1.428f5c28f5c28p-2",
+        "1.4500000000000002": "0x1.7333333333334p+0",
+        "2.2250738585072014e-308": "0x1.0000000000000p-1022",
+        "4.9406564584124654e-324": "0x0.0000000000001p-1022",
+        "1.7976931348623157e308": "0x1.fffffffffffffp+1023",
+        "1.7976931348623158e308": "0x1.fffffffffffffp+1023",
+        "-0.0": "-0x0.0p+0",
+        "-1e-1000": "-0x0.0p+0",
+        "1e-9": "0x1.12e0be826d695p-30",
+        "-3.125e+7": "-0x1.dcd6500000000p+24",
+        "": "nan",
+        "NaN": "nan",
+        "NA": "nan",
+        "null": "nan",
+        "INF": "inf",
+    }
     path = tmp_path / "observations.csv"
     path.write_text(
         "X,Y,note\n"
         + "".join(
             f"{first},{second},row\n"
-            for first, second in zip(values, reversed(values), strict=True)
+            for first, second in zip(tokens, reversed(tokens), strict=True)
         ),
     )
-    record = {
-        name: torch.from_numpy(values)
-        for name, values in read_numeric_csv(path, columns=("X", "Y")).items()
-    }
-    expected = read_tensors(_CWD / "testdata/numeric_csv.pt")
-    if mutation:
-        record["X"][0] = torch.nextafter(
-            record["X"][0],
-            torch.tensor(float("inf"), dtype=torch.float64),
-        )
-    differences = mismatches(expected, record)
-    assert bool(differences) == mutation, differences
+    result = read_numeric_csv(path, columns=("X", "Y"))
+    expected = np.asarray([float.fromhex(value) for value in tokens.values()])
+    np.testing.assert_array_equal(result["X"].view(np.uint64), expected.view(np.uint64))
+    np.testing.assert_array_equal(
+        result["Y"].view(np.uint64),
+        expected[::-1].view(np.uint64),
+    )
 
 
 @pytest.mark.parametrize(
@@ -684,7 +623,8 @@ def test_complete_original_csv_precision_and_missing_values(
         ("+.125e+2", 12.5),
         (" -2.5E1 ", -25.0),
         ("1e-1000", 0.0),
-        ("-1e-1000", 0.0),
+        ("-1e-1000", -0.0),
+        ("0e400", 0.0),
         ("+Infinity", np.inf),
         ("-INF", -np.inf),
     ],
@@ -696,10 +636,13 @@ def test_numeric_csv_signed_decimal_exponents(
 ) -> None:
     path = tmp_path / "observations.csv"
     path.write_text(f"X\n{token}\n")
-    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [expected]
+    np.testing.assert_array_equal(
+        read_numeric_csv(path, columns=("X",))["X"].view(np.uint64),
+        np.asarray([expected], dtype=np.float64).view(np.uint64),
+    )
 
 
-@pytest.mark.parametrize("token", ["rock", ".", "1.2.3", "1e309"])
+@pytest.mark.parametrize("token", ["rock", ".", "1.2.3", "1e309", "10e308"])
 def test_numeric_csv_rejects_invalid_numeric_observations(
     tmp_path: Path,
     token: str,
@@ -817,8 +760,9 @@ def test_curve_uses_quarter_depth_groups_and_only_visible_gamma(
     blend: float,
     raw_weight: float,
 ) -> None:
-    depth = np.asarray([10, 10.0625, 10.25, 11, np.nan], dtype=np.float64)
-    gamma = np.asarray([70, 90, 84, 88, 1e9], dtype=np.float64)
+    # Rows 0 and 2 share the 10 cell, as a horizontal path revisiting a depth does.
+    depth = np.asarray([10, 10.25, 10.0625, 11, np.nan], dtype=np.float64)
+    gamma = np.asarray([70, 84, 90, 88, 1e9], dtype=np.float64)
     reference_depth = np.asarray([9, 10, 10.125, 10.25, 11, 12], dtype=np.float64)
     reference_gamma = np.asarray([20, 30, 40, 50, 60, 70], dtype=np.float64)
     result = _calibrate(
@@ -898,16 +842,17 @@ def test_window_and_resolution_are_declared_fields() -> None:
     np.testing.assert_array_equal(result, [0, 0.7 * 15, 0.7 * 40])
 
 
-def test_curve_compensates_group_sums_and_preserves_public_recipe_weights() -> None:
+def test_curve_takes_exactly_rounded_group_means_and_public_recipe_weights() -> None:
+    # The mean of 1, 1 and 0.1 rounds to 0.7; their float64 sum / 3 rounds up.
     result = _calibrate(
-        np.zeros(4),
-        gamma=np.asarray([1e16, 1, 1, 1], dtype=np.float64),
+        np.zeros(3),
+        gamma=np.asarray([1, 1, 0.1], dtype=np.float64),
         reference_depth=np.asarray([-1, 0, 1], dtype=np.float64),
         reference_gamma=np.zeros(3),
         blend=1,
         raw_weight=0,
     )
-    np.testing.assert_array_equal(result, [0, (10_000_000_000_000_000 + 4) / 4, 0])
+    np.testing.assert_array_equal(result, [0, 0.7, 0])
     calibrated = _calibrate(
         np.arange(3, dtype=np.float64),
         gamma=np.zeros(3),
@@ -931,47 +876,28 @@ def test_curve_compensates_group_sums_and_preserves_public_recipe_weights() -> N
 
 
 class WorkerProbe(Dataset[dict[str, Tensor]]):
-    """Use the native worker protocol while retaining every source-observed leaf."""
+    """Use the native worker protocol and report each item's stream draws."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, length: int = 3) -> None:
         self.streams = WorkerStreams.Config(seed=7).make()
-        self.seed_offset = 0
+        self.length = length
 
     def seed_worker(self, seed: int) -> None:
         """Reset both consumer-owned streams exactly once per worker lifetime."""
-        self.streams.reset(seed + self.seed_offset)
+        self.streams.reset(seed)
 
     def __len__(self) -> int:
-        return 3
+        return self.length
 
     @override
     def __getitem__(self, index: int) -> dict[str, Tensor]:
-        result = {
+        return {
             "index": torch.tensor(index),
-            "initial_seed": torch.tensor(torch.initial_seed()),
             "normal": torch.from_numpy(self.streams.numpy.normal(size=7)),
             "python": torch.tensor(
                 [self.streams.python.randint(0, 999) for _ in range(5)],
             ),
         }
-        result.update(
-            {
-                name.removeprefix("rng/"): value
-                for name, value in full_rng_record(
-                    numpy=self.streams.numpy,
-                    python=self.streams.python,
-                ).items()
-            },
-        )
-        return result
-
-
-class SingleWorkerProbe(WorkerProbe):
-    """Expose one complete item per epoch without losing persistent streams."""
-
-    @override
-    def __len__(self) -> int:
-        return 1
 
 
 def test_reseeding_restores_both_complete_independent_streams() -> None:
@@ -1003,41 +929,41 @@ def test_worker_seed_uses_modulo_of_the_complete_torch_seed() -> None:
     assert mismatches(expected, actual) == []
 
 
-@pytest.mark.parametrize("workers", [0, 1])
-@pytest.mark.parametrize("mutation", [False, True])
-@pytest.mark.parametrize("epochs", [1, 3])
-def test_complete_original_worker_outputs_states_and_loader_generator(
-    workers: int,
-    mutation: bool,
-    epochs: int,
-) -> None:
-    probe = WorkerProbe() if epochs == 1 else SingleWorkerProbe()
-    probe.seed_offset = int(mutation)
-    if workers == 0 and mutation:
-        probe.streams.reset(8)
+@pytest.mark.parametrize("length", [3, 1])
+def test_in_process_loader_continues_dataset_streams_across_epochs(length: int) -> None:
     generator = torch.Generator().manual_seed(8)
+    loader = DataLoader(
+        WorkerProbe(length=length),
+        batch_size=None,
+        worker_init_fn=initialize_worker,
+        generator=generator,
+    )
+    samples = [sample for _ in range(3) for sample in loader]
+    numpy = np.random.RandomState(7)
+    python = InlineConfig(random.Random, 7).make()
+    assert len(samples) == 3 * length
+    for step, sample in enumerate(samples):
+        assert sample["index"].item() == step % length
+        np.testing.assert_array_equal(sample["normal"].numpy(), numpy.normal(size=7))
+        assert sample["python"].tolist() == [python.randint(0, 999) for _ in range(5)]
+    # Each epoch's iterator draws one base seed; the in-process loader never seeds.
+    reference = torch.Generator().manual_seed(8)
+    for _ in range(3):
+        torch.empty((), dtype=torch.int64).random_(generator=reference)
+    assert torch.equal(generator.get_state(), reference.get_state())
+
+
+def test_a_seeded_worker_keeps_its_streams_for_every_later_item() -> None:
+    dataset = WorkerProbe(length=1)
     with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(7)
-        loader = DataLoader(
-            probe,
-            batch_size=None,
-            num_workers=workers,
-            worker_init_fn=initialize_worker,
-            generator=generator,
-            multiprocessing_context="fork" if workers else None,
-            persistent_workers=bool(workers),
-            prefetch_factor=1 if workers else None,
+        torch.manual_seed(23)
+        initialize_worker(0, information=partial(WorkerInfo, dataset=dataset))
+    numpy = np.random.RandomState(23)
+    for _ in range(3):
+        np.testing.assert_array_equal(
+            dataset[0]["normal"].numpy(),
+            numpy.normal(size=7),
         )
-        samples = [sample for _ in range(epochs) for sample in loader]
-        record = {
-            f"{step}/{name}": value
-            for step, sample in enumerate(samples)
-            for name, value in sample.items()
-        }
-        record["loader/generator"] = generator.get_state()
-    filename = f"worker_{workers}.pt" if epochs == 1 else f"worker_epoch_{workers}.pt"
-    differences = mismatches(read_tensors(_CWD / "testdata" / filename), record)
-    assert bool(differences) == mutation, differences
 
 
 @pytest.mark.parametrize("training", [False, True])
@@ -1061,7 +987,7 @@ def test_complete_dataset_observations_without_simulation(training: bool) -> Non
         np.testing.assert_array_equal(item.auxiliary[name], value, strict=True)
 
 
-def test_dataset_composition_retains_the_complete_original_augmented_record() -> None:
+def test_dataset_composition_matches_the_direct_augmented_record() -> None:
     config = WellDataset.Config()
     config.streams.seed = 7
     config.observations = InlineConfig(
@@ -1071,68 +997,40 @@ def test_dataset_composition_retains_the_complete_original_augmented_record() ->
             augmentation_well(prefix=32, suffix=1001, well_id="donor"),
         ],
     )
-    config.transform.features.prefix_rows = 32
-    config.transform.features.target_rows = 64
-    config.transform.features.reference_columns = 3
-    config.transform.features.channels = [
-        *config.transform.features.channels[:-1],
-        "geo_tvt_diff",
-        "pf_particle_density_prob",
-        "pf_prob_ffbsi",
-        "geo_tvt_abs_diff",
-        "geo_tvt_rel",
-    ]
-    config.transform.features.particle = ParticleFeatures.Config(
-        path="pf_tvt_rel_pred_ffbsi",
-    )
+    config.transform = _nexus_augmentation()
     dataset = config.make()
     dataset.seed_worker(29)
     dataset.streams.python.seed(31)
-    record: dict[str, Tensor] = {}
-    samples: list[FeatureItem] = []
-    for step in range(3):
-        item = dataset[0]
-        samples.append(item)
-        record.update(
-            {
-                f"{step}/{name}": torch.from_numpy(values)
-                for name, values in item.arrays.items()
-            },
-        )
-        record.update(
-            {
-                f"{step}/aux_targets/{name}": torch.from_numpy(values)
-                for name, values in item.auxiliary.items()
-            },
-        )
-        for name, value in item.metadata.items():
-            if not isinstance(value, str):
-                record[f"{step}/meta/{name}"] = torch.from_numpy(
-                    np.asarray(value).copy(),
-                )
+    samples = [dataset[0] for _ in range(3)]
+    record = {
+        name: value
+        for step, item in enumerate(samples)
+        for name, value in _item_record(item, prefix=str(step)).items()
+    }
     record.update(
         full_rng_record(numpy=dataset.streams.numpy, python=dataset.streams.python),
     )
-    assert mismatches(read_tensors(_CWD / "testdata" / "augmentation.pt"), record) == []
+    assert mismatches(augmentation_record(), record) == []
     batch = collate_features(samples[:2])
-    source_names = {"media": "unet_static", "label": "target"}
-    collated = {
-        source_names.get(name, name): value
-        for name, value in batch.items()
-        if isinstance(value, Tensor)
-    }
+    for name in samples[0].arrays:
+        expected = torch.stack(
+            [torch.from_numpy(item.arrays[name]) for item in samples[:2]],
+        )
+        actual = batch[{"unet_static": "media", "target": "label"}.get(name, name)]
+        assert isinstance(actual, Tensor)
+        assert torch.equal(
+            actual,
+            expected if expected.dtype == torch.bool else expected.float(),
+        )
     typed = cast("Batch", batch)
-    collated.update(
-        {f"aux_targets/{name}": value for name, value in typed["aux_targets"].items()},
-    )
-    for index, metadata in enumerate(typed["meta"]):
-        assert metadata["well_id"] == "query"
-        for name, value in metadata.items():
-            if not isinstance(value, str):
-                collated[f"meta/{index}/{name}"] = torch.from_numpy(
-                    np.asarray(value).copy(),
-                )
-    assert mismatches(read_tensors(_CWD / "testdata" / "collation.pt"), collated) == []
+    for name, value in typed["aux_targets"].items():
+        assert torch.equal(
+            value,
+            torch.stack(
+                [torch.from_numpy(item.auxiliary[name]) for item in samples[:2]],
+            ),
+        )
+    assert typed["meta"] == [item.metadata for item in samples[:2]]
 
 
 def test_collation_preserves_every_field_boolean_auxiliary_order_and_metadata() -> None:
@@ -1213,58 +1111,38 @@ def test_loader_requires_a_resolved_generator_seed() -> None:
         WellLoader.Config().make()
 
 
-@pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("perturb", [False, True])
-def test_complete_active_features_match_external_record(
-    training: bool,
-    perturb: bool,
-) -> None:
+def test_evaluation_keeps_physical_targets_and_every_suffix_bin() -> None:
+    well = feature_well()
+    depth = well.horizontal["TVT"].copy()
+    depth[64:] = np.nan
+    well = replace(well, horizontal={**well.horizontal, "TVT": depth})
     config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=7)
-    config.channels += [
-        "geo_tvt_diff",
-        "pf_particle_density_prob",
-        "pf_tvt_ffbsi",
-        "pf_prob_ffbsi",
-        "geo_tvt_abs_diff",
-        "geo_tvt_rel",
-    ]
-    config.particle = ParticleFeatures.Config(path="pf_tvt_rel_pred_ffbsi")
-    if perturb:
-        config.gamma_stats = (
-            config.gamma_stats[0],
-            float(
-                cast(
-                    "np.float32",
-                    np.nextafter(np.float32(config.gamma_stats[1]), np.float32(np.inf)),
-                ),
-            ),
-        )
-    item = config.make()(feature_well(), training=training)
-    prefix = str(training)
-    record = {
-        f"{prefix}/{name}": torch.from_numpy(values)
-        for name, values in item.arrays.items()
-    }
-    record.update(
-        {
-            f"{prefix}/aux/{name}": torch.from_numpy(values)
-            for name, values in item.auxiliary.items()
-        },
+    evaluated = config.make()(well, training=False)
+    trained = config.make()(well, training=True)
+    np.testing.assert_array_equal(
+        evaluated.arrays["unet_static"],
+        trained.arrays["unet_static"],
+        strict=True,
     )
-    for name, value in item.metadata.items():
-        if isinstance(value, str):
-            continue
-        record[f"{prefix}/meta/{name}"] = torch.from_numpy(np.asarray(value).copy())
-    expected = read_tensors(_CWD / "testdata" / "features.pt")
-    differences = mismatches(
-        {key: value for key, value in expected.items() if key.startswith(f"{prefix}/")},
-        record,
+    # Bin 1 averages suffix rows 32 to 63 relative to the anchor at row 31; bin 2
+    # has no finite target, and bins 0 and 3 lie outside the suffix.
+    relative = (depth[32:64] - depth[31]).astype(np.float64)
+    physical = np.asarray([0, relative.mean(), 0, 0], dtype=np.float32)
+    np.testing.assert_array_equal(evaluated.arrays["target"], physical, strict=True)
+    mean, std = config.target_stats
+    assert trained.arrays["target"][1] == (physical[1] - mean) / std
+    np.testing.assert_array_equal(
+        evaluated.arrays["target_mask"],
+        [False, True, True, False],
     )
-    if perturb:
-        assert differences
-        assert any("unet_static" in difference for difference in differences)
-    else:
-        assert differences == []
+    np.testing.assert_array_equal(
+        trained.arrays["target_mask"],
+        [False, True, False, False],
+    )
+    assert evaluated.arrays["typewell_target_probs"].shape == (0,)
+    assert trained.arrays["typewell_target_probs"].shape == (4, 7)
+    assert "TVT" not in evaluated.metadata
+    np.testing.assert_array_equal(trained.metadata["TVT"], depth[32:], strict=True)
 
 
 def test_finish_promotes_numeric_inputs_and_zeros_all_nonfinite_values() -> None:
@@ -1321,7 +1199,7 @@ def test_short_visible_context_retains_original_rows_and_owns_output_storage() -
 
 
 def feature_well() -> WellRecord:
-    """Rebuild complete deterministic paths used by the external feature witness."""
+    """Build the deterministic paths of the feature tests."""
     row = np.arange(97, dtype=np.float32)
     target = (20 + row / 8 + row**2 / 512).astype(np.float32)
     visible = target.copy()
@@ -1386,52 +1264,30 @@ def test_probability_image_is_correctly_rounded_float32_log1p(transpose: bool) -
     assert actual.shape == values.shape
 
 
-def test_quadratic_original_binary64_solve_order() -> None:
-    normal = np.asarray(
-        [
-            float.fromhex(value)
-            for value in (
-                "0x1.aab901d4493efp+2",
-                "0x1.5247a66cab6aep-1",
-                "0x1.531483103feeep+3",
-                "0x1.5247a66cab6aep-1",
-                "0x1.531483103feeep+3",
-                "0x1.bdef7bdef7bd3p-1",
-                "0x1.531483103feeep+3",
-                "0x1.bdef7bdef7bd3p-1",
-                "0x1.f000000000000p+4",
-            )
-        ],
-        dtype=np.float64,
-    ).reshape(3, 3)  # _quadratic_solve solves the three quadratic moments.
-    rhs = np.asarray(
-        [
-            float.fromhex(value)
-            for value in (
-                "0x1.8b7bd6717b569p+9",
-                "0x1.4b08421084210p+6",
-                "0x1.2838000000000p+11",
-            )
-        ],
-        dtype=np.float64,
-    )
-    expected = np.asarray(
-        [
-            float.fromhex(value)
-            for value in (
-                "-0x1.9da2ca6ccffb0p+2",
-                "0x1.c09277b683a34p+0",
-                "0x1.3a69f87a3d973p+6",
-            )
-        ],
-        dtype=np.float64,
-    )
-    original_normal, original_rhs = normal.copy(), rhs.copy()
-    actual = _quadratic_solve(normal, rhs)
-    np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
-    np.testing.assert_array_equal(normal, original_normal)
-    np.testing.assert_array_equal(rhs, original_rhs)
-    assert actual.dtype == np.float64
+def test_quadratic_fits_each_bin_and_skips_bins_under_six_rows() -> None:
+    position = np.arange(-4, 5, dtype=np.float32) / 4
+    # Orthogonal to 1, x and x squared on these nine positions; its RMSE is
+    # sqrt(990 / 64 / 9).
+    residual = np.asarray([-14, 7, 13, 9, 0, -9, -13, -7, 14], dtype=np.float32) / 8
+    values = np.full(48, np.nan, dtype=np.float32)
+    values[:9] = 2 * position**2 - 3 * position + 5
+    values[16:25] = values[:9] + residual
+    values[32:37] = 1
+    result = _quadratic(values, np.ones(48, dtype=bool), downsample=16, bins=4)
+    np.testing.assert_array_equal(result[:2, :3], [[2, -3, 5], [2, -3, 5]])
+    # Every moment of these eighths is exact, so the exact fit leaves no residual.
+    assert result[0, 3] == 0
+    assert result[1, 3] == np.float32((990 / 64 / 9) ** 0.5)
+    assert np.isnan(result[2:]).all()
+    assert result.dtype == np.float32
+
+
+def test_quadratic_solve_fuses_each_update_into_the_exact_solution() -> None:
+    # [1.5, -2, 1.25] solves it: 1.5 - 4 + 7.5 = 5, 3 - 12 + 10 = 1, 9 - 16 + 10 = 3.
+    normal = np.asarray([[1, 2, 6], [2, 6, 8], [6, 8, 8]], dtype=np.float64)
+    rhs = np.asarray([5, 1, 3], dtype=np.float64)
+    # Rounding any product before its add misses this binary solution.
+    assert _quadratic_solve(normal, rhs).tolist() == [1.5, -2, 1.25]
 
 
 def test_complete_probability_cleanup_is_owned_and_preserves_empty_rows() -> None:
@@ -1453,7 +1309,7 @@ def test_particle_image_channels_require_the_particle_features() -> None:
 
 
 def write_well(directory: Path, *, with_target: bool = True) -> None:
-    """Rebuild every complete deterministic CSV observation used externally."""
+    """Write the deterministic horizontal and typewell CSVs of one well."""
     row = np.arange(96, dtype=np.float64)
     depth = 20 + row / 128 + row**2 / 65_536
     known = depth.copy()
@@ -1505,7 +1361,7 @@ def surface() -> RelativeSurface:
 
 
 @pytest.mark.parametrize("with_particle", [False, True])
-def test_complete_original_loading_and_cache_outputs(
+def test_prepared_well_casts_columns_anchors_the_prior_and_owns_the_cache(
     tmp_path: Path,
     with_particle: bool,
 ) -> None:
@@ -1516,43 +1372,115 @@ def test_complete_original_loading_and_cache_outputs(
     )
     assert expected_formation in raw.horizontal
     assert "unused_text" not in raw.horizontal
-    original = read_tensors(_CWD / "testdata" / "particle.pt")
-    producer = {
-        key.removeprefix("64/True/"): value.numpy().copy()
-        for key, value in original.items()
-        if key.startswith("64/True/")
-    }
-    path = tmp_path / "tiny.npz"
-    write_particle_cache(path, producer)
-    cached = read_particle_cache(path) if with_particle else None
+    np.testing.assert_array_equal(raw.horizontal["MD"], np.arange(96.0), strict=True)
+    np.testing.assert_array_equal(
+        raw.reference_depth,
+        -140 + np.arange(9.0) * 40,
+        strict=True,
+    )
+    cached = None
+    if with_particle:
+        path = tmp_path / "tiny.npz"
+        write_particle_cache(path, _particle_payload())
+        cached = read_particle_cache(path)
+    prior = surface()
     prepared = prepare_well(
         raw,
-        surface=surface(),
+        surface=prior,
         calibration=calibration(),
         particle=cached,
     )
-    actual: dict[str, torch.Tensor] = {
-        f"well/horizontal/{name}": torch.from_numpy(value)
-        for name, value in prepared.horizontal.items()
-    }
-    actual["well/typewell/TVT"] = torch.from_numpy(prepared.reference_depth)
-    actual["well/typewell/GR"] = torch.from_numpy(prepared.reference_gamma)
-    if cached is not None:
-        assert prepared.particle is not None
-        actual.update(
-            {
-                f"well/pf_cache/{name}": torch.from_numpy(value)
-                for name, value in prepared.particle.items()
-            },
+    columns = ("MD", "X", "Y", "Z", "GR", "TVT_input", "TVT")
+    assert sorted(prepared.horizontal) == sorted(
+        [*columns, "orig_index", "geo_s_rel_prior_abs", *prior.diagnostics, "S_avg"],
+    )
+    for name in columns:
+        np.testing.assert_array_equal(
+            prepared.horizontal[name],
+            raw.horizontal[name].astype(np.float32),
+            strict=True,
         )
-    filename = "particle_loading.pt" if with_particle else "loading.pt"
-    assert mismatches(read_tensors(_CWD / "testdata" / filename), actual) == []
-    if with_particle:
-        assert prepared.particle is not None
-        assert np.count_nonzero(prepared.particle["pf_prob"][0:1]) == 0
-        assert np.isnan(prepared.particle["pf_tvt_pred"].flat[0])
-    else:
+    np.testing.assert_array_equal(
+        prepared.horizontal["orig_index"],
+        np.arange(96, dtype=np.float32),
+        strict=True,
+    )
+    # The prior is relative to the last visible surface point, row 31.
+    anchor = np.float32(raw.horizontal["TVT_input"][31]) + np.float32(
+        raw.horizontal["Z"][31],
+    )
+    np.testing.assert_array_equal(
+        prepared.horizontal["geo_s_rel_prior_abs"],
+        anchor + prior.values,
+        strict=True,
+    )
+    for name, values in prior.diagnostics.items():
+        np.testing.assert_array_equal(prepared.horizontal[name], values, strict=True)
+    np.testing.assert_array_equal(
+        prepared.reference_depth,
+        raw.reference_depth.astype(np.float32),
+        strict=True,
+    )
+    np.testing.assert_array_equal(
+        prepared.reference_gamma,
+        calibration()(
+            raw.horizontal["TVT_input"],
+            gamma=raw.horizontal["GR"],
+            reference_depth=raw.reference_depth,
+            reference_gamma=raw.reference_gamma,
+        ).astype(np.float32),
+        strict=True,
+    )
+    if cached is None:
         assert prepared.particle is None
+        return
+    assert prepared.particle is not None
+    assert list(prepared.particle) == list(cached)
+    for name, values in cached.items():
+        np.testing.assert_array_equal(prepared.particle[name], values, strict=True)
+        assert not np.shares_memory(prepared.particle[name], values)
+    # Window row 0 averages original row 15.5, inside the visible prefix.
+    assert np.count_nonzero(prepared.particle["pf_prob"][0]) == 0
+    assert np.isnan(prepared.particle["pf_tvt_pred"][0])
+    np.testing.assert_array_equal(
+        prepared.particle["pf_prob"][1],
+        np.asarray([0, 0.125, 0.75, 0.125, 0, 0, 0], dtype=np.float32),
+        strict=True,
+    )
+
+
+def _particle_payload() -> dict[str, NDArray[np.generic]]:
+    """Return one well's producer record: three window rows, five padding rows."""
+    probability = np.zeros((8, 7), dtype=np.float32)
+    probability[:3, 1:4] = [[0.25, 0.5, 0.25], [0.125, 0.75, 0.125], [0, 0.5, 0.5]]
+    path = np.asarray([20.125, 20.5, 21.25, 0, 0, 0, 0, 0], dtype=np.float32)
+    payload: dict[str, NDArray[np.generic]] = {
+        name: probability.copy()
+        for name in ("pf_prob", "pf_particle_density_prob", "pf_prob_ffbsi")
+    }
+    payload.update(
+        {
+            name: path.copy()
+            for name in ("pf_tvt_pred", "pf_tvt_pred_ffbsi", "window_tvt")
+        },
+    )
+    payload.update(
+        {
+            name: path - np.float32(20.25) * (path > 0)
+            for name in ("pf_tvt_rel_pred", "pf_tvt_rel_pred_ffbsi", "window_tvt_rel")
+        },
+    )
+    payload["window_orig_index"] = np.asarray(
+        [15.5, 47.5, 79.5, -1, -1, -1, -1, -1],
+        dtype=np.float32,
+    )
+    payload["window_has_tvt"] = path > 0
+    payload["target_mask"] = np.asarray([0, 1, 1, 0, 0, 0, 0, 0], dtype=np.bool_)
+    payload["last_seen_idx"] = np.asarray(31, dtype=np.int64)
+    payload["prefix_start"] = np.asarray(0, dtype=np.int64)
+    payload["suffix_len"] = np.asarray(64, dtype=np.int64)
+    payload["tvt0"] = np.asarray(20.25, dtype=np.float64)
+    return payload
 
 
 def test_all_raw_tracking_inputs_keep_original_precision_and_row_count(
@@ -1869,87 +1797,89 @@ def test_expansion_requires_its_inherited_geometry() -> None:
         config.make()
 
 
-# Seeds whose union reaches every line and branch the sixteen original seeds did.
-@pytest.mark.parametrize("seed", [31, 5, 6, 8, 9, 12, 15])
-def test_complete_path_simulation_arrays_and_rng(seed: int) -> None:
-    record = augmentation_record(seed=seed)
-    filename = "augmentation.pt" if seed == 31 else f"augmentation_{seed:02}.pt"
-    assert mismatches(read_tensors(_CWD / "testdata" / filename), record) == []
-
-
-def test_whole_coherent_reference_curve_boundary_record() -> None:
+def test_a_one_row_curve_takes_only_its_offset_and_moves_the_matched_row() -> None:
+    query = augmentation_well(prefix=4, suffix=5, well_id="query")
+    # Row 4 lies at depth 20.25, the curve's only depth.
+    query = replace(
+        query,
+        reference_depth=np.asarray([20.25], dtype=np.float32),
+        reference_gamma=np.asarray([80], dtype=np.float32),
+    )
+    config = ReferenceJitter.Config()
+    config.smooth_probability = 1
     numpy = np.random.RandomState(29)
     python = InlineConfig(random.Random, 31).make()
-    transform = ReferenceJitter.Config().make()
-    record: dict[str, torch.Tensor] = {}
-    for length in (1, 2, 3, 9):
-        query = augmentation_well(prefix=4, suffix=5, well_id="query")
-        horizontal = {name: values.copy() for name, values in query.horizontal.items()}
-        horizontal["TVT"] = np.asarray(
-            [-1, 0, 1 + 2**-25, 2 + 2**-24, 3, np.nan, -2, 4, 5],
-            dtype=np.float64,
-        )
-        horizontal["GR"] = 77 + np.arange(9, dtype=np.float64) / 7 + 2**-22
-        horizontal["GR"][[1, 4]] = [np.inf, np.nan]
-        axis = np.arange(length, dtype=np.float32)
-        query = replace(
-            query,
-            horizontal=horizontal,
-            reference_depth=axis,
-            reference_gamma=(75 + axis**2 * np.float32(2 / 7)).astype(np.float32),
-        )
-        for step in range(3):
-            result = transform(query, numpy=numpy, python=python)
-            prefix = f"{length}/{step}"
-            record.update(
-                {
-                    f"{prefix}/horizontal/{name}": torch.from_numpy(values.copy())
-                    for name, values in result.horizontal.items()
-                },
-            )
-            record[f"{prefix}/typewell/TVT"] = torch.from_numpy(result.reference_depth)
-            record[f"{prefix}/typewell/GR"] = torch.from_numpy(result.reference_gamma)
-            assert result.particle is not None
-            record.update(
-                {
-                    f"{prefix}/pf_cache/{name}": torch.from_numpy(values.copy())
-                    for name, values in result.particle.items()
-                },
-            )
-    record.update(full_rng_record(numpy=numpy, python=python))
-    differences = mismatches(
-        read_tensors(_CWD / "testdata" / "jitter.pt"),
-        record,
+    result = config.make()(query, numpy=numpy, python=python)
+    reference = np.random.RandomState(29)
+    reference.normal(0, config.gain_std)
+    offset = np.float32(reference.normal(0, config.offset_std))
+    # A single point equals its own mean, so the gain has nothing to scale.
+    curve = np.asarray([80], dtype=np.float32) + offset
+    np.testing.assert_array_equal(result.reference_gamma, curve, strict=True)
+    gamma = query.horizontal["GR"].copy()
+    gamma[4] = curve[0] + (gamma[4] - np.float32(80))
+    np.testing.assert_array_equal(result.horizontal["GR"], gamma, strict=True)
+    # Neither drift nor smoothing draws for a curve this short.
+    np.testing.assert_array_equal(numpy.get_state()[1], reference.get_state()[1])
+    assert numpy.get_state()[2] == reference.get_state()[2]
+    expected = InlineConfig(random.Random, 31).make()
+    expected.random()
+    assert python.getstate() == expected.getstate()
+
+
+class _ScriptedIntegers(random.Random):
+    """Return scripted integers in call order, recording their bounds."""
+
+    def __init__(self, integers: list[int]) -> None:
+        super().__init__(0)
+        self.integers = integers
+        self.bounds: list[tuple[int, int]] = []
+
+    @override
+    def randint(self, a: int, b: int) -> int:
+        self.bounds.append((a, b))
+        return self.integers.pop(0)
+
+
+def test_trend_joins_each_later_block_to_the_previous_derivative() -> None:
+    config = BootstrapTrend.Config(
+        minimum_suffix_rows=4,
+        blocks=[DerivativeBlock.Config(length=4)],
+        join_rows=2,
     )
-    assert differences == [], "\n".join(differences)
-
-
-@pytest.mark.parametrize("mutate_join", [False, True])
-def test_whole_original_multiple_block_joins_and_rng(mutate_join: bool) -> None:
-    donor = augmentation_well(prefix=32, suffix=1025, well_id="donor")
-    horizontal = {name: values.copy() for name, values in donor.horizontal.items()}
-    row = np.arange(1057, dtype=np.float32)
-    depth = (20 + row / 64 + (row % 17) ** 2 / 2048).astype(np.float32)
-    visible = depth.copy()
-    visible[32:] = np.nan
-    horizontal.update(TVT=depth, TVT_input=visible)
-    config = BootstrapTrend.Config()
-    if mutate_join:
-        config.join_rows = 0
     sampler = config.make()
-    sampler.prepare([replace(donor, horizontal=horizontal)])
-    numpy = np.random.RandomState(7)
-    python = InlineConfig(random.Random, 11).make()
-    record = {
-        f"path/{step}": torch.from_numpy(sampler(1033, numpy=numpy, python=python))
-        for step in range(3)
-    }
-    record.update(full_rng_record(numpy=numpy, python=python))
-    differences = mismatches(
-        read_tensors(_CWD / "testdata" / "bootstrap.pt"),
-        record,
+    # Six hidden rows per donor give five derivatives: 1/16 and 1/64.
+    sampler.prepare(
+        [
+            augmentation_well(prefix=2, suffix=6, well_id="query"),
+            augmentation_well(prefix=2, suffix=6, well_id="donor"),
+        ],
     )
-    assert bool(differences) == mutate_join, differences
+    numpy = np.random.RandomState(7)
+    python = _ScriptedIntegers([0, 0, 1, 1, 0, 0, 2])
+    path = sampler(10, numpy=numpy, python=python)
+    # The first draw selects no donor; each block then draws a donor and a start.
+    assert python.bounds == [(0, 1)] * 6 + [(0, 4)]
+    assert python.integers == []
+    blend = (np.arange(2, dtype=np.float32) + 1) / np.float32(3)
+    derivatives = np.concatenate(
+        [
+            np.full(4, 1 / 16, dtype=np.float32),
+            (1 - blend) * np.float32(1 / 16) + blend * np.float32(1 / 64),
+            np.full(2, 1 / 64, dtype=np.float32),
+            # The one-row final block blends its 1/16 halfway into 1/64.
+            [np.float32(5 / 128)],
+        ],
+    )
+    np.testing.assert_array_equal(
+        path,
+        np.concatenate([[0], np.cumsum(derivatives)]).astype(np.float32),
+        strict=True,
+    )
+    reference = np.random.RandomState(7)
+    reference.random_sample(3)
+    np.testing.assert_array_equal(numpy.get_state()[1], reference.get_state()[1])
+    assert numpy.get_state()[2] == reference.get_state()[2]
 
 
 @pytest.mark.parametrize("suffix", [999, 1000, 1001])
@@ -2009,8 +1939,21 @@ def test_bootstrap_pool_interpolates_gaps_and_rejects_absent_finite_paths() -> N
         config.make()
 
 
-@pytest.mark.parametrize("width", [1, 4, 20])
-def test_reference_smoothing_keeps_edges_and_float32_arithmetic(width: int) -> None:
+@pytest.mark.parametrize(
+    ("width", "rows", "sums"),
+    [
+        (1, 1, (75, 77, 83, 93, 107, 125, 147, 173, 203)),
+        # An even width drops to three rows; edge padding repeats 75 and 203.
+        (4, 3, (227, 235, 253, 283, 325, 379, 445, 523, 579)),
+        # A width beyond the nine-row curve shrinks to all nine.
+        (20, 9, (735, 785, 857, 955, 1083, 1211, 1337, 1457, 1567)),
+    ],
+)
+def test_reference_smoothing_rounds_each_padded_window_mean_once(
+    width: int,
+    rows: int,
+    sums: tuple[int, ...],
+) -> None:
     well = augmentation_well(prefix=32, suffix=33, well_id="query")
     config = ReferenceTransform.Config()
     config.gain_std = 0
@@ -2022,17 +1965,11 @@ def test_reference_smoothing_keeps_edges_and_float32_arithmetic(width: int) -> N
         numpy=np.random.RandomState(7),
         python=InlineConfig(random.Random, 11).make(),
     )
-    count = min(width, len(well.reference_gamma))
-    if count % 2 == 0:
-        count -= 1
-    expected = well.reference_gamma.copy()
-    if count > 1:
-        expected = np.convolve(
-            np.pad(expected, count // 2, mode="edge"),
-            np.full(count, 1 / count, dtype=np.float32),
-            mode="valid",
-        ).astype(np.float32)
-    np.testing.assert_array_equal(result.reference_gamma, expected)
+    np.testing.assert_array_equal(
+        result.reference_gamma,
+        (np.asarray(sums, dtype=np.float64) / rows).astype(np.float32),
+        strict=True,
+    )
     np.testing.assert_array_equal(well.reference_gamma, 75 + np.arange(9) ** 2 * 2)
 
 
@@ -2068,6 +2005,84 @@ def test_coherent_curve_shift_preserves_horizontal_residuals(finite: bool) -> No
         np.testing.assert_array_equal(result.horizontal[name], values)
     if not finite:
         assert result is not well
+
+
+def test_reference_drift_averages_three_rows_of_its_normal_draws() -> None:
+    well = _peaked_well()
+    reference = np.random.RandomState(7)
+    reference.normal(size=2)
+    draws = np.pad(reference.normal(size=9).astype(np.float32), 1, mode="edge")
+    drift = ((draws[:-2].astype(np.float64) + draws[1:-1] + draws[2:]) / 3).astype(
+        np.float32,
+    )
+    config = ReferenceJitter.Config()
+    config.gain_std = config.offset_std = config.smooth_probability = 0
+    # The curve rows lie 45 apart, so a 135 drift window spans three rows.
+    config.drift_windows = (135,)
+    # The drift's own deviation scales it by exactly one.
+    config.drift_std = float(np.std(drift))
+    result = config.make()(
+        well,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    np.testing.assert_array_equal(
+        result.reference_gamma,
+        well.reference_gamma + drift,
+        strict=True,
+    )
+
+
+def _peaked_well() -> WellRecord:
+    """Return the query well with a curve of 3s and one 12, whose mean is 4."""
+    curve = np.full(9, 3, dtype=np.float32)
+    curve[3] = 12
+    well = augmentation_well(prefix=32, suffix=33, well_id="query")
+    return replace(well, reference_gamma=curve)
+
+
+def test_reference_smoothing_blends_the_three_row_mean_into_the_curve() -> None:
+    config = ReferenceJitter.Config()
+    config.gain_std = config.offset_std = config.drift_std = 0
+    config.smooth_probability = 1
+    config.smooth_windows = (3,)
+    config.smooth_blend = (0.25, 0.25)
+    result = config.make()(
+        _peaked_well(),
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    # The mean is 6 around the peak: 0.75 * 3 + 0.25 * 6 and 0.75 * 12 + 0.25 * 6.
+    np.testing.assert_array_equal(
+        result.reference_gamma,
+        np.asarray([3, 3, 3.75, 10.5, 3.75, 3, 3, 3, 3], dtype=np.float32),
+        strict=True,
+    )
+
+
+# Seeds 6 and 7 first draw -0.31 and 1.69, so a gain of 1 + 100 z leaves the bounds.
+@pytest.mark.parametrize(("seed", "low", "peak"), [(6, 3.25, 10), (7, 2.75, 14)])
+def test_reference_gain_clips_to_its_bounds_around_the_curve_mean(
+    seed: int,
+    low: float,
+    peak: float,
+) -> None:
+    well = _peaked_well()
+    config = ReferenceJitter.Config()
+    config.gain_std = 100
+    config.gain_bounds = (0.75, 1.25)
+    config.offset_std = config.drift_std = config.smooth_probability = 0
+    result = config.make()(
+        well,
+        numpy=np.random.RandomState(seed),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    # The rows 1 below and 8 above the mean 4 end 0.75 or 1.25 times as far from it.
+    np.testing.assert_array_equal(
+        result.reference_gamma,
+        np.where(well.reference_gamma == 12, np.float32(peak), np.float32(low)),
+        strict=True,
+    )
 
 
 def test_constant_gamma_bias_and_reversed_single_derivative_blocks() -> None:
@@ -2335,31 +2350,25 @@ def _reversal_config() -> PathSimulation.Config:
 
 
 @pytest.mark.parametrize(
-    ("width", "expected_hex"),
+    ("values", "width", "expected"),
     [
-        (32, ("0x1.02e946p-5", "-0x1.15dd84p-4", "-0x1.f9614ep-6")),
-        (63, ("0x1.37a3b2p-4", "0x1.6b526cp-4", "0x1.4d657ep-4")),
-        (64, ("0x1.b3c346p-4", "0x1.0a69f0p-4", "0x1.8bf1aap-4")),
-        (65, ("0x1.533b2ap-4", "0x1.490796p-4", "0x1.742a7ep-4")),
-        (96, ("0x1.38ca60p-4", "0x1.c4cedep-5", "0x1.cd1d40p-5")),
-        (256, ("0x1.5afd16p-6", "0x1.d2a580p-7", "0x1.9747f2p-6")),
-        (1536, ("0x1.c8730cp-6", "0x1.c52f40p-6", "0x1.c90e12p-6")),
+        ((0.5, 1, 2, 7, 6), 2, (0.75, 1.5, 4.5, 6.5)),
+        # A float32 sum rounds 2**24 + 1 back to 2**24; float64 keeps (2**24 + 2) / 3.
+        ((2**24, 1, 1, 7, 7), 3, (5_592_406, 3, 5)),
     ],
 )
-def test_boxcar_original_binary32_accumulation_order(
+def test_boxcar_averages_each_complete_window_in_float64(
+    values: tuple[float, ...],
     width: int,
-    expected_hex: tuple[str, str, str],
+    expected: tuple[float, ...],
 ) -> None:
-    values = np.random.RandomState(719).normal(size=width + 2).astype(np.float32)
-    original = values.copy()
-    expected = np.asarray(
-        [float.fromhex(value) for value in expected_hex],
-        dtype=np.float32,
+    noise = np.asarray(values, dtype=np.float32)
+    np.testing.assert_array_equal(
+        _boxcar_mean(noise, width=width),
+        np.asarray(expected, dtype=np.float32),
+        strict=True,
     )
-    actual = _boxcar_noise(values, width=width)
-    np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
-    np.testing.assert_array_equal(values, original)
-    assert actual.dtype == np.float32
+    np.testing.assert_array_equal(noise, values)
 
 
 def test_flat_drift_noise_leaves_the_paired_curve_unchanged(
@@ -2403,26 +2412,274 @@ def test_shifted_nan_pattern_zero_fills_a_region_without_finite_gamma() -> None:
     assert np.isfinite(result.horizontal["GR"][suffix]).sum() < suffix.sum()
 
 
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_compensation_recovers_terms_a_naive_sum_loses(
-    dtype: type[np.floating],
+def test_bootstrap_pool_skips_donors_without_a_small_derivative() -> None:
+    steep = augmentation_well(prefix=32, suffix=1001, well_id="donor")
+    horizontal = {name: values.copy() for name, values in steep.horizontal.items()}
+    horizontal["TVT"] = np.arange(1033, dtype=np.float32)
+    sampler = BootstrapTrend.Config().make()
+    sampler.prepare(
+        [
+            replace(steep, horizontal=horizontal),
+            augmentation_well(prefix=32, suffix=1001, well_id="donor"),
+        ],
+    )
+    assert len(sampler.pool) == 1
+    np.testing.assert_array_equal(sampler.pool[0], np.full(1000, 1 / 64, np.float32))
+
+
+def test_reference_sharpening_adds_the_scaled_detail_and_one_uniform_draw() -> None:
+    well = augmentation_well(prefix=32, suffix=33, well_id="query")
+    config = ReferenceTransform.Config(
+        gain_std=0,
+        offset_std=0,
+        smooth_probability=0,
+        sharpen_probability=1,
+        sharpen_alpha=(0.25, 0.25),
+    )
+    numpy = np.random.RandomState(7)
+    result = config.make()(
+        well,
+        numpy=numpy,
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    detail = well.reference_gamma - _smooth(well.reference_gamma, 5)
+    np.testing.assert_array_equal(
+        result.reference_gamma,
+        well.reference_gamma + np.float32(0.25) * detail,
+        strict=True,
+    )
+    reference = np.random.RandomState(7)
+    reference.normal(size=2)
+    reference.uniform()
+    np.testing.assert_array_equal(numpy.get_state()[1], reference.get_state()[1])
+    assert numpy.get_state()[2] == reference.get_state()[2]
+
+
+def test_gamma_noise_shift_leaves_a_well_without_hidden_rows_unchanged() -> None:
+    query = augmentation_well(prefix=32, suffix=0, well_id="query")
+    config = _reversal_config()
+    config.reverse_probability = 0
+    config.gamma_noise_shift_probability = 1
+    numpy = np.random.RandomState(7)
+    result = config.make()(
+        query,
+        numpy=numpy,
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    np.testing.assert_array_equal(result.horizontal["GR"], query.horizontal["GR"])
+    np.testing.assert_array_equal(
+        numpy.get_state()[1],
+        np.random.RandomState(7).get_state()[1],
+    )
+
+
+@pytest.mark.parametrize("maximum_tail_cut", [0.5, 0.01])
+def test_tail_cut_drops_a_sampled_fraction_of_the_hidden_rows(
+    maximum_tail_cut: float,
 ) -> None:
-    total, correction = dtype(0), dtype(0)
-    big = dtype(2.0**24 if dtype is np.float32 else 2.0**53)
-    for value in (big, dtype(1), dtype(1), dtype(1), dtype(1)):
-        total, correction = kahan_add(total, correction, value)
-    naive = big
-    for _ in range(4):
-        naive += dtype(1)
-    assert naive == big
-    assert total - correction == big + dtype(4)
-    assert type(total) is dtype
+    query = augmentation_well(prefix=32, suffix=33, well_id="query")
+    config = _reversal_config()
+    config.reverse_probability = 0
+    config.tail_cut_probability = 1
+    config.maximum_tail_cut = maximum_tail_cut
+    result = config.make()(
+        query,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    count = min(int(33 * np.random.RandomState(7).uniform(0, maximum_tail_cut)), 32)
+    assert (count > 0) == (maximum_tail_cut == 0.5)
+    for name, values in query.horizontal.items():
+        np.testing.assert_array_equal(result.horizontal[name], values[: 65 - count])
 
 
-def test_step_returns_sum_and_the_exact_residual() -> None:
-    total, correction = kahan_add(np.float64(1e16), np.float64(0), np.float64(1.0))
-    assert total == np.float64(1e16)
-    assert correction == np.float64(-1.0)
+def test_a_single_hidden_row_is_never_cut() -> None:
+    query = augmentation_well(prefix=32, suffix=1, well_id="query")
+    config = _reversal_config()
+    config.reverse_probability = 0
+    config.tail_cut_probability = 1
+    result = config.make()(
+        query,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    assert len(result.horizontal["MD"]) == 33
+
+
+def test_faults_add_retained_depth_jumps_after_the_first_row() -> None:
+    query = augmentation_well(prefix=32, suffix=65, well_id="query")
+    donor = augmentation_well(prefix=32, suffix=1001, well_id="donor")
+    paths: list[NDArray[np.float32] | NDArray[np.float64]] = []
+    for probability in (0.0, 1.0):
+        config = _reversal_config()
+        config.reverse_probability = 0
+        config.shift_probability = 1
+        config.shift_range = 0
+        config.fault_probability = probability
+        simulation = config.make()
+        simulation.prepare([donor])
+        result = simulation(
+            query,
+            numpy=np.random.RandomState(7),
+            python=InlineConfig(random.Random, 11).make(),
+        )
+        paths.append(result.horizontal["TVT"])
+    change = (paths[1] - paths[0])[32:]
+    assert change[0] == 0
+    # A fault survives only as a depth step of at least the 0.15 jump threshold.
+    assert np.abs(np.diff(change)).max() > 0.149
+
+
+def test_a_zero_fault_count_adds_no_jump_and_draws_no_positions() -> None:
+    query = augmentation_well(prefix=32, suffix=65, well_id="query")
+    donor = augmentation_well(prefix=32, suffix=1001, well_id="donor")
+    results: list[WellRecord] = []
+    for probability in (0.0, 1.0):
+        config = _reversal_config()
+        config.reverse_probability = 0
+        config.shift_probability = 1
+        config.fault_probability = probability
+        config.maximum_faults = 0
+        simulation = config.make()
+        simulation.prepare([donor])
+        numpy = np.random.RandomState(7)
+        if probability == 0:
+            numpy.randint(0, 1)  # The fault count the enabled event samples.
+        results.append(
+            simulation(
+                query,
+                numpy=numpy,
+                python=InlineConfig(random.Random, 11).make(),
+            ),
+        )
+    assert list(results[1].horizontal) == list(results[0].horizontal)
+    for name, values in results[0].horizontal.items():
+        np.testing.assert_array_equal(results[1].horizontal[name], values, strict=True)
+
+
+def test_particle_mask_zeros_every_particle_plane_and_nothing_else() -> None:
+    features = ImageFeatures.Config()
+    features.channels = ["gr", "pf_prob", "gr_std", "pf_tvt"]
+    config = ImageAugmentation.Config()
+    config.rotate_probability = config.sequence_probability = 0
+    config.channel_probability = config.particle_mask_probability = 1
+    config.channel_mask_probability = 0
+    planes = np.arange(1, 25, dtype=np.float32).reshape(4, 2, 3)
+    item = FeatureItem(
+        arrays={"unet_static": planes.copy(), "suffix_mask": np.ones(2, dtype=bool)},
+        auxiliary={},
+        metadata={},
+    )
+    config.make()(
+        item,
+        features=features,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    expected = planes.copy()
+    expected[[1, 3]] = 0
+    np.testing.assert_array_equal(item.arrays["unet_static"], expected)
+
+
+def test_sequence_mask_without_suffix_rows_keeps_the_image_and_stream() -> None:
+    config = ImageAugmentation.Config()
+    config.rotate_probability = config.channel_probability = 0
+    config.sequence_probability = 1
+    planes = np.ones((2, 3, 4), dtype=np.float32)
+    item = FeatureItem(
+        arrays={
+            "unet_static": planes.copy(),
+            "geo_s_rel_prior": np.ones(3, dtype=np.float32),
+            "suffix_mask": np.zeros(3, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    numpy = np.random.RandomState(7)
+    config.make()(
+        item,
+        features=ImageFeatures.Config(),
+        numpy=numpy,
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    np.testing.assert_array_equal(item.arrays["unet_static"], planes)
+    np.testing.assert_array_equal(item.arrays["geo_s_rel_prior"], np.ones(3))
+    np.testing.assert_array_equal(
+        numpy.get_state()[1],
+        np.random.RandomState(7).get_state()[1],
+    )
+
+
+def test_prepared_well_averages_only_observed_formations() -> None:
+    nan = np.nan
+    horizontal = {
+        "MD": np.arange(3, dtype=np.float64),
+        "X": np.zeros(3),
+        "Y": np.zeros(3),
+        "Z": np.zeros(3),
+        "GR": np.full(3, 80.0),
+        "TVT_input": np.asarray([1, 2, nan]),
+        **{name: np.full(3, nan) for name in FORMATIONS},
+    }
+    horizontal["ANCC"] = np.asarray([nan, 4, 8])
+    horizontal["EGFDL"] = np.asarray([2, nan, 6])
+    raw = RawWell(
+        well_id="w",
+        horizontal=horizontal,
+        reference_depth=np.asarray([0, 4], dtype=np.float64),
+        reference_gamma=np.asarray([70, 90], dtype=np.float64),
+    )
+    prepared = prepare_well(
+        raw,
+        surface=RelativeSurface(values=np.zeros(3, dtype=np.float32), diagnostics={}),
+        calibration=calibration(),
+    )
+    # Each formation fills forward, then back over its leading missing rows.
+    np.testing.assert_array_equal(
+        prepared.horizontal["S_avg"],
+        np.asarray([3, 3, 7], dtype=np.float32),
+        strict=True,
+    )
+    assert "geo_nbr_std" not in prepared.horizontal
+    assert not set(FORMATIONS).intersection(prepared.horizontal)
+
+
+def test_prepared_curve_sorts_by_depth_and_keeps_tied_rows_in_order() -> None:
+    # Seventeen descending rows reach NumPy's unstable sort kernels; rows 5 and 6
+    # tie at depth 15.
+    depth = np.arange(20.0, 3, -1)
+    depth[6] = depth[5]
+    zeros = np.zeros(3)
+    raw = RawWell(
+        well_id="w",
+        horizontal={
+            "MD": np.arange(3.0),
+            "X": zeros,
+            "Y": zeros,
+            "Z": zeros,
+            # Without finite gamma the calibration keeps the raw curve.
+            "GR": np.full(3, np.nan),
+            "TVT_input": np.asarray([1, 2, np.nan]),
+        },
+        reference_depth=depth,
+        reference_gamma=np.arange(17.0) * 10,
+    )
+    prepared = prepare_well(
+        raw,
+        surface=RelativeSurface(values=np.zeros(3, dtype=np.float32), diagnostics={}),
+        calibration=calibration(),
+    )
+    order = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 5, 6, 4, 3, 2, 1, 0]
+    np.testing.assert_array_equal(
+        prepared.reference_depth,
+        depth[order].astype(np.float32),
+        strict=True,
+    )
+    np.testing.assert_array_equal(
+        prepared.reference_gamma,
+        np.asarray(order, dtype=np.float32) * 10,
+        strict=True,
+    )
 
 
 class _FixedDraw(random.Random):

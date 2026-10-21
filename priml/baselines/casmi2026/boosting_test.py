@@ -1,4 +1,4 @@
-"""Complete source-fitted tree replay without a LightGBM runtime dependency."""
+"""Checks for the boosting module."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from priml.baselines.casmi2026.boosting import (
     DecisionTree,
     LightGBMModel,
 )
-from priml.testing.golden import mismatches, read_tensors
+from priml.baselines.casmi2026.testing import float32_comparands
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -54,10 +55,9 @@ def tiny_text(expected: dict[str, Tensor], case: int) -> str:
     return "\n".join([*header, "end of trees"])
 
 
-def test_all_trees_missing_directions_and_three_round_predictions_match_source() -> (
-    None
-):
-    expected = read_tensors(GOLDEN)
+def test_all_trees_missing_directions_and_three_round_predictions() -> None:
+    golden = GOLDEN
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     for case in range(8):
         prefix = f"case{case}"
@@ -74,8 +74,10 @@ def test_all_trees_missing_directions_and_three_round_predictions_match_source()
             actual[f"{prefix}/round{rounds}"] = torch.from_numpy(
                 model.predict(query, rounds=rounds),
             )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        golden,
+        float32_comparands(actual, inputs=("*/query", "*/tree*")),
+    )
 
 
 @pytest.mark.parametrize(

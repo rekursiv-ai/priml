@@ -43,10 +43,11 @@ from priml.baselines.casmi2026.pubchem import (
     molecule_logits,
 )
 from priml.baselines.casmi2026.testing import (
+    float32_comparands,
     retrieval_inputs,
 )
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -66,7 +67,8 @@ def test_entire_pubchem_runner_bank_screen_and_all_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
+    golden = _BASELINE / "testdata/pubchem.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -151,7 +153,7 @@ def test_entire_pubchem_runner_bank_screen_and_all_diagnostics(
             clock=clock.__next__,
         )
         observe(actual, "probe/" + name, result)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         bank = tiny_pubchem_bank(tmp_path)
         spectra: list[SpectrumRequest] = [
             {
@@ -279,8 +281,10 @@ def test_entire_pubchem_runner_bank_screen_and_all_diagnostics(
             is not None
         }
         observe(actual, "runner", results)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        golden,
+        float32_comparands(actual, inputs=("pool/mass", "store/mass")),
+    )
 
 
 def test_pubchem_majority_ties_retain_first_encounter_and_single_zero_count(
@@ -462,7 +466,7 @@ def test_run_converts_integer_precursors_in_double_precision_and_names_the_query
             "mode": 1,
         },
     ]
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         result = screen.run(
             "molecule-9",
             spectra,
@@ -616,7 +620,7 @@ def test_pubchem_native_boundaries_keep_missing_staging_errors(
             bits=pool.bits,
             pool_keys=set(),
         )
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         bank = tiny_pubchem_bank(tmp_path)
         assert (
             screen.run(
@@ -757,7 +761,7 @@ def test_pubchem_store_rejects_malformed_arrays_and_pickle_payloads(
         )
 
 
-def test_pubchem_pool_and_popularity_promotions_preserve_source_precision(
+def test_pubchem_pool_and_popularity_promotions_keep_full_precision(
     tmp_path: Path,
 ) -> None:
     expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
@@ -807,7 +811,7 @@ def test_pubchem_pool_and_popularity_promotions_preserve_source_precision(
     assert result[4].get("top_pop") == 1.0 + 2**-11
 
 
-def test_screening_edges_preserve_first_stage_precision_mask_union_and_limit(
+def test_screening_edges_keep_the_mask_union_and_limit(
     tmp_path: Path,
 ) -> None:
     expected = read_tensors(_BASELINE / "testdata/pubchem.pt")
@@ -840,7 +844,8 @@ def test_screening_edges_preserve_first_stage_precision_mask_union_and_limit(
         bits=bits,
         pool_keys=set(),
     )
-    assert result[1] == ["COC"]
+    # Both rows score 1e8 + 1 - 1e8 = 1 exactly; the stable tie keeps CCN.
+    assert result[1] == ["CCN"]
     assert result[4]["fz_top"] == 1.0
     config.pass_one = 3
     result = config.make().probe(
@@ -852,13 +857,13 @@ def test_screening_edges_preserve_first_stage_precision_mask_union_and_limit(
         bits=bits,
         pool_keys=set(),
     )
-    assert result[1] == ["COC"]
+    assert result[1] == ["CCN"]
     assert result[4].get("S") == 0.0
     config.popularity_weight, config.popularity_union, config.limit = 0.25, 1, 25
     config.pass_one = 1
     popular = replace(
         store,
-        ls=np.array([10, 0, 100], np.float16),
+        ls=np.array([0, 10, 100], np.float16),
         lp=np.zeros(3, np.float16),
     )
     result = config.make().probe(
@@ -870,7 +875,7 @@ def test_screening_edges_preserve_first_stage_precision_mask_union_and_limit(
         bits=bits,
         pool_keys=set(),
     )
-    assert result[1] == ["CCN", "COC"]
+    assert result[1] == ["COC", "CCN"]
     assert result[4]["n_pass2"] == 2
     with pytest.raises(ValueError, match="Expected"):
         config.make().probe(
@@ -1008,7 +1013,7 @@ def write_pubchem_table(
     prefix: str,
     raw_valid: bool = True,
 ) -> list[str]:
-    """Adapt only the complete source-produced inputs to the native file schema."""
+    """Write the stored golden inputs in the native file schema."""
     count = int(expected[prefix + "/smiles/length"])
     smiles = [decode(expected[f"{prefix}/smiles/{index}"]) for index in range(count)]
     parquet.write_table(
@@ -1047,7 +1052,7 @@ def write_pubchem_table(
 
 
 def tiny_pubchem_bank(directory: Path) -> MainBank:
-    """Load both complete unchanged source checkpoint inputs, with every state checked."""
+    """Load both stored checkpoint inputs, with every state checked."""
     expected = read_tensors(_BASELINE / "testdata/neural_bank.pt")
     config = save_bank(directory, [0, 1])
     config.merged_adduct, config.single_count = first_modal_adduct, keep_count
@@ -1090,12 +1095,12 @@ def missing_prediction(*args: object, **kwargs: object) -> None:
 
 
 def decode(value: Tensor) -> str:
-    """Decode a complete source string without changing its contents."""
+    """Decode a stored string without changing its contents."""
     return bytes(from_plain(value.tolist(), list[int])).decode()
 
 
 def observe(actual: dict[str, Tensor], prefix: str, value: object) -> None:
-    """Compare every source field through a dtype-preserving replay tree."""
+    """Compare every field through a dtype-preserving replay tree."""
     if isinstance(value, np.ndarray):
         actual[prefix] = torch.from_numpy(value.copy())
     elif isinstance(value, Tensor):
@@ -1177,7 +1182,7 @@ def test_pubchem_constructor_keeps_every_store_row_model_state_and_strict_chemis
     )
     source = read_tensors(_BASELINE / "testdata/neural_bank.pt")
     config.bank = save_bank(tmp_path, [0, 1])
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         inputs = config.make().read()
     assert inputs.pool.smiles == original.smiles
     assert inputs.pool.keys == original.keys
@@ -1241,7 +1246,7 @@ def write_pool(directory: Path, *, pool: CandidatePool) -> None:
         np.save(directory / f"{name}.npy", values)
 
 
-def test_complete_source_pubchem_gate_all_thresholds_rows_and_counters() -> None:
+def test_complete_pubchem_gate_all_thresholds_rows_and_counters() -> None:
     cases = (
         ("absent", 0.0, 0.0, None, 0.0, 0.0),
         ("empty", 0.0, 0.0, None, 0.0, 0.0),
@@ -1293,13 +1298,12 @@ def test_complete_source_pubchem_gate_all_thresholds_rows_and_counters() -> None
         rows.append((name, ";".join(result.candidates)))
         stats[result.mode] += 1
         stats["promoted"] += int(result.promoted)
-    expected = read_tensors(_BASELINE / "testdata/pubchem_gate.pt")
+    golden = _BASELINE / "testdata/pubchem_gate.pt"
     actual = {
         "rows": torch.tensor(list(str(rows).encode()), dtype=torch.uint8),
         "stats": torch.tensor(list(str(stats).encode()), dtype=torch.uint8),
     }
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 if __name__ == "__main__":

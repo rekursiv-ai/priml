@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, cast
 
 import csv
+import math
 
 from treekle import from_plain
 
@@ -19,57 +21,19 @@ from priml.baselines.motor_imagery.data import (
     WindowData,
     _butterworth_bandpass,
     _causal_filter,
-    _complex_dot,
     _filter_initial_state,
-    _hypot,
     _notch,
-    _pole_polynomial,
-    _product,
-    _quotient,
-    _square_root,
+    _zero_phase_filter,
     subject_id,
     write_submission,
 )
 from priml.baselines.motor_imagery.testing import (
     source_preprocessing,
 )
-from priml.testing.golden import mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
-# exp000's filters as SciPy 1.16.3 designed them on x86_64 for filtering.pt.
-# aarch64 SciPy rounds two denominator terms differently; do not recapture there.
-_NOTCH_NUMERATOR: Final = [
-    "0x1.f57ec3b2d27d1p-1",
-    "-0x1.35f0e978b5cb3p-1",
-    "0x1.f57ec3b2d27d1p-1",
-]
-_NOTCH_DENOMINATOR: Final = ["0x1p+0", "-0x1.35f0e978b5cb3p-1", "0x1.eafd8765a4fa2p-1"]
-_BAND_NUMERATOR: Final = [
-    "0x1.fca3a679bc166p-6",
-    "0x0p+0",
-    "-0x1.fca3a679bc166p-4",
-    "0x0p+0",
-    "0x1.7d7abcdb4d10cp-3",
-    "0x0p+0",
-    "-0x1.fca3a679bc166p-4",
-    "0x0p+0",
-    "0x1.fca3a679bc166p-6",
-]
-_BAND_DENOMINATOR: Final = [
-    "0x1p+0",
-    "-0x1.44f964874b0bcp+2",
-    "0x1.673368b6f9f9dp+3",
-    "-0x1.cc42acfd270acp+3",
-    "0x1.7d7a6edb8de1ep+3",
-    "-0x1.a61081d1061eap+2",
-    "0x1.2c599bf9aab12p+1",
-    "-0x1.ef794fc9b9221p-2",
-    "0x1.7f2c89f4131c4p-5",
-]
-_SQRT3: Final = float.fromhex("0x1.bb67ae8584caap+0")
-"""The correctly rounded root of 3; a root through pow need not round to it."""
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 def test_subject_id_handles_both_published_filename_formats() -> None:
@@ -129,15 +93,25 @@ def test_submission_uses_official_ids_labels_and_fails_on_count(tmp_path: Path) 
         write_submission(output, probabilities=[float("nan")], expected_rows=1)
 
 
-@pytest.mark.parametrize("case", ["ramp", "offset"])
-def test_filters_replay_complete_published_source_outputs(case: str) -> None:
-    record = read_tensors(_CWD / "testdata" / "filtering.pt")
-    actual = source_preprocessing().make().filter(record[f"{case}/input"].numpy())
-    report = mismatches(
-        {"filtered": record[f"{case}/output"]},
-        actual={"filtered": torch.from_numpy(actual.copy())},
+def test_exp000_filter_composes_notch_then_bandpass_and_removes_dc() -> None:
+    cfg = source_preprocessing()
+    values = np.arange(0, 300, 3, dtype=np.float64)[:, None] + np.asarray(
+        [277_867.16, 251_519.55, 287_807.6],
     )
-    assert not report
+    actual = cfg.make().filter(values)
+    notch = _notch(cfg.notch_hz, quality=cfg.notch_quality, sample_rate=cfg.sample_rate)
+    band = _butterworth_bandpass(
+        cfg.band_hz,
+        order=cfg.filter_order,
+        sample_rate=cfg.sample_rate,
+    )
+    notched = _zero_phase_filter(values, b=notch[0], a=notch[1])
+    assert np.array_equal(actual, _zero_phase_filter(notched, b=band[0], a=band[1]))
+    assert actual.shape == values.shape
+    # The bandpass zero at z = 1 removes the 2.8e5 offset; the ramp is in band.
+    assert np.abs(actual).max() < 20
+    constant = cfg.make().filter(np.full((100, 3), 2.8e5))
+    assert np.abs(constant).max() < 2e-5
 
 
 @pytest.mark.parametrize("samples", [0, 9, 27])
@@ -146,170 +120,107 @@ def test_filter_requires_complete_zero_phase_padding(samples: int) -> None:
         source_preprocessing().make().filter(np.zeros((samples, 3)))
 
 
-@pytest.mark.parametrize(
-    ("roots", "coefficients"),
-    [([], [1 + 0j]), ([2 + 1j, -1 + 2j], [1 + 0j, -1 - 3j, -4 + 3j])],
-)
-def test_pole_polynomial_is_monic_and_preserves_complex_products(
-    roots: list[complex],
-    coefficients: list[complex],
-) -> None:
-    actual = _pole_polynomial(np.asarray(roots, dtype=np.complex128))
-    assert actual.dtype == np.complex128
-    assert np.array_equal(actual, np.asarray(coefficients))
-
-
-def test_exp000_design_reproduces_the_x86_reference_coefficients() -> None:
+def test_exp000_bandpass_numerator_is_a_scaled_quartic() -> None:
     cfg = source_preprocessing()
-    notch_numerator, notch_denominator = _notch(
-        cfg.notch_hz,
-        quality=cfg.notch_quality,
-        sample_rate=cfg.sample_rate,
-    )
-    zeros, poles, gain = _butterworth_bandpass(
+    band = _butterworth_bandpass(
         cfg.band_hz,
         order=cfg.filter_order,
         sample_rate=cfg.sample_rate,
     )
-    actual = {
-        "notch/numerator": notch_numerator,
-        "notch/denominator": notch_denominator,
-        "band/numerator": gain * _pole_polynomial(zeros).real,
-        "band/denominator": _pole_polynomial(poles).real,
-    }
-    expected = {
-        "notch/numerator": _NOTCH_NUMERATOR,
-        "notch/denominator": _NOTCH_DENOMINATOR,
-        "band/numerator": _BAND_NUMERATOR,
-        "band/denominator": _BAND_DENOMINATOR,
-    }
-    assert not mismatches(
-        {key: _float64(values) for key, values in expected.items()},
-        actual={key: torch.from_numpy(value.copy()) for key, value in actual.items()},
-        ulps=True,
+    # Zeros at z = 1 and z = -1 make the numerator a scaled (z**2 - 1)**4.
+    assert np.array_equal(
+        band[0],
+        band[0][0] * np.asarray([1, 0, -4, 0, 6, 0, -4, 0, 1]),
     )
 
 
-# SciPy 1.16.3 iirnotch supplied these on aarch64 with NumPy 2.5.3.
 @pytest.mark.parametrize(
-    ("center_hz", "quality", "sample_rate", "numerator", "denominator"),
-    [
-        (
-            60.0,
-            20.0,
-            500.0,
-            ["0x1.f686c73312e02p-1", "-0x1.6e53771bf8be9p+0", "0x1.f686c73312e02p-1"],
-            ["0x1p+0", "-0x1.6e53771bf8be9p+0", "0x1.ed0d8e6625c04p-1"],
-        ),
-        (
-            16.0,
-            5.0,
-            64.0,
-            ["0x1.b9feb0ecefaa2p-1", "-0x1.e78c6da74b4e9p-54", "0x1.b9feb0ecefaa2p-1"],
-            ["0x1p+0", "-0x1.e78c6da74b4e9p-54", "0x1.73fd61d9df544p-1"],
-        ),
-        (
-            0.0,
-            30.0,
-            250.0,
-            ["0x1p+0", "-0x1p+1", "0x1p+0"],
-            ["0x1p+0", "-0x1p+1", "0x1p+0"],
-        ),
-        (
-            125.0,
-            30.0,
-            250.0,
-            ["0x1.e680e1237202fp-1", "0x1.e680e1237202fp+0", "0x1.e680e1237202fp-1"],
-            ["0x1p+0", "0x1.e680e1237202fp+0", "0x1.cd01c246e405ep-1"],
-        ),
-    ],
+    ("center_hz", "quality", "sample_rate"),
+    [(50.0, 30.0, 250.0), (60.0, 20.0, 500.0), (16.0, 5.0, 64.0)],
 )
-def test_notch_matches_reference_coefficients_from_zero_through_nyquist(
+def test_notch_zeroes_its_center_and_passes_dc_and_nyquist(
     center_hz: float,
     quality: float,
     sample_rate: float,
-    numerator: list[str],
-    denominator: list[str],
 ) -> None:
-    actual = _notch(center_hz, quality=quality, sample_rate=sample_rate)
-    assert not mismatches(
-        {"numerator": _float64(numerator), "denominator": _float64(denominator)},
-        actual={
-            "numerator": torch.from_numpy(actual[0]),
-            "denominator": torch.from_numpy(actual[1]),
-        },
-        ulps=True,
+    numerator, denominator = _notch(
+        center_hz,
+        quality=quality,
+        sample_rate=sample_rate,
     )
+    assert numerator[0] == numerator[2]
+    assert denominator[0] == 1
+    assert denominator[1] == numerator[1]
+    assert denominator[2] == 2 * numerator[0] - 1
+    assert (
+        abs(
+            _response(
+                numerator,
+                denominator=denominator,
+                hz=center_hz,
+                rate=sample_rate,
+            ),
+        )
+        < 5e-14
+    )
+    for hz in (0.0, sample_rate / 2):
+        gain = abs(
+            _response(numerator, denominator=denominator, hz=hz, rate=sample_rate),
+        )
+        assert abs(gain - 1) < 1e-15
+
+
+def test_notch_at_zero_and_nyquist_is_a_double_real_zero() -> None:
+    zero = _notch(0.0, quality=30.0, sample_rate=250.0)
+    assert [values.tolist() for values in zero] == [[1, -2, 1], [1, -2, 1]]
+    numerator, denominator = _notch(125.0, quality=30.0, sample_rate=250.0)
+    assert numerator[1] == denominator[1] == 2 * numerator[0]
+    assert denominator[2] == 2 * numerator[0] - 1
 
 
 @pytest.mark.parametrize("center_hz", [-1.0, 126.0])
 def test_notch_rejects_a_center_outside_the_nyquist_band(center_hz: float) -> None:
-    with pytest.raises(ValueError, match="Notch frequency"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Notch frequency must lie between zero and Nyquist\.$",
+    ):
         _notch(center_hz, quality=30.0, sample_rate=250.0)
 
 
-# SciPy 1.16.3 butter(output="zpk") supplied these on aarch64 with NumPy 2.5.3;
-# both cases are insensitive to the per-ISA glibc hypot kernel. Order 1 pins the
-# real prototype pole's signed zero, which orders its conjugate pair, and the
-# np.sqrt center; order 6 pins the fused square and reciprocal angle division.
 @pytest.mark.parametrize(
-    ("order", "band_hz", "gain", "poles"),
-    [
-        (
-            1,
-            (8.0, 20.0),
-            "0x1.227014a7a9e9cp-2",
-            [
-                ("0x1.f6e7ece10f34cp-2", "-0x1.c02843ccfac56p-2"),
-                ("0x1.f6e7ece10f34cp-2", "0x1.c02843ccfac56p-2"),
-            ],
-        ),
-        (
-            6,
-            (3.0, 9.0),
-            "0x1.841bb1244b59dp-16",
-            [
-                ("0x1.ea5a60a568bb7p-1", "-0x1.77cc8f3f55a88p-3"),
-                ("0x1.cf1d81c9bfc03p-1", "-0x1.728675df97ab0p-3"),
-                ("0x1.abdd80a3e0e70p-1", "-0x1.8e05adbf141a1p-3"),
-                ("0x1.abdd80a3e0e70p-1", "0x1.8e05adbf141a1p-3"),
-                ("0x1.cf1d81c9bfc03p-1", "0x1.728675df97ab0p-3"),
-                ("0x1.ea5a60a568bb7p-1", "0x1.77cc8f3f55a88p-3"),
-                ("0x1.95ad3c7fa7c26p-1", "0x1.f6919d92ff177p-2"),
-                ("0x1.7b0b947ba37a1p-1", "0x1.817424cf8f6c0p-2"),
-                ("0x1.852a810e27129p-1", "0x1.0b22cce823adfp-2"),
-                ("0x1.852a810e27129p-1", "-0x1.0b22cce823adfp-2"),
-                ("0x1.7b0b947ba37a1p-1", "-0x1.817424cf8f6c0p-2"),
-                ("0x1.95ad3c7fa7c26p-1", "-0x1.f6919d92ff177p-2"),
-            ],
-        ),
-    ],
+    ("order", "band_hz", "sample_rate"),
+    [(1, (8.0, 20.0), 100.0), (6, (10.0, 30.0), 100.0), (4, (1.0, 45.0), 250.0)],
 )
-def test_butterworth_bandpass_matches_reference_zeros_poles_and_gain(
+def test_butterworth_bandpass_halves_power_at_both_edges(
     order: int,
     band_hz: tuple[float, float],
-    gain: str,
-    poles: list[tuple[str, str]],
+    sample_rate: float,
 ) -> None:
-    zeros, actual_poles, actual_gain = _butterworth_bandpass(
+    numerator, denominator = _butterworth_bandpass(
         band_hz,
         order=order,
-        sample_rate=100.0,
+        sample_rate=sample_rate,
     )
-    assert zeros.tolist() == [1] * order + [-1] * order
-    assert actual_gain == float.fromhex(gain)
-    assert not mismatches(
-        {
-            "poles": torch.tensor(
-                [
-                    complex(float.fromhex(real), float.fromhex(imag))
-                    for real, imag in poles
-                ],
-                dtype=torch.complex128,
-            ),
-        },
-        actual={"poles": torch.from_numpy(actual_poles)},
+    assert len(numerator) == len(denominator) == 2 * order + 1
+    assert denominator[0] == 1
+    for hz in band_hz:
+        power = (
+            abs(_response(numerator, denominator=denominator, hz=hz, rate=sample_rate))
+            ** 2
+        )
+        assert abs(power - 0.5) < 1e-6
+    # The band's geometric center in the prewarped domain has unit gain.
+    low, high = (4 * math.tan(math.pi * hz / sample_rate) for hz in band_hz)
+    center = 2 * math.atan((low * high) ** 0.5 / 4) * sample_rate / (2 * math.pi)
+    peak = abs(
+        _response(numerator, denominator=denominator, hz=center, rate=sample_rate),
     )
+    assert abs(peak - 1) < 1e-6
+    for hz in (0.0, sample_rate / 2):
+        assert (
+            abs(_response(numerator, denominator=denominator, hz=hz, rate=sample_rate))
+            < 1e-9
+        )
 
 
 @pytest.mark.parametrize(
@@ -319,62 +230,11 @@ def test_butterworth_bandpass_matches_reference_zeros_poles_and_gain(
 def test_butterworth_bandpass_rejects_edges_outside_the_open_band(
     band_hz: tuple[float, float],
 ) -> None:
-    with pytest.raises(ValueError, match="Band edges"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Band edges must increase strictly between zero and Nyquist\.$",
+    ):
         _butterworth_bandpass(band_hz, order=4, sample_rate=250.0)
-
-
-def test_product_rounds_each_part_once() -> None:
-    assert _product(1 + 2j, 3 + 4j) == -5 + 10j
-    # Two roundings would lose the 2**-60 term of (1 + 2**-30)**2 - 1.
-    square = _product(complex(1 + 2**-30, 1), complex(1 + 2**-30, 1))
-    assert square == complex(2**-29 + 2**-60, 2 + 2**-29)
-
-
-@pytest.mark.parametrize(
-    ("dividend", "divisor"),
-    [(10 + 5j, 2 + 1j), (5 + 10j, 1 + 2j)],
-)
-def test_quotient_scales_by_the_larger_divisor_part(
-    dividend: complex,
-    divisor: complex,
-) -> None:
-    assert _quotient(dividend, divisor) == 5 + 0j
-
-
-@pytest.mark.parametrize(
-    ("value", "root"),
-    [
-        (3 + 4j, 2 + 1j),
-        (-3 + 4j, 1 + 2j),
-        (-3 - 4j, 1 - 2j),
-        (complex(-4, -0.0), complex(0, -2)),
-        (6j, complex(_SQRT3, _SQRT3)),
-    ],
-)
-def test_square_root_follows_csqrt_in_every_half_plane(
-    value: complex,
-    root: complex,
-) -> None:
-    assert np.complex128(_square_root(value)).tobytes() == np.complex128(root).tobytes()
-
-
-@pytest.mark.parametrize(
-    ("x", "y", "norm"),
-    [(0.34, -0.35, "0x1.f3aa7417b6f8fp-2"), (-0.46, 0.09, "0x1.dff8928653ed5p-2")],
-)
-def test_hypot_corrects_the_root_as_x86_glibc_does(
-    x: float,
-    y: float,
-    norm: str,
-) -> None:
-    # The generic glibc 2.39 kernel rounds each one ULP from the exact norm;
-    # aarch64's fused kernel and the uncorrected root round them differently.
-    assert _hypot(x, y) == float.fromhex(norm)
-
-
-def test_complex_dot_sums_four_real_partials_before_combining() -> None:
-    # Summing each complex product first would keep the 2**-53 real term.
-    assert _complex_dot([(1 + 1j, 1 + 1j), (complex(2**-53), 1 + 0j)]) == 2j
 
 
 def test_csv_trials_follow_adjacent_nonempty_markers(tmp_path: Path) -> None:
@@ -414,22 +274,19 @@ def test_csv_trials_follow_adjacent_nonempty_markers(tmp_path: Path) -> None:
     assert [trial.subject for trial in trials] == ["S002", "S002"]
     assert trials[0].windows.shape == (3, 3, 5)
     filtered = processor.filter(values)
-    expected = processor.windows(
-        processor.standardize(filtered[10:20]),
-        pad_short=False,
-    )
-    assert torch.equal(trials[0].windows, torch.from_numpy(expected))
-    record = read_tensors(_CWD / "testdata" / "ingestion.pt")
+    expected = [
+        processor.windows(processor.standardize(filtered[start:stop]), pad_short=False)
+        for start, stop in ((10, 20), (30, 40))
+    ]
+    assert torch.equal(trials[0].windows, torch.from_numpy(expected[0]))
     data_cfg = WindowData.Config()
     data_cfg.base_dir = None
     data_cfg.working_dir = tmp_path
     data_cfg.preprocessing = cfg
     media, labels, identifiers = data_cfg.make().train_dataset.tensors
-    assert torch.equal(media, record["media"])
-    assert torch.equal(labels, record["label"])
-    assert torch.equal(identifiers, record["trial"])
-    assert torch.equal(torch.from_numpy(values), record["raw"])
-    assert torch.equal(record["triggers"], torch.tensor([10, 20, 30, 40, 99]))
+    assert torch.equal(media, torch.from_numpy(np.concatenate(expected))[:, None])
+    assert labels.tolist() == [0, 0, 0, 1, 1, 1]
+    assert identifiers.tolist() == [0, 0, 0, 1, 1, 1]
 
 
 def test_csv_inference_pads_short_cues_and_rejects_missing_cues(tmp_path: Path) -> None:
@@ -590,61 +447,139 @@ def test_causal_filter_preserves_row_major_reduction_order() -> None:
     assert actual.flags.c_contiguous
 
 
+def test_causal_filter_runs_the_transposed_direct_form_recurrence() -> None:
+    impulse = np.asarray([[1.0], [0.0], [0.0], [0.0]])
+    # Normalized by a[0]: y[n] = x[n] + x[n - 1] + y[n - 1] / 2, so the tail halves.
+    actual = _causal_filter(
+        impulse,
+        b=np.asarray([2.0, 2.0]),
+        a=np.asarray([2.0, -1.0]),
+        initial=np.zeros((1, 1)),
+    )
+    assert actual[:, 0].tolist() == [1.0, 1.5, 0.75, 0.375]
+    held = _causal_filter(
+        np.full((3, 2), 1.0),
+        b=np.asarray([1.0, 1.0]),
+        a=np.asarray([1.0, -0.5]),
+        initial=np.asarray([[3.0, 3.0]]),
+    )
+    assert held.tolist() == [[4.0, 4.0]] * 3
+
+
+def test_zero_phase_smoothing_returns_a_ramp_unchanged() -> None:
+    # The reverse pass undoes the FIR's one-sample delay; odd padding extends the line.
+    ramp = np.arange(40, dtype=np.float64).reshape(20, 2)
+    actual = _zero_phase_filter(
+        ramp,
+        b=np.asarray([0.25, 0.5, 0.25]),
+        a=np.asarray([1.0, 0.0, 0.0]),
+    )
+    assert np.array_equal(actual, ramp)
+
+
+def test_zero_phase_filter_starts_both_passes_from_their_edge_samples() -> None:
+    # Dyadic coefficients keep every step exact, so these bits are host-independent.
+    actual = _zero_phase_filter(
+        (np.arange(8, dtype=np.float64) ** 2)[:, None],
+        b=np.asarray([0.25, 0.25]),
+        a=np.asarray([1.0, -0.5]),
+    )
+    expected = [
+        "0x1.1f44775ap-3",
+        "0x1.a2288eeb4p+1",
+        "0x1.d1b88eeb4p+2",
+        "0x1.959c8eeb4p+3",
+        "0x1.3a958eeb4p+4",
+        "0x1.c3a79dd68p+4",
+        "0x1.3146bdd68p+5",
+        "0x1.875d0badp+5",
+    ]
+    assert actual[:, 0].tolist() == [float.fromhex(value) for value in expected]
+
+
 @pytest.mark.parametrize(
     ("numerator", "denominator", "expected"),
     [
-        (
-            _NOTCH_NUMERATOR,
-            _NOTCH_DENOMINATOR,
-            ["0x1.502789a5b05e7p-6", "0x1.502789a5b05d4p-6"],
-        ),
-        (
-            _BAND_NUMERATOR,
-            _BAND_DENOMINATOR,
-            [
-                "-0x1.fca3a66af54f2p-6",
-                "-0x1.fca3a6b5fd347p-6",
-                "0x1.7d7abcf5b43b2p-4",
-                "0x1.7d7abcc0922cbp-4",
-                "-0x1.7d7abcc9fe255p-4",
-                "-0x1.7d7abce25ac5bp-4",
-                "0x1.fca3a680317dap-6",
-                "0x1.fca3a6790b26bp-6",
-            ],
-        ),
+        ([1.0, 1.0], [1.0, -0.5], [3.0]),
+        ([0.5, 0.5], [2.0, -1.0], [0.75]),
+        ([0.25, 0.5, 0.25], [1.0, 0.0, 0.0], [0.75, 0.25]),
     ],
 )
-def test_filter_initial_state_preserves_complete_captured_solve(
-    numerator: list[str],
-    denominator: list[str],
-    expected: list[str],
+def test_filter_initial_state_is_the_unit_step_steady_state(
+    numerator: list[float],
+    denominator: list[float],
+    expected: list[float],
 ) -> None:
-    # These complete vectors retain the unchanged scientific source's float64 solve.
-    actual = _filter_initial_state(
-        np.asarray([float.fromhex(value) for value in numerator]),
-        a=np.asarray([float.fromhex(value) for value in denominator]),
+    actual = _filter_initial_state(np.asarray(numerator), a=np.asarray(denominator))
+    assert actual.tolist() == expected
+
+
+@pytest.mark.parametrize(
+    ("band_hz", "order", "sample_rate"),
+    [((1.0, 45.0), 4, 250.0), ((0.5, 40.0), 6, 250.0), ((1.0, 400.0), 8, 1000.0)],
+)
+def test_filter_initial_state_rounds_to_the_exact_steady_state(
+    band_hz: tuple[float, float],
+    order: int,
+    sample_rate: float,
+) -> None:
+    # Poles near z = 1 make a linear solve miss every float32 element of the last two.
+    numerator, denominator = _butterworth_bandpass(
+        band_hz,
+        order=order,
+        sample_rate=sample_rate,
     )
-    assert not mismatches(
-        {
-            "state": torch.tensor(
-                [float.fromhex(value) for value in expected],
-                dtype=torch.float64,
-            ),
-        },
-        actual={"state": torch.from_numpy(actual)},
+    b = [Fraction(float(value)) for value in numerator]
+    a = [Fraction(float(value)) for value in denominator]
+    steady = sum(b, start=Fraction(0)) / sum(a, start=Fraction(0))
+    residual = [x - y * steady for x, y in zip(b[1:], a[1:], strict=True)]
+    expected = [float(sum(residual[index:])) for index in range(len(residual))]
+    actual = _filter_initial_state(numerator, a=denominator)
+    assert np.array_equal(
+        actual.astype(np.float32),
+        np.asarray(expected, dtype=np.float32),
     )
 
 
-def test_filter_initial_state_rejects_a_singular_steady_state() -> None:
-    with pytest.raises(np.linalg.LinAlgError, match="Singular"):
+@pytest.mark.parametrize(("design", "gain"), [("notch", 1.0), ("band", 0.0)])
+def test_exp000_initial_state_holds_a_constant_offset(design: str, gain: float) -> None:
+    cfg = source_preprocessing()
+    numerator, denominator = (
+        _notch(cfg.notch_hz, quality=cfg.notch_quality, sample_rate=cfg.sample_rate)
+        if design == "notch"
+        else _butterworth_bandpass(
+            cfg.band_hz,
+            order=cfg.filter_order,
+            sample_rate=cfg.sample_rate,
+        )
+    )
+    offset = np.full((50, 2), 2.8e5)
+    held = _causal_filter(
+        offset,
+        b=numerator,
+        a=denominator,
+        initial=_filter_initial_state(numerator, a=denominator)[:, None] * offset[0],
+    )
+    assert np.abs(held - gain * offset).max() < 5e-4
+
+
+def test_filter_initial_state_rejects_a_pole_at_dc() -> None:
+    with pytest.raises(ZeroDivisionError, match="division by zero"):
         _filter_initial_state(
             np.asarray([0.2, 0.3, 0.4]),
             a=np.asarray([1.0, -1.0, 0.0]),
         )
 
 
-def _float64(values: list[str]) -> torch.Tensor:
-    return torch.tensor([float.fromhex(value) for value in values], dtype=torch.float64)
+def _response(
+    numerator: NDArray[np.float64],
+    *,
+    denominator: NDArray[np.float64],
+    hz: float,
+    rate: float,
+) -> complex:
+    z = np.exp(1j * np.pi * hz / (rate / 2))
+    return complex(np.polyval(numerator, z) / np.polyval(denominator, z))
 
 
 if __name__ == "__main__":

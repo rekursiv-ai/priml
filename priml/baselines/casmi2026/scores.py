@@ -1,4 +1,4 @@
-"""Rank and power transforms with the source's tie and rounding behavior."""
+"""Rank, standardization and Tanimoto transforms shared by both engines."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def tanimoto(
 
 
 def ordinal_ranks(values: FloatArray) -> NDArray[np.float64]:
-    """Normalize descending ordinal positions, preserving NumPy quicksort ties.
+    """Normalize descending ordinal positions; ties keep encounter order.
 
     Args:
       values: Candidate scores in encounter order.
@@ -62,7 +62,7 @@ def ordinal_ranks(values: FloatArray) -> NDArray[np.float64]:
       ranks: Zero is the best position and one the worst.
 
     """
-    order = np.argsort(-values)
+    order = np.argsort(-values, kind="stable")
     ranks = np.asarray(
         stats.ordinal_ranks(values.copy(), order=convert_to_tensor(order)).numpy(),
         np.float64,

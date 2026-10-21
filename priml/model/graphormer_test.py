@@ -237,7 +237,7 @@ def test_attention_reset_repeats_the_constructor_draws() -> None:
     config = GraphAttention.Config()
     config.channels_in = HIDDEN
     config.attention.num_heads = HEADS
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         _ = torch.manual_seed(1)
         attention = config.make()
         initial = {

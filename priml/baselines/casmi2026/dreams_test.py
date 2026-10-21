@@ -35,9 +35,10 @@ from priml.baselines.casmi2026.dreams import (
 from priml.baselines.casmi2026.model import DreamAttention, DreamsFP, FPNet
 from priml.baselines.casmi2026.model_test import set_block_heads, tiny_dreams
 from priml.baselines.casmi2026.peaks import prepare_peaks
+from priml.baselines.casmi2026.testing import float32_comparands
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -86,7 +87,7 @@ def bank_spectra() -> list[SpectrumRequest]:
 
 
 def source_checkpoint(record: dict[str, Tensor], *, index: int) -> dict[str, object]:
-    """Adapt the complete independent source state to its released envelope."""
+    """Adapt the stored checkpoint state to its released envelope."""
     prefix = f"model/{index}/"
     state = {
         name.removeprefix(prefix): value
@@ -186,11 +187,12 @@ def save_bank(directory: Path, indices: Sequence[int]) -> MainBank.Config:
     return config
 
 
-def test_entire_full1_model_views_bank_matches_source(tmp_path: Path) -> None:
-    expected = read_tensors(GOLDEN)
+def test_entire_full1_model_views_bank(tmp_path: Path) -> None:
+    golden = GOLDEN
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     paths: list[Path] = []
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         for index in range(3):
             path = tmp_path / f"model{index}.pt"
             torch.save(source_checkpoint(expected, index=index), path)
@@ -256,8 +258,7 @@ def test_entire_full1_model_views_bank_matches_source(tmp_path: Path) -> None:
             )
             actual[f"peaks/{name}/mass"] = torch.from_numpy(prepared_mass)
             actual[f"peaks/{name}/intensity"] = torch.from_numpy(prepared_intensity)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_bank_metadata_adduct_and_validation_boundaries(tmp_path: Path) -> None:
@@ -413,10 +414,11 @@ def test_neural_items_consume_source_ce_n_without_an_override(tmp_path: Path) ->
 LIMIT: Final = 25
 
 
-def test_whole_optional_index_queries_and_every_source_tail_field(
+def test_whole_optional_index_queries_and_every_tail_field(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/dreams_store.pt")
+    golden = _BASELINE / "testdata/dreams_store.pt"
+    expected = read_tensors(golden)
     assert len(expected) == 158
     mass = expected["inputs/mass"].numpy().copy()
     smiles = from_plain(
@@ -528,8 +530,10 @@ def test_whole_optional_index_queries_and_every_source_tail_field(
     actual["float32/_mass_candidates"] = text(str(list(selection.smiles)))
     actual["float32/_out"] = text(str([("float32", ";".join(candidates))]))
     actual["float32/_audit_rows"] = text(str([audit]))
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        golden,
+        float32_comparands(actual, inputs=("*/target", "inputs/*")),
+    )
 
 
 def identity(value: str) -> str | None:
@@ -734,12 +738,12 @@ def test_present_array_failures_propagate_and_only_selected_bytes_decode(
 
 
 def decode(value: Tensor) -> str:
-    """Read complete source text without trimming any characters."""
+    """Read stored text without trimming any characters."""
     return bytes(from_plain(value.tolist(), list[int])).decode()
 
 
 def text(value: str) -> Tensor:
-    """Capture complete native strings in the unchanged witness format."""
+    """Encode a native string as golden bytes."""
     return torch.tensor(list(value.encode()), dtype=torch.uint8)
 
 

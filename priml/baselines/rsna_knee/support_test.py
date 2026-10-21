@@ -1,24 +1,28 @@
 """Test support shared by the knee baseline's tests: tiny inputs, doubles, configs.
 
 A test needing these imports them from here rather than from another test module.
-Frozen doubles hold numerical outputs minted from the source implementation, so
-a stage test can exercise real wiring without a learned model.
+Frozen doubles replay literal numerical outputs, so a stage test can exercise real
+wiring without a learned model.
 """
 
 from __future__ import annotations
 
 from dataclasses import field
+from io import BytesIO
+from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, override
+from typing import TYPE_CHECKING, Final, Literal, override
 
 import csv
 import hashlib
 import json
+import zlib
 
 from configgle import Fig, Makes, Makes2
 from torch import Tensor, nn
 from treekle import to_plain
 
+import numpy as np
 import pytest
 import torch
 
@@ -40,14 +44,27 @@ from priml.model.coatnet import CoAtNet, CoAtStage
 from priml.model.convnext import ConvNeXt
 from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.resnet import ResNet
-from priml.testing.golden import read_tensors
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from numpy.typing import NDArray
+    from PIL import Image
+else:
+    from wrapt import lazy_import
 
-_CWD: Final = Path(__file__).resolve().parent
+    Image = lazy_import("PIL.Image")
+
+
+FLUID_COEFFICIENTS: Final = (0.25, 1.0, 0.5, -0.75)
+"""Effusion stacker intercept and its z, log-volume and missing-volume weights."""
+
+STATE_COEFFICIENTS: Final = (0.5, 0.25, -1.0, 0.5, 0.75, -0.5, 1.0, -0.25)
+"""Baker's stacker intercept, then its z and six state-category weights."""
+
+STUDY_PLANES: Final = ("Sagittal", "Coronal", "Axial")
+"""Plane of each synthetic study series, in CSV order."""
 
 
 class SyntheticPreparation(DicomPreparation):
@@ -117,6 +134,120 @@ def blocks_of[Block: Fig[object]](
     return found
 
 
+def dicom_file(
+    pixels: NDArray[np.integer],
+    *,
+    position: tuple[float, float, float],
+    orientation: tuple[float, ...] = (0.0, 1.0, 0.0, 0.0, 0.0, -1.0),
+    spacing: tuple[float, float] = (0.5, 0.5),
+    instance: int = 1,
+    laterality: str = "",
+    patient: str = "numeric-patient",
+    syntax: str = "1.2.840.10008.1.2.1",
+    stored: int = 0,
+    photometric: str = "MONOCHROME2",
+    slope: str = "",
+    intercept: str = "",
+) -> bytes:
+    """Encode one monochrome frame in a native, deflated or encapsulated syntax.
+
+    Args:
+      pixels: Row-major stored samples; their dtype sets bit allocation and sign.
+      position: Image position of the first pixel in LPS millimeters.
+      orientation: Row then column direction cosines.
+      spacing: Row and column pixel spacing in millimeters.
+      instance: Acquisition instance number.
+      laterality: Series laterality tag, empty when absent.
+      patient: Patient identity.
+      syntax: Transfer syntax UID: explicit or implicit little-endian, explicit
+        big-endian, deflated, RLE, baseline JPEG or JPEG 2000.
+      stored: Bits stored, or 0 for every allocated bit.
+      photometric: Photometric interpretation.
+      slope: Rescale slope decimal string, omitted when empty.
+      intercept: Rescale intercept decimal string, omitted when empty.
+
+    Returns:
+      payload: The complete file, preamble and meta information included.
+
+    """
+    order: Literal["little", "big"] = (
+        "big" if syntax == "1.2.840.10008.1.2.2" else "little"
+    )
+    explicit = syntax != "1.2.840.10008.1.2"
+    rows, columns = pixels.shape
+    bits = 8 * pixels.dtype.itemsize
+    elements = [
+        (0x00100020, b"LO", patient.encode()),
+        (0x00200013, b"IS", str(instance).encode()),
+        (0x00200032, b"DS", _decimals(position)),
+        (0x00200037, b"DS", _decimals(orientation)),
+        (0x00200060, b"CS", laterality.encode()),
+        (0x00280002, b"US", (1).to_bytes(2, order)),
+        (0x00280004, b"CS", photometric.encode()),
+        (0x00280010, b"US", rows.to_bytes(2, order)),
+        (0x00280011, b"US", columns.to_bytes(2, order)),
+        (0x00280030, b"DS", _decimals(spacing)),
+        (0x00280100, b"US", bits.to_bytes(2, order)),
+        (0x00280101, b"US", (stored or bits).to_bytes(2, order)),
+    ]
+    if pixels.dtype.kind == "i":
+        elements.append((0x00280103, b"US", (1).to_bytes(2, order)))
+    elements += [
+        (tag, b"DS", value.encode())
+        for tag, value in ((0x00281052, intercept), (0x00281053, slope))
+        if value
+    ]
+    dataset = b"".join(
+        _element(tag, vr=vr, value=value, order=order, explicit=explicit)
+        for tag, vr, value in elements
+    ) + _pixel_element(pixels, syntax=syntax, order=order, explicit=explicit)
+    if syntax == "1.2.840.10008.1.2.1.99":
+        deflate = zlib.compressobj(wbits=-15)
+        dataset = deflate.compress(dataset) + deflate.flush()
+    return _meta(syntax) + dataset
+
+
+def study_series() -> list[list[tuple[int, bytes]]]:
+    """Return the synthetic study's numbered files, per series in enumeration order.
+
+    The sagittal series lies at x 32.6 and 33.6 mm, so its median position
+    contradicts the explicit right laterality tag on every frame.
+
+    Returns:
+      series: Sagittal (two frames), coronal and axial (four each) files.
+
+    """
+    image = np.arange(6 * 8, dtype=np.uint16).reshape(6, 8)
+    layouts = (
+        ((0.0, 1.0, 0.0, 0.0, 0.0, -1.0), [(32.6, -10.0, 20.0), (33.6, -10.0, 20.0)]),
+        (
+            (1.0, 0.0, 0.0, 0.0, 0.0, -1.0),
+            [(-20.0, float(y), 20.0) for y in range(4)],
+        ),
+        (
+            (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            [(-20.0, -10.0, 1.5 * z) for z in range(4)],
+        ),
+    )
+    series: list[list[tuple[int, bytes]]] = []
+    for index, (orientation, positions) in enumerate(layouts):
+        files = [
+            (
+                number,
+                dicom_file(
+                    image * (index + 2) + 100 * number,
+                    position=position,
+                    orientation=orientation,
+                    instance=number,
+                    laterality="R",
+                ),
+            )
+            for number, position in enumerate(positions, start=1)
+        ]
+        series.append(files[::-1])
+    return series
+
+
 def released_state(path: Path, *, key: str | None = None) -> ReleasedState.Config:
     """Name an existing checkpoint file and require its current bytes.
 
@@ -144,7 +275,6 @@ def study_inputs(root: Path) -> StudyData.Config:
       config: Study data reading the written tree.
 
     """
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
     with (root / "test.csv").open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["StudyInstanceUID"])
@@ -175,24 +305,20 @@ def study_inputs(root: Path) -> StudyData.Config:
                     (1, 0, "")[index],
                     (1, 1, "NaN")[index],
                 ]
-                for index, plane in enumerate(("Sagittal", "Coronal", "Axial"))
+                for index, plane in enumerate(STUDY_PLANES)
             ],
         )
-    for index in range(3):
+    for index, files in enumerate(study_series()):
         directory = root / "test_series" / "study" / str(index + 1)
         directory.mkdir(parents=True)
-        for number in expected[f"enumeration/{index}"].tolist():
-            (directory / f"{number}.dcm").write_bytes(
-                expected[f"input/{index}/{number}"].numpy().tobytes(),
-            )
+        for number, payload in files:
+            (directory / f"{number}.dcm").write_bytes(payload)
     return StudyData.Config(input_dir=root)
 
 
 def corrupt_deflate(root: Path) -> None:
     """Replace every file of the first study with an undecodable deflate stream."""
-    syntax = b"1.2.840.10008.1.2.1.99\0"
-    meta = b"\x02\x00\x10\x00UI" + len(syntax).to_bytes(2, byteorder="little") + syntax
-    payload = bytes(128) + b"DICM" + meta + b"invalid deflate stream"
+    payload = _meta("1.2.840.10008.1.2.1.99") + b"invalid deflate stream"
     for path in (root / "test_series" / "study").rglob("*.dcm"):
         path.write_bytes(payload)
 
@@ -207,7 +333,6 @@ def postprocess_assets(directory: Path) -> R7Postprocess.Config:
       config: Postprocess config reading the written files.
 
     """
-    witness = read_tensors(_CWD / "testdata" / "stackers.pt")
     counts = (6, 6, 5, 5, 6, 6, 6, 6, 5, 6, 6, 8)
     parents = (4, 5, 6, 4, 5, 6, 4, 5, 6, 1, 11, 10, 0)
     categories = {
@@ -260,7 +385,7 @@ def postprocess_assets(directory: Path) -> R7Postprocess.Config:
                         "Effusion": dict(
                             zip(
                                 ("b0", "b_z", "b_lv", "b_miss"),
-                                witness["fluid_coefficients"].tolist(),
+                                FLUID_COEFFICIENTS,
                                 strict=True,
                             ),
                             adopt=True,
@@ -290,8 +415,8 @@ def postprocess_assets(directory: Path) -> R7Postprocess.Config:
                                 "z",
                                 *["state:" + name for name in categories["Baker's"]],
                             ],
-                            "b0": float(witness["state_coefficients"][0]),
-                            "coef": witness["state_coefficients"][1:].tolist(),
+                            "b0": STATE_COEFFICIENTS[0],
+                            "coef": list(STATE_COEFFICIENTS[1:]),
                             "volume_column": None,
                         },
                     },
@@ -311,7 +436,7 @@ class FrozenRaptor(Raptor):
     def __init__(self, config: Config) -> None:
         del config
         nn.Module.__init__(self)
-        # Frozen inference.pt stores two passes, one study, twelve findings.
+        # Frozen logits hold two passes over one study and twelve findings.
         self.logits = nn.Buffer(torch.zeros(2, 1, 12))
         self.calls = 0
 
@@ -347,7 +472,7 @@ class FrozenR7(R7):
         nn.Module.__init__(self)
         self.state_counts = config.state_counts
         self.pad_multiple = config.pad_multiple
-        # Frozen inference.pt keeps one-study finding/state/binary readout schemas.
+        # Frozen readouts hold one study's finding, padded-state and binary logits.
         self.logits = nn.Buffer(torch.zeros(1, 12))
         self.states = nn.Buffer(torch.zeros(1, 12, 8))
         self.binaries = nn.Buffer(torch.zeros(1, 13))
@@ -465,12 +590,27 @@ def raptor_stage_config(path: Path, *, logits: Tensor) -> RaptorStage.Config:
     return config
 
 
-def r7_stage_config(root: Path, expected: Mapping[str, Tensor]) -> R7Stage.Config:
-    """Name an R7 stage replaying stored fold readouts on the CPU.
+def frozen_raptor_logits() -> Tensor:
+    """Return two frozen Raptor passes over one study and twelve findings."""
+    # RaptorScore scores one study per pass and reads row 0.
+    return ((torch.arange(2 * 12) % 7 - 3) / 4).reshape(2, 1, 12).half()
+
+
+def frozen_folds() -> dict[str, Tensor]:
+    """Return four frozen R7 folds' finding, padded-state and binary logits."""
+    # R7Score scores one study per fold and reads row 0 of every readout.
+    return {
+        "logits": ((torch.arange(4 * 12) % 9 - 4) / 8).reshape(4, 1, 12).half(),
+        "states": ((torch.arange(4 * 12 * 8) % 11 - 5) / 4).reshape(4, 1, 12, 8).half(),
+        "binaries": ((torch.arange(4 * 13) % 5 - 2) / 2).reshape(4, 1, 13).half(),
+    }
+
+
+def r7_stage_config(root: Path) -> R7Stage.Config:
+    """Name an R7 stage replaying frozen fold readouts on the CPU.
 
     Args:
       root: Empty directory receiving every frozen asset.
-      expected: Stored `inference.pt` tensors.
 
     Returns:
       config: A stage over four-pixel renders with eager execution.
@@ -499,18 +639,13 @@ def r7_stage_config(root: Path, expected: Mapping[str, Tensor]) -> R7Stage.Confi
     config.score.device, config.score.crop = "cpu", 4
     config.preparation.render.image_size = config.preparation.side.image_size = 4
     config.checkpoints = []
+    folds = frozen_folds()
     for index in range(4):
         path = root / f"fold{index}.pt"
-        torch.save(
-            {
-                name: expected[f"r7/{name}"][index]
-                for name in ("logits", "states", "binaries")
-            },
-            path,
-        )
+        torch.save({name: value[index] for name, value in folds.items()}, path)
         config.checkpoints.append(released_state(path))
     side, anatomy = root / "side.pt", root / "anatomy.pt"
-    torch.save({"logit": expected["raptor/logits"].new_tensor(-3.0).float()}, side)
+    torch.save({"logit": torch.tensor(-3.0)}, side)
     torch.save({"state_dict": {"logit": torch.zeros(())}}, anatomy)
     config.side_checkpoint = released_state(side)
     config.anatomy_checkpoint = released_state(anatomy, key="state_dict")
@@ -520,6 +655,101 @@ def r7_stage_config(root: Path, expected: Mapping[str, Tensor]) -> R7Stage.Confi
 def _digest(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _decimals(values: Sequence[float]) -> bytes:
+    return "\\".join(format(value, "g") for value in values).encode()
+
+
+def _element(
+    tag: int,
+    *,
+    vr: bytes,
+    value: bytes,
+    order: Literal["little", "big"] = "little",
+    explicit: bool = True,
+) -> bytes:
+    value += b" " * (len(value) % 2)
+    head = (tag >> 16).to_bytes(2, order) + (tag & 0xFFFF).to_bytes(2, order)
+    if not explicit:
+        return head + len(value).to_bytes(4, order) + value
+    if vr in {b"OB", b"OW"}:
+        return head + vr + bytes(2) + len(value).to_bytes(4, order) + value
+    return head + vr + len(value).to_bytes(2, order) + value
+
+
+def _pixel_element(
+    pixels: NDArray[np.integer],
+    *,
+    syntax: str,
+    order: Literal["little", "big"],
+    explicit: bool,
+) -> bytes:
+    if syntax == "1.2.840.10008.1.2.5":
+        fragment = _rle(pixels)
+    elif syntax.startswith("1.2.840.10008.1.2.4."):
+        buffer = BytesIO()
+        image_format = "JPEG2000" if syntax == "1.2.840.10008.1.2.4.90" else "JPEG"
+        Image.fromarray(pixels).save(buffer, format=image_format)
+        fragment = buffer.getvalue()
+    else:
+        encoded = pixels.astype(
+            pixels.dtype.newbyteorder("<" if order == "little" else ">"),
+        )
+        vr = b"OB" if pixels.dtype.itemsize == 1 else b"OW"
+        return _element(
+            0x7FE00010,
+            vr=vr,
+            value=encoded.tobytes(),
+            order=order,
+            explicit=explicit,
+        )
+    # A one-entry offset table, which readers must skip, one fragment, the delimiter.
+    fragment += bytes(len(fragment) % 2)
+    return (
+        bytes.fromhex("e07f10004f420000ffffffff")
+        + bytes.fromhex("feff00e00400000000000000")
+        + bytes.fromhex("feff00e0")
+        + len(fragment).to_bytes(4, "little")
+        + fragment
+        + bytes.fromhex("feffdde000000000")
+    )
+
+
+def _rle(pixels: NDArray[np.integer]) -> bytes:
+    """Encode each byte plane, most significant first, as PackBits literal runs."""
+    width = pixels.dtype.itemsize
+    planes = pixels.astype(pixels.dtype.newbyteorder(">")).view(np.uint8)
+    segments = [
+        b"".join(
+            bytes([len(run) - 1]) + run
+            for run in (data[start : start + 128] for start in range(0, len(data), 128))
+        )
+        for data in (
+            planes.reshape(-1, width)[:, plane].tobytes() for plane in range(width)
+        )
+    ]
+    offsets = accumulate((len(segment) for segment in segments[:-1]), initial=64)
+    header = width.to_bytes(4, "little") + b"".join(
+        offset.to_bytes(4, "little") for offset in offsets
+    )
+    return header.ljust(64, b"\0") + b"".join(segments)
+
+
+def _meta(syntax: str) -> bytes:
+    """Encode the preamble and an MR file meta group holding every required element."""
+    uids = {
+        0x00020002: "1.2.840.10008.5.1.4.1.1.4",
+        0x00020003: "2.25.1",
+        0x00020010: syntax,
+        0x00020012: "2.25.2",
+    }
+    group = _element(0x00020001, vr=b"OB", value=bytes([0, 1])) + b"".join(
+        _element(tag, vr=b"UI", value=uid.encode() + bytes(len(uid) % 2))
+        for tag, uid in uids.items()
+    )
+    length = len(group).to_bytes(4, "little")
+    return bytes(128) + b"DICM" + _element(0x00020000, vr=b"UL", value=length) + group
 
 
 def _fold() -> FrozenR7:

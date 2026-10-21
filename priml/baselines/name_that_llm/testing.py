@@ -1,23 +1,19 @@
-"""Numerical tracing and captured-input fixtures shared by the numerical tests."""
+"""Numerical tracing and miniature fixtures shared by the numerical tests."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
-from traceback import walk_stack
 from types import FrameType
-from typing import TYPE_CHECKING, Final, Self, cast, overload, override
+from typing import TYPE_CHECKING, Self, cast, overload, override
 from unittest.mock import patch
 
 import inspect
-import json
 import sys
 
 from numpy.random import Generator
 from torch import Tensor
-from treekle import to_plain
 
 import numpy as np
 import torch
@@ -29,13 +25,10 @@ from priml.baselines.name_that_llm.model import (
     Split,
     SvmBranch,
 )
-from priml.baselines.name_that_llm.svm import LinearSVC
-from priml.testing.golden import read_tensors
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import CodeType, TracebackType
 
     from numpy.typing import ArrayLike, NDArray
@@ -48,8 +41,6 @@ class NumericalTrace:
 
     def __init__(self) -> None:
         self.record: dict[str, Tensor] = {}
-        self.sites: list[str] = []
-        self.states: list[dict[str, object]] = []
         self.counts: dict[str, int] = {}
         self.stack = ExitStack()
         self.hooks: _Hooks | None = None
@@ -169,60 +160,32 @@ class NumericalTrace:
         sys.monitoring.free_tool_id(tool)
 
     def _returned(self, code: CodeType, offset: int, value: object) -> None:
-        del offset
-        self._deliver(code, value=value)
+        del offset, value
+        self._deliver(code)
 
     def _unwound(self, code: CodeType, offset: int, exception: BaseException) -> None:
-        """Preserve the profiler's final return event when an operation raises."""
+        """Record a fit that raises with whatever state it reached."""
         del offset, exception
-        self._deliver(code, value=None)
+        self._deliver(code)
 
-    def _deliver(self, code: CodeType, value: object) -> None:
-        if self._watches_return(code):
-            self._profile(frame_for(code), event="return", arg=value)
+    def _deliver(self, code: CodeType) -> None:
+        if code.co_name == "fit":
+            self._observe(frame_for(code).f_locals.get("self"))
 
-    def _watches_return(self, code: CodeType) -> bool:
-        """Select every return consumed by this observer's observation hooks."""
-        return code.co_name in {"fit", "__call__"}
-
-    def _profile(self, frame: FrameType, event: str, arg: object) -> None:
-        if event == "return" and self._watches_return(frame.f_code):
-            instance = frame.f_locals.get("self")
-            if frame.f_code.co_name == "fit" and isinstance(instance, LinearSVC):
-                seed = frame.f_locals.get("seed_solver")
-                if isinstance(seed, int):
-                    index = self.counts.get("liblinear", 0)
-                    self.counts["liblinear"] = index + 1
-                    self.put(f"rng/liblinear/{index}", value=seed)
-            self._observe(
-                instance,
-                name=frame.f_code.co_name,
-                result=arg,
-            )
-
-    def _observe(self, instance: object, name: str, result: object) -> None:
+    def _observe(self, instance: object) -> None:
         kind = type(instance).__name__
-        if kind == "SigmoidCalibration":
-            kind = "_SigmoidCalibration"
-        if name == "fit" and kind in {
+        if kind in {
             "StandardScaler",
             "LogisticRegression",
             "LinearSVC",
             "TfidfTransformer",
-            "_SigmoidCalibration",
+            "SigmoidCalibration",
         }:
             index = self.counts.get(kind, 0)
             self.counts[kind] = index + 1
             for key, value in cast("dict[str, object]", vars(instance)).items():
                 if key.endswith("_"):
                     self.put(f"{kind}/{index}/{key}", value=value)
-        if name == "__call__" and type(result).__name__ == "BatchEncoding":
-            index = self.counts.get("tokenizer", 0)
-            self.counts["tokenizer"] = index + 1
-            self.put(
-                f"tokenizer/{index}",
-                value=cast("dict[str, object]", vars(result))["data"],
-            )
 
 
 def frame_for(code: CodeType) -> FrameType:
@@ -257,20 +220,11 @@ class _PermutationRecorder(Generator):
 
     @override
     def permutation(self, x: ArrayLike, axis: int = 0) -> NDArray[np.generic]:
-        if not self.trace.observing:
-            return super().permutation(x, axis=axis)
-        self.trace.states.append(dict(self.bit_generator.state))
         result = super().permutation(x, axis=axis)
-        self.trace.states.append(dict(self.bit_generator.state))
-        index = self.trace.counts.get("permutation", 0)
-        self.trace.counts["permutation"] = index + 1
-        self.trace.put(f"rng/permutation/{index}", value=result)
-        frames = walk_stack(inspect.currentframe())
-        next(frames)
-        caller, line = next(frames)
-        self.trace.sites.append(
-            f"{caller.f_code.co_filename}:{line}:permutation",
-        )
+        if self.trace.observing:
+            index = self.trace.counts.get("permutation", 0)
+            self.trace.counts["permutation"] = index + 1
+            self.trace.put(f"rng/permutation/{index}", value=result)
         return result
 
 
@@ -278,9 +232,6 @@ class _PermutationRecorder(Generator):
 class _Hooks:
     previous: Callable[..., object] | None
     factory: Callable[[object], Generator]
-
-
-_BASELINE: Final = _CWD
 
 
 def recipe() -> Benchmark.Config:
@@ -321,7 +272,7 @@ def miniature() -> tuple[
       texts: Deterministic short training passages.
       targets: Three repeated class indices.
       groups: Six complete prompt groups.
-      embeddings: Complete captured inputs at the configured geometry.
+      embeddings: Rows by the four saved layers by hidden width two.
 
     """
     texts = np.array(
@@ -330,9 +281,11 @@ def miniature() -> tuple[
     )
     targets = np.tile(np.arange(3), reps=6).astype(np.int64)
     groups = np.repeat(np.array(["a", "b", "c", "d", "e", "f"]), repeats=3)
-    embeddings = read_tensors(_BASELINE / "testdata" / "exp000.pt")[
-        "input/embeddings"
-    ].numpy()
+    # One rounding from float64 keeps the inputs identical on every host.
+    embeddings = (
+        np.sin(np.arange(18 * 4 * 2) / 5).reshape(18, 4, 2)
+        + 0.5 * targets[:, None, None]
+    ).astype(np.float32)
     return texts, targets, groups, embeddings
 
 
@@ -355,49 +308,30 @@ def miniature_split() -> Split:
     )
 
 
-def capture_source(component: str) -> dict[str, Tensor]:
-    """Read complete portable outputs and captured library-boundary inputs.
-
-    Args:
-      component: Portable component whose output is requested.
-
-    Returns:
-      outputs: Source outputs and the whole captured branch-probability inputs.
-
-    """
-    record = read_tensors(_BASELINE / "testdata" / "exp000.pt")
-    return {
-        key.split("/", maxsplit=1)[1]: value
-        for key, value in record.items()
-        if key.startswith("input/")
-        or key == f"{component}/{component}"
-        or (component == "folds" and key.startswith("folds/fold/"))
-    }
-
-
 def completed_record(
     trace: NumericalTrace,
     outputs: dict[str, Tensor],
 ) -> dict[str, Tensor]:
-    """Retain every output, fitted numeric field, draw, and complete RNG state.
+    """Retain every output, fitted numeric field, permutation and operation count.
 
     Args:
       trace: Observer holding all fitted numeric attributes and random draws.
       outputs: Complete component outputs to append to the record.
 
     Returns:
-      record: Every captured value, operation count and full generator state.
+      record: Every captured value and operation count.
 
     """
     for name, value in outputs.items():
         trace.put(name, value=value)
     for name, count in trace.counts.items():
         trace.put(f"counts/{name}", value=count)
-    trace.put(
-        "rng/states",
-        value=torch.frombuffer(
-            bytearray(json.dumps(to_plain(trace.states)).encode()),
-            dtype=torch.uint8,
-        ),
-    )
     return trace.record
+
+
+def float32_comparands(record: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """Round float64 values to float32 precision, keeping the float64 dtype pinned."""
+    return {
+        name: value.float().double() if value.dtype == torch.float64 else value
+        for name, value in record.items()
+    }

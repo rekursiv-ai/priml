@@ -1,17 +1,15 @@
-"""Replay every RSNA knee network against its source captures and torch costs."""
+"""Check every RSNA knee network against in-tree goldens and torch costs."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast, override
+from typing import Final, cast
 
 import hashlib
 import math
 
 from configgle import InlineConfig, Makeable, Makes
 from torch import Tensor, nn
-from torch.nn import functional
-from treekle import from_plain
 
 import pytest
 import torch
@@ -23,8 +21,10 @@ from priml.baselines.rsna_knee.model import (
     Raptor,
     ReleasedVNet,
     TinyConvNeXt,
+    _checkpoint_name,
     _readout_cost,
     _softmax_cost,
+    _vnet_name,
     checkpoint_state,
     tiny_drop_path,
 )
@@ -45,7 +45,12 @@ from priml.model.special import Identity
 from priml.model.swiglu import SwiGLU, gelu
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
-from priml.testing.golden import mismatches, read_tensors, rng_fingerprint
+from priml.testing.golden import (
+    assert_tensor_golden,
+    mismatches,
+    read_tensors,
+    rng_fingerprint,
+)
 from priml.train.parallelism import NoParallel
 from priml.train.train_step import TrainStep
 
@@ -66,7 +71,7 @@ def _r7_config() -> R7.Config:
 
 
 def _batch() -> tuple[Tensor, Tensor, Tensor]:
-    # The source model fixes three adjacent slices and twelve clinical outputs.
+    # R7 reads three adjacent slices per window and scores twelve findings.
     image = (torch.arange(2 * 3 * 3 * 64 * 96).reshape(2, 3, 3, 64, 96) % 256).to(
         torch.uint8,
     )
@@ -89,33 +94,62 @@ def _batch() -> tuple[Tensor, Tensor, Tensor]:
     return image, meta, mask
 
 
-def test_r7_replays_complete_source_model_and_readouts() -> None:
-    expected = read_tensors(_CWD / "testdata" / "r7_model.pt")
-    state = {
-        name.removeprefix("initial/"): value
-        for name, value in expected.items()
-        if name.startswith("initial/")
-    }
+def _literal_weights(model: nn.Module) -> dict[str, Tensor]:
+    """Return the model state with every parameter set to exact values in [-1, 1)."""
+    state = {name: value.clone() for name, value in model.state_dict().items()}
+    for index, (name, parameter) in enumerate(model.named_parameters()):
+        # A periodic ramp gives small tensors one sign, which kills narrow ReLU stacks.
+        code = (
+            torch.arange(parameter.numel()) * 2_654_435_761 + 40_503 * index
+        ) % 8_191
+        state[name] = (code.double() / 8_191 * 2 - 1).float().reshape(parameter.shape)
+    return state
+
+
+def test_r7_forward_and_state_readout_match_their_golden() -> None:
+    records: list[dict[str, Tensor]] = []
+    config = _r7_config()
+    # Eight still pads the five real windows; deployment pads to 32.
+    config.pad_multiple = 8
     with host_agnostic_numerics():
-        model = _r7_config().make().eval()
-        model.load_checkpoint(state)
+        model = config.make().eval()
+        model.load_checkpoint(_literal_weights(model))
         image, meta, mask = _batch()
         for chunk in (0, 3):
             logits, states, binaries = model(image, meta, mask, chunk=chunk)
-            assert torch.equal(logits, expected["logits"])
-            assert torch.equal(states, expected["states"])
-            assert torch.equal(binaries, expected["binaries"])
             assert model.area is not None
             assert model.syn_specific is not None
-            assert torch.equal(model.area, expected["area"])
-            assert torch.equal(model.syn_specific, expected["syn_specific"])
-            assert torch.equal(
-                model.state_readout(states, binaries),
-                expected["state_readout"],
+            records.append(
+                {
+                    "logits": logits,
+                    "states": states,
+                    "binaries": binaries,
+                    "area": model.area,
+                    "syn_specific": model.syn_specific,
+                    "state_readout": model.state_readout(states, binaries),
+                },
             )
-        with torch.no_grad():
-            model.state_gate.view(torch.int32)[0] += 1
-        assert not torch.equal(model(image, meta, mask)[0], expected["logits"])
+    # Chunking only splits the encoder batch, so both passes agree bit for bit.
+    assert mismatches(records[0], records[1]) == []
+    assert_tensor_golden(_CWD / "testdata" / "r7_model.pt", records[0])
+
+
+def test_r7_loads_released_head_norm_and_timm_encoder_names() -> None:
+    model = _r7_config().make()
+    state = _literal_weights(model)
+    released = dict(state)
+    for native, name in (
+        ("norm_out.weight", "out_norm.weight"),
+        ("norm_sp_head.bias", "sp_head_norm.bias"),
+        ("enc.stem.conv.weight", "enc.stem.0.weight"),
+        (
+            "enc.stages.0.blocks.0.mlp.up_proj.weight",
+            "enc.stages.0.blocks.0.mlp.fc1.weight",
+        ),
+    ):
+        released[name] = released.pop(native)
+    model.load_checkpoint(released)
+    assert mismatches(state, model.state_dict()) == []
 
 
 def test_synovitis_covariate_detaches_and_owns_its_saved_effusion_values() -> None:
@@ -504,56 +538,6 @@ def test_attention_matches_explicit_finding_weighted_sum() -> None:
         )
 
 
-def test_attention_replays_independent_source_training_golden() -> None:
-    config = FindingAttention.Config()
-    config.channels_in = 4
-    config.channels_out = 5
-    config.dropout.p = 0.0
-    golden = _CWD / "testdata" / "finding_attention.pt"
-    with host_agnostic_numerics():
-        expected = read_tensors(golden)
-        actual = _three_updates(config.make())
-    with host_agnostic_numerics():
-        perturbed = _three_updates(_PerturbedAttention(config.copy_tree().finalize()))
-    assert not torch.equal(perturbed["losses"], expected["losses"])
-    assert actual.keys() == expected.keys()
-    for key in expected:
-        assert torch.equal(actual[key], expected[key]), key
-
-
-@pytest.mark.parametrize("width", [4, 3])
-def test_uninitialized_finding_head_replays_source_state_and_rng_consumption(
-    width: int,
-) -> None:
-    suffix = "" if width == 4 else f"_{width}"
-    expected = read_tensors(
-        _CWD / "testdata" / f"finding_attention_init{suffix}.pt",
-    )
-    config = FindingAttention.Config()
-    config.channels_in, config.channels_out = width, 12
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        torch.manual_seed(19)
-        model = config.make().eval()
-        mismatched = [
-            name
-            for name, value in model.state_dict().items()
-            if not torch.equal(value, expected["initial/" + name])
-        ]
-        assert not mismatched
-        assert torch.equal(torch.get_rng_state(), expected["rng_state"])
-        windows = 5 if width == 3 else 3
-        features = (
-            torch.arange(2 * windows * width, dtype=torch.float32).reshape(
-                2,
-                windows,
-                width,
-            )
-            % 7
-            - 3
-        ) / 5
-        assert torch.equal(model(features), expected["output"])
-
-
 def test_attention_reset_covers_injected_projection_state() -> None:
     config = FindingAttention.Config()
     config.channels_in, config.channels_out = 4, 5
@@ -592,47 +576,6 @@ def test_injected_head_projections_retain_parameter_costs() -> None:
         )
 
 
-class _PerturbedAttention(FindingAttention):
-    @override
-    def forward(self, features: Tensor) -> Tensor:
-        return super().forward(features) * 1.001
-
-
-def _three_updates(model: nn.Module) -> dict[str, Tensor]:
-    # Literal initialization removes source RNG dependence without storing redundant inputs.
-    with torch.no_grad():
-        for index, parameter in enumerate(model.parameters()):
-            parameter.copy_(
-                (
-                    torch.arange(parameter.numel(), dtype=torch.float32).reshape(
-                        parameter.shape,
-                    )
-                    % 17
-                    - 8
-                )
-                / (23 + index),
-            )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    features = (
-        torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) % 7 - 3
-    ) / 5
-    labels = (torch.arange(2 * 5).reshape(2, 5) % 2).float()
-    losses: list[Tensor] = []
-    for _ in range(3):
-        optimizer.zero_grad()
-        loss = functional.binary_cross_entropy_with_logits(
-            cast(TensorFn, model)(features),
-            labels,
-        )
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.detach().float())
-    return {
-        "losses": torch.stack(losses),
-        **{key: value.detach().float() for key, value in model.state_dict().items()},
-    }
-
-
 def _raptor_config() -> Raptor.Config:
     config = Raptor.Config()
     config.chunk_size = 16
@@ -648,45 +591,39 @@ def _raptor_config() -> Raptor.Config:
     return config
 
 
-def _source_raptor_config() -> Raptor.Config:
-    config = _raptor_config()
-    _backbone(config).blocks_per_stage = (2, 6, 14, 2)
-    return config
-
-
 def _backbone(config: Raptor.Config) -> CoAtNet.Config:
     assert isinstance(config.backbone, CoAtNet.Config)
     return config.backbone
 
 
-def test_both_complete_raptor_model_forwards_replay_source_tensors() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_model.pt")
-    state = {
-        name.removeprefix("initial/"): value
-        for name, value in expected.items()
-        if name.startswith("initial/")
-    }
+def test_raptor_chunked_and_whole_bag_forwards_match_their_golden() -> None:
+    config = _raptor_config()
+    _backbone(config).image_size = (32, 64)
     with host_agnostic_numerics():
-        model = _source_raptor_config().make().eval()
-        model.load_checkpoint(state)
-        image = (
-            torch.arange(2 * 9 * 3 * 64 * 96, dtype=torch.float32).reshape(
-                2,
-                9,
-                3,
-                64,
-                96,
-            )
-            % 251
-        ) / 127
-        features = model.encode(image)
-        assert torch.equal(model.head(features), expected["chunked"])
-        # Chunking only splits the encoder batch, so the same weights serve both.
+        model = config.make().eval()
+        model.load_checkpoint(_literal_weights(model))
+        # Two studies of five three-slice windows; chunks of four split the bag.
+        image = torch.arange(2 * 5 * 3 * 32 * 64, dtype=torch.float32) % 251 / 127
+        model.chunk_size = 4
+        chunked = model(image.reshape(2, 5, 3, 32, 64))
         model.chunk_size = math.inf
-        assert torch.equal(model(image), expected["unchunked"])
-        with torch.no_grad():
-            model.head.clsW.view(torch.int32)[0, 0] += 1
-        assert not torch.equal(model.head(features), expected["chunked"])
+        whole = model(image.reshape(2, 5, 3, 32, 64))
+    # Chunking only splits the encoder batch, so both passes agree bit for bit.
+    assert torch.equal(chunked, whole)
+    assert_tensor_golden(_CWD / "testdata" / "raptor_model.pt", {"output": whole})
+
+
+def test_raptor_loads_released_finding_head_names() -> None:
+    model = _raptor_config().make()
+    state = _literal_weights(model)
+    released = {
+        name.removeprefix("head."): value
+        for name, value in state.items()
+        if name.startswith(("head.clsW", "head.clsb", "head.norm.", "head.att."))
+    }
+    released |= {name: value for name, value in state.items() if name[:5] != "head."}
+    model.load_checkpoint(released)
+    assert mismatches(state, model.state_dict()) == []
 
 
 def test_raptor_checkpoint_remapping_rejects_missing_and_colliding_names() -> None:
@@ -754,7 +691,7 @@ def test_raptor_accepts_a_single_window_chunk_and_rejects_less() -> None:
 
 def _tiny_config() -> TinyConvNeXt.Config:
     config = TinyConvNeXt.Config()
-    config.channels_hidden = (2, 2, 2, 2)
+    config.channels_hidden = (2, 3, 4, 5)
     config.blocks_per_stage = (1, 1, 1, 1)
     assert isinstance(config.head, ConvNeXtHead.Config)
     assert isinstance(config.head.proj_out, Linear.Config)
@@ -762,60 +699,45 @@ def _tiny_config() -> TinyConvNeXt.Config:
     return config
 
 
-def test_complete_constructor_state_rng_and_feature_forward_match_source() -> None:
-    expected = read_tensors(_CWD / "testdata" / "tiny_model.pt")
-    assert torch.equal(
-        expected["configuration/depths"],
-        torch.ones(4, dtype=torch.int64),
-    )
-    assert expected["configuration/classes"].item() == 2
-    source_state = {
-        name.removeprefix("initial/"): value
-        for name, value in expected.items()
-        if name.startswith("initial/")
-    }
+def _tiny_image() -> Tensor:
+    return (
+        torch.arange(4 * 3 * 32 * 64, dtype=torch.float32).reshape(4, 3, 32, 64) % 251
+    ) / 127
+
+
+def test_tiny_constructor_state_draws_and_features_match_their_golden() -> None:
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics(), torch.no_grad():
         torch.manual_seed(19)
         model = _tiny_config().make().eval()
-        native = model.remap_checkpoint(source_state)
-        assert model.state_dict().keys() == native.keys()
-        for name, value in model.state_dict().items():
-            assert torch.equal(value, native[name]), name
-        assert torch.equal(rng_fingerprint(), expected["rng_fingerprint"])
-        rates = torch.tensor(
-            [
-                module.drop_path
-                for module in model.modules()
-                if isinstance(module, ConvNeXtBlock)
-            ],
-            dtype=torch.float64,
-        )
-        assert torch.equal(rates, expected["drop_path"])
-        model.load_checkpoint(source_state)
-        model.set_submodule("head.proj_out", Identity.Config(2).make(), strict=True)
-        image = (
-            torch.arange(4 * 3 * 32 * 64, dtype=torch.float32).reshape(4, 3, 32, 64)
-            % 251
-        ) / 127
-        assert torch.equal(model(image), expected["features"])
-        model.get_parameter("head.norm.weight").add_(torch.finfo(torch.float32).eps)
-        assert not torch.equal(model(image), expected["features"])
+        record = {
+            f"constructor/initial/{name}": value.clone()
+            for name, value in model.state_dict().items()
+        }
+        record["constructor/rng"] = rng_fingerprint()
+        rates = [
+            module.drop_path
+            for module in model.modules()
+            if isinstance(module, ConvNeXtBlock)
+        ]
+        model.set_submodule("head.proj_out", Identity.Config(5).make(), strict=True)
+        record["constructor/features"] = model(_tiny_image())
+    assert rates == [0.1 * index / 3.0 for index in range(4)]
+    assert_tensor_golden(_CWD / "testdata" / "tiny_model.pt", record)
 
 
 def test_checkpoint_mapping_is_complete_atomic_and_checks_source_gamma_shape() -> None:
-    expected = read_tensors(_CWD / "testdata" / "tiny_model.pt")
-    state = {
-        name.removeprefix("initial/"): value
-        for name, value in expected.items()
-        if name.startswith("initial/")
-    }
     model = _tiny_config().make()
     saved = {name: value.clone() for name, value in model.state_dict().items()}
+    without_gamma = {
+        name: value
+        for name, value in saved.items()
+        if name != "stages.0.blocks.0.gamma"
+    }
     for bad in (
         dict[str, torch.Tensor](),
-        {**state, "stem.conv.weight": state["features.0.0.weight"]},
-        {**state, "features.1.0.layer_scale": torch.zeros(2)},
-        {**state, "classifier.2.weight": state["classifier.2.weight"].double()},
+        {**saved, "features.0.0.weight": saved["stem.conv.weight"]},
+        {**without_gamma, "features.1.0.layer_scale": torch.zeros(2)},
+        {**saved, "head.proj_out.weight": saved["head.proj_out.weight"].double()},
     ):
         with pytest.raises(ValueError, match="Checkpoint"):
             model.load_checkpoint(bad)
@@ -826,24 +748,41 @@ def test_checkpoint_mapping_is_complete_atomic_and_checks_source_gamma_shape() -
     model.load_checkpoint(saved)
 
 
+@pytest.mark.parametrize(
+    ("released", "native"),
+    [
+        ("features.0.0.weight", "stem.conv.weight"),
+        ("features.0.1.bias", "stem.norm.bias"),
+        ("features.1.0.layer_scale", "stages.0.blocks.0.gamma"),
+        ("features.3.0.block.0.weight", "stages.1.blocks.0.conv_dw.weight"),
+        ("features.5.2.block.2.bias", "stages.2.blocks.2.norm.bias"),
+        ("features.7.1.block.3.weight", "stages.3.blocks.1.mlp.up_proj.weight"),
+        ("features.1.0.block.5.bias", "stages.0.blocks.0.mlp.down_proj.bias"),
+        ("features.6.1.weight", "stages.3.downsample.1.weight"),
+        ("classifier.0.weight", "head.norm.weight"),
+        ("classifier.2.bias", "head.proj_out.bias"),
+        ("stages.0.blocks.0.gamma", "stages.0.blocks.0.gamma"),
+    ],
+)
+def test_torchvision_initializer_names_map_onto_the_native_convnext(
+    released: str,
+    native: str,
+) -> None:
+    assert _checkpoint_name(released) == native
+
+
 def test_reset_replays_constructor_draw_order_and_every_initial_tensor() -> None:
-    expected = read_tensors(_CWD / "testdata" / "tiny_model.pt")
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(19)
         model = _tiny_config().make()
-        state = model.remap_checkpoint(
-            {
-                name.removeprefix("initial/"): value
-                for name, value in expected.items()
-                if name.startswith("initial/")
-            },
-        )
+        constructed = {
+            name: value.clone() for name, value in model.state_dict().items()
+        }
+        position = rng_fingerprint()
         torch.manual_seed(19)
         model.reset_parameters()
-        assert all(
-            torch.equal(value, state[name])
-            for name, value in model.state_dict().items()
-        )
-        assert torch.equal(rng_fingerprint(), expected["rng_fingerprint"])
+        assert mismatches(constructed, model.state_dict()) == []
+        assert torch.equal(rng_fingerprint(), position)
 
 
 def test_production_tiny_keeps_every_stage_and_all_initializer_classes() -> None:
@@ -986,79 +925,6 @@ def test_checkpoint_source_block_grammar_is_validated_before_loading(
     )
 
 
-def test_complete_tiny_replays_three_source_adamw_updates() -> None:
-    expected = read_tensors(_CWD / "testdata" / "tiny_model.pt")
-    assert expected["training/losses"].shape == (3,)
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        torch.manual_seed(19)
-        config = _tiny_config()
-        config.blocks_per_stage = (1, 1, 1, 1)
-        assert isinstance(config.head, ConvNeXtHead.Config)
-        assert isinstance(config.head.proj_out, Linear.Config)
-        config.head.proj_out.channels_out = 2
-        model = config.make()
-        actual = _three_tiny_updates(model)
-    mapped = {
-        key: value
-        for key, value in expected.items()
-        if key.startswith("training/")
-        and not key.startswith(
-            ("training/state/", "training/exp_avg/", "training/exp_avg_sq/"),
-        )
-    }
-    for category in ("state", "exp_avg", "exp_avg_sq"):
-        prefix = f"training/{category}/"
-        mapped.update(
-            {
-                prefix + key: value
-                for key, value in checkpoint_state(
-                    {
-                        key.removeprefix(prefix): value
-                        for key, value in expected.items()
-                        if key.startswith(prefix)
-                    },
-                ).items()
-            },
-        )
-    assert mismatches(mapped, actual) == []
-
-
-def _three_tiny_updates(model: nn.Module) -> dict[str, Tensor]:
-    model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    image = (
-        torch.arange(4 * 3 * 32 * 64, dtype=torch.float32).reshape(4, 3, 32, 64) % 251
-    ) / 127
-    labels = torch.tensor([0, 1, 1, 0])
-    losses: list[Tensor] = []
-    positions = [rng_fingerprint()]
-    for _ in range(3):
-        optimizer.zero_grad()
-        output = from_plain(cast(object, model(image)), Tensor)
-        loss = functional.cross_entropy(output, labels)
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.detach().clone())
-        positions.append(rng_fingerprint())
-    record = {
-        "training/losses": torch.stack(losses),
-        "training/rng": torch.stack(positions),
-        **{
-            "training/state/" + name: value.detach().clone()
-            for name, value in model.state_dict().items()
-        },
-    }
-    steps: list[Tensor] = []
-    for name, parameter in model.named_parameters():
-        state = from_plain(cast(object, optimizer.state[parameter]), dict[str, Tensor])
-        assert state.keys() == {"step", "exp_avg", "exp_avg_sq"}
-        steps.append(state["step"].clone())
-        for category in ("exp_avg", "exp_avg_sq"):
-            record[f"training/{category}/{name}"] = state[category].clone()
-    record["training/step"] = torch.stack(steps)
-    return record
-
-
 def test_tiny_drop_path_spreads_the_maximum_linearly_over_the_blocks() -> None:
     assert tiny_drop_path(0.1, 1) == (0.0,)
     assert tiny_drop_path(0.1, 2) == (0.0, 0.1)
@@ -1172,25 +1038,19 @@ def test_meta_pretrained_encoder_reloads_complete_features_before_training(
     path = tmp_path / "imagenet.pt"
     torch.save(
         {
-            name.removeprefix("initial/"): value
+            name.removeprefix("constructor/initial/"): value
             for name, value in expected.items()
-            if name.startswith("initial/")
+            if name.startswith("constructor/initial/")
         },
         path,
     )
     encoder = ImageNetEncoder.Config()
-    backbone = TinyConvNeXt.Config()
-    backbone.channels_hidden = (2, 2, 2, 2)  # The source checkpoint fixes these widths.
-    backbone.blocks_per_stage = (1, 1, 1, 1)
-    assert isinstance(backbone.head, ConvNeXtHead.Config)
-    assert isinstance(backbone.head.proj_out, Linear.Config)
-    backbone.head.proj_out.channels_out = 2
-    encoder.backbone = backbone
+    encoder.backbone = _tiny_config()
     encoder.checkpoint.path = path
     encoder.checkpoint.sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     study = Raptor.Config()
     study.backbone = encoder
-    study.head.channels_in, study.head.channels_out = 2, 5
+    study.head.channels_in, study.head.channels_out = 5, 6
     study.head.channels_hidden = 3
     config = TrainStep.Config(model=study)
     config.parallelism = NoParallel.Config(device="cpu")
@@ -1218,48 +1078,35 @@ def test_meta_pretrained_encoder_reloads_complete_features_before_training(
             torch.equal(value, saved[name])
             for name, value in materialized.backbone.state_dict().items()
         )
-        image = (
-            torch.arange(4 * 3 * 32 * 64, dtype=torch.float32).reshape(4, 3, 32, 64)
-            % 251
-        ) / 127
+        # Evaluation mode disables stochastic depth, as in the stored features.
         assert torch.equal(
-            cast(TensorFn, materialized.backbone)(image),
-            expected["features"],
+            cast(TensorFn, materialized.backbone.eval())(_tiny_image()),
+            expected["constructor/features"],
         )
 
 
-def test_imagenet_encoder_loads_every_source_tensor_before_removing_classifier(
+def test_imagenet_encoder_loads_every_checkpoint_tensor_before_removing_classifier(
     tmp_path: Path,
 ) -> None:
     expected = read_tensors(_CWD / "testdata" / "tiny_model.pt")
     path = tmp_path / "imagenet.pt"
     torch.save(
         {
-            name.removeprefix("initial/"): value
+            name.removeprefix("constructor/initial/"): value
             for name, value in expected.items()
-            if name.startswith("initial/")
+            if name.startswith("constructor/initial/")
         },
         path,
     )
     config = ImageNetEncoder.Config()
-    backbone = TinyConvNeXt.Config()
-    backbone.channels_hidden = (2, 2, 2, 2)
-    backbone.blocks_per_stage = (1, 1, 1, 1)
-    assert isinstance(backbone.head, ConvNeXtHead.Config)
-    assert isinstance(backbone.head.proj_out, Linear.Config)
-    backbone.head.proj_out.channels_out = 2
-    config.backbone = backbone
+    config.backbone = _tiny_config()
     config.checkpoint.path = path
     config.checkpoint.sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics(), torch.no_grad():
         torch.manual_seed(19)
         encoder = config.make().eval()
-        assert torch.equal(rng_fingerprint(), expected["rng_fingerprint"])
-        image = (
-            torch.arange(4 * 3 * 32 * 64, dtype=torch.float32).reshape(4, 3, 32, 64)
-            % 251
-        ) / 127
-        assert torch.equal(encoder(image), expected["features"])
+        assert torch.equal(rng_fingerprint(), expected["constructor/rng"])
+        assert torch.equal(encoder(_tiny_image()), expected["constructor/features"])
         assert "backbone.head.norm.weight" in encoder.state_dict()
         assert "backbone.head.proj_out.weight" not in encoder.state_dict()
 
@@ -1448,41 +1295,6 @@ def test_encoder_reads_its_checkpoint_on_cpu_as_plain_tensors(
     assert seen == [{"map_location": "cpu", "weights_only": True}]
 
 
-def _released(name: str) -> dict[str, Tensor]:
-    expected = read_tensors(_CWD / "testdata" / name)
-    return {
-        key.removeprefix("initial/"): value
-        for key, value in expected.items()
-        if key.startswith("initial/")
-    }
-
-
-def _backbone_config() -> CoAtNet.Config:
-    config = CoAtNet.Config(image_size=(64, 96))
-    config.stem.channels_hidden = (1, 2)
-    config.channels_hidden = (2, 4, 2, 4)
-    for block in blocks_of(config, CoAtTransformer.Config):
-        block.attention.channels_head = 2
-        block.attention.relative.mlp.channels_hidden = 2
-    return config
-
-
-def test_every_coatnet_block_replays_source_parameters_and_outputs() -> None:
-    expected = read_tensors(_CWD / "testdata" / "coatnet.pt")
-    with host_agnostic_numerics():
-        model = _backbone_config().make().eval()
-        model.load_checkpoint(_released("coatnet.pt"))
-        # The complete coatnet.pt source witness fixes batch three and RGB channels.
-        image = (
-            torch.arange(3 * 3 * 64 * 96, dtype=torch.float32).reshape(3, 3, 64, 96)
-            / 101
-        )
-        assert torch.equal(model(image), expected["output"])
-        with torch.no_grad():
-            model.norm.weight[0].add_(torch.finfo(torch.float32).eps)
-        assert not torch.equal(model(image), expected["output"])
-
-
 def _side_config() -> ResNet.Config:
     config = ResNet.Config(channels_in=1, channels_out=1)
     config.stem.channels_out = 2
@@ -1490,21 +1302,17 @@ def _side_config() -> ResNet.Config:
     return config
 
 
-def test_complete_resnet34_source_state_and_output() -> None:
-    expected = read_tensors(_CWD / "testdata" / "side_model.pt")
+def test_resnet34_laterality_forward_matches_its_golden() -> None:
     with host_agnostic_numerics():
         model = _side_config().make().eval()
-        model.load_torchvision_state_dict(_released("side_model.pt"))
-        # The complete side_model.pt witness fixes the single MRI channel stem.
+        model.load_torchvision_state_dict(_literal_weights(model))
+        # The laterality model reads one MRI channel; ResNet.Config(channels_in=1).
         image = (
             torch.arange(3 * 1 * 32 * 64, dtype=torch.float32).reshape(3, 1, 32, 64)
             / 101
         )
-        assert torch.equal(model(image), expected["output"])
-        assert model.fc.bias is not None
-        with torch.no_grad():
-            model.fc.bias.view(torch.int32)[0] += 1
-        assert not torch.equal(model(image), expected["output"])
+        output = model(image)
+    assert_tensor_golden(_CWD / "testdata" / "side_model.pt", {"output": output})
 
 
 def _anatomy_config() -> ReleasedVNet.Config:
@@ -1513,21 +1321,14 @@ def _anatomy_config() -> ReleasedVNet.Config:
     return config
 
 
-def test_anatomy_replays_every_source_state_tensor_and_full_output() -> None:
-    expected = read_tensors(_CWD / "testdata" / "anatomy_model.pt")
+def test_anatomy_forward_matches_its_golden() -> None:
     with host_agnostic_numerics():
         model = _anatomy_config().make().eval()
-        model.load_checkpoint(_released("anatomy_model.pt"))
-        # The source VNet requires one input channel and four spatial halvings.
-        x = (
-            torch.arange(3 * 1 * 16 * 16, dtype=torch.float32).reshape(3, 1, 16, 16)
-            / 101
-        )
-        assert torch.equal(model(x), expected["output"])
-        with torch.no_grad():
-            assert model.output.proj.bias is not None
-            model.output.proj.bias.view(torch.int32)[0] += 1
-        assert not torch.equal(model(x), expected["output"])
+        model.load_checkpoint(_literal_weights(model))
+        # The released VNet reads one channel and halves both sides four times.
+        x = torch.arange(2 * 1 * 16 * 32, dtype=torch.float32).reshape(2, 1, 16, 32)
+        output = model(x / 101)
+    assert_tensor_golden(_CWD / "testdata" / "anatomy_model.pt", {"output": output})
 
 
 def test_anatomy_rejects_incomplete_checkpoint_before_mutating_parameters() -> None:
@@ -1541,24 +1342,47 @@ def test_anatomy_rejects_incomplete_checkpoint_before_mutating_parameters() -> N
 
 
 def test_anatomy_checkpoint_validates_prefix_shape_dtype_and_collisions() -> None:
-    state = _released("anatomy_model.pt")
     model = _anatomy_config().make()
+    state = {name: value.clone() for name, value in model.state_dict().items()}
     model.load_checkpoint({"model.net." + name: value for name, value in state.items()})
     wrong = dict(state)
-    wrong["in_tr.conv_block.conv.weight"] = state[
-        "in_tr.conv_block.conv.weight"
-    ].double()
+    wrong["input.layer.conv.weight"] = state["input.layer.conv.weight"].double()
     with pytest.raises(ValueError, match="shape or dtype"):
         model.load_checkpoint(wrong)
     wrong = dict(state)
-    wrong["input.layer.conv.weight"] = state["in_tr.conv_block.conv.weight"]
+    wrong["in_tr.conv_block.conv.weight"] = state["input.layer.conv.weight"]
     with pytest.raises(ValueError, match="collide"):
         model.load_checkpoint(wrong)
 
 
+@pytest.mark.parametrize(
+    ("released", "native"),
+    [
+        ("model.net.in_tr.conv_block.conv.weight", "input.layer.conv.weight"),
+        # Split, as in the production pattern: codespell rewrites the whole token.
+        ("in_tr.conv_block.ad" + "n.N.running_var", "input.layer.norm.running_var"),
+        ("down_tr128.ops.2.conv_block.ad" + "n.N.bias", "down.2.blocks.2.norm.bias"),
+        ("up_tr32.ops.0.conv_block.ad" + "n.N.weight", "up.3.blocks.0.norm.weight"),
+        ("down_tr32.down_conv.weight", "down.0.proj.conv.weight"),
+        ("down_tr64.bn1.bias", "down.1.proj.norm.bias"),
+        ("down_tr256.ops.0.conv_block.conv.bias", "down.3.blocks.0.conv.bias"),
+        ("up_tr256.up_conv.weight", "up.0.proj.weight"),
+        ("up_tr32.bn1.running_mean", "up.3.norm.running_mean"),
+        ("up_tr64.ops.0.conv_block.conv.weight", "up.2.blocks.0.conv.weight"),
+        ("out_tr.conv2.weight", "output.proj.weight"),
+    ],
+)
+def test_released_anatomy_names_map_onto_the_native_vnet(
+    released: str,
+    native: str,
+) -> None:
+    assert _vnet_name(released) == native
+
+
 def test_anatomy_production_configuration_retains_complete_model_state() -> None:
-    model = ReleasedVNet.Config(channels_in=1, channels_out=4).make()
-    control = _anatomy_config().make()
+    with torch.device("meta"):
+        model = ReleasedVNet.Config(channels_in=1, channels_out=4).make()
+        control = _anatomy_config().make()
     assert model.state_dict().keys() == control.state_dict().keys()
     assert sum(value.numel() for value in model.state_dict().values()) == 9_368_112
 

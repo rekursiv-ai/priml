@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, cast
 
 import json
 
 from pyarrow import parquet
-from torch import nn
 
 import numpy as np
 import pytest
@@ -18,34 +16,45 @@ from priml.baselines.casmi2026.isolated import IDENTITY_RDKIT
 from priml.baselines.casmi2026.model import (
     DreamAttention,
     FragmentAttention,
-    ReleasedModel,
 )
 from priml.baselines.casmi2026.testing import (
-    decode,
+    float32_comparands,
+    identity_fingerprints,
     identity_rows,
-    released_parameters,
     retrieval_inputs,
     set_heads,
     write_identity,
 )
 from priml.model.graphormer import GraphAttention
-from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+if TYPE_CHECKING:
+    from pathlib import Path
 
-_BASELINE: Final = _CWD
 
-
-class _Released(nn.Module):
-    def __init__(self, *, names: dict[str, str]) -> None:
-        super().__init__()
-        self.first = nn.Linear(1, 1)
-        self.second = nn.Linear(1, 1)
-        self._names = names
-
-    def checkpoint_names(self) -> dict[str, str]:
-        return self._names
+def test_float32_comparands_round_outputs_once_and_keep_matching_inputs() -> None:
+    wide = torch.tensor([1 + 2.0**-30, 0.1, -0.0], dtype=torch.float64)
+    narrow = torch.tensor([0.5], dtype=torch.float32)
+    counts = torch.tensor([3, 4])
+    record = {
+        "a/input/mass": wide,
+        "b/mass": wide,
+        "counts": counts,
+        "half": narrow,
+        "config": wide,
+    }
+    actual = float32_comparands(record, inputs=("*/input/*", "config"))
+    assert list(actual) == list(record)
+    assert actual["a/input/mass"] is wide
+    assert actual["config"] is wide
+    assert actual["counts"] is counts
+    assert actual["half"] is narrow
+    assert actual["b/mass"].dtype == torch.float64
+    assert actual["b/mass"].tolist() == [1.0, float(np.float32(0.1)), -0.0]
+    assert torch.signbit(actual["b/mass"][2])
+    unmatched = float32_comparands({"input/mass": wide})["input/mass"]
+    assert unmatched.dtype == torch.float64
+    assert unmatched.tolist() == [1.0, float(np.float32(0.1)), -0.0]
 
 
 @pytest.mark.parametrize(
@@ -62,72 +71,53 @@ def test_head_count_rejects_a_foreign_configuration() -> None:
         set_heads(object(), 3)
 
 
-def test_released_order_follows_the_schema_and_lists_each_parameter_once() -> None:
-    model = _Released(
-        names={
-            "b": "second.weight",
-            "a": "first.weight",
-            "c": "second.bias",
-            "d": "first.bias",
-            "e": "absent",
-        },
-    )
-    ordered = released_parameters(cast("ReleasedModel", model))
-    assert ordered == [
-        model.second.weight,
-        model.first.weight,
-        model.second.bias,
-        model.first.bias,
-    ]
-
-
-def test_released_order_rejects_an_incomplete_schema() -> None:
-    model = _Released(names={"a": "first.weight"})
-    with pytest.raises(ValueError, match="does not cover"):
-        released_parameters(cast("ReleasedModel", model))
-
-
-def test_released_order_rejects_duplicate_that_masks_a_missing_parameter() -> None:
-    model = _Released(
-        names={
-            "a": "first.weight",
-            "b": "first.bias",
-            "c": "second.bias",
-            "d": "first.weight",
-        },
-    )
-    with pytest.raises(ValueError, match="does not cover"):
-        released_parameters(cast("ReleasedModel", model))
-
-
-def test_released_order_rejects_duplicate_with_complete_coverage() -> None:
-    model = _Released(
-        names={
-            "a": "first.weight",
-            "b": "first.bias",
-            "c": "second.weight",
-            "d": "second.bias",
-            "e": "first.weight",
-        },
-    )
-    with pytest.raises(ValueError, match="does not cover"):
-        released_parameters(cast("ReleasedModel", model))
-
-
-def test_text_fields_decode_from_their_bytes() -> None:
-    assert decode(torch.tensor(list(b"C(=O)"))) == "C(=O)"
-
-
 def test_identity_records_stage_the_prepared_inputs(tmp_path: Path) -> None:
-    expected = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
-    rows = identity_rows(expected)
-    assert len(rows) == 8
-    assert rows[0]["smiles"] == decode(expected["0/input"])
-    write_identity(tmp_path, expected)
+    rows = identity_rows()
+    assert [row["smiles"] for row in rows] == [
+        "C/C=C/C",
+        "CC(=O)C",
+        "C[N+](C)(C)C",
+        "CCO.[Na+].[Cl-]",
+        "[13CH3]O",
+        "*C",
+        "invalid",
+        "",
+    ]
+    assert rows[0]["metric"] == (
+        '{"py/tuple":["IAQRGUVFOMOMEM",{"py/tuple":[{"py/tuple":["C",4]}]}]}'
+    )
+    assert (rows[3]["key"], rows[3]["standard_key"]) == (
+        "LOHGGLZYTJNUAL",
+        "LFQSCWFLJHTTHZ",
+    )
+    assert (rows[3]["formula"], rows[3]["standard_formula"]) == ("C2H6ClNaO", "C2H6O")
+    assert [row["standardized"] is None for row in rows] == [
+        False,
+        False,
+        True,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert rows[2]["key"] == "QEMXHQIAXOOASZ"
+    assert rows[2]["standard_metric"] == rows[5]["metric"] == "null"
+    assert rows[5]["standard_formula_lookup"] == "CH3*"
+    assert rows[6]["standard_formula_lookup"] == ""
+    rows[0]["key"] = "edited"
+    assert identity_rows()[0]["key"] == "IAQRGUVFOMOMEM"
+    write_identity(tmp_path)
     table = parquet.read_table(tmp_path / "molecules.parquet")
-    assert table.column("smiles").to_pylist() == [row["smiles"] for row in rows]
+    assert table.to_pylist() == [dict(row) for row in identity_rows()]
     fingerprints = cast("np.ndarray", np.load(tmp_path / "fingerprints.npy"))
-    assert fingerprints.shape[0] == 8
+    np.testing.assert_array_equal(fingerprints, identity_fingerprints())
+    assert fingerprints.dtype == np.uint8
+    assert fingerprints.shape == (8, 2069)
+    assert fingerprints[1, :3].tolist() == [0, 5, 10]
+    assert fingerprints[7, :3].tolist() == [0, 17, 34]
+    assert not fingerprints[2].any()
+    assert not fingerprints[6].any()
     manifest = cast(
         "dict[str, object]",
         json.loads((tmp_path / "manifest.json").read_text()),

@@ -40,8 +40,7 @@ def exp000() -> PublicRecipe.Config:
       https://www.kaggle.com/code/heliosli/this-one-is-old-version-0-957-new-one-you-can-use
 
     Results:
-      Complete tiny-state CPU component witnesses replay exactly. Physical
-      preparation and scoring controls replay source-minted numerical tensors.
+      Tiny-width CPU model goldens minted in-tree replay exactly.
       Complete learned native GPU inference remains unmeasured. A historical
       source-runtime run took 168.29 seconds on H200; it does not qualify this
       rewrite. Public score 0.957 is reported by the source; official test

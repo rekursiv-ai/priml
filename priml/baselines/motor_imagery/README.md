@@ -121,84 +121,32 @@ are tested. No fallback epoch is part of `exp000`.
 
 ## Evidence and provenance
 
-Original definitions, ingestion statements and source-only minters remain
-external. Native replay loads only complete source-minted numeric PT records,
-renaming their `bn_*` and `classifier` keys to the current nouns; every stored
-key, shape, dtype and bit is compared. The external definition
-fixture SHA-256 is
-`173eef407c6dd75d96e721c1d781dd7618d05ba26331ab8eb87a6a49f4b6c4ef`;
-decoded definitions:
-`e115694dd3ce0140b24048a988a0a57d2228e6d7589a35deb41480567651d4fb`.
-The original-ingestion fixture SHA-256 is
-`5c948cc66a582f09b4d29ca46fa71ed1d9f6c275f050cd4e0a1dabc19e97bc56`.
+No test reads a notebook output. Every golden is minted in-tree from this
+package by the test that replays it (`--regenerate-b4b` or
+`--regenerate-golden`). Tensor goldens compute under `host_agnostic_numerics()`
+and pinned samplers; every stored key, shape, dtype and bit is compared.
 
-| Complete control | SHA-256 |
+| Golden | Contents and minting test |
 | --- | --- |
-| multiscaleeegnet.pt | `d50d87638bd4f0952831649417187dad642969e069a3f81696bafcbfc2d37003` |
-| shallowconvnet.pt | `e7c4312ee80d96d729396105819d5b6bb568f56aadf8b9852e9c8e905f65b431` |
-| attentioneegnet.pt | `b944b96da8f2982219eea6af3aab2b269998a9cf3d9ee2f4328c07e27a2dad54` |
-| filtering.pt | `16efd9c52c23c20600b7dbfafaf7502a0c21ec8e8fe8ef9cb1372125ee5ad2fc` |
-| ingestion.pt | `2cdc27af9e919fc45925f306615a02c6fd17bfe0da674eca5e7e0b8e26c604d7` |
-| subject_folds.pt | `6a41ff0a2297569433f1d45868afe8d891cf52791666a03c41e5c243b8426f43` |
+| multiscaleeegnet.pt, shallowconvnet.pt, attentioneegnet.pt | `init/`: initial state and forward logits (`model_test.py`); `train/`: three epochs of losses, final state, gradients, AdamW state, evaluation outputs and sampler-site counts (`train_step_test.py`) |
+| exp000.txt | Complete finalized exp000 configuration (`experiments_test.py`) |
 
-The three neural controls are 14,450/4,192/8,233 bytes in ensemble order. They
-contain complete initial/final tensors, three mean losses, final gradients,
-all AdamW tensors, logits/probabilities and sampler-site counts. A real Priml
-loop separately checks complete model/optimizer/epoch-schedule/random state.
-Filtering records compare complete float64 input/output arrays. Ingestion records cover
-parsed decimals, missing markers, cue boundaries, windows, labels and IDs;
-fold records cover every validation index for unequal counts and tied counts.
-Test-marker/padding and submission tests check their complete native outputs.
+A real Priml loop runs the same three epochs and must equal the final state,
+AdamW state and sampler counts in the `train/` part of multiscaleeegnet.pt.
+Sampler sites are numbered in encounter order within
+each file, so moving a line does not change a golden. Pinned samplers intercept
+uniform initialization, Bernoulli dropout and DataLoader integer seeds and
+permutations beneath the original sampling algorithms; an unknown seeded
+primitive raises. Loop construction restores the campaign's Python and Torch
+streams and the pending first-use CUDA seed.
 
-All six controls were captured from unchanged pinned originals on x86_64 on
-2026-10-17, using the same BFB implementation as native replay (capture SHA
-`87f7880ea686cfd85bcb6c598d1721ca17b173453fb4b2843f3d21c7ab8a17e7`).
-Original ARM controls remain external; the three current neural files retain
-the bytes above. Current ARM replay is unmeasured.
-
-The shared `host_agnostic_numerics()` testing boundary fixes the adjacent-pair
-CPU float64 convolution weight reduction tree internally. Input/bias gradients
-and non-target kernels retain their ordinary dispatch. The same reduction
-applies to original minting and native replay;
-production arithmetic remains native. It replaced five differing
-ShallowConvNet gradient/AdamW fields after replay of all six complete backward
-inputs isolated the weight reductions. Thread/MKL controls did not resolve
-them. Earlier ARM/x86 traces retained 17 differing float64 scratch fields in
-BatchNorm, elementary functions and a norm; none reached float32 outputs or
-stored fields. Archived before/after source controls remain external.
-
-A later shared testing-context repair copied legacy `native_batch_norm`
-running-buffer updates back despite its incomplete mutation schema. Before
-replacement, source and native loaded every archived old initial field and
-matched through three updates. Corrected original-source captures changed
-only initial running variances to 0.9; other initial parameters/buffers retained
-their bits. Constructor regressions require the dummy pass to update every
-BatchNorm counter/variance. Complete old controls remain external.
-
-Preprocessing designs both filters without SciPy, in plain Python arithmetic
-that repeats SciPy's NumPy operations with x86 glibc's hypot and x86 OpenBLAS's
-complex dot order, so coefficients and filtered records match on x86 and
-aarch64. It preserves the unfused IIR recurrence and row-major buffers. Layout
-fixes the subsequent NumPy reduction order; all 90 ingestion values match after
-standardization and
-window extraction. [Filtering provenance](testdata/filtering.md) records the
-original input cases, source definition hash and capture environment.
-
-Shared RNG pins intercept uniform initialization, Bernoulli dropout, DataLoader
-integer seeds and permutations beneath the original sampling algorithms.
-Unknown seeded primitives raise. Existing site keys/counts and full values are
-preserved; initializer locations use encounter order within each layer type.
-Additional full-file site/generator-state metadata does not change the old PT
-keys. Python/Torch source seeds and pending first-use CUDA seed are preserved;
-complete NumPy/hash-environment state parity remains open.
-
-Sensitivity tests reject one ULP in all six model-record families for every
-architecture and added uniform/Bernoulli or omitted dummy-dropout draws. A
-uniform logit shift preserving argmax still fails every changed bit. Historical
-full/reduced source path measurements cover 140 lines/156 arcs identically,
-with zero native line/arc changes in the then-current model/layer/training/loss
-paths. They measure constructors, three updates and evaluation, not a full
-production run.
+Filters, folds, ingestion and submission have hand-checkable tests: coefficient
+structure, band-edge and center gains, steady states, literal fold members and
+windows composed from the documented steps. Preprocessing designs the notch
+from its closed form and the bandpass by prewarped bilinear transform of the
+analog Butterworth prototype. Each filter starts from the steady state of a
+unit step at its DC gain. Zero-phase filtering runs each filter forward, then
+backward, over an odd extension of three filter lengths at each end.
 
 ## Timing and remaining measurements
 

@@ -40,7 +40,6 @@ from priml.baselines.motor_imagery.testing import (
     model_record,
     optimizer_record,
     random_record,
-    read_source_record,
     source_step,
 )
 from priml.baselines.motor_imagery.train_loop import MotorImageryLoop
@@ -372,20 +371,14 @@ def test_campaign_reports_all_folds_members_and_official_artifacts(
     }
     assert (output / "config.txt").is_file()
     assert (output / "submission.csv").read_text().splitlines()[0] == "ID,TARGET"
-    record = read_tensors(_CWD / "testdata" / "subject_folds.pt")
-    for fold in range(cfg.folds.count):
-        indices = record[f"equal/{fold}"]
-        expected = {
-            index // 4
-            for index in from_plain(cast(object, indices.tolist()), list[int])
-        }
+    # Four equal people: the first and third fill fold 1, the second and fourth fold 0.
+    for fold, people in enumerate(({1, 3}, {0, 2})):
         state = cast(
             "dict[str, Tensor]",
             torch.load(output / f"fold-{fold}.pt", weights_only=True),
         )
         best_trials = from_plain(state["best_trials"].tolist(), list[int])
-        assert set(best_trials) == expected
-        assert Counter(best_trials) == Counter(dict.fromkeys(expected, 2))
+        assert Counter(best_trials) == Counter(dict.fromkeys(people, 2))
 
 
 def test_campaign_rejects_a_fold_without_a_positive_accuracy_epoch(
@@ -637,7 +630,9 @@ def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
             )
         assert len(observed) == 1
         prediction = observed[0].clone()
-        expected_prediction = step.call_eval(media)
+        # run() predicted with oneDNN off; its float32 convolutions round differently.
+        with portable_half_precision():
+            expected_prediction = step.call_eval(media)
         assert isinstance(expected_prediction, Tensor)
         assert torch.equal(prediction, expected_prediction)
 
@@ -903,11 +898,11 @@ def test_campaign_rejects_missing_data_and_passthrough_arguments(
         campaign.run("--unknown")
 
 
-def test_actual_priml_loop_matches_reference_epochs_and_random_draws(
+def test_actual_priml_loop_matches_the_step_golden(
     tmp_path: Path,
 ) -> None:
     cfg = exp_smoke()
-    # The full-cohort loop never evaluates, so it draws exactly the source's values.
+    # The full-cohort loop never evaluates, so its draws match the train/ golden's.
     cfg.validation.runtime = SingleProcess.Config(device="cpu")
     cfg.ensemble_loop.runtime = SingleProcess.Config(device="cpu")
     cfg.ensemble_loop.base_dir = None
@@ -923,7 +918,7 @@ def test_actual_priml_loop_matches_reference_epochs_and_random_draws(
         PinnedRandom() as pins,
     ):
         model = model_cfg.make()
-        # The source Conv2d requires one input plane and binary class labels.
+        # Every network's Conv2d requires a singleton input plane; labels are binary.
         media = torch.arange(4 * 3 * 100).reshape(4, 3, 100).float() / 100
         trials = [
             Trial(
@@ -948,11 +943,11 @@ def test_actual_priml_loop_matches_reference_epochs_and_random_draws(
             optimizer_record(cast(torch.optim.Optimizer, loop.step.optimizer)),
         )
         actual.update(random_record(pins))
-    record = read_source_record(_CWD / "testdata" / "multiscaleeegnet.pt")
+    record = read_tensors(_CWD / "testdata" / "multiscaleeegnet.pt")
     expected = {
-        key: value
+        key.removeprefix("train/"): value
         for key, value in record.items()
-        if key.startswith(("final/", "optimizer/", "random/"))
+        if key.startswith(("train/final/", "train/optimizer/", "train/random/"))
     }
     compare_record(expected, actual)
     assert loop.step.global_step == 3
@@ -1096,7 +1091,7 @@ def test_fixed_validation_people_are_the_only_fold_and_remain_disjoint(
     }
 
 
-def test_ensemble_probability_matches_every_reference_model_and_window() -> None:
+def test_ensemble_probability_matches_every_golden_model_and_window() -> None:
     steps: list[MotorImageryStep] = []
     probabilities: list[Tensor] = []
     expected_logits: dict[str, Tensor] = {}
@@ -1111,16 +1106,16 @@ def test_ensemble_probability_matches_every_reference_model_and_window() -> None
         model = cfg.make()
         model.load_state_dict(
             {
-                key.removeprefix("final/"): value
+                key.removeprefix("train/final/"): value
                 for key, value in record.items()
-                if key.startswith("final/")
+                if key.startswith("train/final/")
             },
         )
         steps.append(
             MotorImageryStep(source_step(cfg, epochs=1).finalized(), model=model),
         )
-        probabilities.append(record["probabilities"])
-        expected_logits[model_type.__name__] = record["eval_logits"]
+        probabilities.append(record["train/probabilities"])
+        expected_logits[model_type.__name__] = record["train/eval_logits"]
     media = torch.arange(4 * 3 * 100).reshape(4, 3, 100).float() / 100
     trial = Trial(subject="S008", trial_id=0, label=-1, windows=media)
     with host_agnostic_numerics():
@@ -1156,7 +1151,7 @@ def test_float32_softmax_cast_retains_native_complete_logit_probabilities(
 ) -> None:
     record = read_tensors(_CWD / "testdata" / f"{model_name}.pt")
     with torch.inference_mode():
-        logits = record["eval_logits"].to(dtype=dtype)
+        logits = record["train/eval_logits"].to(dtype=dtype)
         expected = logits.softmax(dim=1, dtype=torch.float32)
         actual = logits.to(dtype=torch.float32).softmax(dim=1)
     compare_record({"probabilities": expected}, {"probabilities": actual})

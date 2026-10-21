@@ -24,7 +24,6 @@ import torch
 
 from priml.baselines.rsna_knee.data import FINDINGS
 from priml.data.na_values import PANDAS_NA_VALUES
-from priml.math.fused import fma32
 from priml.paths import resolve_working_dir
 
 
@@ -1006,8 +1005,7 @@ class R7Render:
 
     def __call__(self, series: Sequence[NativeSeries]) -> RenderedStudy:
         """Render all retained acquisitions with the released intensity curve."""
-        retained: list[NativeSeries] = []
-        crop_inputs: list[tuple[tuple[int, int, int, int], ...]] = []
+        retained: list[tuple[NativeSeries, tuple[tuple[int, int, int, int], ...]]] = []
         pixels: list[NDArray[np.uint8]] = []
         metadata: list[list[float]] = []
         blocks: list[SliceBlock] = []
@@ -1032,11 +1030,10 @@ class R7Render:
             )
             if any(
                 _same_input(acquisition, second=previous) and crops == previous_crops
-                for previous, previous_crops in zip(retained, crop_inputs, strict=True)
+                for previous, previous_crops in retained
             ):
                 continue
-            retained.append(acquisition)
-            crop_inputs.append(crops)
+            retained.append((acquisition, crops))
             views: list[tuple[int, int]] = []
             for view, crop, center in view_inputs:
                 views.append((view, len(pixels)))
@@ -1901,7 +1898,7 @@ class AnatomySampler:
                 image = image[::-1]
             height, width = cast(tuple[int, int], image.shape)
             resized = _resize_input(
-                torch.from_numpy(np.ascontiguousarray(image)),
+                image,
                 size=(
                     max(
                         config.pad_multiple,
@@ -1913,7 +1910,7 @@ class AnatomySampler:
                     ),
                 ),
             )
-            inputs = resized[None, None].to(device)
+            inputs = torch.from_numpy(resized)[None, None].to(device)
             height, width = inputs.shape[-2:]
             inputs = functional.pad(
                 inputs,
@@ -1940,19 +1937,24 @@ class AnatomySampler:
         return result, "ok"
 
 
-def _resize_input(image: Tensor, *, size: tuple[int, int]) -> Tensor:
-    """Apply the source x86 OpenCV half-pixel and fused delta interpolation."""
-    height, width = image.shape
-    x = (torch.arange(size[1], dtype=torch.float64) + 0.5) * (width / size[1]) - 0.5
-    y = (torch.arange(size[0], dtype=torch.float64) + 0.5) * (height / size[0]) - 0.5
-    left, top = x.floor().long(), y.floor().long()
-    fx, fy = (x - left).float(), (y - top).float()
-    left_pixels = image[:, left.clamp_min(0)]
-    right_pixels = image[:, (left + 1).clamp_max(width - 1)]
-    rows = fma32(right_pixels - left_pixels, y=fx, addend=left_pixels)
-    top_rows = rows[top.clamp_min(0)]
-    bottom_rows = rows[(top + 1).clamp_max(height - 1)]
-    return fma32(bottom_rows - top_rows, y=fy[:, None], addend=top_rows)
+def _resize_input(
+    image: NDArray[np.float32],
+    *,
+    size: tuple[int, int],
+) -> NDArray[np.float32]:
+    """Resize bilinearly at half-pixel centers in float64, rounding once to float32."""
+    height, width = cast(tuple[int, int], image.shape)
+    x = (np.arange(size[1]) + 0.5) * (width / size[1]) - 0.5
+    y = (np.arange(size[0]) + 0.5) * (height / size[0]) - 0.5
+    left, top = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = x - left, (y - top)[:, None]
+    pixels = image.astype(np.float64)
+    left_pixels = pixels[:, np.maximum(left, 0)]
+    right_pixels = pixels[:, np.minimum(left + 1, width - 1)]
+    rows = left_pixels + fx * (right_pixels - left_pixels)
+    top_rows = rows[np.maximum(top, 0)]
+    bottom_rows = rows[np.minimum(top + 1, height - 1)]
+    return (top_rows + fy * (bottom_rows - top_rows)).astype(np.float32)
 
 
 @dataclass(kw_only=True, slots=True)

@@ -16,12 +16,6 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from scipy import spatial
-else:
-    from wrapt import lazy_import
-
-    spatial = lazy_import("scipy.spatial")
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Clustering:
@@ -156,9 +150,7 @@ def lloyd(
         if empty.size:
             distance = np.square(points - centers[labels]).sum(axis=1)
             if np.max(distance) != 0:
-                farthest: NDArray[np.int64] = np.argpartition(distance, -len(empty))[
-                    : -len(empty) - 1 : -1
-                ]
+                farthest = np.argsort(-distance, kind="stable")[: len(empty)]
                 for offset in range(len(empty)):
                     missing = cast("np.int64", empty[offset])
                     index = cast("np.int64", farthest[offset])
@@ -664,15 +656,16 @@ class GeographicPrior:
             [(float(np.nanmean(well.x)), float(np.nanmean(well.y)))],
             dtype=np.float64,
         )
-        _, nearest = spatial.cKDTree(centers).query(
-            query_center,
-            k=min(self.config.neighbor_wells, len(support)),
+        _, nearest = _nearest(
+            centers,
+            queries=query_center,
+            count=self.config.neighbor_wells,
         )
         own = self._support(well, prefix=True)
         parts = [own] if len(own.values) else []
         parts.extend(
             points[support[int(index)].well_id]
-            for index in np.asarray(nearest).reshape(-1)
+            for index in nearest[0]
             if len(points[support[int(index)].well_id].values)
         )
         if not parts:
@@ -680,14 +673,16 @@ class GeographicPrior:
         values = np.vstack([part.values for part in parts]).astype(np.float32)
         flags = np.concatenate([part.is_prefix for part in parts])
         if len(values) > self.config.max_support_points:
-            distance, _ = spatial.cKDTree(xy.astype(np.float64)).query(
-                values[:, :2].astype(np.float64),
-                k=1,
+            distance, _ = _nearest(
+                xy.astype(np.float64),
+                queries=values[:, :2].astype(np.float64),
+                count=1,
             )
-            selected = np.argpartition(distance, self.config.max_support_points - 1)[
-                : self.config.max_support_points
-            ]
-            selected.sort()
+            selected = np.sort(
+                np.argsort(distance[:, 0], kind="stable")[
+                    : self.config.max_support_points
+                ],
+            )
             values, flags = values[selected], flags[selected]
         return SupportPoints(values=values, is_prefix=flags)
 
@@ -698,13 +693,11 @@ class GeographicPrior:
         xy: NDArray[np.float32],
         dxy: NDArray[np.float32],
     ) -> tuple[NDArray[np.float32], dict[str, NDArray[np.float32]]]:
-        count = min(self.config.point_neighbors, len(support.values))
-        distance, indices = spatial.cKDTree(self.metric(support.values[:, :2])).query(
-            self.metric(xy),
-            k=count,
+        distance, indices = _nearest(
+            self.metric(support.values[:, :2]),
+            queries=self.metric(xy),
+            count=self.config.point_neighbors,
         )
-        if count == 1:
-            distance, indices = distance[:, None], indices[:, None]
         weights = (
             1
             / np.maximum(distance, self.config.distance_epsilon)
@@ -786,3 +779,20 @@ def _labels(
         -2 * (points @ centers.T) + norms[None, :],
         axis=1,
     ).astype(np.int64)
+
+
+def _nearest(
+    points: NDArray[np.float64],
+    *,
+    queries: NDArray[np.float64],
+    count: int,
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Find each query's nearest points by distance, ties to the lower row."""
+    if np.count_nonzero(~np.isfinite(np.concatenate((points, queries)))):
+        raise ValueError("Geographic neighbor coordinates must be finite.")
+    dx = queries[:, None, 0] - points[None, :, 0]
+    dy = queries[:, None, 1] - points[None, :, 1]
+    squared = dx * dx + dy * dy
+    # Equal distances must keep row order; argpartition and the default sort do not.
+    indices = np.argsort(squared, axis=1, kind="stable")[:, :count]
+    return np.sqrt(np.take_along_axis(squared, indices, axis=1)), indices

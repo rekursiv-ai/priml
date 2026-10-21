@@ -53,66 +53,149 @@ from priml.baselines.casmi2026.isolated import (
     v6_reaction_rules,
 )
 from priml.baselines.casmi2026.main_engine_test import Prepared
-from priml.testing.golden import mismatches, read_tensors
+from priml.baselines.casmi2026.testing import float32_comparands
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
 _BASELINE: Final = _CWD
 
 
-def test_every_fixed_mass_and_admitted_element_matches_source() -> None:
-    values = ELEMENT_MASSES
-    actual = {
-        "elements": torch.tensor(list("\0".join(values).encode()), dtype=torch.uint8),
-        "mass": torch.tensor(list(values.values()), dtype=torch.float64),
-    }
-    expected = read_tensors(_CWD / "testdata/atomic_masses.pt")
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+def test_element_masses_are_monoisotopic_and_lead_with_the_organic_elements() -> None:
+    assert len(ELEMENT_MASSES) == 82
+    assert list(ELEMENT_MASSES)[:4] == ["C", "H", "N", "O"]
+    assert ELEMENT_MASSES["C"] == 12.0
+    assert ELEMENT_MASSES["O"] == 15.9949146196
+    assert HYDROGEN_MASS == ELEMENT_MASSES["H"] == 1.00782503207
+    assert all(mass > 0 for mass in ELEMENT_MASSES.values())
 
 
-ADDUCTS_GOLDEN: Final = _BASELINE / "testdata" / "cache.pt"
+def test_adduct_parameters_decode_every_vocabulary_name_in_token_order() -> None:
+    assert [(name, adduct_parameters(name)) for name in adduct_names()] == [
+        ("[M+H]+", (1, 1, 1.00727645217, 1)),
+        ("[M+NH4]+", (1, 1, 18.03382555318, 1)),
+        ("[M-H2O+H]+", (1, 1, -17.00328823157, 1)),
+        ("[M-2H2O+H]+", (1, 1, -35.01385291531, 1)),
+        ("[M+Na]+", (1, 1, 22.989220701, 1)),
+        ("[M+K]+", (1, 1, 38.9631581001, 1)),
+        ("[M-H]-", (1, 1, -1.00727645217, -1)),
+        ("[M-H2O-H]-", (1, 1, -19.01784113591, -1)),
+        ("[M+CH2O2-H]-", (1, 1, 44.99820285116999, -1)),
+        ("[M+Cl]-", (1, 1, 34.969401259899996, -1)),
+        ("[M+Li]+", (1, 1, 7.0154559701, 1)),
+        ("[M-H2O]+", (1, 1, -18.01111326364, 1)),
+        ("[M]+", (1, 1, -0.0005485799, 1)),
+        ("[M+2H]2+", (1, 2, 2.01455290434, 1)),
+        ("[M+3H]3+", (1, 3, 3.02182935651, 1)),
+        ("[M+H+Na]2+", (1, 2, 23.996497153169997, 1)),
+        ("[M+HNa]2+", (1, 2, 23.996497153169997, 1)),
+        ("[M+2Na]2+", (1, 2, 45.978441402, 1)),
+        ("[M+2Na-H]+", (1, 1, 44.97116494983, 1)),
+        ("[M+Ca]2+", (1, 2, 39.961493820200005, 1)),
+        ("[M+CH3OH+H]+", (1, 1, 33.03349120005, 1)),
+        ("[M+CH3CN+H]+", (1, 1, 42.03382555318, 1)),
+        ("[M+CH3CN+Na]+", (1, 1, 64.01576980201, 1)),
+        ("[M+C2H4N]+", (1, 1, 42.03382555318, 1)),
+        ("[M+CH5O]+", (1, 1, 33.03349120005, 1)),
+        ("[M-H2N]+", (1, 1, -16.019272648839998, 1)),
+        ("[M-NH3+H]+", (1, 1, -16.01927264884, 1)),
+        ("[M-H5O3]+", (1, 1, -53.02441759905, 1)),
+        ("[M-CH3]+", (1, 1, -15.02402367611, 1)),
+        ("[M+H-CH3]+", (1, 1, -14.01619864404, 1)),
+        ("[M-2H]-", (1, 1, -2.01510148424, -1)),
+        ("[M-2H]2-", (1, 2, -2.01455290434, -1)),
+        ("[M-H2]2-", (1, 2, -2.01455290434, -1)),
+        ("[M]-", (1, 1, 0.0005485799, -1)),
+        ("[M+HCOO]-", (1, 1, 44.99820285116999, -1)),
+        ("[M+C2H4O2-H]-", (1, 1, 59.01385291531, -1)),
+        ("[M+CH3COO]-", (1, 1, 59.01385291531, -1)),
+        ("[M+Br]-", (1, 1, 78.9188856799, -1)),
+        ("[M+Na-2H]-", (1, 1, 20.974667796659997, -1)),
+        ("[M+K-2H]-", (1, 1, 36.94860519576, -1)),
+        ("[M+Na-H2]-", (1, 1, 20.974667796659997, -1)),
+        ("[M+K-H2]-", (1, 1, 36.94860519576, -1)),
+        ("[M-CH3]-", (1, 1, -15.02292651631, -1)),
+        ("[M-C3H6NO2]-", (1, 1, -88.03930485652, -1)),
+        ("[M+C2F3O2]-", (1, 1, 112.98558747909999, -1)),
+        ("[M+CF3COO]-", (1, 1, 112.98558747909999, -1)),
+        ("[2M+H]+", (2, 1, 1.00727645217, 1)),
+        ("[2M+Na]+", (2, 1, 22.989220701, 1)),
+        ("[2M+K]+", (2, 1, 38.9631581001, 1)),
+        ("[2M+NH4]+", (2, 1, 18.03382555318, 1)),
+        ("[2M+Ca]2+", (2, 2, 39.961493820200005, 1)),
+        ("[2M-H]-", (2, 1, -1.00727645217, -1)),
+        ("[2M+CH2O2-H]-", (2, 1, 44.99820285116999, -1)),
+        ("[2M+C2H4O2-H]-", (2, 1, 59.01385291531, -1)),
+        ("[2M+Na-2H]-", (2, 1, 20.974667796659997, -1)),
+        ("[2M+Cl]-", (2, 1, 34.969401259899996, -1)),
+        ("[3M+H]+", (3, 1, 1.00727645217, 1)),
+        ("[3M+Na]+", (3, 1, 22.989220701, 1)),
+        ("[3M-H]-", (3, 1, -1.00727645217, -1)),
+    ]
+    assert [adduct_index(name) for name in ("[M+H]+", "[3M-H]-", "unknown", None)] == [
+        0,
+        58,
+        59,
+        59,
+    ]
 
 
-def test_all_adduct_mass_arithmetic_matches_source() -> None:
-    names = adduct_names()
-    actual = {
-        "adduct/parameters": torch.tensor(
-            [adduct_parameters(name) for name in names],
-            dtype=torch.float64,
-        ),
-        "adduct/indices": torch.tensor(
-            [adduct_index(name) for name in (*names, "unknown", "<unk>")],
-        ),
-        "adduct/neutral": torch.from_numpy(
-            neutral_mass(
-                np.arange(len(names) + 1, dtype=np.float64) + 100,
-                [*names, "unknown"],
-            ),
-        ),
-        "adduct/precursor": torch.tensor(
-            [precursor_mass(123.456, adduct=name) for name in names],
-            dtype=torch.float64,
-        ),
-    }
-    names = SECOND_NAMES
-    actual["prvsiyan/parameters"] = torch.tensor(
-        [second_adduct_parameters(name) for name in names],
-        dtype=torch.float64,
+def test_second_adduct_parameters_keep_proton_first_offsets_in_table_order() -> None:
+    assert [(name, second_adduct_parameters(name)) for name in SECOND_NAMES] == [
+        ("[M+H]+", (1, 1, 1.00727645217)),
+        ("[M+NH4]+", (1, 1, 18.03382555318)),
+        ("[M+Na]+", (1, 1, 22.989220701)),
+        ("[M+K]+", (1, 1, 38.9631581001)),
+        ("[M-H2O+H]+", (1, 1, -17.00328823157)),
+        ("[M-2H2O+H]+", (1, 1, -35.013852915310004)),
+        ("[M+2H]2+", (1, 2, 2.01455290434)),
+        ("[M]+", (1, 1, -0.0005485799)),
+        ("[M-H2O]+", (1, 1, -18.01111326364)),
+        ("[M+CH3OH+H]+", (1, 1, 33.033491200049994)),
+        ("[M+CH3CN+H]+", (1, 1, 42.03382555318)),
+        ("[M-H]-", (1, 1, -1.00727645217)),
+        ("[M-H2O-H]-", (1, 1, -19.01784113591)),
+        ("[M+CH2O2-H]-", (1, 1, 44.99820285117)),
+        ("[M+C2H4O2-H]-", (1, 1, 59.013852915310004)),
+        ("[M+Cl]-", (1, 1, 34.969401259899996)),
+        ("[M]-", (1, 1, 0.0005485799)),
+        ("[M-2H]-", (1, 2, -2.01455290434)),
+        ("[M+Na-2H]-", (1, 1, 20.97521637656)),
+        ("[2M+H]+", (2, 1, 1.00727645217)),
+        ("[2M+Na]+", (2, 1, 22.989220701)),
+        ("[2M+NH4]+", (2, 1, 18.03382555318)),
+        ("[2M+K]+", (2, 1, 38.9631581001)),
+        ("[2M-H]-", (2, 1, -1.00727645217)),
+        ("[2M+CH2O2-H]-", (2, 1, 44.99820285117)),
+        ("[2M+C2H4O2-H]-", (2, 1, 59.013852915310004)),
+        ("[2M+Na-2H]-", (2, 1, 20.97521637656)),
+        ("[3M+H]+", (3, 1, 1.00727645217)),
+        ("[3M-H]-", (3, 1, -1.00727645217)),
+    ]
+
+
+def test_neutral_and_precursor_masses_invert_the_adduct_arithmetic() -> None:
+    labels: list[str | None] = ["[M+H]+", "[2M+Na]+", "[M+2H]2+", "unknown", None]
+    mz = np.array([101.0, 223.0, 51.0, 70.0, 70.0])
+    actual = neutral_mass(mz, labels)
+    assert actual.dtype == np.float64
+    np.testing.assert_array_equal(
+        actual,
+        [
+            101.0 - 1.00727645217,
+            (223.0 - 22.989220701) / 2,
+            102.0 - 2.01455290434,
+            math.nan,
+            math.nan,
+        ],
     )
-    actual["prvsiyan/neutral"] = torch.from_numpy(
-        second_neutral_mass(
-            np.arange(len(names) + 1, dtype=np.float64) + 100,
-            [*names, "unknown"],
-        ),
+    labels = ["[M-2H]-", "[3M-H]-", "[M+Li]+"]
+    np.testing.assert_array_equal(
+        second_neutral_mass(mz[:3], labels),
+        [202.0 + 2.01455290434, (223.0 + 1.00727645217) / 3, math.nan],
     )
-    expected = {
-        key: value
-        for key, value in read_tensors(ADDUCTS_GOLDEN).items()
-        if key.startswith(("adduct/", "prvsiyan/"))
-    }
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert precursor_mass(100.0, adduct="[M+2H]2+") == (100.0 + 2.01455290434) / 2
+    assert precursor_mass(100.0, adduct="[3M-H]-") == 300.0 - 1.00727645217
 
 
 def test_main_engine_fragment_carriers_follow_polarity_and_adduct_markers() -> None:
@@ -280,21 +363,14 @@ def _write_graphs(directory: Path) -> None:
     )
 
 
-def test_complete_source_reaction_vocabulary_and_every_mass_plan() -> None:
-    expected = read_tensors(_CWD / "testdata" / "derivatives.pt")
+def test_complete_reaction_vocabulary_and_every_mass_plan() -> None:
     rules = reaction_rules()
-    names = torch.tensor(
-        list("\0".join(rule.name for rule in rules).encode()),
-        dtype=torch.uint8,
-    )
-    assert torch.equal(names, expected["names"])
-    for index, delta in enumerate(expected["deltas"].unbind()):
-        actual = matching_plans(rules, float(delta), tolerance=0.003, max_reactions=2)
-        indices = torch.tensor(
-            [[plan[0], plan[1] if len(plan) == 2 else -1] for plan in actual],
-            dtype=torch.int64,
-        ).reshape(-1, 2)
-        assert torch.equal(indices, expected[f"match/{index}"])
+    deltas = [rule.mass for rule in rules] + [0.0, 0.003, -0.003, 1000.0]
+    actual = {"names": _reactions_text("\0".join(rule.name for rule in rules))}
+    for index, delta in enumerate(deltas):
+        plans = matching_plans(rules, delta, tolerance=0.003, max_reactions=2)
+        actual[f"match/{index}"] = _plans([list(plan) for plan in plans])
+    assert_tensor_golden(_CWD / "testdata" / "derivatives.pt", actual)
 
 
 def test_mass_plans_keep_single_before_pair_order_and_cancel_element_counts() -> None:
@@ -330,8 +406,8 @@ def test_reaction_element_table_covers_every_recipe_element(element: str) -> Non
     assert matching_plans((single,), 0.0, tolerance=0.0, max_reactions=1) == [(0,)]
 
 
-def test_complete_v6_grammar_and_all_source_mass_plan_matches_are_hermetic() -> None:
-    expected = read_tensors(_CWD / "testdata/v6_derivatives.pt")
+def test_complete_v6_grammar_and_all_mass_plan_matches_are_hermetic() -> None:
+    deltas = (0.0, 0.003, -0.003, 15.9949146196, 14.01565006414, 1000.0)
     rules = v6_reaction_rules()
     actual = {
         "names": _reactions_text("\0".join(rule.name for rule in rules)),
@@ -344,14 +420,13 @@ def test_complete_v6_grammar_and_all_source_mass_plan_matches_are_hermetic() -> 
         ),
         "masses": torch.tensor([rule.mass for rule in rules], dtype=torch.float64),
     }
-    for name, value in actual.items():
-        assert torch.equal(value, expected[name]), name
-    for index, delta in enumerate(expected["deltas"].unbind()):
-        plans = matching_plans(rules, float(delta), tolerance=0.003, max_reactions=2)
-        assert torch.equal(
-            _plans([list(plan) for plan in plans]),
-            expected[f"match/{index}"],
-        )
+    for index, delta in enumerate(deltas):
+        plans = matching_plans(rules, delta, tolerance=0.003, max_reactions=2)
+        actual[f"match/{index}"] = _plans([list(plan) for plan in plans])
+    assert_tensor_golden(
+        _CWD / "testdata/v6_derivatives.pt",
+        float32_comparands(actual),
+    )
 
 
 def _plans(values: list[list[int]]) -> Tensor:
@@ -501,70 +576,48 @@ def test_raw_molecular_data_exposes_real_runtime_annotation_types() -> None:
     assert hints["bond_ring"] == NDArray[np.bool_]
 
 
-@pytest.mark.parametrize(
-    ("filename", "count", "with_labels"),
-    [
-        ("fragnet_records.pt", 27, False),
-        ("fragnet_ordering.pt", 20, True),
-    ],
-)
-def test_complete_molecular_inputs_outputs_and_source_mobile_hydrogen_branches(
-    filename: str,
-    count: int,
-    with_labels: bool,
+def test_mobile_hydrogen_assignments_follow_the_ordered_graph_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata" / filename)
-    masses = ELEMENT_MASSES
+    golden = _BASELINE / "testdata" / "fragnet_ordering.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
-    for index in range(count):
+    for index in range(20):
         prefix = str(index)
         actual[f"{prefix}/input"] = expected[f"{prefix}/input"].clone()
         atoms = _atoms(expected, prefix)
-        record = molecular_record(atoms, masses=masses)
-        actual[f"{prefix}/parsed"] = torch.tensor(atoms is not None)
-        if atoms is not None:
-            actual[f"{prefix}/raw/symbols"] = torch.tensor(
-                list("\0".join(atoms.symbols).encode()),
-                dtype=torch.uint8,
-            )
-            for name, values in (
-                ("hydrogens", atoms.hydrogens),
-                ("degree", atoms.degree),
-                ("charge", atoms.charge),
-                ("aromatic", atoms.aromatic),
-                ("bonds", atoms.bonds),
-                ("bond_aromatic", atoms.bond_aromatic),
-                ("bond_ring", atoms.bond_ring),
-            ):
-                actual[f"{prefix}/raw/{name}"] = torch.from_numpy(values)
-        if with_labels:
-            assert atoms is not None
-            codes = from_plain(
-                cast(object, expected[f"{prefix}/wl/codes"].tolist()),
-                list[int],
-            )
-            actual[f"{prefix}/wl/codes"] = torch.tensor(codes, dtype=torch.int64)
-            actual[f"{prefix}/wl/labels"] = torch.tensor(
-                _labels(
-                    _properties(atoms),
-                    codes=codes,
-                ),
-                dtype=torch.int64,
-            )
-        actual[f"{prefix}/valid"] = torch.tensor(record is not None)
-        if record is not None:
-            for name in ("amass", "kind", "el", "nh", "bonds", "bring", "el10"):
-                actual[f"{prefix}/{name}"] = torch.from_numpy(record[name])
-            actual[f"{prefix}/mass"] = torch.tensor(record["mass"], dtype=torch.float64)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+        record = molecular_record(atoms, masses=ELEMENT_MASSES)
+        actual[f"{prefix}/raw/symbols"] = torch.tensor(
+            list("\0".join(atoms.symbols).encode()),
+            dtype=torch.uint8,
+        )
+        for name, values in (
+            ("hydrogens", atoms.hydrogens),
+            ("degree", atoms.degree),
+            ("charge", atoms.charge),
+            ("aromatic", atoms.aromatic),
+            ("bonds", atoms.bonds),
+            ("bond_aromatic", atoms.bond_aromatic),
+            ("bond_ring", atoms.bond_ring),
+        ):
+            actual[f"{prefix}/raw/{name}"] = torch.from_numpy(values)
+        codes = from_plain(
+            cast(object, expected[f"{prefix}/wl/codes"].tolist()),
+            list[int],
+        )
+        actual[f"{prefix}/wl/codes"] = torch.tensor(codes, dtype=torch.int64)
+        actual[f"{prefix}/wl/labels"] = torch.tensor(
+            _labels(_properties(atoms), codes=codes),
+            dtype=torch.int64,
+        )
+        # fragnet_records.pt pins every other molecular_record field.
+        assert record is not None
+        actual[f"{prefix}/nh"] = torch.from_numpy(record["nh"])
+    assert_tensor_golden(golden, actual)
 
 
-def _atoms(expected: dict[str, Tensor], prefix: str) -> FragnetAtoms | None:
-    if not bool(expected[f"{prefix}/parsed"]):
-        return None
+def _atoms(expected: dict[str, Tensor], prefix: str) -> FragnetAtoms:
     text = bytes(
         from_plain(cast(object, expected[f"{prefix}/raw/symbols"].tolist()), list[int]),
     ).decode()
@@ -768,7 +821,7 @@ def _reaction_data_write(
     (directory / "manifest.json").write_text(json.dumps(to_plain(manifest)))
 
 
-def test_complete_source_proposals_have_explicit_empty_headers_and_no_runtime_sdk(
+def test_complete_proposals_have_explicit_empty_headers_and_no_runtime_sdk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

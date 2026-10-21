@@ -1,123 +1,114 @@
-"""Replay torch-solver sigmoid fits and source-minted likelihood points."""
+"""Pin the sigmoid calibration's likelihood, its starting prior and its branches."""
 
 from __future__ import annotations
-
-from pathlib import Path
-from typing import Final
 
 import math
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.name_that_llm.calibration import (
     SigmoidCalibration,
     _binary_points,
-    dot_product,
+    _Objective,
 )
 from priml.baselines.name_that_llm.logistic import LBFGS
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+def test_smoothed_likelihood_matches_its_closed_form() -> None:
+    objective = _Objective(
+        scores=np.array([1.0, 2.0, 4.0]),
+        targets=np.array([0, 1, 0.25]),
+    )
+    # Zero logits give each row the gradient (1 - 2t) / 2 in its logit.
+    _, gradient = objective(np.zeros(2))
+    assert gradient.tolist() == [-0.5, -0.25]
+    # An offset of 1000 underflows exp(-1000): each row costs 1000 t.
+    loss, gradient = objective(np.array([0.0, 1000.0]))
+    assert loss == 1000 * 1.25
+    assert gradient.tolist() == [1 * 0 + 2 * 1 + 4 * 0.25, 1.25]
 
 
-@pytest.mark.parametrize("scale", argvalues=[1, 100])
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_sigmoid_replays_complete_solver_state_and_predictions(
-    scale: int,
-    corrupt: bool,
-) -> None:
-    scores = np.sin(np.arange(7) / 3) * scale
+def test_sigmoid_without_updates_starts_at_the_smoothed_class_prior() -> None:
+    config = SigmoidCalibration.Config()
+    config.optimizer.max_iter = 0
+    model = config.make().fit(
+        np.sin(np.arange(7) / 3),
+        targets=np.array([0, 1, 0, 0, 1, 0, 1], dtype=np.int64),
+    )
+    # Four negatives and three positives: the offset starts at log((4 + 1) / (3 + 1)).
+    assert (model.a_, model.b_) == (0.0, math.log(5 / 4))
+
+
+def test_binary_likelihood_takes_the_stable_branch_on_each_side_of_every_edge() -> None:
+    # The branches agree mathematically, so only exact float64 bits tell them apart.
+    scores = np.array(
+        [-37, np.nextafter(-37, 0), -2, np.nextafter(-2, 0), 18, np.nextafter(18, 19)],
+    )
+    targets = np.full(6, 6 / 7)
+    loss, gradient = _binary_points(scores, targets=targets)
+    below, above = np.exp(scores[:3]), np.exp(-scores[3:])
+    expected_loss = np.concatenate(
+        [
+            [below[0] - targets[0] * scores[0]],
+            np.log1p(below[1:]) - targets[1:3] * scores[1:3],
+            np.log1p(above[:2]) + (1 - targets[3:5]) * scores[3:5],
+            [above[2] + (1 - targets[5]) * scores[5]],
+        ],
+    )
+    expected_gradient = np.concatenate(
+        [
+            [below[0] - targets[0]],
+            ((1 - targets[1:3]) * below[1:] - targets[1:3]) / (1 + below[1:]),
+            ((1 - targets[3:]) - targets[3:] * above) / (1 + above),
+        ],
+    )
+    np.testing.assert_array_equal(loss, expected_loss)
+    np.testing.assert_array_equal(gradient, expected_gradient)
+
+
+def test_unfitted_calibration_predicts_one_half_everywhere() -> None:
+    model = SigmoidCalibration.Config().make()
+    assert (model.a_, model.b_) == (0.0, 0.0)
+    np.testing.assert_array_equal(model.predict(np.array([-3.0, 4.0])), [0.5, 0.5])
+
+
+def test_sigmoid_predictions_follow_the_logistic_on_both_sides_of_zero() -> None:
+    model = SigmoidCalibration.Config().make()
+    model.a_ = -1.0
+    exponential = np.exp(-0.5)
+    np.testing.assert_array_equal(
+        model.predict(np.array([-0.5, 0.5])),
+        [exponential / (1 + exponential), 1 / (1 + exponential)],
+    )
+
+
+def test_sigmoid_rescales_scores_whose_magnitude_reaches_the_threshold() -> None:
+    scores = np.sin(np.arange(7) / 3)
     targets = np.array([0, 1, 0, 0, 1, 0, 1], dtype=np.int64)
-    with host_agnostic_numerics():
-        model = SigmoidCalibration.Config().make().fit(scores, targets=targets)
-    if corrupt:
-        model.a_ = math.nextafter(model.a_, math.inf)
-    actual = {
-        "a_": torch.tensor(model.a_, dtype=torch.float64),
-        "b_": torch.tensor(model.b_, dtype=torch.float64),
-        "predict": torch.from_numpy(
-            model.predict(
-                np.array([-1000, -37, -2, 0, 18, 1000], dtype=np.float64),
-            ),
-        ),
-    }
-    prefix = f"{scale}/"
-    expected = {
-        name.removeprefix(prefix): value
-        for name, value in read_tensors(_CWD / "testdata" / "sigmoid.pt").items()
-        if name.startswith(prefix)
-    }
-    report = mismatches(expected, actual=actual)
-    if corrupt:
-        assert any(item.startswith("a_:") for item in report), report
-    else:
-        assert not report, "\n".join(report)
+    scale = float(np.abs(scores).max())
+    config = SigmoidCalibration.Config()
+    config.max_magnitude = scale
+    rescaled = config.make().fit(scores, targets=targets)
+    unscaled = SigmoidCalibration.Config().make().fit(scores / scale, targets=targets)
+    assert (rescaled.a_, rescaled.b_) == (unscaled.a_ / scale, unscaled.b_)
 
 
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_binary_likelihood_matches_every_source_boundary_and_tail(
-    corrupt: bool,
-) -> None:
-    expected = read_tensors(_CWD / "testdata" / "binary_points.pt")
-    loss, gradient = _binary_points(
-        expected["scores"].numpy(),
-        targets=expected["targets"].numpy(),
+def test_sigmoid_fits_a_strided_score_column_like_its_copy() -> None:
+    scores = np.stack([np.sin(np.arange(7) / 3), np.cos(np.arange(7) / 5)], axis=1)
+    targets = np.array([0, 1, 0, 0, 1, 0, 1], dtype=np.int64)
+    assert not scores[:, 1].flags.c_contiguous
+    strided, copied = (
+        SigmoidCalibration.Config().make().fit(column, targets=targets)
+        for column in (scores[:, 1], scores[:, 1].copy())
     )
-    actual = dict(expected)
-    actual["loss"], actual["gradient"] = (
-        torch.from_numpy(loss),
-        torch.from_numpy(gradient),
-    )
-    if corrupt:
-        actual["gradient"][:1] = torch.nextafter(
-            actual["gradient"][:1],
-            other=torch.tensor(torch.inf),
-        )
-    report = mismatches(expected, actual=actual)
-    if corrupt:
-        assert any(item.startswith("gradient:") for item in report), report
-    else:
-        assert not report, "\n".join(report)
+    assert (strided.a_, strided.b_) == (copied.a_, copied.b_)
 
 
-@pytest.mark.parametrize("column", argvalues=[0, 1, 2])
-@pytest.mark.parametrize("strided", argvalues=[False, True])
-def test_sigmoid_replays_solver_fits_of_all_source_grouped_inputs(
-    column: int,
-    strided: bool,
-) -> None:
-    record = read_tensors(_CWD / "testdata" / "svm_calibration.pt")
-    prefix = f"{column}/"
-    expected = {
-        name.removeprefix(prefix): value
-        for name, value in record.items()
-        if name.startswith(prefix)
-    }
-    scores = expected["scores"].numpy()
-    assert expected["strides"].tolist() == [scores.itemsize]
-    if strided:
-        columns = np.empty((len(scores), 3), dtype=np.float64)
-        columns[:, 0] = scores
-        scores = columns[:, 0]
-    with host_agnostic_numerics():
-        model = (
-            SigmoidCalibration.Config()
-            .make()
-            .fit(
-                scores,
-                targets=expected["targets"].numpy(),
-            )
-        )
-    actual = dict(expected)
-    actual["a_"] = torch.tensor(model.a_, dtype=torch.float64)
-    actual["b_"] = torch.tensor(model.b_, dtype=torch.float64)
-    actual["predict"] = torch.from_numpy(model.predict(scores))
-    report = mismatches(expected, actual=actual)
-    assert not report, "\n".join(report)
+def test_sigmoid_accepts_a_threshold_below_one() -> None:
+    config = SigmoidCalibration.Config()
+    config.max_magnitude = 0.5
+    assert config.make().config.max_magnitude == 0.5
 
 
 @pytest.mark.parametrize("maximum", argvalues=[0, -1, np.nan, np.inf])
@@ -143,39 +134,6 @@ def test_sigmoid_rejects_empty_or_unaligned_scores(rows: int, labels: int) -> No
         )
 
 
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_sigmoid_replays_complete_additional_solver_state(corrupt: bool) -> None:
-    """Replay the complete seven-row witness and detect one-ULP parameter drift.
-
-    Args:
-      corrupt: Whether to perturb the fitted slope by one representable value.
-
-    """
-    expected = read_tensors(_CWD / "testdata" / "calibration.pt")
-    scores, targets = (
-        expected["scores"].numpy().copy(),
-        expected["targets"].numpy().copy(),
-    )
-    with host_agnostic_numerics():
-        model = SigmoidCalibration.Config().make().fit(scores, targets=targets)
-    actual = {
-        "scores": torch.from_numpy(scores),
-        "targets": torch.from_numpy(targets),
-        "parameters": torch.tensor([model.a_, model.b_], dtype=torch.float64),
-        "predict": torch.from_numpy(model.predict(scores)),
-    }
-    if corrupt:
-        actual["parameters"][0] = torch.nextafter(
-            actual["parameters"][0],
-            other=torch.tensor(torch.inf),
-        )
-    report = mismatches(expected, actual=actual)
-    if corrupt:
-        assert any(item.startswith("parameters:") for item in report), report
-    else:
-        assert not report, "\n".join(report)
-
-
 def test_sigmoid_predictions_saturate_without_overflow_and_keep_shape() -> None:
     model = SigmoidCalibration.Config().make()
     model.a_, model.b_ = -1.0, 0.0
@@ -191,54 +149,6 @@ def test_default_calibration_keeps_the_shared_solver_and_source_budgets() -> Non
     assert isinstance(config.optimizer.make(), LBFGS)
     assert config.optimizer.max_iter == 15_000
     assert config.optimizer.tolerance_gradient == 1e-6
-
-
-def test_dot_product_rejects_misaligned_vectors() -> None:
-    with pytest.raises(ValueError, match="equal-length"):
-        dot_product(np.ones(2), right=np.ones(3))
-
-
-@pytest.mark.parametrize("length", argvalues=[2, 7, 15])
-def test_dot_product_keeps_fused_binary64_cancellation(length: int) -> None:
-    left = np.zeros(length, dtype=np.float64)
-    right = np.zeros(length, dtype=np.float64)
-    left[:2], right[:2] = [1, 1 + 2**-27], [-1, 1 - 2**-27]
-    assert dot_product(left, right=right) == -(2**-54)
-
-
-@pytest.mark.parametrize("length", argvalues=[16, 17, 31, 32, 33, 63, 64, 65])
-def test_dot_product_keeps_the_source_block_reduction_tree(length: int) -> None:
-    right = np.zeros(length, dtype=np.float64)
-    right[:3] = [1e16, 1, -1e16]
-    assert dot_product(np.ones(length, dtype=np.float64), right=right) == 1
-
-
-def test_dot_product_keeps_the_first_source_calibration_gradient() -> None:
-    negative = float.fromhex("-0x1.1c71c71c71c72p-2")
-    positive = float.fromhex("0x1.6c16c16c16c17p-2")
-    left = np.array(
-        [negative, positive, negative, negative, positive, negative, positive],
-        dtype=np.float64,
-    )
-    right = np.array(
-        [
-            float.fromhex(value)
-            for value in (
-                "0x0.0p+0",
-                "0x1.4f0c2068a80c6p-2",
-                "0x1.3c9af78209765p-1",
-                "0x1.aed548f090ceep-1",
-                "0x1.f1a1d8383254ap-1",
-                "0x1.fda61ca171a76p-1",
-                "0x1.d18f6ead1b446p-1",
-            )
-        ],
-    )
-    assert dot_product(left, right=right) == float.fromhex("0x1.a6bb5c1c5be4ap-4")
-
-
-def test_dot_product_keeps_an_empty_vector_sum() -> None:
-    assert dot_product(np.empty(0), right=np.empty(0)) == 0
 
 
 if __name__ == "__main__":

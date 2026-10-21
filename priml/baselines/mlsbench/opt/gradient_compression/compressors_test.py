@@ -44,7 +44,7 @@ def test_scaled_sign_counts_zero_as_positive() -> None:
 
 def test_qsgd_rounds_up_exactly_when_the_draw_is_below_the_remainder() -> None:
     grad = torch.tensor([0.375, -0.5, 0.0])
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         draws = torch.rand(3)
         torch.manual_seed(0)

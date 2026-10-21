@@ -88,11 +88,9 @@ highest scored public code retrieved on 15 October 2026.
 Outer folds run sequentially; the notebook uses joblib for outer SVM fits.
 The native classifier implements the dual solver selected by this feature
 geometry. `torch.optim.LBFGS` fits the dense heads and sigmoid calibration in
-place of scikit-learn's L-BFGS-B, so those fits are not bit-identical to the
-notebook's. Native NumPy sparse rows and average linkage replace SciPy's.
-They keep its stored summation order, merge order and tie-breaking, and round
-each product before adding it, as SciPy's x86 build does. Transformers
-supplies tokenizer I/O.
+place of scikit-learn's L-BFGS-B. Native NumPy sparse rows and average linkage
+replace SciPy's; average linkage keeps its merge order and tie-breaking.
+Transformers supplies tokenizer I/O.
 
 The original notebook SHA256 is
 `509018093b5264c507f15333aa2c78d2baeab46efb727c1742157f3af6a6b139`;
@@ -105,35 +103,19 @@ its code-cell SHA256 is
 nice -n 19 env UV_NO_SYNC=1 WORKERS_DEFAULT=1 uv --quiet run --frozen pytest -n 0 -p no:randomly --durations=0 priml/baselines/name_that_llm
 ```
 
-All 21 `.pt` records were minted externally from the pinned original on
-Linux x86_64: Python 3.14.7, PyTorch 2.11.0+cu128, Transformers 5.19.0,
-NumPy 2.5.3, SciPy 1.16.3, scikit-learn 1.9.1 and pandas 2.3.3. The values
-the L-BFGS fits determine were then re-minted from the port under
-`host_agnostic_numerics`: SciPy's L-BFGS-B calls OpenBLAS `dnrm2`, which
-rounds per ISA, so no golden minted from it replays on aarch64. Inputs keep
-the original's bits.
-The largest record is 31,773 bytes. Originals and minting runners remain
-outside this package. Native tests compare complete key sets, shapes, dtypes, values and random
-streams. One-ULP perturbations must fail.
+Every `.pt` golden is minted in-tree from this package: the test that reads
+it writes it under `--regenerate-b4b` and compares values rounded to float32,
+each in its own dtype. Torch computations run inside `host_agnostic_numerics`;
+the logistic heads' NumPy products sum in float64 and round once.
 
-The classifier miniature retains 18 rows, three classes, six prompt groups,
-all four saved layers and hidden width two. Its embedding inputs come from
-the original frozen 8B extractor. Separate Qwen captures use the original
-`from_pretrained(dtype=...)` loader with four blocks, width seven,
-intermediate width eleven, four query heads, two key/value heads, head
-width six, vocabulary seventeen and fifteen tokens. They retain float32
-rotary frequencies with fp16 and bf16 weights.
+`exp000.pt` holds every fitted state and output of the three exp000 branches
+on an 18-row miniature, after three updates of each solver: three classes, six
+prompt groups, all four saved layers and hidden width two. `encoder.pt` holds
+the pooled states of a native Qwen with four blocks, width seven, intermediate
+width eleven, four query and two key/value heads of width six and vocabulary
+seventeen, in float32, float16 and bfloat16. Component tests check
+hand-derived values on literal inputs.
 
-Controls cover whole fitted TF-IDF, scaler, SVM, calibration and dense-head
-states; every sparse buffer; all 25 style features; group-size ties; centring,
-chunks, topics, pooling and blend outputs. Solver witnesses include three
-updates and convergence, float32 regularizer boundaries, all sigmoid tails,
-strided calibration columns and bounded random rejection. Source operation
-order is retained, including separate sparse multiply/add and fused binary64
-calibration reductions. Original capture and replay use the same shared
-`host_agnostic_numerics` policy.
-
-These controls establish miniature CPU parity. Qwen controls inject
-`SdpaNaive`; default fused CUDA attention, historical Kaggle GPU equivalence,
-full-data scores and five-minute admission remain unmeasured. Qwen receives
-no training updates in this recipe.
+The Qwen golden injects `SdpaNaive`; default fused CUDA attention, full-data
+scores and five-minute admission remain unmeasured. Qwen receives no training
+updates in this recipe.

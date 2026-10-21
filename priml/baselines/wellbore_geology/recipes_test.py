@@ -1,7 +1,6 @@
 """Require typed complete public family settings and native geometry propagation."""
 
 from pathlib import Path
-from typing import Final
 
 import pytest
 import torch
@@ -22,14 +21,9 @@ from priml.baselines.wellbore_geology.recipes import (
 from priml.baselines.wellbore_geology.train_step import WellboreTrainStep
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr_schedule import RecursiveCosine
-from priml.testing.golden import mismatches, read_tensors
 from priml.train.epoch_loop import EarlyStopping
 from priml.train.train_loop import TrainLoop
 from priml.train.train_step import TrainStep
-
-
-_THIS: Final = Path(__file__).resolve()
-_CWD: Final = _THIS.parent
 
 
 def _stopping(family: Family.Config) -> EarlyStopping.Config:
@@ -50,27 +44,29 @@ def test_complete_public_training_schedules() -> None:
             family_0803_v2,
         )
     ]
-    actual: dict[str, torch.Tensor] = {}
-    for family in families:
-        values = {
-            "epochs": family.training.max_epochs,
-            "min_epochs": _stopping(family).min_epochs,
-            "patience": _stopping(family).patience,
-            "train_batch": family.training.dataset.loader.batch_size,
-            "validation_batch": family.training.dataset.validation_batch_size,
-            "accumulation": family.training.step.accumulate_grad_batches,
-            "repeats": family.cv.repeats,
-            "folds": family.cv.folds,
-            "cv_seed": family.cv.split_seed,
-        }
-        actual.update(
-            {
-                f"{family.name}/{name}": torch.tensor(value)
-                for name, value in values.items()
-            },
+    # Epochs, minimum epochs, patience, train and validation batch, accumulation,
+    # repeats, folds and the fold seed.
+    assert {
+        family.name: (
+            family.training.max_epochs,
+            _stopping(family).min_epochs,
+            _stopping(family).patience,
+            family.training.dataset.loader.batch_size,
+            family.training.dataset.validation_batch_size,
+            family.training.step.accumulate_grad_batches,
+            family.cv.repeats,
+            family.cv.folds,
+            family.cv.split_seed,
         )
-    expected = read_tensors(_THIS.with_name("testdata") / "recipe_settings.pt")
-    assert mismatches(expected, actual) == []
+        for family in families
+    } == {
+        "0719_V1": (300, 170, 30, 16, 32, 1, 3, 5, 33),
+        "0724_V1": (300, 170, 30, 16, 16, 1, 3, 5, 33),
+        "0729_V3": (200, 150, 50, 16, 16, 1, 3, 5, 2233),
+        "0801_V1": (300, 170, 50, 16, 16, 1, 3, 5, 42),
+        "0801_V2": (300, 170, 50, 16, 16, 1, 3, 5, 42),
+        "0803_V2": (200, 170, 50, 16, 16, 1, 3, 5, 42),
+    }
 
 
 def test_family_geometry_reaches_every_native_consumer() -> None:

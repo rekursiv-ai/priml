@@ -1,4 +1,4 @@
-"""Source rank ties and scalar binary32 powers."""
+"""Rank ties, standardization and binary32 Tanimoto."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize("count", [0, 1, 7, 33, 129])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_ordinal_ranks_reuses_shared_inversion_with_numpy_quicksort_order(
+def test_ordinal_ranks_reuses_shared_inversion_with_stable_order(
     count: int,
     dtype: type[np.float32 | np.float64],
     monkeypatch: pytest.MonkeyPatch,
@@ -39,7 +39,7 @@ def test_ordinal_ranks_reuses_shared_inversion_with_numpy_quicksort_order(
         values[0] = np.nan
         values[1] = -0.0
         values[2] = 0.0
-    order = np.argsort(-values)
+    order = np.argsort(-values, kind="stable")
     expected = np.empty(count, np.float64)
     expected[order] = np.arange(count)
     observed: list[Tensor | None] = []

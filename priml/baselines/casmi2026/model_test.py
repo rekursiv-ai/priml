@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast, override
+from typing import Final, cast, override
 
 import itertools
 import math
@@ -64,10 +64,7 @@ from priml.baselines.casmi2026.model import (
     released_ggnn,
     size_stack,
 )
-from priml.baselines.casmi2026.testing import (
-    released_parameters,
-    set_heads,
-)
+from priml.baselines.casmi2026.testing import float32_comparands, set_heads
 from priml.cost import cost
 from priml.loss.simple_loss import SimpleLoss
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
@@ -83,15 +80,12 @@ from priml.model.transformer.block import TransformerBlock
 from priml.optimizers.composite import CompositeOptimizer
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
-from priml.testing.golden import mismatches, read_tensors, rng_fingerprint
-
-
-if TYPE_CHECKING:
-    from scipy import optimize
-else:
-    from wrapt import lazy_import
-
-    optimize = lazy_import("scipy.optimize")
+from priml.testing.golden import (
+    assert_tensor_golden,
+    mismatches,
+    read_tensors,
+    rng_fingerprint,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -147,35 +141,44 @@ def labelled_forward(
     )
 
 
-def optimizer_groups(model: Glacier) -> list[dict[str, object]]:
-    """Return the released weight-decay and no-decay parameter groups.
+def optimizer_state(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, Tensor]:
+    """Key every optimizer state tensor by its native parameter name.
 
     Args:
-      model: GLACIER whose trainable parameters are grouped.
+      model: Module whose parameters the optimizer updates.
+      optimizer: Optimizer after its updates.
 
     Returns:
-      groups: Trainable parameters grouped by their released names and shapes.
+      record: ``optimizer/<parameter>/<state>`` float32 tensors.
 
     """
-    parameters = dict(model.named_parameters())
-    decay: list[nn.Parameter] = []
-    no_decay: list[nn.Parameter] = []
-    for old, new in model.checkpoint_names().items():
-        parameter = parameters[new]
-        if parameter.requires_grad:
-            group = (
-                no_decay
-                if parameter.ndim == 1
-                or old.endswith("bias")
-                or "norm" in old.lower()
-                or "embed" in old.lower()
-                else decay
-            )
-            group.append(parameter)
-    return [
-        {"params": decay, "weight_decay": 0.0},
-        {"params": no_decay, "weight_decay": 0.0},
-    ]
+    names = {id(parameter): name for name, parameter in model.named_parameters()}
+    return {
+        f"optimizer/{names[id(parameter)]}/{key}": value.detach().clone().float()
+        for parameter, state in optimizer.state.items()
+        for key, value in state.items()
+    }
+
+
+def assignment(cost: list[list[float]]) -> tuple[list[int], list[int]]:
+    """Assign every column to a distinct row at the least total cost.
+
+    Args:
+      cost: Rows (query slots) by columns (boundaries), with no more columns than rows.
+
+    Returns:
+      rows: The row chosen for each column, first in permutation order among ties.
+      columns: Every column index in order.
+
+    """
+    chosen = min(
+        itertools.permutations(range(len(cost)), len(cost[0])),
+        key=lambda rows: sum(cost[row][column] for column, row in enumerate(rows)),
+    )
+    return list(chosen), list(range(len(cost[0])))
 
 
 def boundaries(adjacency: Tensor, masks: Tensor) -> dict[str, Tensor]:
@@ -393,21 +396,24 @@ class GlacierCriterion:
             normalized=False,
         )
         cost = rank_cost + card_cost
-        assignment = torch.zeros_like(cost)
+        chosen = torch.zeros_like(cost)
         # Assignment is discrete; the selected logits retain their gradients.
         for index in range(len(cost)):
-            rows, columns = optimize.linear_sum_assignment(
-                cost[index, :, : int(counts[index])].detach().cpu().numpy(),
+            rows, columns = assignment(
+                from_plain(
+                    cost[index, :, : int(counts[index])].detach().cpu().tolist(),
+                    list[list[float]],
+                ),
             )
-            assignment[index, rows, columns] = 1
+            chosen[index, rows, columns] = 1
         flat = ranked.reshape(len(logits), logits.shape[1], -1)
         selected = (
-            (flat.transpose(1, 2) @ assignment)
+            (flat.transpose(1, 2) @ chosen)
             .transpose(1, 2)
             .reshape(len(logits), truth.shape[1], logits.shape[-1], 4)
         )
         selected = (selected * truth_cards.unsqueeze(-2)).sum(-1)
-        selected_cards = (cards.transpose(1, 2) @ assignment).transpose(1, 2)
+        selected_cards = (cards.transpose(1, 2) @ chosen).transpose(1, 2)
         loss = self.cross_entropy(
             functional.normalize(selected, p=1, dim=-1),
             functional.normalize(truth, p=1, dim=-1),
@@ -487,7 +493,7 @@ def tiny_model() -> FPNet.Config:
     config = FPNet.Config()
     config.channels_hidden = 8
     config.channels_out = 7
-    config.num_layers = 1  # Independently minted source golden uses one complete block.
+    config.num_layers = 1  # The golden holds one complete block.
     set_block_heads(config.block, 2)
     config.adduct.channels_in = 11
     config.head.channels_hidden = 9
@@ -575,7 +581,7 @@ def test_padding_values_do_not_change_pooled_predictions() -> None:
     assert all(torch.equal(a, b) for a, b in zip(expected, actual, strict=True))
 
 
-def test_source_parameter_registration_order() -> None:
+def test_parameter_registration_order() -> None:
     model = tiny_model().make()
     assert list(model._modules) == [
         "mz_emb",
@@ -646,7 +652,7 @@ def test_checkpoint_mapping_rejects_collisions_before_any_weight_changes() -> No
     assert not mismatches(before, model.state_dict())
 
 
-def test_sinusoidal_basis_matches_the_source_expression() -> None:
+def test_sinusoidal_basis_matches_the_closed_form_expression() -> None:
     config = SinEmb.Config()
     config.channels_out = 6
     config.power = 2.0
@@ -822,7 +828,7 @@ def test_feedforward_cost_matches_the_complete_training_invocation() -> None:
 def test_feedforward_reset_repeats_the_constructor_draws() -> None:
     config = DreamFFN.Config()
     config.channels_in = 6
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         _ = torch.manual_seed(7)
         model = config.make()
         initial = {name: value.clone() for name, value in model.state_dict().items()}
@@ -911,10 +917,11 @@ def test_attention_cost_matches_the_complete_masked_training_invocation(
         )
 
 
-def test_complete_source_both_attention_precision_branches_and_three_updates() -> None:
-    expected = read_tensors(_BASELINE / "testdata" / "dream_precision.pt")
+def test_complete_both_attention_precision_branches_and_three_updates() -> None:
+    golden = _BASELINE / "testdata" / "dream_precision.pt"
+    expected = read_tensors(golden)
     actual = {name: expected[name].clone() for name in ("input", "bias", "mask")}
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         for fp32 in (True, False):
             _ = torch.manual_seed(42)
             config = DreamAttention.Config()
@@ -987,8 +994,7 @@ def test_complete_source_both_attention_precision_branches_and_three_updates() -
                     query_mask=actual["mask"],
                 ).clone()
             actual[f"{label}/final_rng"] = rng_fingerprint()
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 DREAMS_GOLDEN: Final = _BASELINE / "testdata" / "dreams.pt"
@@ -1013,7 +1019,7 @@ def tiny_dreams() -> DreamsFP.Config:
     config.backbone.basis.num_fractional = 2
     config.backbone.basis.num_integer = 3
     config.backbone.encoder.num_layers = (
-        1  # One complete source-recorded encoder layer.
+        1  # The golden holds one complete encoder layer.
     )
     block = config.backbone.encoder.block
     assert isinstance(block, TransformerBlock.Config)
@@ -1173,14 +1179,13 @@ def test_spectrum_preparation_keeps_every_allocation_on_the_input_device() -> No
     assert output.shape == (3, model.config.max_peaks + 1, 2)
 
 
-def test_three_updates_match_every_source_tensor_and_random_position() -> None:
-    expected = read_tensors(DREAMS_GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+def test_three_updates_match_every_tensor_and_random_position() -> None:
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         model = tiny_dreams().make()
         actual = {
             f"initial/{name}": value.detach().clone()
-            for name, value in model.released_state().items()
+            for name, value in model.state_dict().items()
         }
         actual["initial/rng"] = rng_fingerprint()
         config = CompositeOptimizer.Config()
@@ -1198,38 +1203,9 @@ def test_three_updates_match_every_source_tensor_and_random_position() -> None:
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
         actual["loss"] = torch.stack(losses).float()
-        for name, value in model.released_state().items():
-            actual[f"final/{name}"] = value.detach().clone().float()
-        native_parameters = {
-            name: index for index, (name, _) in enumerate(model.named_parameters())
-        }
-        state = from_plain(
-            cast(object, optimizer.optimizers[0].state_dict()["state"]),
-            dict[int, dict[str, Tensor]],
-        )
-        released_index = 0
-        for names in model.checkpoint_parts().values():
-            if names[0] not in native_parameters:
-                continue
-            if all(native_parameters[name] not in state for name in names):
-                released_index += 1
-                continue
-            states = [state[native_parameters[name]] for name in names]
-            assert all(set(values) == set(states[0]) for values in states)
-            for name, first in states[0].items():
-                if first.ndim == 0:
-                    assert all(torch.equal(first, values[name]) for values in states)
-                    value = first
-                else:
-                    value = (
-                        torch.cat([values[name] for values in states])
-                        if len(states) > 1
-                        else first
-                    )
-                actual[f"optimizer/{released_index}/{name}"] = (
-                    value.detach().clone().float()
-                )
-            released_index += 1
+        for name, value in model.state_dict().items():
+            actual[f"final/{name}"] = value.detach().clone()
+        actual.update(optimizer_state(model, optimizer.optimizers[0]))
         model.eval()
         logits, elements = model.forward(*inputs())
         actual["logits"] = logits.detach().float()
@@ -1248,7 +1224,7 @@ def test_three_updates_match_every_source_tensor_and_random_position() -> None:
             precursor=precursor,
             mode=mode,
         )
-    assert not mismatches(expected, actual), "\n".join(mismatches(expected, actual))
+    assert_tensor_golden(DREAMS_GOLDEN, actual)
 
 
 @pytest.mark.parametrize("damage", ["missing", "shape", "none"])
@@ -1328,7 +1304,7 @@ def tiny_second() -> SecondFPNet.Config:
     config = SecondFPNet.Config()
     config.channels_hidden = 8
     config.channels_out = 7
-    config.num_layers = 1  # The independent source record contains one complete block.
+    config.num_layers = 1  # The golden holds one complete block.
     config.head.channels_hidden = 9
     config.adduct.channels_in = 11
     assert isinstance(config.block.attn, PeakAttention.Config)
@@ -1342,14 +1318,13 @@ def second_inputs() -> tuple[Tensor, ...]:
     return mz, intensity, pad, precursor, adduct, torch.tensor([0, 2, 4]), ce, polarity
 
 
-def test_second_three_updates_match_every_source_tensor_and_random_position() -> None:
-    expected = read_tensors(SECOND_GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+def test_second_three_updates_match_every_tensor_and_random_position() -> None:
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         model = tiny_second().make()
         actual = {
             f"initial/{name}": value.detach().clone()
-            for name, value in model.released_state().items()
+            for name, value in model.state_dict().items()
         }
         actual["initial/rng"] = rng_fingerprint()
         config = CompositeOptimizer.Config()
@@ -1367,27 +1342,9 @@ def test_second_three_updates_match_every_source_tensor_and_random_position() ->
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
         actual["loss"] = torch.stack(losses).float()
-        for name, value in model.released_state().items():
-            actual[f"final/{name}"] = value.detach().clone().float()
-        parameters = dict(model.named_parameters())
-        native_names = list(parameters)
-        released_indices = {
-            name: index
-            for index, name in enumerate(
-                native
-                for native in model.checkpoint_names().values()
-                if native in parameters
-            )
-        }
-        state = from_plain(
-            cast(object, optimizer.optimizers[0].state_dict()["state"]),
-            dict[int, dict[str, Tensor]],
-        )
-        for index, values in state.items():
-            for name, value in values.items():
-                actual[f"optimizer/{released_indices[native_names[index]]}/{name}"] = (
-                    value.detach().clone().float()
-                )
+        for name, value in model.state_dict().items():
+            actual[f"final/{name}"] = value.detach().clone()
+        actual.update(optimizer_state(model, optimizer.optimizers[0]))
         model.eval()
         actual["logits"] = model.forward(*second_inputs()).detach().float()
         with torch.inference_mode():
@@ -1395,14 +1352,12 @@ def test_second_three_updates_match_every_source_tensor_and_random_position() ->
                 model.forward(*second_inputs()).detach().float()
             )
         actual["final/rng"] = rng_fingerprint()
-    assert not mismatches(expected, actual), "\n".join(mismatches(expected, actual))
+    assert_tensor_golden(SECOND_GOLDEN, actual)
 
 
 def test_checkpoint_remap_is_complete_and_detects_a_single_ulp() -> None:
     expected = {
-        key.removeprefix("initial/"): tensor
-        for key, tensor in read_tensors(SECOND_GOLDEN).items()
-        if key.startswith("initial/") and key != "initial/rng"
+        name: value + 1 for name, value in tiny_second().make().released_state().items()
     }
     model = tiny_second().make()
     model.load_released_state(expected)
@@ -1768,24 +1723,28 @@ def capture(record: dict[str, Tensor], prefix: str, output: object) -> None:
 
 
 def assert_glacier_replay() -> None:
-    """Replay every source tensor, shared by each leaf's mutation entry point."""
-    expected = read_tensors(GLACIER_GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    """Train GLACIER for three steps and compare every tensor with its golden."""
+    golden = GLACIER_GOLDEN
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         model = tiny_glacier().make()
         batch, labels, spectrum = prepared_batch()
         actual = {
             f"initial/{name}": value.detach().clone()
-            for name, value in model.released_state().items()
+            for name, value in model.state_dict().items()
         }
         actual["initial/rng"] = rng_fingerprint()
         actual["requires_grad"] = torch.tensor(
-            [parameter.requires_grad for parameter in released_parameters(model)],
+            [parameter.requires_grad for parameter in model.parameters()],
         )
         optimizer = CompositeOptimizer(
             [
-                PartialConfig(torch.optim.AdamW, lr=0.0004).make()(
-                    optimizer_groups(model),
+                PartialConfig(torch.optim.AdamW, lr=0.0004, weight_decay=0.0).make()(
+                    [
+                        parameter
+                        for parameter in model.parameters()
+                        if parameter.requires_grad
+                    ],
                 ),
             ],
         )
@@ -1806,15 +1765,9 @@ def assert_glacier_replay() -> None:
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
         actual["loss"] = torch.stack(losses)
-        for name, value in model.released_state().items():
+        for name, value in model.state_dict().items():
             actual[f"final/{name}"] = value.detach().clone()
-        state = from_plain(
-            cast(object, optimizer.optimizers[0].state_dict()["state"]),
-            dict[int, dict[str, Tensor]],
-        )
-        for index, values in state.items():
-            for name, value in values.items():
-                actual[f"optimizer/{index}/{name}"] = value.detach().clone()
+        actual.update(optimizer_state(model, optimizer.optimizers[0]))
         actual["learning_rate"] = torch.tensor(
             [
                 from_plain(group["lr"], float)
@@ -1845,8 +1798,7 @@ def assert_glacier_replay() -> None:
         actual["post/root_forms"] = batch.root_forms.clone()
         actual["post/atom_forms"] = batch.atom_forms.clone()
         actual["final/rng"] = rng_fingerprint()
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_whole_glacier_three_released_training_steps() -> None:
@@ -1854,12 +1806,11 @@ def test_whole_glacier_three_released_training_steps() -> None:
 
 
 def test_complete_checkpoint_mapping_and_atomic_shape_rejection() -> None:
-    source = {
-        name.removeprefix("initial/"): value
-        for name, value in read_tensors(GLACIER_GOLDEN).items()
-        if name.startswith("initial/") and name != "initial/rng"
-    }
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
+        source = {
+            name: value + 1
+            for name, value in tiny_glacier().make().released_state().items()
+        }
         model = tiny_glacier().make()
     model.load_released_state(source)
     assert not mismatches(source, model.released_state())
@@ -1887,7 +1838,7 @@ def test_fragment_attention_reset_repeats_complete_constructor(bias: bool) -> No
     assert isinstance(config.attention.proj_qkv, Linear.Config)
     assert isinstance(config.attention.proj_out, Linear.Config)
     config.attention.proj_qkv.bias = config.attention.proj_out.bias = bias
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         _ = torch.manual_seed(42)
         attention = config.make()
         initial = {
@@ -1980,21 +1931,21 @@ def generation_batch() -> GenerationBatch:
     )
 
 
-def test_three_released_adam_updates_match_all_generator_values() -> None:
-    expected = read_tensors(GEN_GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+def test_three_adam_updates_match_all_generator_values() -> None:
+    golden = GEN_GOLDEN
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         model = tiny_generator().make()
         batch = generation_batch()
         actual = {
             f"initial/{name}": value.detach().clone()
-            for name, value in model.released_state().items()
+            for name, value in model.state_dict().items()
         }
         actual["initial/rng"] = rng_fingerprint()
         optimizer = CompositeOptimizer(
             [
                 PartialConfig(torch.optim.Adam, lr=0.000996, weight_decay=0.0).make()(
-                    released_parameters(model),
+                    model.parameters(),
                 ),
             ],
         )
@@ -2019,15 +1970,9 @@ def test_three_released_adam_updates_match_all_generator_values() -> None:
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
         actual["loss"] = torch.stack(losses).float()
-        for name, value in model.released_state().items():
-            actual[f"final/{name}"] = value.detach().clone().float()
-        state = from_plain(
-            cast(object, optimizer.optimizers[0].state_dict()["state"]),
-            dict[int, dict[str, Tensor]],
-        )
-        for index, values in state.items():
-            for name, value in values.items():
-                actual[f"optimizer/{index}/{name}"] = value.detach().clone().float()
+        for name, value in model.state_dict().items():
+            actual[f"final/{name}"] = value.detach().clone()
+        actual.update(optimizer_state(model, optimizer.optimizers[0]))
         actual["learning_rate"] = torch.tensor(
             [
                 from_plain(group["lr"], float)
@@ -2043,28 +1988,19 @@ def test_three_released_adam_updates_match_all_generator_values() -> None:
         actual["post/root_features"] = batch.roots.features.clone()
         actual["post/fragment_features"] = batch.fragments.features.clone()
         actual["final/rng"] = rng_fingerprint()
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
-    actual["loss"][0] = torch.nextafter(
-        actual["loss"][0],
-        torch.full_like(actual["loss"][0], float("inf")),
-    )
-    assert mismatches(expected, actual) == ["loss: 1/3 differ"]
+    assert_tensor_golden(golden, actual)
 
 
 def test_complete_checkpoint_loading_rejects_alias_conflicts_atomically() -> None:
-    expected = read_tensors(GEN_GOLDEN)
     state = {
-        name.removeprefix("initial/"): value
-        for name, value in expected.items()
-        if name.startswith("initial/") and name != "initial/rng"
+        name: value + 1
+        for name, value in tiny_generator().make().released_state().items()
     }
     model = tiny_generator().make()
     model.load_released_state(state)
     assert not mismatches(state, model.released_state())
     assert model.encoder is model.root_encoder
-    assert len(released_parameters(model)) == len(list(model.parameters()))
-    assert any(not parameter.requires_grad for parameter in released_parameters(model))
+    assert any(not parameter.requires_grad for parameter in model.parameters())
     conflict = {
         **state,
         "root_module.input_project.weight": state["gnn.input_project.weight"] + 1,
@@ -2170,24 +2106,24 @@ def intensity_batch() -> IntensityBatch:
     )
 
 
-def test_complete_intensity_three_released_updates() -> None:
-    expected = read_tensors(INTENSITY_GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+def test_complete_intensity_three_updates() -> None:
+    golden = INTENSITY_GOLDEN
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         model = tiny_intensity().make()
         batch = intensity_batch()
         actual = {
             f"initial/{name}": value.detach().clone()
-            for name, value in model.released_state().items()
+            for name, value in model.state_dict().items()
         }
         actual["initial/rng"] = rng_fingerprint()
         actual["requires_grad"] = torch.tensor(
-            [parameter.requires_grad for parameter in released_parameters(model)],
+            [parameter.requires_grad for parameter in model.parameters()],
         )
         optimizer = CompositeOptimizer(
             [
                 PartialConfig(torch.optim.Adam, lr=0.000736, weight_decay=1e-7).make()(
-                    released_parameters(model),
+                    model.parameters(),
                 ),
             ],
         )
@@ -2207,15 +2143,9 @@ def test_complete_intensity_three_released_updates() -> None:
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
         actual["loss"] = torch.stack(losses).float()
-        for name, value in model.released_state().items():
+        for name, value in model.state_dict().items():
             actual[f"final/{name}"] = value.detach().clone()
-        state = from_plain(
-            cast(object, optimizer.optimizers[0].state_dict()["state"]),
-            dict[int, dict[str, Tensor]],
-        )
-        for index, values in state.items():
-            for name, value in values.items():
-                actual[f"optimizer/{index}/{name}"] = value.detach().clone().float()
+        actual.update(optimizer_state(model, optimizer.optimizers[0]))
         actual["learning_rate"] = torch.tensor(
             [
                 from_plain(group["lr"], float)
@@ -2233,39 +2163,28 @@ def test_complete_intensity_three_released_updates() -> None:
         actual["post/root_features"] = batch.roots.features.clone()
         actual["post/fragment_features"] = batch.fragments.features.clone()
         actual["final/rng"] = rng_fingerprint()
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
-    actual["loss"][0] = torch.nextafter(
-        actual["loss"][0],
-        torch.full_like(actual["loss"][0], float("inf")),
-    )
-    assert mismatches(expected, actual) == ["loss: 1/3 differ"]
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
-def test_released_optimizer_order_rejects_extra_registration_at_schema_boundary() -> (
-    None
-):
+def test_checkpoint_schema_rejects_extra_registration() -> None:
     model = tiny_intensity().make()
     model.register_parameter("unexpected", torch.nn.Parameter(torch.zeros(1)))
     with pytest.raises(
         ValueError,
         match=r"^Native intensity state differs from its checkpoint schema\.$",
     ):
-        released_parameters(model)
+        model.checkpoint_names()
 
 
 def test_intensity_checkpoint_loading_and_clone_identity() -> None:
-    expected = read_tensors(INTENSITY_GOLDEN)
     state = {
-        name.removeprefix("initial/"): value
-        for name, value in expected.items()
-        if name.startswith("initial/") and name != "initial/rng"
+        name: value + 1
+        for name, value in tiny_intensity().make().released_state().items()
     }
     model = tiny_intensity().make()
     model.load_released_state(state)
     assert not mismatches(state, model.released_state())
     assert model.encoder is model.root_encoder
-    assert len(released_parameters(model)) == len(list(model.parameters()))
     for first, second in zip(
         model.blocks[0].parameters(),
         model.blocks[1].parameters(),
@@ -2297,7 +2216,7 @@ CONSTRAINTS_GOLDEN: Final = _BASELINE / "testdata" / "constraints.pt"
 
 
 def test_all_constraint_gradients_selections_and_graph_patterns() -> None:
-    expected = read_tensors(CONSTRAINTS_GOLDEN)
+    golden = CONSTRAINTS_GOLDEN
     model = Breakpoints.Config().make()
     actual: dict[str, Tensor] = {}
     with host_agnostic_numerics():
@@ -2363,12 +2282,8 @@ def test_all_constraint_gradients_selections_and_graph_patterns() -> None:
                 masks[1, 2, 0] = masks[1, 2, 63] = True
             for name, value in boundaries(adjacency, masks).items():
                 actual[f"boundary/{size}/{name}"] = value.clone()
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
-    assert not expected["boundary/64/boundary_mask"][..., 63].any()
-    value = actual["0/rank"].view(-1)
-    value[0] = torch.nextafter(value[0], torch.full_like(value[0], float("inf")))
-    assert mismatches(expected, actual) == ["0/rank: 1/240 differ"]
+    assert_tensor_golden(golden, actual)
+    assert not actual["boundary/64/boundary_mask"][..., 63].any()
 
 
 def test_typed_unique_return_contracts() -> None:
@@ -2390,7 +2305,7 @@ def test_typed_unique_return_contracts() -> None:
 
 
 def test_dense_matches_complete_torch_initialization_and_random_position() -> None:
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         _ = torch.manual_seed(42)
         expected = torch.nn.Linear(3, 5)
         expected_next = torch.rand(7)
@@ -2539,11 +2454,8 @@ def ggnn_topology() -> GraphBatch:
     )
 
 
-def test_ggnn_three_updates_match_every_active_source_tensor_and_random_position() -> (
-    None
-):
-    expected = read_tensors(GGNN_GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+def test_ggnn_three_updates_match_every_active_tensor_and_random_position() -> None:
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         model = ggnn_config().make()
         actual = {
@@ -2568,14 +2480,8 @@ def test_ggnn_three_updates_match_every_active_source_tensor_and_random_position
             optimizer.zero_grad(set_to_none=True)
         actual["loss"] = torch.stack(losses).float()
         for name, tensor in model.state_dict().items():
-            actual[f"final/{name}"] = tensor.detach().clone().float()
-        state = from_plain(
-            cast(object, optimizer.optimizers[0].state_dict()["state"]),
-            dict[int, dict[str, Tensor]],
-        )
-        for index, values in state.items():
-            for name, tensor in values.items():
-                actual[f"optimizer/{index}/{name}"] = tensor.detach().clone().float()
+            actual[f"final/{name}"] = tensor.detach().clone()
+        actual.update(optimizer_state(model, optimizer.optimizers[0]))
         model.eval()
         output = model.forward(ggnn_topology(), features)
         actual["output"] = output.detach().float()
@@ -2621,7 +2527,7 @@ def test_ggnn_three_updates_match_every_active_source_tensor_and_random_position
             .float()
         )
         actual["final/rng"] = rng_fingerprint()
-    assert not mismatches(expected, actual), "\n".join(mismatches(expected, actual))
+    assert_tensor_golden(GGNN_GOLDEN, actual)
 
 
 def test_packed_rows_scatter_into_zero_padded_segments_in_encounter_order() -> None:

@@ -60,7 +60,6 @@ from priml.baselines.wellbore_geology.testing import (
 from priml.baselines.wellbore_geology.train_loop import WellboreFoldLoop
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
-from priml.testing.golden import mismatches, read_tensors
 from priml.train.budget import WallBudget
 from priml.train.epoch_loop import EarlyStopping, first_periodic_and_last
 
@@ -348,35 +347,19 @@ def test_training_without_a_held_out_loader_is_rejected(
         train_family(family, raw=load_split(dataset / "train"), output_directory=output)
 
 
-@pytest.mark.parametrize("mutation", ["none", "divide_last", "reverse"])
-def test_complete_original_fifteen_model_bin_mean(mutation: str) -> None:
-    expected = read_tensors(_CWD / "testdata/model_bins.pt")
-    count = int(expected["count"].item())
-    assert count == 15
-    predictions = [
-        expected[f"prediction/{index}"].numpy().copy() for index in range(count)
-    ]
+def test_fifteen_model_bin_mean_divides_each_model_in_insertion_order() -> None:
+    pattern = (np.arange(12) % 7).reshape(2, 6).astype(np.float32)
     total = None
-    for prediction in reversed(predictions) if mutation == "reverse" else predictions:
-        total = accumulate_prediction(total, prediction, count=count)
-    assert total is not None
-    if mutation == "divide_last":
-        total = np.zeros_like(predictions[0])
-        for prediction in predictions:
-            total += prediction
-        total /= count
-    actual = {
-        f"prediction/{index}": torch.from_numpy(prediction.copy())
-        for index, prediction in enumerate(predictions)
-    }
-    actual["count"] = torch.tensor(count)
-    actual["mean"] = torch.from_numpy(total)
-    report = mismatches(expected, actual)
-    if mutation == "none":
-        assert report == []
-    else:
-        assert report
-        assert all(line.startswith("mean:") for line in report)
+    for index in range(15):
+        prediction = pattern / np.float32(11 + index) - np.float32(0.2) * (index % 3)
+        total = accumulate_prediction(total, prediction, count=15)
+    # Dividing once at the end, or in reverse order, rounds these bins differently.
+    mean = [-0.20000002, -0.14086735, -0.08173467, -0.022602012, 0.03653065, 0.0956633]
+    np.testing.assert_array_equal(
+        total,
+        np.asarray([mean, [0.15479596, *mean[:5]]], dtype=np.float32),
+        strict=True,
+    )
 
 
 @pytest.mark.parametrize("count", [0, -1])

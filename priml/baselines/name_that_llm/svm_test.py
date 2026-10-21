@@ -1,76 +1,19 @@
-"""Replay complete source-minted sparse classifier states and predictions."""
+"""Pin sparse classifier scores, shuffle draws and configuration checks."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Final, cast
-
-from treekle import from_plain
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.name_that_llm.sparse import CsrMatrix
 from priml.baselines.name_that_llm.svm import DualCoordinate, LinearSVC, _bounded
-from priml.testing.golden import mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
-
-@pytest.mark.parametrize("max_iter", argvalues=[3, 5000])
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
-def test_sparse_classifier_replays_complete_source_state(
-    max_iter: int,
-    corrupt: bool,
-) -> None:
-    fit = np.sin(np.arange(35).reshape(5, 7) / 7)
-    fit[np.arange(5), np.arange(5)] = 0
-    predict = CsrMatrix.from_dense(np.cos(np.arange(21).reshape(3, 7) / 11))
-    targets = np.array([4, 2, 8, 4, 2], dtype=np.int64)
-    config = LinearSVC.Config()
-    config.optimizer.max_iter = max_iter
-    model = config.make().fit(CsrMatrix.from_dense(fit), targets=targets)
-    if corrupt:
-        model.coef_[:1, :1] = np.nextafter(model.coef_[:1, :1], np.inf)
-    actual = {"predict": torch.from_numpy(model.decision_function(predict))}
-    for name, value in cast("dict[str, object]", vars(model)).items():
-        if name.endswith("_"):
-            assert isinstance(value, (int, np.generic, np.ndarray))
-            actual[name] = torch.from_numpy(np.asarray(value))
-    prefix = f"{max_iter}/"
-    expected = {
-        name.removeprefix(prefix): value
-        for name, value in read_tensors(_CWD / "testdata" / "linear_svc.pt").items()
-        if name.startswith(prefix)
-    }
-    report = mismatches(expected, actual=actual)
-    if corrupt:
-        assert any(item.startswith("coef_:") for item in report), report
-    else:
-        assert not report, "\n".join(report)
-
-
-@pytest.mark.parametrize("max_iter", argvalues=[3, 5000])
-def test_sparse_prediction_replays_from_complete_captured_fitted_state(
-    max_iter: int,
-) -> None:
-    record = read_tensors(_CWD / "testdata" / "linear_svc.pt")
-    model = LinearSVC.Config().make()
-    model.n_features_in_ = int(record[f"{max_iter}/n_features_in_"])
-    model.classes_ = record[f"{max_iter}/classes_"].numpy()
-    model.coef_ = record[f"{max_iter}/coef_"].numpy()
-    model.intercept_ = record[f"{max_iter}/intercept_"].numpy()
-    # The original fixture fixes three prediction rows and three classes.
-    scores = model.decision_function(
-        CsrMatrix.from_dense(np.cos(np.arange(21).reshape(3, 7) / 11)),
-    )
-    report = mismatches(
-        {"scores": record[f"{max_iter}/predict"]},
-        actual={"scores": torch.from_numpy(scores)},
-    )
-    assert not report, report
+if TYPE_CHECKING:
+    from numpy.random import RandomState
 
 
 def test_sparse_scores_round_each_product_before_adding_it() -> None:
@@ -87,12 +30,70 @@ def test_sparse_scores_round_each_product_before_adding_it() -> None:
     assert np.array_equal(scores, np.tile(model.intercept_, reps=(2, 1)))
 
 
-def test_coordinate_shuffle_matches_complete_source_bounded_draws() -> None:
-    golden = read_tensors(_CWD / "testdata" / "linear_svc.pt")
-    random = np.random.RandomState(5489)
-    limits = from_plain(golden["rng/limits"].tolist(), list[int])
-    actual = torch.tensor([_bounded(random, limit=limit) for limit in limits])
-    assert not mismatches({"draws": golden["rng/draws"]}, actual={"draws": actual})
+@pytest.mark.parametrize(
+    ("limit", "threshold", "seed", "rejected"),
+    argvalues=[
+        # Seed 0's accepted product has a low word exactly at the threshold.
+        (3 * 2**30, 2**30, 0, 1),
+        (2**31 + 1, 2**31 - 1, 8, 3),
+    ],
+)
+def test_bounded_draw_rejects_biased_products_and_consumes_each_draw(
+    limit: int,
+    threshold: int,
+    seed: int,
+    rejected: int,
+) -> None:
+    # The threshold is 2**32 mod limit: low words below it would bias the draw.
+    draws = np.random.RandomState(seed).randint(
+        0,
+        1 << 32,
+        dtype=np.uint32,
+        size=rejected + 2,
+    )
+    raw = cast("list[int]", draws.tolist())
+    low = [(value * limit) & 0xFFFFFFFF for value in raw[: rejected + 1]]
+    assert [word < threshold for word in low] == [True] * rejected + [False]
+    random = np.random.RandomState(seed)
+    assert _bounded(random, limit=limit) == raw[rejected] * limit >> 32
+    assert random.randint(0, 1 << 32, dtype=np.uint32) == raw[rejected + 1]
+
+
+def test_solver_shrinks_a_wide_margin_row_then_rechecks_every_row() -> None:
+    draws = np.random.RandomState(1308).randint(0, 1 << 32, dtype=np.uint32, size=12)
+    # Each bounded draw is accepted with offset zero, so four sweeps keep row order.
+    assert all(
+        0 < draw * limit < 1 << 32
+        for draw, limit in zip(
+            cast("list[int]", draws.tolist()),
+            [3, 2, 1] * 4,
+            strict=True,
+        )
+    )
+    weights, sweeps = (
+        DualCoordinate.Config()
+        .make()
+        .minimize(
+            [[(0, 2.0)], [(0, 0.5)], [(0, 4.0)]],
+            signs=[1.0, 1.0, 1.0],
+            width=1,
+            inverse_regularization=2,
+            random=np.random.RandomState(1308),
+        )
+    )
+    # C = 2 gives the diagonal 1/4. Sweep 2 ends at the largest gradient 26/17; sweep
+    # 3 drops the last row (gradient 3) and finds the rest flat, so sweep 4 rechecks
+    # every row. The optimum keeps only the middle row: w = 2 * 1/2 = 1.
+    assert (weights, sweeps) == ([1.0], 4)
+
+
+def test_classifier_reports_the_most_sweeps_any_class_took(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(DualCoordinate, "minimize", _Sweeps(counts=[2, 5, 3]))
+    model = LinearSVC.Config().make()
+    model.fit(CsrMatrix.from_dense(np.eye(3, 4)), targets=np.arange(3, dtype=np.int64))
+    assert model.n_iter_ == 5
 
 
 @pytest.mark.parametrize("inverse", argvalues=[0, -1, np.nan, np.inf])
@@ -156,6 +157,25 @@ def test_sparse_classifier_rejects_unfitted_or_mismatched_feature_columns(
         match=r"^Expected fitted classifier feature columns\.$",
     ):
         model.decision_function(features.take_columns(np.arange(2)))
+
+
+@dataclass(slots=True, kw_only=True)
+class _Sweeps:
+    """Return zero weights and the next sweep count; a non-function stays unbound."""
+
+    counts: list[int]
+
+    def __call__(
+        self,
+        rows: list[list[tuple[int, float]]],
+        signs: list[float],
+        *,
+        width: int,
+        inverse_regularization: float,
+        random: RandomState,
+    ) -> tuple[list[float], int]:
+        del rows, signs, inverse_regularization, random
+        return [0.0] * width, self.counts.pop(0)
 
 
 if __name__ == "__main__":

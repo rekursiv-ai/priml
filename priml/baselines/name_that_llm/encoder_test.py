@@ -1,15 +1,13 @@
-"""Pin the reference pooling arithmetic, padding, and saved-layer order."""
+"""Pin the native Qwen forward, pooling arithmetic, padding, and saved-layer order."""
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
 import json
 import math
 
-from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -37,13 +35,10 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden_part, mismatches
 
 
-# ``transformers`` is priml's ``hub`` extra, which the public repository's
-# validation does not install.
-pytest.importorskip("transformers")
-
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -63,12 +58,38 @@ else:
         "TokenizersBackend",
     )
 
-_THIS: Final = Path(__file__).resolve()
-_CWD: Final = _THIS.parent
+
+@pytest.fixture
+def tiny_checkpoint(tmp_path: Path) -> FrozenQwen.Config:
+    model_config = {
+        "model_type": "qwen3",
+        "hidden_size": 7,
+        "intermediate_size": 11,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 6,
+        "vocab_size": 17,
+        "torch_dtype": "float32",
+    }
+    (tmp_path / "config.json").write_text(json.dumps(to_plain(model_config)))
+    # ``pytorch_model.bin`` loads with torch alone; safetensors is the hub extra.
+    torch.save(_checkpoint_state(), tmp_path / "pytorch_model.bin")
+    config = FrozenQwen.Config()
+    config.directory = tmp_path
+    config.layers = [1, 2, 3, 4]
+    config.channels_hidden = 7
+    config.batch_size = 2
+    config.max_length = 5
+    config.dtype = torch.float16
+    config.release_model = _no_collection
+    return config
 
 
 @pytest.fixture
-def tiny_encoder(tmp_path: Path) -> FrozenQwen.Config:
+def tiny_encoder(tiny_checkpoint: FrozenQwen.Config) -> FrozenQwen.Config:
+    # Tokenizer files load through ``transformers``, priml's ``hub`` extra.
+    pytest.importorskip("transformers")
     backend = Tokenizer(
         WordLevel(
             {"[UNK]": 0, "[EOS]": 1, "red": 2, "blue": 3, "green": 4},
@@ -85,64 +106,14 @@ def tiny_encoder(tmp_path: Path) -> FrozenQwen.Config:
         eos_token="[EOS]",  # noqa: S106 -- Literal end-of-sequence marker.
         model_input_names=["input_ids", "attention_mask"],
     )
-    tokenizer.save_pretrained(tmp_path)
-    model_config = {
-        "model_type": "qwen3",
-        "hidden_size": 7,
-        "intermediate_size": 11,
-        "num_hidden_layers": 4,
-        "num_attention_heads": 4,
-        "num_key_value_heads": 2,
-        "head_dim": 6,
-        "vocab_size": 17,
-        "torch_dtype": "float32",
-    }
-    (tmp_path / "config.json").write_text(json.dumps(to_plain(model_config)))
-    shapes = {
-        "model.embed_tokens.weight": (17, 7),
-        "model.norm.weight": (7,),
-        "lm_head.weight": (17, 7),
-    }
-    for layer in range(4):
-        prefix = f"model.layers.{layer}"
-        shapes.update(
-            {
-                f"{prefix}.input_layernorm.weight": (7,),
-                f"{prefix}.post_attention_layernorm.weight": (7,),
-                f"{prefix}.self_attn.q_proj.weight": (24, 7),
-                f"{prefix}.self_attn.k_proj.weight": (12, 7),
-                f"{prefix}.self_attn.v_proj.weight": (12, 7),
-                f"{prefix}.self_attn.o_proj.weight": (7, 24),
-                f"{prefix}.self_attn.q_norm.weight": (6,),
-                f"{prefix}.self_attn.k_norm.weight": (6,),
-                f"{prefix}.mlp.gate_proj.weight": (11, 7),
-                f"{prefix}.mlp.up_proj.weight": (11, 7),
-                f"{prefix}.mlp.down_proj.weight": (7, 11),
-            },
-        )
-    # Synthetic checkpoint data exercises loading without running another model.
-    state = {
-        name: (
-            torch.ones(shape)
-            if "norm.weight" in name
-            else torch.sin(torch.arange(math.prod(shape)).float()).reshape(shape) * 0.02
-        )
-        for name, shape in shapes.items()
-    }
-    save_file(state, str(tmp_path / "model.safetensors"))
-    config = FrozenQwen.Config()
-    config.directory = tmp_path
-    config.layers = [1, 2, 3, 4]
-    config.channels_hidden = 7
-    config.batch_size = 2
-    config.max_length = 5
-    config.dtype = torch.float16
-    config.release_model = _no_collection
-    return config
+    tokenizer.save_pretrained(tiny_checkpoint.directory)
+    return tiny_checkpoint
 
 
-def test_checkpoint_builds_a_frozen_priml_qwen(tiny_encoder: FrozenQwen.Config) -> None:
-    model = tiny_encoder.make()._load_model(torch.float32)
+def test_checkpoint_builds_a_frozen_priml_qwen(
+    tiny_checkpoint: FrozenQwen.Config,
+) -> None:
+    model = tiny_checkpoint.make()._load_model(torch.float32)
     assert type(model) is Qwen3
     assert not model.training
     assert all(not parameter.requires_grad for parameter in model.parameters())
@@ -153,13 +124,13 @@ def test_checkpoint_builds_a_frozen_priml_qwen(tiny_encoder: FrozenQwen.Config) 
 
 
 def test_checkpoint_recipe_edits_follow_the_encoder_slots(
-    tiny_encoder: FrozenQwen.Config,
+    tiny_checkpoint: FrozenQwen.Config,
 ) -> None:
-    tiny_encoder.norm = RMSNorm.Config()
-    tiny_encoder.rotate = RoPE.rotate
-    tiny_encoder.split_qkv_projection = False
-    tiny_encoder.split_gate_projection = False
-    model = tiny_encoder.make()._load_model(torch.float32)
+    tiny_checkpoint.norm = RMSNorm.Config()
+    tiny_checkpoint.rotate = RoPE.rotate
+    tiny_checkpoint.split_qkv_projection = False
+    tiny_checkpoint.split_gate_projection = False
+    model = tiny_checkpoint.make()._load_model(torch.float32)
     assert isinstance(model.proj_out, Sequential)
     assert type(model.proj_out[0]) is RMSNorm
     for block in model.blocks:
@@ -175,9 +146,9 @@ def test_checkpoint_recipe_edits_follow_the_encoder_slots(
 
 
 def test_hidden_states_require_the_token_embedding(
-    tiny_encoder: FrozenQwen.Config,
+    tiny_checkpoint: FrozenQwen.Config,
 ) -> None:
-    model = tiny_encoder.make()._load_model(torch.float32)
+    model = tiny_checkpoint.make()._load_model(torch.float32)
     model.proj_in = None
     with pytest.raises(ValueError, match="proj_in"):
         selected_hidden_states(
@@ -189,88 +160,49 @@ def test_hidden_states_require_the_token_embedding(
 
 
 def test_checkpoint_width_must_match_the_configured_features(
-    tiny_encoder: FrozenQwen.Config,
+    tiny_checkpoint: FrozenQwen.Config,
 ) -> None:
-    tiny_encoder.channels_hidden = 13
+    tiny_checkpoint.channels_hidden = 13
     with pytest.raises(ValueError, match="checkpoint width"):
-        tiny_encoder.make()._load_model(torch.float32)
+        tiny_checkpoint.make()._load_model(torch.float32)
 
 
-@pytest.mark.parametrize("corrupt", argvalues=[False, True])
 @pytest.mark.parametrize(
-    ("dtype", "suffix"),
-    argvalues=[
-        (torch.float32, ""),
-        (torch.float16, "_fp16"),
-        (torch.bfloat16, "_bf16"),
-    ],
+    "dtype",
+    argvalues=[torch.float32, torch.float16, torch.bfloat16],
 )
-def test_native_qwen_replays_complete_frozen_source_states(
-    tiny_encoder: FrozenQwen.Config,
-    corrupt: bool,
+def test_native_qwen_replays_pooled_states_at_every_precision(
+    tiny_checkpoint: FrozenQwen.Config,
     dtype: torch.dtype,
-    suffix: str,
 ) -> None:
-    record = read_tensors(
-        _THIS.with_name("testdata") / f"qwen_hidden{suffix}.pt",
-    )
-    initial = {
-        name.removeprefix("initial/"): value
-        for name, value in record.items()
-        if name.startswith("initial/")
-    }
-    save_file(initial, str(Path(tiny_encoder.directory) / "model.safetensors"))
-    tiny_encoder.layers = [0, 1, 2, 4]
-    tiny_encoder.attention_kernel = SdpaNaive.Config()
+    tiny_checkpoint.layers = [0, 1, 2, 4]
+    tiny_checkpoint.attention_kernel = SdpaNaive.Config()
     metadata = json_loads(
-        (Path(tiny_encoder.directory) / "config.json").read_text(),
+        (Path(tiny_checkpoint.directory) / "config.json").read_text(),
         dict[str, object],
     )
     with host_agnostic_numerics():
-        model = tiny_encoder.make()._load_model(dtype)
-        expected_initial = remap_hf_state_dict(initial, Qwen3.Config.from_hf(metadata))
-        assert mismatches(expected_initial, actual=model.state_dict()) == []
-    assert isinstance(model.proj_out, Sequential)
-    if corrupt:
-        norm = model.proj_out[0]
-        assert isinstance(norm, RMSNorm)
-        assert norm.weight is not None
-        with torch.no_grad():
-            norm.weight[0] = torch.nextafter(
-                norm.weight[0],
-                torch.full_like(norm.weight[0], fill_value=math.inf),
-            )
-    intermediate: dict[str, Tensor] = {}
-    for name, module in model.blocks[0].named_modules():
-        if name in {"norm1", "attn", "norm2", "ffn", "attn.norm_q", "attn.rope"}:
-            module.register_forward_hook(
-                partial(_record_checkpoint, intermediate, name),
-            )
-    actual: dict[str, Tensor] = {}
+        model = tiny_checkpoint.make()._load_model(dtype)
+    loaded = remap_hf_state_dict(_checkpoint_state(), Qwen3.Config.from_hf(metadata))
+    expected = {name: value.to(dtype) for name, value in loaded.items()}
+    assert mismatches(expected, actual=model.state_dict()) == []
+    mask = torch.tensor([[1, 1, 1, 1, 1], [1, 1, 1, 1, 0], [1, 1, 0, 0, 0]])
+    pools: list[Tensor] = []
     with host_agnostic_numerics(), torch.inference_mode():
         for case in range(3):
-            tokens = (torch.arange(15).reshape(3, 5) + case) % 17
-            mask = torch.tensor([[1, 1, 1, 1, 1], [1, 1, 1, 1, 0], [1, 1, 0, 0, 0]])
             states = selected_hidden_states(
                 model,
-                input_ids=tokens,
+                input_ids=(torch.arange(15).reshape(3, 5) + case) % 17,
                 attention_mask=mask,
-                layers=tiny_encoder.layers,
+                layers=tiny_checkpoint.layers,
             )
-            actual.update(
-                {
-                    f"case/{case}/block0/{name}": value.clone()
-                    for name, value in intermediate.items()
-                },
-            )
-            for layer, hidden in zip(tiny_encoder.layers, states, strict=True):
-                actual[f"case/{case}/hidden/{layer}"] = hidden
-                actual[f"case/{case}/pool/{layer}"] = mean_pool(hidden, mask)
-    expected = {
-        name: value for name, value in record.items() if name.startswith("case/")
-    }
-    report = mismatches(expected, actual=actual)
-    assert bool(report) is corrupt, "\n".join(report)
+            pools.append(torch.stack([mean_pool(hidden, mask) for hidden in states]))
+    prefix = f"{str(dtype).removeprefix('torch.')}/"
+    assert_tensor_golden_part(
+        _CWD / "testdata" / "encoder.pt",
+        prefix=prefix,
+        record={f"{prefix}pool": torch.stack(pools)},
+    )
 
 
 def test_unweighted_qwen_norm_keeps_dtype_and_dtype_default_epsilon() -> None:
@@ -310,72 +242,14 @@ def test_qwen_rotation_preserves_partial_and_padded_geometry(
     assert torch.equal(actual_k, other=keys)
 
 
-@pytest.mark.parametrize(
-    ("dtype", "suffix"),
-    argvalues=[
-        (torch.float32, ""),
-        (torch.float16, "_fp16"),
-        (torch.bfloat16, "_bf16"),
-    ],
-)
-def test_qwen_rotation_keeps_source_arithmetic_precision(
-    dtype: torch.dtype,
-    suffix: str,
-) -> None:
-    expected = read_tensors(_THIS.with_name("testdata") / f"qwen_rotation{suffix}.pt")
-    actual: dict[str, Tensor] = {}
-    with host_agnostic_numerics():
-        for case in range(3):
-            q = torch.sin(torch.arange(120).reshape(2, 5, 3, 4).float() / 7 + case).to(
-                dtype,
-            )
-            k = torch.sin(torch.arange(144).reshape(2, 6, 3, 4).float() / 11 + case).to(
-                dtype,
-            )
-            phase = torch.arange(6).reshape(3, 2).float() / 13
-            cosine = phase.cos().to(dtype).unsqueeze(-2)
-            sine = phase.sin().to(dtype).unsqueeze(-2)
-            rotated_q, rotated_k = rotate_activation_dtype(
-                q.transpose(1, 2),
-                k.transpose(1, 2),
-                cosine,
-                sine,
-            )
-            actual[f"case/{case}/q"] = rotated_q.transpose(1, 2)
-            actual[f"case/{case}/k"] = rotated_k.transpose(1, 2)
-    assert not (report := mismatches(expected, actual=actual)), "\n".join(report)
-
-
-def _record_checkpoint(
-    destination: dict[str, Tensor],
-    name: str,
-    module: torch.nn.Module,
-    inputs: tuple[object, ...],
-    output: object,
-) -> None:
-    del module, inputs
-    if name == "attn.rope":
-        assert isinstance(output, tuple)
-        for label, factor in zip(
-            ("cos", "sin"),
-            cast("tuple[Tensor, Tensor]", output),
-            strict=True,
-        ):
-            half = factor.squeeze(-2)
-            destination[label] = torch.cat((half, half), dim=-1).unsqueeze(0)
-        return
-    assert isinstance(output, Tensor)
-    destination[name] = output.detach().clone()
-
-
 @pytest.mark.parametrize("layers", argvalues=[[], [-1, 2], [2, 5]])
 def test_saved_state_indices_must_exist(
-    tiny_encoder: FrozenQwen.Config,
+    tiny_checkpoint: FrozenQwen.Config,
     layers: list[int],
 ) -> None:
-    tiny_encoder.layers = layers
+    tiny_checkpoint.layers = layers
     with pytest.raises(ValueError, match="hidden-state indices"):
-        tiny_encoder.make()._load_model(torch.float32)
+        tiny_checkpoint.make()._load_model(torch.float32)
 
 
 def test_mean_pool_excludes_padding_and_keeps_float32_accumulation() -> None:
@@ -414,10 +288,20 @@ def test_tiny_qwen_preserves_rows_under_length_sorting(
     assert np.array_equal(embeddings, a2=encoder.encode(texts[::-1])[::-1])
 
 
+def test_equal_token_lengths_keep_their_input_order(
+    tiny_encoder: FrozenQwen.Config,
+) -> None:
+    encoder = _RowsSeen(tiny_encoder)
+    # Twenty rows: past sixteen, NumPy's default sort stops keeping ties in order.
+    encoder.encode(["red", "red blue"] * 10)
+    assert encoder.seen == [([*range(1, 20, 2), *range(0, 20, 2)], torch.float16)]
+
+
 def test_retry_recomputes_nonfinite_rows(tiny_encoder: FrozenQwen.Config) -> None:
     encoder = _NaNFirstPass(tiny_encoder)
     result = encoder.encode(["red blue", "green", "red green blue"])
     assert np.isfinite(result).all()
+    assert encoder.dtypes == [torch.float16, torch.bfloat16]
 
 
 def test_extraction_preserves_rows_batches_tokens_precision_and_device(
@@ -481,7 +365,10 @@ def test_extraction_preserves_rows_batches_tokens_precision_and_device(
 def test_retry_cannot_accept_persistent_nonfinite_values(
     tiny_encoder: FrozenQwen.Config,
 ) -> None:
-    with pytest.raises(RuntimeError, match="remain nonfinite"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Qwen embeddings remain nonfinite after bf16 retry\.$",
+    ):
         _AlwaysNaN(tiny_encoder).encode(["red blue", "green"])
 
 
@@ -493,6 +380,10 @@ def test_unprepared_weights_fail_explicitly(tmp_path: Path) -> None:
 
 
 class _NaNFirstPass(FrozenQwen):
+    def __init__(self, config: FrozenQwen.Config) -> None:
+        super().__init__(config)
+        self.dtypes: list[torch.dtype] = []
+
     @override
     def _encode_rows(
         self,
@@ -502,6 +393,7 @@ class _NaNFirstPass(FrozenQwen):
         texts: list[str],
         tokenizer: PreTrainedTokenizerBase,
     ) -> NDArray[np.float32]:
+        self.dtypes.append(dtype)
         output = super()._encode_rows(
             rows,
             dtype=dtype,
@@ -529,6 +421,64 @@ class _AlwaysNaN(FrozenQwen):
             fill_value=np.nan,
             dtype=np.float32,
         )
+
+
+class _RowsSeen(FrozenQwen):
+    def __init__(self, config: FrozenQwen.Config) -> None:
+        super().__init__(config)
+        self.seen: list[tuple[list[int], torch.dtype]] = []
+
+    @override
+    def _encode_rows(
+        self,
+        rows: NDArray[np.int64],
+        dtype: torch.dtype,
+        *,
+        texts: list[str],
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> NDArray[np.float32]:
+        del texts, tokenizer
+        self.seen.append((cast("list[int]", rows.tolist()), dtype))
+        return np.zeros(
+            (len(rows), len(self.config.layers), self.config.channels_hidden),
+            dtype=np.float32,
+        )
+
+
+def _checkpoint_state() -> dict[str, Tensor]:
+    """Return distinct weights in every tensor, exact in float32 on every host."""
+    shapes = {
+        "model.embed_tokens.weight": (17, 7),
+        "model.norm.weight": (7,),
+        "lm_head.weight": (17, 7),
+    }
+    for layer in range(4):
+        prefix = f"model.layers.{layer}"
+        shapes.update(
+            {
+                f"{prefix}.input_layernorm.weight": (7,),
+                f"{prefix}.post_attention_layernorm.weight": (7,),
+                f"{prefix}.self_attn.q_proj.weight": (24, 7),
+                f"{prefix}.self_attn.k_proj.weight": (12, 7),
+                f"{prefix}.self_attn.v_proj.weight": (12, 7),
+                f"{prefix}.self_attn.o_proj.weight": (7, 24),
+                f"{prefix}.self_attn.q_norm.weight": (6,),
+                f"{prefix}.self_attn.k_norm.weight": (6,),
+                f"{prefix}.mlp.gate_proj.weight": (11, 7),
+                f"{prefix}.mlp.up_proj.weight": (11, 7),
+                f"{prefix}.mlp.down_proj.weight": (7, 11),
+            },
+        )
+    state: dict[str, Tensor] = {}
+    offset = 0
+    for name, shape in shapes.items():
+        count = math.prod(shape)
+        steps = torch.arange(offset, offset + count)
+        offset += count
+        wave = (steps * 37 % 101 - 50).double() / 101
+        values = 1 + wave / 2 if "norm.weight" in name else wave
+        state[name] = values.float().reshape(shape)
+    return state
 
 
 def _no_collection() -> None:

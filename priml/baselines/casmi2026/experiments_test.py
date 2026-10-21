@@ -126,16 +126,8 @@ def test_exp000_pins_every_released_checkpoint_and_simulator_asset() -> None:
     assert config.policy.fallback.gap_weight == 0.5
 
 
-@pytest.mark.parametrize(
-    ("name", "factory"),
-    [
-        ("train_exp000", train_exp000),
-        ("train_exp001", train_exp001),
-        ("train_exp002", train_exp002),
-    ],
-)
+@pytest.mark.parametrize("factory", [train_exp000, train_exp001, train_exp002])
 def test_training_protocol_is_explicit_and_separate_from_released_checkpoints(
-    name: str,
     factory: Callable[[], CasmiRun],
 ) -> None:
     config = factory()
@@ -148,11 +140,15 @@ def test_training_protocol_is_explicit_and_separate_from_released_checkpoints(
     assert config.budget.seconds == 300
     assert config.loop.num_steps_eval == -1
     assert config.loop.eval_stop_on_time_limit is False
-    assert_pprint_golden(test_file=__file__, name=name, config=config)
+
+
+def test_train_exp000_config_pprint() -> None:
+    assert_pprint_golden(test_file=__file__, name="train_exp000", config=train_exp000())
 
 
 def test_exp001_changes_only_the_declared_peak_cap() -> None:
     parent, child = train_exp000(), train_exp001()
+    assert child.loop.experiment_name == "train_exp001"
     assert casmi_loop(child).dataset.max_peaks == 128
     casmi_loop(child).dataset.max_peaks = casmi_loop(parent).dataset.max_peaks
     child.loop.experiment_name = parent.loop.experiment_name
@@ -163,6 +159,7 @@ def test_exp001_changes_only_the_declared_peak_cap() -> None:
 
 def test_exp002_changes_only_the_declared_cold_preparation() -> None:
     parent, child = train_exp000(), train_exp002()
+    assert child.loop.experiment_name == "train_exp002"
     assert isinstance(child.preparation, TrainingPreparation.Config)
     child.preparation = parent.preparation
     child.loop.experiment_name = parent.loop.experiment_name

@@ -3,7 +3,7 @@
 1. Public `experiments.exp000` reproduces released-checkpoint inference.
 2. `experiments.train_exp000` declares a separate five-minute training protocol.
 3. Scientific preparation runs explicitly outside the project environment.
-4. Complete source controls qualify the native numerical boundaries.
+4. Goldens minted in-tree from this package pin the numerical boundaries.
 
 ## Competition
 
@@ -106,7 +106,8 @@ Prepare complete data in this order:
 
 The runtime reaction vocabulary and `v6_reactions.tsv` live in `chemistry`.
 Preparation/cache builders stay in `scripts`. Tests use small synthetic rows and
-checked-in source records; complete generator execution is a manual data step.
+goldens minted from this package; complete generator execution is a manual data
+step.
 
 ## Run public inference
 
@@ -176,23 +177,19 @@ Attribution remains with canqiang, flexonafft, obstacledeveloper, bobthebot369,
 skomuro, prvsiyan, megayak, Dmitrii Gluzdov, hengck23, ms-pred,
 Huseyin Emre Aksoy and Ahmed Berat Özer. Public asset terms remain applicable.
 In particular, the Prvsiyan fingerprint dataset carries CC-BY-NC-SA-4.0; the
-notebook license does not relicense data or checkpoints. No original source,
-source-side mint runner or additional license file ships in this package.
+notebook license does not relicense data or checkpoints. No original source or
+additional license file ships in this package.
 
-The 71 complete source-produced PT records were captured on x86; models use
-size-only reductions and three optimization updates. Complete state, optimizer,
-RNG, gradients/predictions and scientific observations stay in the comparisons.
-Released names map bijectively to native state names, with collision, missing,
-unexpected, shape and dtype validation before loading. No control is minted
-from native results.
-
-Three complete records (`fragment_features`, `main_pipeline`,
-`second_pipeline`) were recaptured from untouched originals on the x86
-validation host on October 18, 2026 using a common scalar NumPy reference. The external source
-process alone disabled `X86_V4,AVX512_ICL,AVX512_SPR`; source BLAS remained
-SkylakeX. Inputs, seeds, recipes, dtypes, shapes and full key sets were unchanged.
-Native execution carries no CPU-feature pin. Structural changes preserve every
-PT byte, including these approved captures.
+Every output in a PT golden in `testdata/` is minted from this package by its
+test under `pytest --regenerate-b4b`, keyed by native state names. A golden also
+stores replay inputs a test cannot rebuild, such as chemistry-runtime rows,
+fitted trees and checkpoint states, whole beside those outputs. Float64 outputs
+are rounded once to float32 values and keep their float64 dtype. Constant
+tables and small data-pipeline outputs are literals in their tests. Models use
+size-only reductions and three optimization updates, and Torch computations run
+inside `host_agnostic_numerics`. Released checkpoint names map bijectively to
+native state names, with collision, missing, unexpected, shape and dtype
+validation before loading.
 
 Tiny component/stage replays and the complete native entry replay qualify their
 declared boundaries. They do not establish complete production-cache generation,

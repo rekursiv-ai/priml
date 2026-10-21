@@ -11,6 +11,7 @@ from unittest.mock import patch
 import argparse
 import hashlib
 import json
+import math
 import pickle
 import sys
 import tempfile
@@ -25,12 +26,7 @@ import pytest
 import torch
 
 from priml.baselines.casmi2026 import data as data_module
-from priml.baselines.casmi2026.chemistry import (
-    ChemicalTable,
-    IdentityTable,
-    clean_block,
-    instrument_family,
-)
+from priml.baselines.casmi2026.chemistry import ChemicalTable, IdentityTable
 from priml.baselines.casmi2026.custom_types import GapGraph
 from priml.baselines.casmi2026.data import (
     SpectrumData,
@@ -117,10 +113,11 @@ from priml.baselines.casmi2026.simulators import (
     SimulatorAdmissionTable,
 )
 from priml.baselines.casmi2026.testing import (
+    float32_comparands,
     identity_rows,
     write_identity,
 )
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 if TYPE_CHECKING:
@@ -190,7 +187,7 @@ def cache(root: Path) -> SpectrumData.Config:
     return config
 
 
-def test_source_cache_split_and_exact_resume(tmp_path: Path) -> None:
+def test_cache_split_and_exact_resume(tmp_path: Path) -> None:
     config = cache(tmp_path)
     data = config.make()
     train_sid = set(data.sids[data.train_indices.numpy()])
@@ -273,13 +270,9 @@ def test_empty_required_population_is_rejected(tmp_path: Path, bucket: int) -> N
         _ = config.make()
 
 
-GOLDEN: Final = _BASELINE / "testdata" / "cache.pt"
-
-
-def assert_cache_replay(
+def test_complete_cleaned_cache_record(
     tmp_path: Path,
 ) -> None:
-    """Compare the complete independent source cache record after real preparation."""
     parquet.write_table(
         Table.from_pydict({"inchikey14": ["first", "last", "first"], "sid": [0, 1, 2]}),
         where=tmp_path / "structures.parquet",
@@ -368,68 +361,63 @@ def assert_cache_replay(
         max_peaks=512,
         precursor_margin=2.0,
     )
-    actual: dict[str, Tensor] = {}
-    for field in ("off", "mz", "it"):
-        values = cast("NDArray[np.generic]", np.load(output / f"spec_{field}.npy"))
-        actual[f"cache/{field}"] = torch.from_numpy(values)
-    metadata = parquet.read_table(output / "spec_meta.parquet")
-    for name in metadata.column_names:
-        if name in ("adduct", "collision_energy_orig_units"):
-            continue
-        values = from_plain(
-            cast(object, metadata.column(name).to_pylist()),
-            list[float | int | None],
-        )
-        actual[f"meta/{name}"] = torch.from_numpy(np.asarray(values, dtype=np.float64))
-    assert metadata.column("adduct").to_pylist() == raw.column("adduct").to_pylist()
-    assert metadata.column("collision_energy_orig_units").to_pylist() == ["eV"] * rows
-    actual["instrument"] = torch.tensor(
-        [
-            instrument_family(name)
-            for name in (
-                None,
-                np.nan,
-                3,
-                "ftms",
-                "itft",
-                "Exactive",
-                "FT-ICR",
-                "fticr",
-                "trap",
-                "lit",
-                "quattro",
-                "triple",
-                "unmapped",
-                "Orbitrap TOF",
-            )
-        ],
+    offsets, mz, it = (
+        cast("NDArray[np.generic]", np.load(output / f"spec_{field}.npy"))
+        for field in ("off", "mz", "it")
     )
-    for size in (19, 31, 37):
-        values = np.arange(size, dtype=np.float64)
-        cleaned = clean_block(
-            np.array([0, size], dtype=np.int64),
-            mz=values % 5 + 1,
-            intensity=values % 3 + 1,
-            precursor=np.array([20.0]),
-            floor=0.001,
-            topk=7,
-            over=2.0,
-        )
-        for name, result in zip(("off", "mz", "it"), cleaned, strict=True):
-            actual[f"ties{size}/{name}"] = torch.from_numpy(result)
-    expected = {
-        key: value
-        for key, value in read_tensors(GOLDEN).items()
-        if not key.startswith(("adduct/", "prvsiyan/", "edge"))
+    assert (offsets.dtype, mz.dtype, it.dtype) == (np.int64, np.float32, np.float32)
+    np.testing.assert_array_equal(offsets, [0, 2, 2, 2, 5, 517, 521, 521, 523])
+    # The 512-peak cap drops the 18 earliest of the 76 weakest peaks.
+    kept = [index for index in range(530) if index % 7 or index >= 7 * 18]
+    np.testing.assert_array_equal(
+        mz,
+        np.array(
+            [10, 20, 10, 20, 30, *(masses[4][i] for i in kept), 10, 10, 20, 30, 15, 25],
+            np.float32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        it,
+        np.array(
+            [
+                *(1 / 200, 0.2 / 200, 4 / 8, 8 / 8, 0.008 / 8),
+                *((index % 7 + 1) / 7 for index in kept),
+                *(1 / 3, 2 / 3, 3 / 3, 1 / 3, 1.0, 0.002),
+            ],
+            np.float32,
+        ),
+    )
+    metadata = parquet.read_table(output / "spec_meta.parquet")
+    assert {
+        name: metadata.column(name).to_pylist() for name in metadata.column_names
+    } == {
+        "adduct": raw.column("adduct").to_pylist(),
+        "precursor_mz": [30.0, 50.0, 60.0, 70.0, 100.0, 50.0, 40.0, 90.0],
+        "precursor_error_ppm": [index / 3 for index in range(rows)],
+        "collision_energy_orig_units": ["eV"] * rows,
+        "base_peak_intensity": [100.0] * rows,
+        "num_peaks": [6, 0, 2, 4, 530, 4, 3, 3],
+        "ce_mean": [15.0, None, None, 25.0, None, 5.0, 0.0, None],
+        "ce_min": [10.0, None, None, 25.0, None, 3.0, 0.0, None],
+        "ce_max": [20.0, None, None, 25.0, None, 8.0, 0.0, None],
+        "ce_n": [2, 0, 0, 1, 2, 3, 1, 0],
+        "sid": [2, 1, -1, 2, 2, 1, -1, 2],
+        "lib": [0, 1, 2, 3, 4, 5, 6, 10],
+        "instr": [0, 1, 2, 3, 4, 5, 5, 1],
+        "adduct_ix": [0, 6, 59, 50, 4, 9, 12, 2],
+        "mode": [1, -1, -1, 1, 1, -1, -1, 1],
+        "nm": [
+            30.0 - 1.00727645217,
+            50.0 + 1.00727645217,
+            None,
+            (140.0 - 39.961493820200005) / 2,
+            100.0 - 22.989220701,
+            50.0 - 34.969401259899996,
+            40.0 + 0.0005485799,
+            90.0 + 17.00328823157,
+        ],
+        "n_clean": [2, 0, 0, 3, 512, 4, 0, 2],
     }
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
-
-
-def test_complete_cleaned_cache_and_adduct_arithmetic_match_source(
-    tmp_path: Path,
-) -> None:
-    assert_cache_replay(tmp_path)
 
 
 def test_native_cold_cache_and_every_verified_output_without_rdkit(
@@ -620,8 +608,7 @@ def test_preparation_rejects_contained_inputs_and_invalid_official_identity(
     with pytest.raises(ValueError, match=r"^output path aliases protected input"):
         config.make().run()
     config.working_dir = tmp_path / "prepared"
-    expected = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
-    rows = identity_rows(expected)
+    rows = identity_rows()
     rows[0]["metric"] = "null"
     parquet.write_table(
         Table.from_pylist([dict(row) for row in rows]),
@@ -651,9 +638,8 @@ def _config(root: Path) -> TrainingPreparation.Config:
     config.pool.mkdir()
     identities = Path(config.identities.working_dir)
     identities.mkdir()
-    expected = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
-    write_identity(identities, expected)
-    smiles = [row["smiles"] for row in identity_rows(expected)[:2]]
+    write_identity(identities)
+    smiles = [row["smiles"] for row in identity_rows()[:2]]
     parquet.write_table(
         Table.from_pydict(
             {
@@ -1205,16 +1191,22 @@ def _analog_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(analog_data, "MolecularContext", context)
 
 
-def test_graph_hashes_match_whole_source_records_and_zero_reservation(
+def test_graph_hashes_are_seeded_blake2b_and_zero_is_reserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata/analog_preparation.pt")
-    for index in (1, 2, 3, 4, 5):
-        core = _analog_data_decode(expected[f"{index}/core_smiles"])
-        assert analog_data._identity("E:" + core) == int(expected[f"{index}/hashes"][0])
-    core = _analog_data_decode(expected["1/core_smiles"])
-    assert analog_data._identity("G:" + core) == int(expected["1/hashes"][1])
-    assert analog_data._identity("R:" + core) == int(expected["1/hashes"][2])
+    for text, expected in (
+        ("E:C1CCCCC1", 4_101_090_148_000_295_725),
+        ("G:C1CCCCC1", 2_963_313_213_660_459_189),
+        ("R:C1CCCCC1", 2_587_690_919_976_953_160),
+        ("E:C1CCNCC1", 1_399_155_810_780_611_077),
+        ("E:C1CCC(CCC2CCCCC2)CC1", 1_073_036_906_936_525_605),
+        ("E:C1CC1.C1CC1", 807_823_770_527_924_393),
+        (
+            "E:C1CC1.C1CCC1.C1CCCC1.C1CCCCC1.C1CCCCCC1.C1CN1.C1CO1",
+            3_953_499_957_839_148_272,
+        ),
+    ):
+        assert analog_data._identity(text) == expected
 
     def reserved(data: bytes, *, digest_size: int) -> types.SimpleNamespace:
         assert data == b"reserved"
@@ -1227,10 +1219,6 @@ def test_graph_hashes_match_whole_source_records_and_zero_reservation(
         types.SimpleNamespace(blake2b=reserved),
     )
     assert analog_data._identity("reserved") == 1
-
-
-def _analog_data_decode(value: Tensor) -> str:
-    return bytes(from_plain(cast(object, value.tolist()), list[int])).decode()
 
 
 # atomic_data_test.py.
@@ -1875,7 +1863,7 @@ class _Molecule:
 
 
 class Primitives:
-    """Supply complete captured SDK outcomes and explicit exceptional operations."""
+    """Supply stored SDK outcomes and explicit exceptional operations."""
 
     def __init__(self, version: str) -> None:
         assert version == IDENTITY_RDKIT
@@ -1906,7 +1894,7 @@ class Primitives:
         return key + "-UHFFFAOYSA-N" if key else ""
 
 
-def test_complete_source_engine_identity_sdk_and_known_failures(
+def test_complete_engine_identity_sdk_and_known_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(engine_identity, "Chemistry", Primitives)
@@ -1922,7 +1910,7 @@ def test_complete_source_engine_identity_sdk_and_known_failures(
 
 
 class RecordedKeys:
-    """Retain every complete source SDK result at the writer's primitive boundary."""
+    """Retain every stored SDK result at the writer's primitive boundary."""
 
     def __init__(self, version: str) -> None:
         assert version == IDENTITY_RDKIT
@@ -2128,7 +2116,7 @@ class _FragmentGapDataGraphs:
 
 
 # fragnet_data_test.py.
-def test_standard_atom_projection_retains_every_whole_source_field(
+def test_standard_atom_projection_retains_every_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected = _observations(monkeypatch)
@@ -2160,8 +2148,10 @@ def test_standard_atom_projection_retains_every_whole_source_field(
             for name in ("amass", "kind", "el", "nh", "bonds", "bring", "el10"):
                 actual[f"{prefix}/{name}"] = torch.from_numpy(record[name])
             actual[f"{prefix}/mass"] = torch.tensor(record["mass"], dtype=torch.float64)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        _SCRIPTS_DIR.parent / "testdata/fragnet_records.pt",
+        float32_comparands(actual),
+    )
     with pytest.raises(
         ValueError,
         match=r"^Fragnet preparation requires RDKit 2026\.03\.3\.$",
@@ -2175,7 +2165,11 @@ def test_writer_retains_all_duplicate_rows_and_empty_stream_layouts(
 ) -> None:
     expected = _observations(monkeypatch)
     value = _fragnet_data_decode(expected["0/input"])
-    assert bool(expected["0/valid"])
+    reference = molecular_record(
+        fragnet_data.FragnetChemistry(IDENTITY_RDKIT).atoms(value),
+        masses=ELEMENT_MASSES,
+    )
+    assert reference is not None
     invalid = next(
         _fragnet_data_decode(expected[f"{index}/input"])
         for index in range(27)
@@ -2201,8 +2195,8 @@ def test_writer_retains_all_duplicate_rows_and_empty_stream_layouts(
         record = table.row(index)
         assert record is not None
         for name in ("amass", "kind", "el", "nh", "bonds", "bring", "el10"):
-            np.testing.assert_array_equal(record[name], expected[f"0/{name}"].numpy())
-        assert record["mass"] == float(expected["0/mass"])
+            np.testing.assert_array_equal(record[name], reference[name], strict=True)
+        assert record["mass"] == reference["mass"]
     assert table.row(3) is None
     with pytest.raises(ValueError, match="batch_rows must be positive"):
         fragnet_data.prepare_fragnet(
@@ -3116,8 +3110,9 @@ def test_writer_retains_all_rows_bounded_batches_and_empty_arrays(
     assert base.dtype == np.float64
 
 
-def test_complete_rounded_source_fragment_rows_and_cap_encounter_order() -> None:
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata" / "main_fragments.pt")
+def test_complete_rounded_fragment_rows_and_cap_encounter_order() -> None:
+    golden = _SCRIPTS_DIR.parent / "testdata" / "main_fragments.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     for index in range(13):
         prefix = str(index)
@@ -3141,8 +3136,8 @@ def test_complete_rounded_source_fragment_rows_and_cap_encounter_order() -> None
                 )
         for depth, row in zip((2, 1), fragment_rows(graph)[1:], strict=True):
             actual[f"{prefix}/depth{depth}"] = torch.from_numpy(row.astype(np.float64))
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+        actual[f"{prefix}/fragments"] = torch.from_numpy(base_fragment_masses(graph))
+    assert_tensor_golden(golden, float32_comparands(actual, inputs=("*/weights",)))
 
 
 def test_fragment_graph_preserves_weights_through_nonroot_bond_endpoints() -> None:
@@ -3151,26 +3146,6 @@ def test_fragment_graph_preserves_weights_through_nonroot_bond_endpoints() -> No
         bonds=np.array([[3, 2], [2, 1], [0, 3]], dtype=np.int32),
     )
     np.testing.assert_array_equal(masses, [1, 2, 4, 6, 8, 9, 12, 13, 14, 15])
-
-
-def test_complete_generated_main_fragments_retain_source_float64_values() -> None:
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata/base_fragments.pt")
-    actual: dict[str, Tensor] = {}
-    for index in range(13):
-        prefix = str(index)
-        graph = None
-        for name in ("input", "valid"):
-            actual[f"{prefix}/{name}"] = expected[f"{prefix}/{name}"].clone()
-        if bool(expected[f"{prefix}/valid"]):
-            for name in ("weights", "bonds"):
-                actual[f"{prefix}/{name}"] = expected[f"{prefix}/{name}"].clone()
-            graph = (
-                cast("NDArray[np.float64]", actual[f"{prefix}/weights"].numpy()),
-                cast("NDArray[np.int32]", actual[f"{prefix}/bonds"].numpy()),
-            )
-        actual[f"{prefix}/fragments"] = torch.from_numpy(base_fragment_masses(graph))
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
 
 
 class _MainFragmentsGraphs:
@@ -3596,7 +3571,7 @@ def test_pubchem_preparation_requires_the_exact_scientific_release() -> None:
         _ = PubChemChemistry(SIMULATOR_RDKIT)
 
 
-def test_complete_source_primitive_records_and_independent_sdk_failures(
+def test_complete_primitive_records_and_independent_sdk_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(pubchem_data, "Chemistry", ObservedChemistry)
@@ -3605,7 +3580,8 @@ def test_complete_source_primitive_records_and_independent_sdk_failures(
         "GenMACCSKeys",
         ObservedChemistry(IDENTITY_RDKIT).maccs_keys,
     )
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata/pubchem_preparation.pt")
+    golden = _SCRIPTS_DIR.parent / "testdata/pubchem_preparation.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     chemistry = PubChemChemistry(IDENTITY_RDKIT)
     strings = [decode(expected[f"rows/smiles/{index}"]) for index in range(8)]
@@ -3633,8 +3609,7 @@ def test_complete_source_primitive_records_and_independent_sdk_failures(
             "keys": keys,
         },
     )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
     parsed_value, partial_value, valid_value, full_value, key = chemistry.record(
         "raw_error",
     )
@@ -4031,12 +4006,11 @@ class _SecondFragmentsGraphs:
 
 
 # second_library_test.py.
-def test_complete_raw_source_records_and_first_duplicate_pool_mapping(
+def test_complete_raw_records_and_first_duplicate_pool_mapping(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata" / "engine2_library.pt")
     formulas = ["C2H6O", None, "Xe", "", "D2O", "junk"]
     columns: dict[str, object] = {
         "inchikey14": ["a", None, "b", "a", "c", "missing"],
@@ -4099,13 +4073,43 @@ def test_complete_raw_source_records_and_first_duplicate_pool_mapping(
     monkeypatch.setattr(parquet.ParquetFile, "iter_batches", bounded_batches)
     monkeypatch.setattr(parquet, "read_table", selected_columns)
     prepare_second_library(source, pool=pool, output=output)
-    actual: dict[str, Tensor] = {}
-    for name in ("off", "mz", "it", "prec", "nm", "pol", "tims"):
-        array = cast(
+    mass = ELEMENT_MASSES
+    for name, expected in (
+        ("off", np.array([0, 5, 5, 7, 8, 11, 12], np.int64)),
+        (
+            "mz",
+            np.array([-2, 0, 30, 30, 101, 20, 10, 200, 4, 5, 6, 1000], np.float32),
+        ),
+        (
+            "it",
+            np.array(
+                [-1, 0, 4, 9, 0.0001, 0.5, 0.25, 1, 3, 2, 1, math.nan],
+                np.float32,
+            ),
+        ),
+        ("prec", np.array([47.0, 18.0, 131.0, 94.0, 21.0, 17.0])),
+        (
+            "nm",
+            np.array(
+                [
+                    mass["C"] * 2 + mass["H"] * 6 + mass["O"],
+                    18.0 + 1.00727645217,
+                    math.nan,
+                    (94.0 - 22.989220701) / 2,
+                    mass["D"] * 2 + mass["O"],
+                    0.0,
+                ],
+            ),
+        ),
+        ("pol", np.array([1, -1, -1, -1, -1, 1], np.int8)),
+        ("tims", np.array([True, True, False, False, True, False])),
+    ):
+        actual = cast(
             "NDArray[np.generic]",
             np.load(output / f"{name}.npy", allow_pickle=False),
         )
-        actual[name] = torch.from_numpy(array.copy())
+        assert actual.dtype == expected.dtype, name
+        np.testing.assert_array_equal(actual, expected, err_msg=name)
     metadata = parquet.read_table(output / "metadata.parquet")
     assert metadata.num_rows == original.num_rows
     assert metadata.schema.names == [
@@ -4117,33 +4121,37 @@ def test_complete_raw_source_records_and_first_duplicate_pool_mapping(
         metadata.to_pylist()
         == original.drop("ms2_mzs").drop("ms2_normalized_intensities").to_pylist()
     )
-    for short, field in (("ik", "inchikey14"), ("smi", "normalized_smiles")):
-        values = from_plain(
-            cast(object, metadata.column(field).to_pylist()),
-            list[str | None],
-        )
-        for row, value in enumerate(values):
-            actual[f"{short}/{row}/present"] = torch.tensor(value is not None)
-            actual[f"{short}/{row}/text"] = torch.tensor(
-                list((value or "").encode()),
-                dtype=torch.uint8,
-            )
-    cases = [
-        *formulas,
-        "C+H-2",
-        "C(OH)2",
-        "C0H0",
-        "Cl2BrFI",
-        "AsFeSeSiNaKB",
-        "H3C2H3",
-        "+",
-    ]
-    actual["formula_cases"] = torch.tensor(
-        [formula_mass(value) for value in cases],
-        dtype=torch.float64,
+    np.testing.assert_array_equal(
+        [
+            formula_mass(value)
+            for value in (*formulas, "C+H-2", "C(OH)2", "C0H0", "H3C2H3", "+")
+        ],
+        [
+            mass["C"] * 2 + mass["H"] * 6 + mass["O"],
+            math.nan,
+            math.nan,
+            math.nan,
+            mass["D"] * 2 + mass["O"],
+            0.0,
+            mass["C"] + mass["H"],
+            mass["C"] + mass["O"] + mass["H"],
+            0.0,
+            mass["H"] * 3 + mass["C"] * 2 + mass["H"] * 3,
+            0.0,
+        ],
     )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert formula_mass("Cl2BrFI") == (
+        mass["Cl"] * 2 + mass["Br"] + mass["F"] + mass["I"]
+    )
+    assert formula_mass("AsFeSeSiNaKB") == (
+        mass["As"]
+        + mass["Fe"]
+        + mass["Se"]
+        + mass["Si"]
+        + mass["Na"]
+        + mass["K"]
+        + mass["B"]
+    )
     row_p = cast("NDArray[np.int64]", np.load(output / "row_p.npy", allow_pickle=False))
     assert row_p.dtype == np.int64
     np.testing.assert_array_equal(row_p, [1, -1, 0, 1, -1, -1])

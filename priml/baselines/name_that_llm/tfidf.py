@@ -577,8 +577,8 @@ class TfidfVectorizer:
         for index, term in enumerate(sorted(self.vocabulary_)):
             remap[self.vocabulary_[term]] = index
             self.vocabulary_[term] = index
-        # Rows stay in stored order, unsorted under the new numbering: the golden
-        # buffers and every stored-order row sum downstream depend on it.
+        # Rows stay in stored order, unsorted under the new numbering: every
+        # stored-order row sum downstream depends on it.
         return replace(counts, indices=remap[counts.indices])
 
     def _prune(self, counts: CsrMatrix) -> CsrMatrix:
@@ -588,7 +588,7 @@ class TfidfVectorizer:
             total = np.bincount(counts.indices, weights=counts.data)
             priorities = -total[keep]
             preferred = np.flatnonzero(keep)[
-                priorities.argsort()[: self.config.max_features]
+                priorities.argsort(kind="stable")[: self.config.max_features]
             ]
             keep = np.zeros_like(keep)
             keep[preferred] = True

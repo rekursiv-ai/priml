@@ -24,10 +24,12 @@ import torch
 
 from priml.baselines.casmi2026 import simulators
 from priml.baselines.casmi2026.isolated import (
+    ELEMENT_MASSES,
     GLACIER_ROOT_DIR,
     ICE_ROOT_DIR,
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
+    SIMULATOR_SYMBOLS,
 )
 from priml.baselines.casmi2026.model import (
     GraphGenerator,
@@ -86,15 +88,12 @@ from priml.baselines.casmi2026.simulators import (
     take_graphs,
     walk_features,
 )
-from priml.baselines.casmi2026.testing import (
-    released_parameters,
-    set_heads,
-)
+from priml.baselines.casmi2026.testing import float32_comparands, set_heads
 from priml.model.attention.attention import Attention
 from priml.model.ggnn import GraphBatch
 from priml.model.special import Dropout
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden, mismatches, read_tensors
 from priml.train.budget import WallBudget
 
 
@@ -139,17 +138,15 @@ def without_dropout[ConfigT](config: ConfigT) -> ConfigT:
 _BASELINE: Final = _CWD
 
 
-def test_complete_source_decisions_and_canonical_cache_need_no_chemistry_runtime(
+def test_staged_decisions_and_canonical_cache_need_no_chemistry_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/simulator_admission.pt")
-    rows = admission_rows(expected)
+    rows = admission_rows()
     _write(tmp_path, rows)
     table = SimulatorAdmissionTable(tmp_path)
-    report = mismatches(expected, admission_record(table))
-    assert not report, "\n".join(report)
+    assert table.rows == tuple(rows)
     for index, row in enumerate(rows):
         assert table.row(index) == row
         assert table.ice(row["smiles"]) == (row["ice_accepted"], row["ice_reason"])
@@ -178,7 +175,7 @@ def test_complete_source_decisions_and_canonical_cache_need_no_chemistry_runtime
 def test_admission_reader_rejects_inconsistent_versions_and_decisions(
     tmp_path: Path,
 ) -> None:
-    rows = admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt"))
+    rows = admission_rows()
     invalid_rows: tuple[SimulatorAdmissionRow, ...] = (
         {**rows[0], "glacier_canonical": None},
         {**rows[0], "glacier_heavy_atoms": -1},
@@ -199,59 +196,43 @@ def test_admission_reader_rejects_inconsistent_versions_and_decisions(
             _ = SimulatorAdmissionTable(tmp_path)
 
 
-def admission_rows(record: dict[str, Tensor]) -> list[SimulatorAdmissionRow]:
-    """Project every field of the full source record into the declared Arrow schema.
-
-    Args:
-      record: Whole unchanged source-produced admission tensors.
+def admission_rows() -> list[SimulatorAdmissionRow]:
+    """Return sixteen staged decisions covering every admission and rejection path.
 
     Returns:
-      rows: All16 original decisions in the complete source input order.
+      rows: A repeated input, an alias, both heavy-atom limits and each rejection.
 
     """
+    outside = "element outside VALID_ATOM_NUM"
     return [
         {
-            "smiles": _decode(record[f"iceberg/{index}/input"]),
-            "ice_accepted": bool(record[f"iceberg/{index}/accepted"].item()),
-            "ice_reason": _decode(record[f"iceberg/{index}/reason"]),
-            "glacier_accepted": bool(record[f"glacier/{index}/accepted"].item()),
-            "glacier_reason": _decode(record[f"glacier/{index}/reason"]),
-            "glacier_canonical": _decode(record[f"glacier/{index}/canonical"])
-            if bool(record[f"glacier/{index}/canonical_present"].item())
-            else None,
-            "glacier_heavy_atoms": int(record[f"glacier/{index}/heavy"].item()),
+            "smiles": smiles,
+            "ice_accepted": ice,
+            "ice_reason": ice_reason,
+            "glacier_accepted": glacier,
+            "glacier_reason": glacier_reason,
+            "glacier_canonical": canonical,
+            "glacier_heavy_atoms": heavy,
         }
-        for index in range(16)
-    ]
-
-
-def admission_record(table: SimulatorAdmissionTable) -> dict[str, Tensor]:
-    """Return every original source field after the numeric prepared boundary.
-
-    Args:
-      table: Complete ordered prepared admission data.
-
-    Returns:
-      record: Full paired source schema with no omitted decisions or cache fields.
-
-    """
-    result: dict[str, Tensor] = {}
-    for index, row in enumerate(table.rows):
-        for family, accepted, reason in (
-            ("iceberg", row["ice_accepted"], row["ice_reason"]),
-            ("glacier", row["glacier_accepted"], row["glacier_reason"]),
-        ):
-            prefix = f"{family}/{index}"
-            result[prefix + "/input"] = _text(row["smiles"])
-            result[prefix + "/accepted"] = torch.tensor(accepted)
-            result[prefix + "/reason"] = _text(reason)
-        prefix = f"glacier/{index}"
-        result[prefix + "/canonical_present"] = torch.tensor(
-            row["glacier_canonical"] is not None,
+        for smiles, ice, ice_reason, glacier, glacier_reason, canonical, heavy in (
+            ("CCO", True, "", True, "", "CCO", 3),
+            ("OCC", True, "", True, "", "CCO", 3),
+            ("F/C=C/F", True, "", True, "", "F/C=C/F", 4),
+            ("F/C=C\\F", True, "", True, "", "F/C=C\\F", 4),
+            ("[13CH3][NH3+]", True, "", True, "", "[13CH3][NH3+]", 2),
+            ("[Na+].[Cl-]", True, "", True, "", "[Cl-].[Na+]", 2),
+            ("[Cu+2]", False, "elements ['Cu']", False, outside, None, 0),
+            ("", False, "rdkit parse", False, "empty", None, 0),
+            ("invalid", False, "rdkit parse", False, "rdkit parse", None, 0),
+            ("C" * 100, True, "", True, "", "C" * 100, 100),
+            ("C" * 101, True, "", False, "> 100 heavy atoms", None, 0),
+            ("*", False, "elements ['*']", False, outside, None, 0),
+            ("[H][H]", True, "", True, "", "[H][H]", 0),
+            ("[He]", False, "elements ['He']", False, outside, None, 0),
+            ("C.O", True, "", True, "", "C.O", 2),
+            ("CCO", True, "", True, "", "CCO", 3),
         )
-        result[prefix + "/canonical"] = _text(row["glacier_canonical"] or "")
-        result[prefix + "/heavy"] = torch.tensor(row["glacier_heavy_atoms"])
-    return result
+    ]
 
 
 def _write(directory: Path, rows: list[SimulatorAdmissionRow]) -> None:
@@ -273,10 +254,6 @@ def _write(directory: Path, rows: list[SimulatorAdmissionRow]) -> None:
         Table.from_pylist(rows, schema=schema),
         directory / "admission.parquet",
     )
-
-
-def _decode(value: Tensor) -> str:
-    return value.numpy().tobytes().decode()
 
 
 def _text(value: str) -> Tensor:
@@ -396,9 +373,7 @@ def test_release_forgets_every_decoded_group(tmp_path: Path) -> None:
     assert decoded == [0, 1, 0]
 
 
-def test_dense_and_sparse_powers_retain_isolated_atoms_and_the_source_record() -> None:
-    expected_record = read_tensors(_BASELINE / "testdata" / "walks.pt")
-    actual_record: dict[str, Tensor] = {}
+def test_dense_and_sparse_powers_retain_isolated_atoms() -> None:
     for count in (5, DENSE_NODE_LIMIT + 1):
         arguments = {
             "source": torch.tensor([0, 1, 1, 2]),
@@ -426,13 +401,6 @@ def test_dense_and_sparse_powers_retain_isolated_atoms_and_the_source_record() -
         expected = torch.zeros((count, 3))
         expected[:3, 1] = torch.tensor([0.25, 1.0, 0.75])
         assert torch.equal(actual, expected)
-        actual_record[str(count)] = actual
-    assert not mismatches(expected_record, actual_record)
-    actual_record["5"][0, 1] = torch.nextafter(
-        actual_record["5"][0, 1],
-        torch.tensor(float("inf")),
-    )
-    assert mismatches(expected_record, actual_record) == ["5: 1/15 differ"]
 
 
 def test_a_single_step_is_the_normalized_self_return() -> None:
@@ -782,9 +750,8 @@ def test_complete_both_public_simulator_scoring_families() -> None:
             [value if value is not None else 0 for value in scores.values()],
             dtype=torch.float64,
         )
-    expected = read_tensors(_BASELINE / "testdata" / "simulator_scoring.pt")
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    golden = _BASELINE / "testdata" / "simulator_scoring.pt"
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 def _spectra() -> list[SpectrumRequest]:
@@ -1032,7 +999,7 @@ def _prepared(directory: Path) -> None:
     )
 
 
-def test_prepared_numeric_backend_matches_the_whole_trained_source_inference(
+def test_prepared_numeric_backend_replays_the_whole_trained_inference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1042,13 +1009,17 @@ def test_prepared_numeric_backend_matches_the_whole_trained_source_inference(
         "device_count",
         lambda: pytest.fail("CPU replay must not enumerate CUDA devices."),
     )
-    state = {
-        name.removeprefix("final/"): value
-        for name, value in expected.items()
-        if name.startswith("final/") and name != "final/rng"
-    }
+    with torch.random.fork_rng(devices=[]):
+        trained = tiny_glacier().make()
+    trained.load_state_dict(
+        {
+            name.removeprefix("final/"): value
+            for name, value in expected.items()
+            if name.startswith("final/") and name != "final/rng"
+        },
+    )
     checkpoint = tmp_path / "checkpoint.pt"
-    torch.save({"state_dict": state}, checkpoint)
+    torch.save({"state_dict": trained.released_state()}, checkpoint)
     batch, _, _ = prepared_batch()
     batch.root_forms.copy_(expected["post/root_forms"])
     batch.atom_forms.copy_(expected["post/atom_forms"])
@@ -1413,8 +1384,6 @@ def test_complete_component_labels_keep_isolated_nodes_and_contiguous_ids() -> N
 
 
 def test_weighted_dense_and_sparse_walks_retain_isolated_atoms() -> None:
-    expected_record = read_tensors(_THIS.parent / "testdata" / "walks.pt")
-    actual_record: dict[str, Tensor] = {}
     for count in (5, 2001):
         graph = FragmentGraph(
             topology=GraphBatch(
@@ -1446,14 +1415,6 @@ def test_weighted_dense_and_sparse_walks_retain_isolated_atoms() -> None:
         expected = torch.zeros((count, 3))
         expected[:3, 1] = torch.tensor([0.25, 1.0, 0.75])
         assert torch.equal(actual, expected)
-        actual_record[str(count)] = actual
-    report = mismatches(expected_record, actual_record)
-    assert not report, "\n".join(report)
-    actual_record["5"][0, 1] = torch.nextafter(
-        actual_record["5"][0, 1],
-        torch.tensor(float("inf")),
-    )
-    assert mismatches(expected_record, actual_record) == ["5: 1/15 differ"]
 
 
 def _chains() -> FragmentGraph:
@@ -1560,15 +1521,12 @@ def test_root_reader_requires_complete_double_precision_element_masses(
 
 
 def test_complete_joint_autoregression_and_intensity_from_prepared_roots() -> None:
-    expected = read_tensors(_THIS.parent / "testdata" / "joint.pt")
-    actual = {
-        key: value.clone()
-        for key, value in expected.items()
-        if key.startswith("input/")
-    }
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    golden = _THIS.parent / "testdata" / "joint.pt"
+    inputs = _ice_roots()
+    actual: dict[str, Tensor] = {}
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         generator, intensity = _models()
-        batch = _batch(expected)
+        batch = _batch(inputs)
         prediction = predict_spectra(
             generator,
             intensity,
@@ -1595,24 +1553,14 @@ def test_complete_joint_autoregression_and_intensity_from_prepared_roots() -> No
             actual.update(
                 {f"joint/{key}/{index}": value for index, value in enumerate(values)},
             )
-        _root_record(batch.roots, actual)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
-    actual["joint/spec/0"][0, 1] = torch.nextafter(
-        actual["joint/spec/0"][0, 1],
-        torch.tensor(float("inf"), dtype=torch.float64),
-    )
-    assert mismatches(expected, actual) == ["joint/spec/0: 1/260 differ"]
+        _assert_roots(batch.roots, inputs)
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
-def test_complete_source_stopping_threshold_singletons_and_full_capacity() -> None:
-    expected = read_tensors(_THIS.parent / "testdata" / "generation_boundaries.pt")
-    actual = {
-        key: value.clone()
-        for key, value in expected.items()
-        if "/input/" in key or key == "element_masses"
-    }
-    with torch.random.fork_rng(), torch.no_grad(), host_agnostic_numerics():
+def test_stopping_threshold_singletons_and_full_capacity() -> None:
+    golden = _THIS.parent / "testdata" / "generation_boundaries.pt"
+    actual: dict[str, Tensor] = {}
+    with torch.random.fork_rng(devices=[]), torch.no_grad(), host_agnostic_numerics():
         generator, _ = _models()
         generator.eval()
         for label, threshold, capacity in (
@@ -1620,12 +1568,7 @@ def test_complete_source_stopping_threshold_singletons_and_full_capacity() -> No
             ("singleton", 0.0, 5),
             ("capacity", 0.0, 1),
         ):
-            inputs = {
-                key.removeprefix(label + "/"): value
-                for key, value in expected.items()
-                if key.startswith(label + "/")
-            }
-            inputs["input/element_masses"] = expected["element_masses"]
+            inputs = _ice_roots(singleton=label == "singleton")
             batch = _batch(inputs)
             generation = grow_fragments(
                 generator,
@@ -1635,11 +1578,14 @@ def test_complete_source_stopping_threshold_singletons_and_full_capacity() -> No
                 walk_steps=2,
                 threshold=threshold,
             )
-            values = {f"generation/{key}": value for key, value in generation.items()}
-            _root_record(batch.roots, values)
-            actual.update({f"{label}/{key}": value for key, value in values.items()})
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+            _assert_roots(batch.roots, inputs)
+            actual.update(
+                {
+                    f"{label}/generation/{key}": value
+                    for key, value in generation.items()
+                },
+            )
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 def test_index_helpers_follow_the_device_of_their_reference_and_mark_prefixes() -> None:
@@ -1657,10 +1603,9 @@ def test_index_helpers_follow_the_device_of_their_reference_and_mark_prefixes() 
 def test_the_intensity_model_receives_exactly_the_generated_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = read_tensors(_THIS.parent / "testdata" / "joint.pt")
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         generator, intensity = _models()
-        batch = _batch(expected)
+        batch = _batch(_ice_roots())
         spy = mock.Mock(wraps=intensity.forward)
         monkeypatch.setattr(intensity, "forward", spy)
         prediction = predict_spectra(
@@ -1707,7 +1652,7 @@ def _models() -> tuple[GraphGenerator, GraphIntensity]:
     intensity = intensity_config.make()
     with torch.no_grad():
         for model in (generator, intensity):
-            for index, parameter in enumerate(released_parameters(model)):
+            for index, parameter in enumerate(model.parameters()):
                 if parameter.requires_grad:
                     values = torch.arange(parameter.numel(), dtype=torch.float32)
                     values = ((values + index * 3).remainder(29) - 14) / 101
@@ -1740,34 +1685,71 @@ def _batch(record: dict[str, Tensor]) -> IceBatch:
     )
 
 
-def _root_record(graph: FragmentGraph, record: dict[str, Tensor]) -> None:
-    topology = graph.topology
-    segments = torch.repeat_interleave(topology.node_counts)
-    record.update(
-        {
-            "root/source": topology.source,
-            "root/destination": topology.destination,
-            "root/node_counts": topology.node_counts,
-            "root/edge_counts": torch.bincount(
-                segments[topology.source],
-                minlength=len(topology.node_counts),
-            ),
-            "root/nodes/h": graph.features,
-            "root/nodes/n_id": graph.node_ids,
-            "root/edges/e_ind": topology.edge_type,
-            "root/edges/e": torch.eye(4)[topology.edge_type],
-        },
+type _IceMolecule = tuple[tuple[tuple[int, int, int], ...], tuple[tuple[int, int], ...]]
+
+
+def _ice_roots(*, singleton: bool = False) -> dict[str, Tensor]:
+    """Return two prepared roots: methoxyethane and cyclohexane, or CH4 and NH3."""
+    # Every atom sets its element, group and attached-hydrogen feature channels.
+    chains: tuple[_IceMolecule, ...] = (
+        (
+            ((0, 22, 29), (0, 22, 28), (3, 23, 26), (0, 22, 29)),
+            ((0, 1), (1, 2), (2, 3)),
+        ),
+        (((0, 22, 28),) * 6, ((0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0))),
     )
+    singletons: tuple[_IceMolecule, ...] = ((((0, 22, 30),), ()), (((1, 21, 29),), ()))
+    molecules = singletons if singleton else chains
+    atoms: list[tuple[int, int, int]] = []
+    sources: list[int] = []
+    destinations: list[int] = []
+    forms = torch.zeros(len(molecules), 18)
+    for index, (channels, bonds) in enumerate(molecules):
+        left = [len(atoms) + first for first, _ in bonds]
+        right = [len(atoms) + second for _, second in bonds]
+        sources += left + right
+        destinations += right + left
+        atoms += channels
+        for element, _, hydrogen in channels:
+            forms[index, element] += 1
+            forms[index, HYDROGEN_ROW] += hydrogen - 26
+    features = torch.zeros(len(atoms), 32)
+    for row, channels in enumerate(atoms):
+        features[row, list(channels)] = 1
+    counts = [len(channels) for channels, _ in molecules]
+    return {
+        "root/source": torch.tensor(sources, dtype=torch.int64),
+        "root/destination": torch.tensor(destinations, dtype=torch.int64),
+        "root/edges/e_ind": torch.ones(len(sources), dtype=torch.int64),
+        "root/node_counts": torch.tensor(counts),
+        "root/nodes/h": features,
+        "root/nodes/n_id": torch.cat([torch.arange(count) for count in counts]),
+        "input/root_forms": forms,
+        "input/element_masses": torch.tensor(
+            [[ELEMENT_MASSES[symbol]] for symbol in SIMULATOR_SYMBOLS],
+            dtype=torch.float64,
+        ),
+    }
 
 
-def test_complete_source_prediction_backend_without_a_chemistry_runtime(
+def _assert_roots(graph: FragmentGraph, inputs: dict[str, Tensor]) -> None:
+    topology = graph.topology
+    assert torch.equal(topology.source, inputs["root/source"])
+    assert torch.equal(topology.destination, inputs["root/destination"])
+    assert torch.equal(topology.edge_type, inputs["root/edges/e_ind"])
+    assert torch.equal(topology.node_counts, inputs["root/node_counts"])
+    assert torch.equal(graph.features, inputs["root/nodes/h"])
+    assert torch.equal(graph.node_ids, inputs["root/nodes/n_id"])
+
+
+def test_complete_prediction_backend_without_a_chemistry_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, name="rdkit", value=None)
     config = _ice_backend_config(tmp_path)
     actual: dict[str, Tensor] = {}
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         backend = config.make()
         for label, adduct, instrument, energy in (
             ("proton", "[M+H]+", "Orbitrap", 20.0),
@@ -1788,9 +1770,8 @@ def test_complete_source_prediction_backend_without_a_chemistry_runtime(
             _ = backend.predict([("invalid", "[M+H]+", "Orbitrap", 20.0)])
         with pytest.raises(KeyError):
             _ = backend.predict([("unprepared", "[M+H]+", "Orbitrap", 20.0)])
-    expected = read_tensors(_BASELINE / "testdata" / "ice_backend.pt")
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    golden = _BASELINE / "testdata" / "ice_backend.pt"
+    assert_tensor_golden(golden, actual)
     released: list[bool] = []
     monkeypatch.setattr(
         torch.cuda,
@@ -1827,13 +1808,13 @@ def _ice_backend_config(directory: Path) -> IceBackend.Config:
     _ = without_dropout(config)
     config.generator_checkpoint = directory / "generator.pt"
     config.intensity_checkpoint = directory / "intensity.pt"
-    with torch.random.fork_rng(), torch.no_grad(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), torch.no_grad(), host_agnostic_numerics():
         for model, path in (
             (config.generator.make(), config.generator_checkpoint),
             (config.intensity.make(), config.intensity_checkpoint),
         ):
             assert isinstance(model, GraphGenerator | GraphIntensity)
-            for index, parameter in enumerate(released_parameters(model)):
+            for index, parameter in enumerate(model.parameters()):
                 if parameter.requires_grad:
                     values = torch.arange(parameter.numel(), dtype=torch.float32)
                     values = ((values + index * 3).remainder(29) - 14) / 101
@@ -1851,52 +1832,57 @@ def _checkpoint(model: ReleasedModel, path: Path) -> None:
 
 
 def _prepared_roots(directory: Path) -> None:
-    record = read_tensors(_BASELINE / "testdata" / "ice_chemistry.pt")
+    hydrogen, oxygen = ELEMENT_MASSES["H"], ELEMENT_MASSES["O"]
     rows: list[IceRow] = []
-    for index, smiles in enumerate(("CCOC", "C1CCCCC1")):
-        edges = len(record[f"{index}/source"]) // 2
+    # (smiles, element, degree and hydrogen channels per atom, bonds, hydrogens).
+    for smiles, channels, bonds, hydrogens in (
+        (
+            "CCOC",
+            ((0, 22, 29), (0, 22, 28), (3, 23, 26), (0, 22, 29)),
+            [[0, 1], [1, 2], [2, 3]],
+            [3, 2, 0, 3],
+        ),
+        (
+            "C1CCCCC1",
+            ((0, 22, 28),) * 6,
+            [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0]],
+            [2] * 6,
+        ),
+    ):
+        features = np.zeros((len(channels), 32))
+        for atom, active in enumerate(channels):
+            features[atom, list(active)] = 1
+        masses = [oxygen if active[0] == 3 else 12.0 for active in channels]
+        hydrogenated = [
+            m + h * hydrogen for m, h in zip(masses, hydrogens, strict=True)
+        ]
+        formula = np.zeros(18)
+        formula[[0, 3, 7]] = (
+            sum(active[0] == 0 for active in channels),
+            sum(active[0] == 3 for active in channels),
+            sum(hydrogens),
+        )
         rows.append(
             {
                 "input_smiles": smiles,
                 "smiles": smiles,
                 "valid": True,
-                "features": from_plain(
-                    record[f"{index}/nodes/h"].tolist(),
-                    list[list[float]],
-                ),
-                "bonds": from_plain(
-                    torch.stack(
-                        [
-                            record[f"{index}/source"][:edges],
-                            record[f"{index}/destination"][:edges],
-                        ],
-                        dim=-1,
-                    ).tolist(),
-                    list[list[int]],
-                ),
-                "bond_orders": from_plain(
-                    record[f"{index}/edges/e_ind"][:edges].tolist(),
-                    list[int],
-                ),
-                "formula": from_plain(record[f"{index}/formula"].tolist(), list[float]),
-                "hydrogens": from_plain(
-                    record[f"{index}/hydrogens"].tolist(),
-                    list[int],
-                ),
-                "atom_masses": from_plain(
-                    record[f"{index}/atom_masses"].tolist(),
-                    list[float],
-                ),
-                "hydrogenated_masses": from_plain(
-                    record[f"{index}/hydrogenated_masses"].tolist(),
-                    list[float],
-                ),
-                "mass": float(record[f"{index}/mass"]),
+                "features": from_plain(features.tolist(), list[list[float]]),
+                "bonds": bonds,
+                "bond_orders": [1] * len(bonds),
+                "formula": from_plain(formula.tolist(), list[float]),
+                "hydrogens": hydrogens,
+                "atom_masses": masses,
+                "hydrogenated_masses": hydrogenated,
+                "mass": sum(hydrogenated),
             },
         )
     rows.append({**rows[0], "input_smiles": "invalid", "valid": False})
     parquet.write_table(Table.from_pylist(rows), directory / "ice.parquet")
-    np.save(directory / "element_masses.npy", record["element_masses"].numpy())
+    np.save(
+        directory / "element_masses.npy",
+        np.array([[ELEMENT_MASSES[symbol]] for symbol in SIMULATOR_SYMBOLS]),
+    )
     _ = (directory / "manifest.json").write_text(
         json.dumps(to_plain({"rdkit": SIMULATOR_RDKIT, "format_version": 1})),
     )
@@ -1906,7 +1892,7 @@ def test_ice_backend_the_default_root_directory_is_where_the_preparer_writes() -
     assert IceBackend.Config().root_dir == ICE_ROOT_DIR
 
 
-def test_complete_source_job_schedulers_and_failure_boundaries() -> None:
+def test_complete_job_schedulers_and_failure_boundaries() -> None:
     actual: dict[str, Tensor] = {}
     for case, glacier, budget in (
         ("ice_complete", False, False),
@@ -1975,12 +1961,11 @@ def test_complete_source_job_schedulers_and_failure_boundaries() -> None:
         if case == "gl_failfast":
             assert state.predicted >= 64
             assert state.predicted == state.failed
-    expected = read_tensors(_BASELINE / "testdata" / "simulator_jobs.pt")
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    golden = _BASELINE / "testdata" / "simulator_jobs.pt"
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
-def test_complete_source_length_boundaries_and_accumulated_time() -> None:
+def test_complete_length_boundaries_and_accumulated_time() -> None:
     actual: dict[str, Tensor] = {}
     for length, count in (
         (60, 9),
@@ -2032,9 +2017,8 @@ def test_complete_source_length_boundaries_and_accumulated_time() -> None:
                 ),
             )
             _cache_record(label + "/cache", state.cache, actual)
-    expected = read_tensors(_BASELINE / "testdata" / "simulator_boundaries.pt")
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    golden = _BASELINE / "testdata" / "simulator_boundaries.pt"
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 def test_failure_diagnostic_retains_first_three_hundred_characters() -> None:
@@ -2162,13 +2146,13 @@ def _cache_record(
 _SCORING: Final = QueryScoring.Config().make()
 
 
-def test_both_complete_source_outer_publications_caches_and_budget_boundaries(
+def test_both_complete_outer_publications_caches_and_budget_boundaries(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/simulator_outer.pt")
+    golden = _BASELINE / "testdata/simulator_outer.pt"
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     admission = SimulatorAdmissionTable(tmp_path)
     actual: dict[str, Tensor] = {}
@@ -2195,8 +2179,7 @@ def test_both_complete_source_outer_publications_caches_and_budget_boundaries(
                 assert result.scored_molecules == 1
                 assert all(value is None for value in result.scores["d"].values())
             assert result.status == ("ok" if case == "complete" else "budget")
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_empty_input_geometry_and_load_failures_preserve_initial_publication(
@@ -2204,7 +2187,7 @@ def test_empty_input_geometry_and_load_failures_preserve_initial_publication(
 ) -> None:
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     admission = SimulatorAdmissionTable(tmp_path)
     for batch_size, chunk_jobs in ((0, 3), (3, 0)):
@@ -2267,7 +2250,7 @@ def test_deadline_epoch_includes_loading_and_missing_admission_is_explicit(
 ) -> None:
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     admission = SimulatorAdmissionTable(tmp_path)
     boundary = _Boundary(glacier=False)
@@ -2314,7 +2297,7 @@ def test_real_query_and_model_shape_failures_remain_per_molecule(
 ) -> None:
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     admission = SimulatorAdmissionTable(tmp_path)
     malformed: SpectrumRequest = {
@@ -2368,7 +2351,7 @@ def test_real_query_and_model_shape_failures_remain_per_molecule(
 def test_first_fifty_distinct_rejections_abort_only_without_an_accepted_string(
     tmp_path: Path,
 ) -> None:
-    rows = admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt"))
+    rows = admission_rows()
     invalid: list[SimulatorAdmissionRow] = [
         {**rows[8], "smiles": f"bad{index}"} for index in range(50)
     ]
@@ -2495,7 +2478,7 @@ def observe_result(
     *,
     glacier: bool,
 ) -> dict[str, Tensor]:
-    """Observe every original outer record field through a shared native boundary."""
+    """Observe every outer record field through a shared native boundary."""
     actual = {
         prefix + "/status": _text(result.status),
         prefix + "/counts": torch.tensor(
@@ -2527,7 +2510,7 @@ def observe_result(
     _cache_record(prefix + "/cache", result.jobs.cache, actual)
     if glacier:
         _cache_record(prefix + "/canonical_cache", result.jobs.canonical_cache, actual)
-    return actual
+    return float32_comparands(actual)
 
 
 if __name__ == "__main__":

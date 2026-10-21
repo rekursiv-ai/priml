@@ -11,6 +11,7 @@ from unittest.mock import patch
 import hashlib
 import importlib
 import json
+import math
 import sys
 import types
 
@@ -33,10 +34,10 @@ from priml.baselines.casmi2026.chemistry import (
     SpectralLibrary,
     clean_block,
     clean_main,
+    instrument_family,
     merge_main,
 )
 from priml.baselines.casmi2026.custom_types import ReactionRequest
-from priml.baselines.casmi2026.data_test import assert_cache_replay
 from priml.baselines.casmi2026.isolated import (
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
@@ -65,11 +66,12 @@ from priml.baselines.casmi2026.scripts.rdkit_backend import (
     MolecularContext,
 )
 from priml.baselines.casmi2026.testing import (
-    decode,
+    float32_comparands,
+    identity_fingerprints,
     identity_rows,
     write_identity,
 )
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden
 
 
 if TYPE_CHECKING:
@@ -182,102 +184,149 @@ def test_complete_numeric_chemical_assets_and_selected_bit_order(
     assert ChemicalTable.load(tmp_path).valid.dtype == np.bool_
 
 
-CLEANING_GOLDEN: Final = _BASELINE / "testdata/cache.pt"
-
-
-def test_complete_source_cache_cleaning_and_instrument_labels(tmp_path: Path) -> None:
-    assert_cache_replay(tmp_path)
-
-
-@pytest.mark.parametrize("case", [0, 1])
-def test_cleaning_nan_intensity_and_zero_spectrum_block(case: int) -> None:
-    mz = np.array([1.0, 2.0, np.nan]) if case == 0 else np.array([], dtype=np.float64)
-    intensity = (
-        np.array([2.0, np.nan, 4.0]) if case == 0 else np.array([], dtype=np.float64)
+def test_clean_block_keeps_the_strongest_ties_in_encounter_order() -> None:
+    values = np.arange(19, dtype=np.float64)
+    offsets, mz, intensity = clean_block(
+        np.array([0, 19], dtype=np.int64),
+        mz=values % 5 + 1,
+        intensity=values % 3 + 1,
+        precursor=np.array([20.0]),
+        floor=0.001,
+        topk=7,
+        over=2.0,
     )
-    cleaned = clean_block(
-        np.array([0, len(mz)], dtype=np.int64)
-        if case == 0
-        else np.array([0], dtype=np.int64),
-        mz=mz,
-        intensity=intensity,
-        precursor=np.array([20.0]) if case == 0 else np.array([], dtype=np.float64),
+    # Six intensity-three peaks and the last intensity-two peak (index 16) survive.
+    np.testing.assert_array_equal(offsets, [0, 7])
+    np.testing.assert_array_equal(mz, np.array([1, 2, 2, 3, 3, 4, 5], np.float32))
+    np.testing.assert_array_equal(
+        intensity,
+        np.array([1, 2 / 3, 1, 1, 1, 1, 1], np.float32),
+    )
+
+
+def test_instrument_labels_map_to_the_six_main_engine_families() -> None:
+    labels = (
+        None,
+        np.nan,
+        3,
+        "timsTOF",
+        "ftms",
+        "itft",
+        "Exactive",
+        "FT-ICR",
+        "fticr",
+        "QTOF",
+        "trap",
+        "lit",
+        "quattro",
+        "triple",
+        "unmapped",
+        "Orbitrap TOF",
+    )
+    assert [instrument_family(label) for label in labels] == [
+        5,
+        5,
+        5,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+        4,
+        5,
+        1,
+    ]
+
+
+def test_cleaning_keeps_finite_peaks_and_an_empty_block() -> None:
+    offsets, mz, intensity = clean_block(
+        np.array([0, 3], dtype=np.int64),
+        mz=np.array([1.0, 2.0, np.nan]),
+        intensity=np.array([2.0, np.nan, 4.0]),
+        precursor=np.array([20.0]),
         floor=0.001,
         topk=512,
         over=2.0,
     )
-    actual = {
-        f"edge{case}/{name}": torch.from_numpy(result)
-        for name, result in zip(("off", "mz", "it"), cleaned, strict=True)
-    }
-    expected = {
-        key: value
-        for key, value in read_tensors(CLEANING_GOLDEN).items()
-        if key.startswith(f"edge{case}/")
-    }
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    # The NaN mass exceeds no cap but fails every comparison, so peak 0 alone stays.
+    np.testing.assert_array_equal(offsets, [0, 1])
+    np.testing.assert_array_equal(mz, np.array([1.0], np.float32))
+    np.testing.assert_array_equal(intensity, np.array([1.0], np.float32))
+    offsets, mz, intensity = clean_block(
+        np.array([0], dtype=np.int64),
+        mz=np.array([], dtype=np.float64),
+        intensity=np.array([], dtype=np.float64),
+        precursor=np.array([], dtype=np.float64),
+        floor=0.001,
+        topk=512,
+        over=2.0,
+    )
+    np.testing.assert_array_equal(offsets, [0])
+    assert mz.dtype == intensity.dtype == np.float32
+    assert mz.shape == intensity.shape == (0,)
 
 
-def observe_identity(
-    table: IdentityTable,
-    expected: dict[str, Tensor],
-) -> dict[str, Tensor]:
-    """Observe all source fields through public native lookups without RDKit."""
-    actual: dict[str, Tensor] = {}
-    for index in range(8):
-        prefix = str(index)
-        value = decode(expected[prefix + "/input"])
+def observe_identity(table: IdentityTable) -> list[tuple[object, ...]]:
+    """Read every staged identity row back through the public native lookups."""
+    observed: list[tuple[object, ...]] = []
+    for expected in identity_rows():
+        value = expected["smiles"]
         row = table.for_smiles(value)
-        actual[prefix + "/input"] = text(row["smiles"])
-        for name, result in (
-            ("standardized", table.standardize(value)),
-            ("key", table.key(value)),
-            ("standard_key", row["standard_key"]),
-        ):
-            actual[prefix + "/" + name + "/valid"] = torch.tensor(result is not None)
-            actual[prefix + "/" + name + "/text"] = text(result or "")
-        actual[prefix + "/formula"] = text(table.formula(value))
-        actual[prefix + "/metric"] = text(
-            json.dumps(to_plain(table.identity(value)), separators=(",", ":")),
-        )
-        actual[prefix + "/standard_metric"] = text(row["standard_metric"])
-        standardized = row["standardized"]
-        properties = (
-            table.properties(standardized) if standardized is not None else None
-        )
+        standardized = table.standardize(value)
         fingerprint = (
             table.fingerprint(standardized) if standardized is not None else None
         )
-        actual[prefix + "/properties/valid"] = torch.tensor(properties is not None)
-        actual[prefix + "/properties/formula"] = text(
-            properties[0] if properties else "",
+        observed.append(
+            (
+                row["smiles"],
+                standardized,
+                table.key(value),
+                row["standard_key"],
+                table.formula(value),
+                json.dumps(to_plain(table.identity(value)), separators=(",", ":")),
+                row["standard_metric"],
+                table.properties(standardized) if standardized is not None else None,
+                None if fingerprint is None else fingerprint.tolist(),
+            ),
         )
-        actual[prefix + "/properties/mass"] = torch.tensor(
-            properties[1] if properties else 0.0,
-            dtype=torch.float64,
-        )
-        actual[prefix + "/properties/heavy"] = torch.tensor(
-            properties[2] if properties else 0,
-        )
-        actual[prefix + "/fingerprint/valid"] = torch.tensor(fingerprint is not None)
-        actual[prefix + "/fingerprint/packed"] = torch.from_numpy(
-            fingerprint.copy() if fingerprint is not None else np.zeros(2069, np.uint8),
-        )
-    return actual
+    return observed
 
 
-def test_complete_source_identity_and_product_table_without_rdkit(
+def staged_identity() -> list[tuple[object, ...]]:
+    """Return what ``observe_identity`` reads back from the staged identity rows."""
+    fingerprints = identity_fingerprints()
+    return [
+        (
+            row["smiles"],
+            row["standardized"],
+            row["key"],
+            row["standard_key"],
+            row["formula"],
+            row["metric"],
+            row["standard_metric"],
+            (row["standard_formula"], row["standard_mass"], row["standard_heavy"])
+            if row["properties_valid"]
+            else None,
+            fingerprints[index].tolist() if row["fingerprint_valid"] else None,
+        )
+        for index, row in enumerate(identity_rows())
+    ]
+
+
+def test_complete_identity_and_product_table_without_rdkit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
-    write_identity(tmp_path, expected)
+    write_identity(tmp_path)
     table = IdentityTable.Config(working_dir=tmp_path).make()
-    report = mismatches(expected, observe_identity(table, expected))
-    assert not report, "\n".join(report)
-    for row in identity_rows(expected):
+    assert observe_identity(table) == staged_identity()
+    for row in identity_rows():
         standardized = row["standardized"]
         if standardized is not None:
             fingerprint = table.fingerprint(standardized)
@@ -313,9 +362,8 @@ def test_complete_source_identity_and_product_table_without_rdkit(
 def test_identity_rows_preserve_first_duplicate_and_reject_malformed_layouts(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
-    write_identity(tmp_path, expected)
-    rows = identity_rows(expected)
+    write_identity(tmp_path)
+    rows = identity_rows()
     rows[1] = rows[0].copy()
     rows[1].update(key="second", standard_key="second")
     parquet.write_table(
@@ -338,7 +386,7 @@ def test_identity_rows_preserve_first_duplicate_and_reject_malformed_layouts(
             match=r"^Identity fingerprints require complete U8\[rows,2069\] layout\.$",
         ):
             IdentityTable.Config(working_dir=tmp_path).make()
-    write_identity(tmp_path, expected)
+    write_identity(tmp_path)
     for header in (
         {"format_version": 2, "rdkit": IDENTITY_RDKIT, "raw_bits": 16_551},
         {"format_version": 1, "rdkit": SIMULATOR_RDKIT, "raw_bits": 16_551},
@@ -360,20 +408,19 @@ def test_identity_rows_preserve_first_duplicate_and_reject_malformed_layouts(
 def test_identity_types_partial_failures_and_restricted_numpy_loading(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
     for field in ("metric", "standard_metric"):
-        write_identity(tmp_path, expected)
-        rows = [dict(row) for row in identity_rows(expected)]
+        write_identity(tmp_path)
+        rows = [dict(row) for row in identity_rows()]
         rows[0][field] = json.dumps(to_plain((123, ())))
         parquet.write_table(Table.from_pylist(rows), tmp_path / "molecules.parquet")
         with pytest.raises(ReadError):
             IdentityTable.Config(working_dir=tmp_path).make()
-    write_identity(tmp_path, expected)
-    rows = [dict(row) for row in identity_rows(expected)]
+    write_identity(tmp_path)
+    rows = [dict(row) for row in identity_rows()]
     rows[0].update(properties_valid=False, fingerprint_valid=False)
     parquet.write_table(Table.from_pylist(rows), tmp_path / "molecules.parquet")
     table = IdentityTable.Config(working_dir=tmp_path).make()
-    standardized = table.for_smiles(decode(expected["0/input"]))["standardized"]
+    standardized = table.for_smiles(identity_rows()[0]["smiles"])["standardized"]
     assert standardized is not None
     assert table.properties(standardized) is None
     assert table.fingerprint(standardized) is None
@@ -383,15 +430,10 @@ def test_identity_types_partial_failures_and_restricted_numpy_loading(
         IdentityTable.Config(working_dir=tmp_path).make()
 
 
-def text(value: str) -> Tensor:
-    """Transport a complete observed string into the numerical comparison tree."""
-    return torch.tensor(list(value.encode()), dtype=torch.uint8)
-
-
 LIBRARY_GOLDEN: Final = _BASELINE / "testdata" / "assets.pt"
 
 
-def test_complete_provided_pool_and_library_state_matches_source(
+def test_complete_provided_pool_and_library_state(
     tmp_path: Path,
 ) -> None:
     counts = np.array([3, 7, 4, 5, 7, 1, 6, 4, 5], dtype=np.int32)
@@ -547,74 +589,60 @@ def test_complete_provided_pool_and_library_state_matches_source(
     assert library.representatives().indices is library.representatives().indices
     assert pool.formula_vector(0) is pool.formula_vector(0)
     assert pool.fingerprints(np.empty(0, dtype=np.int64)).shape == (0, 9)
-    report = mismatches(read_tensors(LIBRARY_GOLDEN), actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(LIBRARY_GOLDEN, float32_comparands(actual))
 
 
-def _molecules_text(value: Tensor) -> str:
-    return bytes(from_plain(cast(object, value.tolist()), list[int])).decode()
-
-
-def test_runtime_reads_all_source_identities_without_rdkit(tmp_path: Path) -> None:
-    source = read_tensors(_BASELINE / "testdata" / "chemistry.pt")
-    structures = (
-        "CCO",
-        "O=c1cccc[nH]1",
-        "C[C@H](O)F",
-        "[13CH3]CO",
-        "CCO.[Na+]",
-        "[NH4+]",
-        "not-smiles",
-    )
-    columns: dict[str, list[object]] = {
-        name: []
-        for name in (
-            "input_smiles",
-            "smiles",
-            "valid",
-            "formula",
-            "mass",
-            "heavy_atoms",
-            "key",
-            "raw_key",
-            "metric_key",
-            "composition",
-        )
+def test_runtime_reads_all_staged_identities_without_rdkit(tmp_path: Path) -> None:
+    # Formula, mass, heavy atoms, key and heavy composition of each valid structure.
+    valid: dict[str, tuple[str, float, int, str, tuple[tuple[str, int], ...]]] = {
+        "CCO": ("C2H6O", 46.041864812, 3, "LFQSCWFLJHTTHZ", (("C", 2), ("O", 1))),
+        "O=c1cccc[nH]1": (
+            "C5H5NO",
+            95.03711378,
+            7,
+            "UBQKCCHYAOITMY",
+            (("C", 5), ("N", 1), ("O", 1)),
+        ),
+        "C[C@H](O)F": (
+            "C2H5FO",
+            64.032443,
+            4,
+            "OGBOTYGRYZDLMG",
+            (("C", 2), ("F", 1), ("O", 1)),
+        ),
+        "[13CH3]CO": ("C2H6O", 47.045219652, 3, "LFQSCWFLJHTTHZ", (("C", 2), ("O", 1))),
+        "CCO.[Na+]": (
+            "C2H6NaO+",
+            69.03108551209,
+            4,
+            "CDPFDOHSBWKTDU",
+            (("C", 2), ("Na", 1), ("O", 1)),
+        ),
+        "[NH4+]": ("H4N+", 18.03382554809, 1, "QGZKDVFQNNGYKY", (("N", 1),)),
     }
-    packed: list[np.ndarray[tuple[int, ...], np.dtype[np.uint8]]] = []
-    identities: list[tuple[str, tuple[tuple[str, int], ...]] | None] = []
-    for index, smiles in enumerate(structures):
-        prefix = str(index)
-        valid = bool(source[f"{prefix}/valid"].item())
-        identity = from_plain(
-            json_loads(_molecules_text(source[f"{prefix}/metric"])),
-            tuple[str, tuple[tuple[str, int], ...]],
-            default=None,
-        )
-        identities.append(identity)
-        row: dict[str, object] = {
-            "input_smiles": smiles,
-            "smiles": smiles if valid else "",
-            "valid": valid,
-            "formula": _molecules_text(source[f"{prefix}/formula"]) if valid else "",
-            "mass": source[f"{prefix}/mass"].item() if valid else float("nan"),
-            "heavy_atoms": int(source[f"{prefix}/heavy"].item()) if valid else 0,
-            "key": _molecules_text(source[f"{prefix}/key/text"]),
-            "raw_key": _molecules_text(source[f"{prefix}/raw_key/text"]),
-            "metric_key": identity[0] if identity is not None else "",
-            "composition": json.dumps(
-                to_plain(identity[1] if identity is not None else ()),
-            ),
-        }
-        for name, value in row.items():
-            columns[name].append(value)
-        packed.append(
-            source[f"{prefix}/packed"].numpy()
-            if valid
-            else np.zeros((16_551 + 7) // 8, np.uint8),
-        )
-    parquet.write_table(Table.from_pydict(columns), tmp_path / "structures.parquet")
-    np.save(tmp_path / "raw_fp.npy", np.stack(packed))
+    structures = (*valid, "not-smiles")
+    prepared = [valid.get(smiles) for smiles in structures]
+    identities = [None if row is None else (row[3], row[4]) for row in prepared]
+    parquet.write_table(
+        Table.from_pydict(
+            {
+                "input_smiles": list(structures),
+                "smiles": [smiles if smiles in valid else "" for smiles in structures],
+                "valid": [row is not None for row in prepared],
+                "formula": [row[0] if row else "" for row in prepared],
+                "mass": [row[1] if row else float("nan") for row in prepared],
+                "heavy_atoms": [row[2] if row else 0 for row in prepared],
+                "key": [row[3] if row else "" for row in prepared],
+                "raw_key": [row[3] if row else "" for row in prepared],
+                "metric_key": [row[3] if row else "" for row in prepared],
+                "composition": [
+                    json.dumps(to_plain(row[4] if row else ())) for row in prepared
+                ],
+            },
+        ),
+        tmp_path / "structures.parquet",
+    )
+    np.save(tmp_path / "raw_fp.npy", np.zeros((7, (16_551 + 7) // 8), np.uint8))
     _ = (tmp_path / "fingerprint_bits.txt").write_text("16551\n")
     _ = (tmp_path / "manifest.json").write_text(f'{{"rdkit":"{IDENTITY_RDKIT}"}}\n')
     original_import = importlib.import_module
@@ -661,7 +689,7 @@ def test_identity_provenance_requires_the_declared_schema(
 SPECTRA_GOLDEN: Final = _BASELINE / "testdata" / "spectra.pt"
 
 
-def test_complete_both_spectral_search_families_match_source() -> None:
+def test_complete_both_spectral_search_families() -> None:
     masses = [
         np.arange(7, dtype=np.float32) * 10 + 10,
         np.array([], dtype=np.float32),
@@ -726,8 +754,8 @@ def test_complete_both_spectral_search_families_match_source() -> None:
                 candidates=candidates,
                 cosine=bool(kind),
             )
-            actual[f"ahmed/{case}/direct{kind}"] = torch.from_numpy(result)
-        actual[f"ahmed/{case}/hybrid"] = torch.from_numpy(
+            actual[f"main/{case}/direct{kind}"] = torch.from_numpy(result)
+        actual[f"main/{case}/hybrid"] = torch.from_numpy(
             main_search.score(
                 query,
                 store=store,
@@ -738,12 +766,12 @@ def test_complete_both_spectral_search_families_match_source() -> None:
         prepared = second_search.prepare(
             (query_mass.astype(np.float32), query_intensity.astype(np.float32)),
         )
-        actual[f"prvsiyan/{case}/query_mz"] = torch.from_numpy(prepared[0])
-        actual[f"prvsiyan/{case}/query_weights"] = torch.from_numpy(prepared[1])
-        actual[f"prvsiyan/{case}/direct"] = torch.from_numpy(
+        actual[f"second/{case}/query_mz"] = torch.from_numpy(prepared[0])
+        actual[f"second/{case}/query_weights"] = torch.from_numpy(prepared[1])
+        actual[f"second/{case}/direct"] = torch.from_numpy(
             second_search.score(prepared, store=store, candidates=candidates),
         )
-        actual[f"prvsiyan/{case}/shifted"] = torch.from_numpy(
+        actual[f"second/{case}/shifted"] = torch.from_numpy(
             second_search.score(
                 prepared,
                 store=store,
@@ -752,10 +780,10 @@ def test_complete_both_spectral_search_families_match_source() -> None:
             ),
         )
         cleaned = second_search.clean_store(store, indices=np.arange(7, dtype=np.int64))
-        actual[f"prvsiyan/{case}/store_offsets"] = torch.from_numpy(cleaned.offsets)
-        actual[f"prvsiyan/{case}/store_mz"] = torch.from_numpy(cleaned.mz)
-        actual[f"prvsiyan/{case}/store_weights"] = torch.from_numpy(cleaned.intensity)
-        actual[f"prvsiyan/{case}/precleaned"] = torch.from_numpy(
+        actual[f"second/{case}/store_offsets"] = torch.from_numpy(cleaned.offsets)
+        actual[f"second/{case}/store_mz"] = torch.from_numpy(cleaned.mz)
+        actual[f"second/{case}/store_weights"] = torch.from_numpy(cleaned.intensity)
+        actual[f"second/{case}/precleaned"] = torch.from_numpy(
             second_search.score_prepared(
                 prepared,
                 store=cleaned,
@@ -790,58 +818,74 @@ def test_complete_both_spectral_search_families_match_source() -> None:
         "weights": empty.intensity,
     }.items():
         actual[f"empty_store/{name}"] = torch.from_numpy(values)
-    expected = read_tensors(SPECTRA_GOLDEN)
-    report = mismatches(expected, actual)
-    diagnostics: list[str] = []
-    for key, want in expected.items():
-        got = actual[key]
-        if (
-            want.dtype == torch.float32
-            and want.shape == got.shape
-            and not torch.equal(want, got)
-        ):
-            want_bits, got_bits = (
-                want.view(torch.int32).long(),
-                got.view(torch.int32).long(),
-            )
-            want_order = torch.where(want_bits < 0, -(1 << 31) - want_bits, want_bits)
-            got_order = torch.where(got_bits < 0, -(1 << 31) - got_bits, got_bits)
-            diagnostics.append(
-                f"{key}: max ULP {(want_order - got_order).abs().max().item()}, expected={want.tolist()}, actual={got.tolist()}",
-            )
-    assert not report, "\n".join([*report, *diagnostics])
+    assert_tensor_golden(SPECTRA_GOLDEN, actual)
 
 
-def test_complete_query_cleaning_preserves_both_compiled_quicksort_orders() -> None:
-    expected = read_tensors(_BASELINE / "testdata/cleaning.pt")
-    actual = {
-        name: value.clone()
-        for name, value in expected.items()
-        if "/input/" in name or name.endswith("/config")
-    }
-    for index in range(8):
-        prefix = str(index)
-        config = expected[f"{prefix}/config"]
-        peaks = clean_main(
-            (
-                cast("NDArray[np.float64]", actual[f"{prefix}/input/mz"].numpy()),
-                cast(
-                    "NDArray[np.float64]",
-                    actual[f"{prefix}/input/intensity"].numpy(),
-                ),
-            ),
-            precursor=float(config[0]),
-            floor=float(config[1]),
-            max_peaks=int(config[2]),
-            over=float(config[3]),
+def test_complete_query_cleaning_keeps_stable_peak_orders() -> None:
+    # Each case: masses, intensities, precursor, floor, peak cap and mass margin.
+    cases: tuple[tuple[list[float], list[float], float, float, int, float], ...] = (
+        ([], [], 100.0, 0.001, 512, 2.0),
+        ([10.0, 20.0], [0.0, -1.0], 100.0, 0.001, 512, 2.0),
+        (
+            [-2.0, 0.0, 10.0, 20.0, 103.0],
+            [1000.0, 900.0, 2.0, 1.0, 2000.0],
+            100.0,
+            0.001,
+            512,
+            2.0,
+        ),
+        (
+            [102.0, 102.000001, 100.0, 1.0],
+            [7.0, 10.0, 1.0, 0.0069999],
+            100.0,
+            0.001,
+            512,
+            2.0,
+        ),
+        ([40.0 - index for index in range(40)], [1.0] * 40, 100.0, 0.001, 7, 2.0),
+        (
+            [20.0, 10.0, 20.0, 20.0, 10.0, 30.0],
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            100.0,
+            0.0,
+            4,
+            2.0,
+        ),
+        ([10.0, 20.0, 30.0], [1.0, 2.0, 3.0], float("nan"), 0.001, 512, 2.0),
+        (
+            [11.0, 15.0, 10.0, 14.0, 12.0, 13.0],
+            [1.0, 4.0, 2.0, 3.0, 1.0, 2.0],
+            10.0,
+            0.5,
+            2,
+            4.0,
+        ),
+    )
+    expected: tuple[tuple[list[float], list[float]], ...] = (
+        ([], []),
+        ([], []),
+        ([10.0, 20.0], [0.002, 0.001]),
+        ([100.0, 102.0], [1 / 7, 1.0]),
+        ([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [1.0] * 7),
+        ([10.0, 20.0, 20.0, 30.0], [5 / 6, 3 / 6, 4 / 6, 1.0]),
+        ([], []),
+        ([13.0, 14.0], [2 / 3, 1.0]),
+    )
+    for case, peaks in zip(cases, expected, strict=True):
+        mass, intensity, precursor, floor, maximum, over = case
+        actual = clean_main(
+            (np.array(mass, np.float64), np.array(intensity, np.float64)),
+            precursor=precursor,
+            floor=floor,
+            max_peaks=maximum,
+            over=over,
         )
-        actual[f"{prefix}/mz"] = torch.from_numpy(peaks[0])
-        actual[f"{prefix}/intensity"] = torch.from_numpy(peaks[1])
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+        assert actual[0].dtype == actual[1].dtype == np.float32
+        np.testing.assert_array_equal(actual[0], np.array(peaks[0], np.float32))
+        np.testing.assert_array_equal(actual[1], np.array(peaks[1], np.float32))
 
 
-def test_complete_peak_normalization_preserves_compiled_reduction_order() -> None:
+def test_complete_peak_normalization_and_entropy_weighting() -> None:
     actual: dict[str, Tensor] = {}
     for case, (intensity, power, entropy, floor, maximum) in enumerate(
         (
@@ -866,8 +910,10 @@ def test_complete_peak_normalization_preserves_compiled_reduction_order() -> Non
         )
         actual[f"{case}/mz"] = torch.from_numpy(mz)
         actual[f"{case}/weights"] = torch.from_numpy(weights)
-    report = mismatches(read_tensors(_BASELINE / "testdata/normalization.pt"), actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        _BASELINE / "testdata/normalization.pt",
+        float32_comparands(actual),
+    )
 
 
 def test_prepared_spectra_compare_without_narrowing_to_float32() -> None:
@@ -878,7 +924,17 @@ def test_prepared_spectra_compare_without_narrowing_to_float32() -> None:
         search.prepare(spectrum) for spectrum in (peaks, peaks, other)
     )
     assert search.similarity(query, same) == pytest.approx(1.0, abs=1e-12)
-    assert search.similarity(query, different) == 0.0
+    # The exact value is 2.8e-17; three rounded entropies cancel to one ulp of 1.
+    assert search.similarity(query, different) == math.ulp(1.0)
+
+
+def test_prepared_similarity_clips_a_rounded_excess_to_one() -> None:
+    search = MainSearch.Config().make()
+    masses = np.array([100.0, 200.0])
+    query = search.prepare((masses, np.array([6.0, 2.0])))
+    # Unclipped, the rounded entropies of this near-identical pair give 1 + 2**-52.
+    near = search.prepare((masses, np.array([6.0, 2.0 + 2.0**-31])))
+    assert search.similarity(query, near) == 1.0
 
 
 _SCRIPTS_DIR: Final = _CWD / "scripts"
@@ -1371,7 +1427,6 @@ def test_explicit_vocabulary_and_application_provenance_keep_each_actual_attempt
 
 # graph_properties_test.py.
 def test_complete_isotope_formula_hydrogen_and_mass_properties() -> None:
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata" / "ice_chemistry.pt")
     elements = (
         "C",
         "N",
@@ -1392,7 +1447,9 @@ def test_complete_isotope_formula_hydrogen_and_mass_properties() -> None:
         "Na",
         "K",
     )
-    table = _Table(float(expected["2/atom_masses"][0]))
+    masses = np.zeros(len(elements))
+    masses[[0, 1, 7]] = 12.0, 14.003074, 1.007825032
+    table = _Table(13.00335484)
     actual = atom_properties(
         _atoms(
             _GraphPropertiesAtom("C", isotope=13, implicit=0, explicit=3),
@@ -1400,17 +1457,17 @@ def test_complete_isotope_formula_hydrogen_and_mass_properties() -> None:
         ),
         formula="CH6N+",
         elements=elements,
-        masses=expected["element_masses"].numpy()[:, 0],
+        masses=masses,
         periodic_table=cast("Chem.PeriodicTable", table),
     )
-    for field, value in (
-        ("formula", actual.formula),
-        ("hydrogens", actual.hydrogens),
-        ("atom_masses", actual.masses),
-        ("hydrogenated_masses", actual.hydrogenated_masses),
-    ):
-        np.testing.assert_array_equal(value, expected[f"2/{field}"].numpy())
-    assert actual.mass == float(expected["2/mass"])
+    composition = np.zeros(len(elements))
+    composition[[0, 1, 7]] = 1, 1, 6
+    np.testing.assert_array_equal(actual.formula, composition)
+    np.testing.assert_array_equal(actual.hydrogens, [3, 3])
+    np.testing.assert_array_equal(actual.masses, [13.00335484, 14.003074])
+    hydrogenated = np.array([3, 3]) * 1.007825032 + np.array([13.00335484, 14.003074])
+    np.testing.assert_array_equal(actual.hydrogenated_masses, hydrogenated)
+    assert actual.mass == hydrogenated[0] + hydrogenated[1]
     assert actual.total_hydrogens == 6
     np.testing.assert_array_equal(actual.elements, [0, 1])
     forms = np.zeros((2, 18), dtype=np.float64)
@@ -1500,8 +1557,7 @@ def test_identity_writer_keeps_every_decision_duplicate_and_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(identity_data, "IdentityChemistry", ObservedIdentity)
-    expected = read_tensors(_SCRIPTS_DIR.parent / "testdata/identity_preparation.pt")
-    strings = [row["smiles"] for row in identity_rows(expected)]
+    strings = [row["smiles"] for row in identity_rows()]
     source, output = tmp_path / "input.parquet", tmp_path / "nested" / "prepared"
     parquet.write_table(Table.from_pydict({"smiles": strings + strings}), source)
     identity_data.prepare_identity(
@@ -1513,11 +1569,10 @@ def test_identity_writer_keeps_every_decision_duplicate_and_manifest(
     metadata = parquet.ParquetFile(output / "molecules.parquet")
     assert metadata.num_row_groups == 6
     assert metadata.read().column("smiles").to_pylist() == strings + strings
-    report = mismatches(
-        expected,
-        observe_identity(IdentityTable.Config(working_dir=output).make(), expected),
+    assert (
+        observe_identity(IdentityTable.Config(working_dir=output).make())
+        == staged_identity()
     )
-    assert not report, "\n".join(report)
     header = json_loads((output / "manifest.json").read_text(), dict[str, object])
     assert header["format_version"] == 1
     assert header["rdkit"] == IDENTITY_RDKIT
@@ -1582,10 +1637,7 @@ def test_complete_independent_sdk_assembly_and_failure_boundaries(
     for index, row in enumerate(observed.rows):
         actual, packed = chemistry.record(row["smiles"])
         assert actual == row
-        np.testing.assert_array_equal(
-            packed,
-            observed.expected[f"{index}/fingerprint/packed"].numpy(),
-        )
+        np.testing.assert_array_equal(packed, identity_fingerprints()[index])
     for name in ("standard-error", "properties-error", "canonical-error"):
         actual, _ = chemistry.record(name)
         assert actual["standardized"] is None
@@ -1604,10 +1656,7 @@ def test_complete_independent_sdk_assembly_and_failure_boundaries(
     assert row["fingerprint_valid"]
     assert row["formula"] == observed.rows[0]["formula"]
     assert row["standard_formula_lookup"] == observed.rows[0]["standard_formula_lookup"]
-    np.testing.assert_array_equal(
-        fingerprint,
-        observed.expected["0/fingerprint/packed"].numpy(),
-    )
+    np.testing.assert_array_equal(fingerprint, identity_fingerprints()[0])
 
 
 def test_properties_and_identity_reject_what_the_sdk_stops_parsing(
@@ -1627,24 +1676,22 @@ def test_properties_and_identity_reject_what_the_sdk_stops_parsing(
 
 
 class ObservedIdentity:
-    """Supply complete source-produced SDK outputs at the writer boundary."""
+    """Supply the staged identity rows as SDK outputs at the writer boundary."""
 
     def __init__(self, version: str) -> None:
         assert version == IDENTITY_RDKIT
-        self.expected = read_tensors(
-            _SCRIPTS_DIR.parent / "testdata/identity_preparation.pt",
-        )
-        self.rows = identity_rows(self.expected)
+        self.rows = identity_rows()
+        self.fingerprints = identity_fingerprints()
 
     def record(self, smiles: str) -> tuple[IdentityRow, NDArray[np.uint8]]:
         index = next(
             index for index, row in enumerate(self.rows) if row["smiles"] == smiles
         )
-        return self.rows[index], self.expected[f"{index}/fingerprint/packed"].numpy()
+        return self.rows[index], self.fingerprints[index]
 
 
 class PrimitiveIdentity(ObservedIdentity):
-    """Replay full source SDK fields while preserving independent call boundaries."""
+    """Replay the staged SDK fields while preserving independent call boundaries."""
 
     def __init__(self, version: str) -> None:
         super().__init__(version)
@@ -1739,9 +1786,7 @@ class PrimitiveIdentity(ObservedIdentity):
     def raw_fingerprint(self, value: str) -> NDArray[np.uint8] | None:
         index = self.positions[value]
         return (
-            self.expected[f"{index}/fingerprint/packed"].numpy()
-            if self.rows[index]["fingerprint_valid"]
-            else None
+            self.fingerprints[index] if self.rows[index]["fingerprint_valid"] else None
         )
 
 

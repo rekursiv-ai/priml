@@ -61,9 +61,9 @@ def prepare_peaks(
     selected = values >= floor
     masses, values = masses[selected], values[selected]
     if len(masses) > max_peaks:
-        selected = np.argsort(-values)[:max_peaks]
+        selected = np.argsort(-values, kind="stable")[:max_peaks]
         masses, values = masses[selected], values[selected]
-    order = np.argsort(masses)
+    order = np.argsort(masses, kind="stable")
     return masses[order].astype(np.float32), np.sqrt(values[order]).astype(np.float32)
 
 

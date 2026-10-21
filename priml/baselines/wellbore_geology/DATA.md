@@ -22,5 +22,5 @@ in the [README](README.md#prepare-inputs). Those jobs run once before an
 experiment that requires the cache.
 
 Tests write a few synthetic well CSV rows under `tmp_path` and call the staging
-and reader functions directly. Checked-in small `.pt` records cover numerical
-parity. Pytest needs no Kaggle archive, downloaded weights, or particle cache.
+and reader functions directly. Pytest needs no Kaggle archive, downloaded
+weights, or particle cache.

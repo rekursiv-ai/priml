@@ -51,8 +51,8 @@ def exp000() -> PublicRecipe.Config:
       https://www.kaggle.com/code/antriksharya/casmi26-lb-0-443-v7c-engine-2-rank-2-insert
 
     Results:
-      Historical source public score: 0.443. Native qualification uses complete
-      tiny source-minted records; a native full-GPU score is unmeasured.
+      Historical source public score: 0.443. Native qualification uses tiny
+      records minted in-tree; a native full-GPU score is unmeasured.
       Released checkpoint-training recipes were not published.
 
     Returns:

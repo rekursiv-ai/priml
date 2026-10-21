@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import cast
 
 import csv
 import hashlib
@@ -16,6 +16,7 @@ from configgle import InlineConfig, traverse
 from torch import Tensor, nn
 from treekle import ReadError, from_plain, json_loads, to_plain
 
+import numpy as np
 import pytest
 import torch
 
@@ -24,7 +25,10 @@ from priml.baselines.rsna_knee.data import FINDINGS
 from priml.baselines.rsna_knee.experiments import train_exp000
 from priml.baselines.rsna_knee.imaging import read_dicom
 from priml.baselines.rsna_knee.model import ImageNetEncoder
-from priml.baselines.rsna_knee.support_test import SyntheticPreparation
+from priml.baselines.rsna_knee.support_test import (
+    SyntheticPreparation,
+    dicom_file,
+)
 from priml.baselines.rsna_knee.train_loop import (
     RECEIPT,
     SELECTED_FILES,
@@ -45,7 +49,6 @@ from priml.baselines.rsna_knee.train_loop import (
 )
 from priml.metrics.roc_auc import MacroRocAuc
 from priml.runtime import SingleProcess
-from priml.testing.golden import read_tensors
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import TrackerList
 from priml.train.train_loop import EvalTimeLimitError, TrainLoop
@@ -160,9 +163,6 @@ def test_inventory_rejects_a_receipt_without_an_object_schema(tmp_path: Path) ->
             acquisition_dir=tmp_path,
             selected={Path("train_images/study/series")},
         )
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 def _skip_flush(descriptor: int) -> None:
@@ -468,9 +468,14 @@ def test_series_selection_prefers_fluid_sensitive_then_lowest_uid() -> None:
 
 
 def _payload(patient: str) -> bytes:
-    source = read_tensors(_CWD / "testdata" / "dicom.pt")["input/1"].numpy().tobytes()
-    original = b"numeric-patient"
-    return source.replace(original, patient.encode().ljust(len(original)))
+    return dicom_file(
+        np.arange(15, dtype=np.uint16).reshape(3, 5),
+        position=(0.0, 0.0, 0.0),
+        patient=patient,
+        photometric="MONOCHROME1",
+        slope="-0.5",
+        intercept="17",
+    )
 
 
 def _pixels(payload: bytes) -> torch.Tensor:

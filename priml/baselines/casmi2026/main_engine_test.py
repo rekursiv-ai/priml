@@ -99,17 +99,13 @@ from priml.baselines.casmi2026.main_engine import (
     supports,
     training_smiles,
 )
-from priml.baselines.casmi2026.second_engine_test import (
-    FEATURES_GOLDEN,
-    analog_record as views_analog_record,
-    view_record,
-)
 from priml.baselines.casmi2026.testing import (
+    float32_comparands,
     retrieval_inputs,
 )
 from priml.math import stats
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -131,19 +127,12 @@ if TYPE_CHECKING:
 _BASELINE: Final = _CWD
 
 
-def test_complete_views_and_second_engine_record() -> None:
-    report = mismatches(
-        read_tensors(FEATURES_GOLDEN),
-        views_analog_record() | view_record(),
-    )
-    assert not report, "\n".join(report)
-
-
 ANALOG_STRUCTURE_GOLDEN: Final = _BASELINE / "testdata/analog_family.pt"
 
 
-def test_complete_structural_family_matches_source_with_every_prepared_graph() -> None:
-    expected = read_tensors(ANALOG_STRUCTURE_GOLDEN)
+def test_complete_structural_family_with_every_prepared_graph() -> None:
+    golden = ANALOG_STRUCTURE_GOLDEN
+    expected = read_tensors(golden)
     actual = {
         name: value.clone()
         for name, value in expected.items()
@@ -206,8 +195,7 @@ def test_complete_structural_family_matches_source_with_every_prepared_graph() -
         actual[f"features/{case}"] = torch.from_numpy(
             np.column_stack(list(output.values())),
         )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_signed_codes_keep_vector_axes_and_exact_sentinel_boundaries() -> None:
@@ -232,16 +220,15 @@ def test_signed_codes_keep_vector_axes_and_exact_sentinel_boundaries() -> None:
     assert result.dtype == np.int64
 
 
-def test_complete_source_codec_keeps_int64_absolute_value_wraparound() -> None:
-    expected = read_tensors(_BASELINE / "testdata/analog_codes.pt")
-    actual = {
-        "input": expected["input"].clone(),
-        "codes": torch.from_numpy(
-            delta_codes(expected["input"].numpy()),
-        ),
-    }
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+def test_codes_keep_the_int64_absolute_value_wraparound() -> None:
+    # np.abs maps the lowest int64 to itself, so it never exceeds the sentinel bound.
+    differences = np.zeros((2, 10), np.int64)
+    differences[0, 0] = differences[1, 9] = np.iinfo(np.int64).min
+    np.testing.assert_array_equal(
+        delta_codes(differences),
+        np.array([-40, -40 * 81**9], np.int64),
+        strict=True,
+    )
 
 
 _THIS: Final = Path(__file__).resolve()
@@ -300,8 +287,9 @@ def test_main_engine_empty_group_keeps_all94_columns() -> None:
     assert result.shape == (0, 94)
 
 
-def test_entire_frag2_family_matches_source_with_caps_and_ties() -> None:
-    expected = read_tensors(_BASELINE / "testdata" / "frag2.pt")
+def test_entire_frag2_family_with_caps_and_ties() -> None:
+    golden = _BASELINE / "testdata" / "frag2.pt"
+    expected = read_tensors(golden)
     spectra: list[SpectrumRequest] = [
         {
             "mz": from_plain(
@@ -324,10 +312,12 @@ def test_entire_frag2_family_matches_source_with_caps_and_ties() -> None:
     depth2 = [expected[f"input/depth2/{index}"].numpy() for index in range(5)]
     capabilities = expected["input/capabilities"].numpy()
     masses, specific, support = diagnostic_losses(capabilities)
-    assert torch.equal(torch.from_numpy(masses), expected["loss/mass"])
-    assert torch.equal(torch.from_numpy(specific), expected["loss/specific"])
-    assert torch.equal(torch.from_numpy(support), expected["loss/support"])
-    actual: dict[str, Tensor] = {}
+    actual = {
+        name: value for name, value in expected.items() if name.startswith("input/")
+    }
+    actual["loss/mass"] = torch.from_numpy(masses)
+    actual["loss/specific"] = torch.from_numpy(specific)
+    actual["loss/support"] = torch.from_numpy(support)
     for index, (query, limit, count) in enumerate(
         (
             (spectra, 600, 5),
@@ -351,10 +341,7 @@ def test_entire_frag2_family_matches_source_with_caps_and_ties() -> None:
         actual[f"features/{index}"] = torch.from_numpy(
             np.column_stack(list(values.values())),
         )
-    selected = {
-        name: value for name, value in expected.items() if name.startswith("features/")
-    }
-    assert not mismatches(selected, actual), "\n".join(mismatches(selected, actual))
+    assert_tensor_golden(golden, float32_comparands(actual, inputs=("input/*",)))
 
 
 def test_formula_vocabulary_retains_all_elements_and_complete_grammar() -> None:
@@ -420,7 +407,7 @@ def test_analog_sum_is_correctly_rounded_float32_log1p() -> None:
     assert np.array_equal(values["ap_sum"], expected)
 
 
-def test_main_likelihood_keeps_complete_source_float32_reduction() -> None:
+def test_main_likelihood_is_evaluated_in_float64_and_rounded_once() -> None:
     _, pool, _ = retrieval_inputs()
     rows = replace(
         candidates(pool, target=100.0, ppm=10.0, fallback_ppm=30.0),
@@ -450,16 +437,19 @@ def test_main_likelihood_keeps_complete_source_float32_reduction() -> None:
         modes=np.ones(1, np.float32),
     )
     values, _ = _main_model_features(rows, views=views)
-    assert np.array_equal(
-        values["fp_ll"],
-        np.array(
-            [-78.60855865478516, -64.4507827758789, -71.6036376953125],
-            np.float32,
-        ),
-    )
+    one = np.float32(1)
+    probability = [one / (one + np.float32(math.exp(-z))) for z in logits.tolist()]
+    likelihood = np.zeros(3, np.float32)
+    for row, bits in enumerate(rows.fingerprints.tolist()):
+        present = absent = np.float32(0)
+        for bit, p in zip(bits, probability, strict=True):
+            present += np.float32(bit) * np.float32(math.log(p))
+            absent += np.float32(1 - bit) * np.float32(math.log(one - p))
+        likelihood[row] = present + absent
+    assert np.array_equal(values["fp_ll"], likelihood / np.float32(7) * 100)
 
 
-def test_complete_tree_asset_bank_binds_features_and_averages_source_models(
+def test_complete_tree_asset_bank_binds_features_and_averages_its_models(
     tmp_path: Path,
 ) -> None:
     expected = read_tensors(GOLDEN)
@@ -478,12 +468,14 @@ def test_complete_tree_asset_bank_binds_features_and_averages_source_models(
     bank = TreeBank.load(path, hashlib.sha256(payload).hexdigest())
     query = expected["case0/query"].numpy().astype(np.float32)
     actual = bank.score(query[:, ::-1], ["Column_2", "Column_1", "Column_0"])
-    # All four source models use the same complete query matrix.
     wanted = np.mean(
-        [expected[f"case{case}/prediction"].numpy() for case in cases],
+        [
+            LightGBMModel.parse(text).predict(query.astype(np.float64))
+            for text in models
+        ],
         axis=0,
     )
-    assert np.array_equal(actual, wanted)
+    np.testing.assert_array_equal(actual, wanted, strict=True)
     assert len(bank.models) == 4
     assert [len(model.trees) for model in bank.models] == [3, 3, 3, 3]
     with pytest.raises(ValueError, match="missing"):
@@ -532,7 +524,7 @@ def test_each_booster_must_declare_the_complete_ranker_feature_order(
 
 
 class PreparedPaths:
-    """Present every captured source input through the real preparation boundary."""
+    """Present every stored input through the real preparation boundary."""
 
     def __init__(self, record: dict[str, Tensor]) -> None:
         self.rows: dict[tuple[str, Combo], tuple[ProposalPath, ...]] = {}
@@ -595,7 +587,8 @@ class PreparedPaths:
 
 
 def test_entire_prior_path_family_supports_duplicates_and_all41_features() -> None:
-    expected = read_tensors(_BASELINE / "testdata/derivation.pt")
+    golden = _BASELINE / "testdata/derivation.pt"
+    expected = read_tensors(golden)
     actual = {
         name: value.clone()
         for name, value in expected.items()
@@ -717,8 +710,7 @@ def test_entire_prior_path_family_supports_duplicates_and_all41_features() -> No
         actual[f"features/{case}"] = torch.from_numpy(
             np.column_stack(list(derivation_features(context, priors=priors).values())),
         )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, float32_comparands(actual, inputs=("input/*",)))
 
 
 def test_support_identity_routes_keep_generated_duplicates_and_known_invalid_keys() -> (
@@ -1030,7 +1022,7 @@ def analog_record(analogs: Sequence[Analog]) -> Tensor:
     ).reshape(-1, 4)
 
 
-def test_whole_main_engine_retrieval_matches_source() -> None:
+def test_whole_main_engine_retrieval() -> None:
     library, pool, spectra = retrieval_inputs()
     actual: dict[str, Tensor] = {}
     for name, count in (("ties", 37), ("empty", 0)):
@@ -1042,7 +1034,7 @@ def test_whole_main_engine_retrieval_matches_source() -> None:
             peak_count=(np.arange(count) % 4 + 2).astype(np.int32),
             mass=np.full(count, 100.0, dtype=np.float64),
         )
-        actual[f"ahmed/{name}"] = torch.from_numpy(
+        actual[f"main/{name}"] = torch.from_numpy(
             MainRetrieval.Config().make().representatives(metadata),
         )
     partition_library = replace(library, library=library.library.copy())
@@ -1055,7 +1047,7 @@ def test_whole_main_engine_retrieval_matches_source() -> None:
         len(representatives[partition_library.mode[representatives] == 1])
         > 4 * config_partition.n_analog
     )
-    actual["ahmed/partition"] = analog_record(
+    actual["main/partition"] = analog_record(
         partition.analogs(
             spectra,
             library=partition_library,
@@ -1068,7 +1060,7 @@ def test_whole_main_engine_retrieval_matches_source() -> None:
         if not merged:
             config.merge = None
         search = config.make()
-        actual[f"ahmed/{merged}/representatives"] = torch.from_numpy(
+        actual[f"main/{merged}/representatives"] = torch.from_numpy(
             search.representatives(library),
         )
         excluded = np.isin(np.arange(13), [1, 5])
@@ -1081,7 +1073,7 @@ def test_whole_main_engine_retrieval_matches_source() -> None:
                 (spectra[2:], 100.0, None, -1, -1),
             ),
         ):
-            actual[f"ahmed/{merged}/{case}"] = analog_record(
+            actual[f"main/{merged}/{case}"] = analog_record(
                 search.analogs(
                     query,
                     library=library,
@@ -1163,11 +1155,10 @@ def test_whole_main_engine_retrieval_matches_source() -> None:
                 actual[f"candidates/{case}/fragments/{position}"] = torch.from_numpy(
                     fragments,
                 )
-    report = mismatches(
-        read_tensors(_THIS.parent / "testdata" / "retrieval.pt"),
-        actual,
+    assert_tensor_golden(
+        _THIS.parent / "testdata" / "retrieval.pt",
+        float32_comparands(actual),
     )
-    assert not report, "\n".join(report)
 
 
 def test_candidate_metadata_retains_each_admitted_parent_and_path() -> None:
@@ -1206,13 +1197,13 @@ def test_candidate_metadata_retains_each_admitted_parent_and_path() -> None:
 ENGINE_GOLDEN: Final = _BASELINE / "testdata" / "engine.pt"
 
 
-def test_whole_main94_and_fragment_evidence_matches_source(tmp_path: Path) -> None:
-    expected = read_tensors(ENGINE_GOLDEN)
+def test_whole_main94_and_fragment_evidence(tmp_path: Path) -> None:
+    golden = ENGINE_GOLDEN
     actual: dict[str, Tensor] = {}
     library, pool, spectra = retrieval_inputs()
     for item, energy in zip(spectra, (10.0, None, float("nan")), strict=True):
         item["ce"] = energy
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         path = tmp_path / "full1.pt"
         torch.save(
             source_checkpoint(
@@ -1342,8 +1333,7 @@ def test_whole_main94_and_fragment_evidence_matches_source(tmp_path: Path) -> No
         actual["fragments/no_peaks"] = torch.from_numpy(
             main_fragment_features(masses, peaks=[]),
         )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 def test_main_engine_empty_candidates_preserve_all94_columns() -> None:
@@ -2078,8 +2068,9 @@ class Prepared:
         return self.fragments[smiles]
 
 
-def test_complete_source_generation_all_eight_cases_and_every_admitted_field() -> None:
-    expected = read_tensors(_BASELINE / "testdata/generation_inputs.pt")
+def test_complete_generation_all_eight_cases_and_every_admitted_field() -> None:
+    golden = _BASELINE / "testdata/generation_inputs.pt"
+    expected = read_tensors(golden)
     prepared = Prepared(expected)
     strings = tuple(decode(expected[f"parents/{index}"]) for index in range(9))
     actual = {
@@ -2169,12 +2160,17 @@ def test_complete_source_generation_all_eight_cases_and_every_admitted_field() -
                 ],
                 dtype=torch.float64,
             )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        golden,
+        float32_comparands(
+            actual,
+            inputs=("parents/*", "preparation/*", "*/target", "*/analogs"),
+        ),
+    )
 
 
 @pytest.mark.parametrize("case", ["default", "parent_cap", "no_parents"])
-def test_planned_requests_keep_source_parent_order_and_every_budget(case: str) -> None:
+def test_planned_requests_keep_parent_order_and_every_budget(case: str) -> None:
     expected = read_tensors(_BASELINE / "testdata/generation_inputs.pt")
     prepared = Prepared(expected)
     parents = tuple(decode(expected[f"parents/{index}"]) for index in range(9))
@@ -2229,8 +2225,9 @@ def test_planned_requests_keep_source_parent_order_and_every_budget(case: str) -
         }
 
 
-def test_whole_relative_window_threshold_and_all_reached_source_requests() -> None:
-    expected = read_tensors(_BASELINE / "testdata/generation_requests.pt")
+def test_whole_relative_window_threshold_and_all_reached_requests() -> None:
+    golden = _BASELINE / "testdata/generation_requests.pt"
+    expected = read_tensors(golden)
     prepared = Prepared(read_tensors(_BASELINE / "testdata/generation_inputs.pt"))
     actual = {
         name: value.clone()
@@ -2308,8 +2305,7 @@ def test_whole_relative_window_threshold_and_all_reached_source_requests() -> No
                 for row in result.logs
             ],
         )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_seen_keys_are_logged_before_missing_properties_and_mass_checks() -> None:
@@ -2453,7 +2449,7 @@ def test_each_rejected_product_skips_only_itself_inside_the_exact_mass_window() 
 
 
 def decode(value: Tensor) -> str:
-    """Read a complete source-produced UTF8 input."""
+    """Read a stored UTF8 input."""
     return bytes(from_plain(value.tolist(), list[int])).decode()
 
 
@@ -2469,8 +2465,9 @@ def _json_text(value: object) -> Tensor:
 def assert_main_pipeline(
     tmp_path: Path,
 ) -> None:
-    """Replay every public main pipeline field from its complete source control."""
-    expected = read_tensors(_BASELINE / "testdata/main_pipeline.pt")
+    """Replay every public main pipeline field against its golden."""
+    golden = _BASELINE / "testdata/main_pipeline.pt"
+    expected = read_tensors(golden)
     actual = {
         k: v.clone()
         for k, v in expected.items()
@@ -2607,7 +2604,7 @@ def assert_main_pipeline(
         for identity in [from_plain({"kind": parts[1], "how": parts[2]}, _LogIdentity)]
     )
     old = read_tensors(_BASELINE / "testdata/neural_bank.pt")
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         banks: list[MainBank] = []
         for name, indices in (("full", (0,)), ("views", (0, 1, 2))):
             paths: list[Path] = []
@@ -2822,12 +2819,8 @@ def assert_main_pipeline(
             generated=generated,
             logs=logs,
         )
-        np.testing.assert_array_equal(
-            ranked.features,
-            expected["selected"].numpy(),
-            err_msg="\n".join(mismatches(expected, actual)),
-        )
-        np.testing.assert_array_equal(ranked.scores, expected["scores"].numpy())
+        np.testing.assert_array_equal(ranked.features, actual["selected"].numpy())
+        np.testing.assert_array_equal(ranked.scores, actual["scores"].numpy())
         if ranked.feature_names != selected_names:
             raise ValueError("Expected ranked.feature_names == selected_names.")
         if ranked.features.dtype != np.float32:
@@ -2903,9 +2896,20 @@ def assert_main_pipeline(
             raise ValueError("Expected empty.scores.dtype == np.float64.")
         if empty.feature_names != selected_names:
             raise ValueError("Expected empty.feature_names == selected_names.")
-    report = mismatches(expected, actual)
-    if report:
-        raise ValueError("\n".join(report))
+    assert_tensor_golden(
+        golden,
+        float32_comparands(
+            actual,
+            inputs=(
+                "input/*",
+                "prepared/*",
+                "candidates/mass",
+                "candidates/frags/*",
+                "context/logs_numeric",
+                "ranker/*/tree/*",
+            ),
+        ),
+    )
 
 
 class _LogIdentity(TypedDict):

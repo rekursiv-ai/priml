@@ -104,9 +104,8 @@ class CsrMatrix:
     def gram(self) -> NDArray[np.float64]:
         """Return every pairwise row inner product as a dense matrix.
 
-        Entry `(i, k)` adds separately rounded products in row `i`'s stored
-        order, as x86 SciPy's `csr_matmat` does, so it may differ from `(k, i)`
-        in the last bit.
+        Entry `(i, k)` sums the products in row `i`'s stored order, so it may
+        differ from `(k, i)` in the last bit.
 
         Returns:
           products: Dense float64 inner products, rows by rows.
@@ -136,8 +135,7 @@ class CsrMatrix:
 def hstack(blocks: Sequence[CsrMatrix]) -> CsrMatrix:
     """Join blocks side by side, storing each row's columns in increasing order.
 
-    SciPy's COO-to-CSR conversion sorted the joined rows, and the classifier
-    sums every row in stored order.
+    The classifier sums every row in stored order, so the order is part of its bits.
 
     Args:
       blocks: Matrices with equal row counts and distinct columns in each row.

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 import json
 
-from treekle import from_plain, to_plain
+from treekle import to_plain
 
 import numpy as np
 
@@ -17,18 +18,47 @@ from priml.model.graphormer import GraphAttention
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from numpy.typing import NDArray
     from pyarrow import Table, parquet
-    from torch import Tensor, nn
+    from torch import Tensor
+
+    import torch
 
     from priml.baselines.casmi2026.custom_types import IdentityRow, SpectrumRequest
-    from priml.baselines.casmi2026.model import ReleasedModel
 else:
     from wrapt import lazy_import
 
     Table = lazy_import("pyarrow", "Table")
     parquet = lazy_import("pyarrow.parquet")
+    torch = lazy_import("torch")
+
+
+def float32_comparands(
+    record: Mapping[str, Tensor],
+    *,
+    inputs: Sequence[str] = (),
+) -> dict[str, Tensor]:
+    """Round every float64 output once to float32; stored replay inputs stay whole.
+
+    Args:
+      record: Golden record of computed outputs and the inputs its test replays.
+      inputs: Shell-style key patterns of the replayed inputs, kept unrounded.
+
+    Returns:
+      record: The same keys in order, every other float64 tensor rounded to
+        float32 values and kept in float64, so the golden still pins its dtype.
+
+    """
+    return {
+        key: value.float().double()
+        if value.dtype == torch.float64
+        and not any(fnmatchcase(key, pattern) for pattern in inputs)
+        else value
+        for key, value in record.items()
+    }
 
 
 def set_heads(attn: object, heads: int) -> None:
@@ -46,91 +76,95 @@ def set_heads(attn: object, heads: int) -> None:
     attn.attention.num_heads = heads
 
 
-def released_parameters(model: ReleasedModel) -> list[nn.Parameter]:
-    """Return every parameter in released registration order, shared ones once.
-
-    Args:
-      model: Released model whose checkpoint schema names the parameters.
+def identity_rows() -> list[IdentityRow]:
+    """Return eight prepared identity rows covering every rejection and alias case.
 
     Returns:
-      ordered: Frozen and trainable parameters, covering the whole model.
-
-    Raises:
-      ValueError: The schema leaves a parameter of the model unnamed.
+      rows: Fresh rows: two aliases, a charged and a salt input, an isotope, a
+        dummy atom, an unparsable input and the empty string.
 
     """
-    parameters = dict(model.named_parameters())
-    ordered = [
-        parameters[native]
-        for native in model.checkpoint_names().values()
-        if native in parameters
+    return [
+        _identity_row(
+            "C/C=C/C",
+            standardized="CC=CC",
+            key="IAQRGUVFOMOMEM",
+            formula="C4H8",
+            composition=(("C", 4),),
+            mass=56.062600255999996,
+            heavy=4,
+        ),
+        _identity_row(
+            "CC(=O)C",
+            standardized="CC(C)=O",
+            key="CSCPPACGZOOCGX",
+            formula="C3H6O",
+            composition=(("C", 3), ("O", 1)),
+            mass=58.041864812,
+            heavy=4,
+        ),
+        {
+            **_identity_row("C[N+](C)(C)C", standardized=None, formula="C4H12N+"),
+            "key": "QEMXHQIAXOOASZ",
+            "metric": _metric("QEMXHQIAXOOASZ", (("C", 4), ("N", 1))),
+        },
+        {
+            **_identity_row(
+                "CCO.[Na+].[Cl-]",
+                standardized="CCO",
+                key="LFQSCWFLJHTTHZ",
+                formula="C2H6O",
+                composition=(("C", 2), ("O", 1)),
+                mass=46.041864812,
+                heavy=3,
+            ),
+            "key": "LOHGGLZYTJNUAL",
+            "formula": "C2H6ClNaO",
+            "metric": _metric(
+                "LOHGGLZYTJNUAL",
+                (("C", 2), ("Cl", 1), ("Na", 1), ("O", 1)),
+            ),
+        },
+        _identity_row(
+            "[13CH3]O",
+            standardized="[13CH3]O",
+            key="OKKJLVBELUTLKV",
+            formula="CH4O",
+            composition=(("C", 1), ("O", 1)),
+            mass=33.029569588,
+            heavy=2,
+        ),
+        _identity_row(
+            "*C",
+            standardized="*C",
+            formula="CH3*",
+            mass=15.023475096,
+            heavy=1,
+        ),
+        _identity_row("invalid", standardized=None, formula="invalid"),
+        _identity_row("", standardized="", formula=""),
     ]
-    if len(ordered) != len(parameters) or {id(parameter) for parameter in ordered} != {
-        id(parameter) for parameter in parameters.values()
-    }:
-        raise ValueError("Checkpoint order does not cover the model's parameters.")
-    return ordered
 
 
-def identity_rows(expected: dict[str, Tensor]) -> list[IdentityRow]:
-    """Transport every complete source field into the declared native table schema.
-
-    Args:
-      expected: Source-produced identity record tensors of the eight reached cases.
-
-    Returns:
-      rows: One native identity row per case.
-
-    """
-    rows: list[IdentityRow] = []
-    for index in range(8):
-        prefix = str(index)
-        rows.append(
-            {
-                "smiles": decode(expected[prefix + "/input"]),
-                "standardized": decode(expected[prefix + "/standardized/text"])
-                if bool(expected[prefix + "/standardized/valid"])
-                else None,
-                "key": decode(expected[prefix + "/key/text"])
-                if bool(expected[prefix + "/key/valid"])
-                else None,
-                "standard_key": decode(expected[prefix + "/standard_key/text"])
-                if bool(expected[prefix + "/standard_key/valid"])
-                else None,
-                "formula": decode(expected[prefix + "/formula"]),
-                "metric": decode(expected[prefix + "/metric"]),
-                "standard_metric": decode(expected[prefix + "/standard_metric"]),
-                "standard_formula_lookup": decode(
-                    expected[prefix + "/properties/formula"],
-                ),
-                "properties_valid": bool(expected[prefix + "/properties/valid"]),
-                "standard_formula": decode(expected[prefix + "/properties/formula"]),
-                "standard_mass": float(expected[prefix + "/properties/mass"]),
-                "standard_heavy": int(expected[prefix + "/properties/heavy"]),
-                "fingerprint_valid": bool(expected[prefix + "/fingerprint/valid"]),
-            },
-        )
-    return rows
+def identity_fingerprints() -> NDArray[np.uint8]:
+    """Return one distinct packed 16,551-bit row per identity row, zero when invalid."""
+    valid = np.array([row["fingerprint_valid"] for row in identity_rows()])
+    pattern = np.arange(2069)[None, :] * (2 * np.arange(8)[:, None] + 3) % 256
+    return np.where(valid[:, None], pattern, 0).astype(np.uint8)
 
 
-def write_identity(directory: Path, expected: dict[str, Tensor]) -> None:
-    """Stage whole source-produced records as native prepared inputs.
+def write_identity(directory: Path) -> None:
+    """Stage the identity rows as native prepared inputs.
 
     Args:
       directory: Existing directory receiving molecules, fingerprints and manifest.
-      expected: Source-produced identity record tensors of the eight reached cases.
 
     """
     parquet.write_table(
-        Table.from_pylist([dict(row) for row in identity_rows(expected)]),
+        Table.from_pylist([dict(row) for row in identity_rows()]),
         directory / "molecules.parquet",
     )
-    np.save(
-        directory / "fingerprints.npy",
-        np.stack(
-            [expected[f"{index}/fingerprint/packed"].numpy() for index in range(8)],
-        ),
-    )
+    np.save(directory / "fingerprints.npy", identity_fingerprints())
     (directory / "manifest.json").write_text(
         json.dumps(
             to_plain(
@@ -138,11 +172,6 @@ def write_identity(directory: Path, expected: dict[str, Tensor]) -> None:
             ),
         ),
     )
-
-
-def decode(value: Tensor) -> str:
-    """Decode every byte of a source-produced text field."""
-    return bytes(from_plain(value.tolist(), list[int])).decode()
 
 
 def retrieval_inputs() -> tuple[SpectralLibrary, CandidatePool, list[SpectrumRequest]]:
@@ -221,3 +250,37 @@ def retrieval_inputs() -> tuple[SpectralLibrary, CandidatePool, list[SpectrumReq
         {"mz": [], "it": [], "mode": 1, "prec": 101.0, "adduct": "[M+H]+"},
     ]
     return library, pool, spectra
+
+
+def _identity_row(
+    smiles: str,
+    *,
+    standardized: str | None,
+    formula: str,
+    key: str | None = None,
+    composition: tuple[tuple[str, int], ...] = (),
+    mass: float = 0.0,
+    heavy: int = 0,
+) -> IdentityRow:
+    metric = _metric(key, composition) if key is not None else "null"
+    valid = standardized is not None
+    lookup = formula if valid else ""
+    return {
+        "smiles": smiles,
+        "standardized": standardized,
+        "key": key,
+        "formula": formula,
+        "metric": metric,
+        "standard_key": key,
+        "standard_metric": metric,
+        "standard_formula_lookup": lookup,
+        "properties_valid": valid,
+        "standard_formula": lookup,
+        "standard_mass": mass,
+        "standard_heavy": heavy,
+        "fingerprint_valid": valid,
+    }
+
+
+def _metric(key: str, composition: tuple[tuple[str, int], ...]) -> str:
+    return json.dumps(to_plain((key, composition)), separators=(",", ":"))

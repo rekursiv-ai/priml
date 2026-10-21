@@ -21,14 +21,12 @@ from priml.baselines.casmi2026.custom_types import (
 )
 from priml.baselines.casmi2026.isolated import IDENTITY_RDKIT, formula_vector
 from priml.data.arrays import load_array
-from priml.math.fused import fma64
 from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from numba.misc import quicksort
     from pyarrow import Table, parquet
 
     from priml.baselines.casmi2026.custom_types import FloatArray
@@ -36,7 +34,6 @@ else:
     from wrapt import lazy_import
 
     parquet = lazy_import("pyarrow.parquet")
-    quicksort = lazy_import("numba.misc.quicksort")
 
 
 # Ordered transfers retain the public table's floating-point grouping.
@@ -226,8 +223,6 @@ def clean_block(
     boundaries = np.zeros(len(offsets), dtype=np.int64)
     masses = np.empty(len(mz), dtype=np.float32)
     values = np.empty(len(mz), dtype=np.float32)
-    # NumPy and Numba quicksort select different tied peaks, even on one host.
-    argsort = quicksort.make_py_quicksort(is_argsort=True).run_quicksort
     for row in range(len(precursor)):
         limit = precursor.item(row)
         start, stop = offsets.item(row), offsets.item(row + 1)
@@ -238,8 +233,8 @@ def clean_block(
         if maximum <= 0:
             indices = indices[:0]
         if len(indices) > topk:
-            indices = indices[argsort(raw_it[indices])[-topk:]]
-        order = argsort(raw_mz[indices])
+            indices = indices[np.argsort(raw_it[indices], kind="stable")[-topk:]]
+        order = np.argsort(raw_mz[indices], kind="stable")
         begin = boundaries.item(row)
         end = begin + len(indices)
         masses[begin:end] = raw_mz[indices][order]
@@ -746,7 +741,7 @@ class MainSearch:
             ],
             dtype=np.float64,
         )
-        total = _normalization_total(weights)
+        total = weights.sum()
         if total > 0:
             weights *= 1.0 / total
             entropy = _entropy64(weights)
@@ -758,7 +753,7 @@ class MainSearch:
                     ],
                     dtype=np.float64,
                 )
-                total = _normalization_total(weights)
+                total = weights.sum()
                 if total > 0:
                     weights *= 1.0 / total
         return masses[selected], weights
@@ -820,7 +815,7 @@ class MainSearch:
         difference = (
             _entropy64(query[1]) + _entropy64(candidate[1]) - 2 * _entropy64(mixture)
         )
-        value = fma64(difference, y=1.0 / math.log(4.0), addend=1.0)
+        value = difference * (1.0 / math.log(4.0)) + 1.0
         return 0.0 if value < 0 else 1.0 if value > 1 else value
 
 
@@ -1022,11 +1017,11 @@ def clean_main(
       peaks: Complete original masses and linear peak intensities.
       precursor: Original precursor mass, before the explicit overage allowance.
       floor: Relative threshold against every intensity below the precursor cap.
-      max_peaks: Complete intensity-ranked peak cap, retaining compiled tie order.
+      max_peaks: Complete intensity-ranked peak cap; ties keep the later peak.
       over: Maximum mass above the precursor admitted to the query.
 
     Returns:
-      masses: Retained float32 masses in compiled mass-quicksort order.
+      masses: Retained float32 masses in stable mass order.
       intensity: Float32 linear intensities normalized by the original base peak.
 
     """
@@ -1070,7 +1065,7 @@ def merge_main(
         return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
     masses = np.concatenate([mz for mz, _ in present])
     intensity = np.concatenate([values / values.max() for _, values in present])
-    order = np.argsort(masses)
+    order = np.argsort(masses, kind="stable")
     masses, intensity = masses[order], intensity[order]
     keep = np.ones(len(masses), dtype=np.bool_)
     survivor = 0
@@ -1086,7 +1081,7 @@ def merge_main(
             survivor = index
     masses, intensity = masses[keep], intensity[keep]
     if max_peaks is not None and len(masses) > max_peaks:
-        selected = np.sort(np.argsort(-intensity)[:max_peaks])
+        selected = np.sort(np.argsort(-intensity, kind="stable")[:max_peaks])
         masses, intensity = masses[selected], intensity[selected]
     return masses.astype(np.float32), intensity.astype(np.float32)
 
@@ -1099,34 +1094,15 @@ def _selected(values: FloatArray, *, floor: float, maximum: int) -> NDArray[np.i
         else np.empty(0, dtype=np.int64)
     )
     if len(selected) > maximum:
-        order = quicksort.make_py_quicksort(is_argsort=True).run_quicksort(
-            values[selected],
-        )
+        order = np.argsort(values[selected], kind="stable")
         selected = np.sort(selected[order[-maximum:]])
     return selected
 
 
-def _normalization_total(weights: NDArray[np.float64]) -> float:
-    # The pinned compiled kernel accumulates four strided lanes, combines 0+2
-    # and 1+3, then adds the scalar tail. Preserve that order on every host.
-    lanes = [0.0] * 4
-    stop = len(weights) - len(weights) % 4
-    for index in range(0, stop, 4):
-        for lane in range(4):
-            lanes[lane] += weights.item(index + lane)
-    total = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
-    for index in range(stop, len(weights)):
-        total += weights.item(index)
-    return total
-
-
 def _entropy64(weights: NDArray[np.float64]) -> float:
     positive = weights[weights > 0]
-    entropy = 0.0
-    for index in range(len(positive)):
-        value = positive.item(index)
-        entropy = fma64(-value, y=math.log(value), addend=entropy)
-    return entropy
+    # `fsum` rounds once; `ndarray.sum()` misses the exact entropy by up to 4.2 ulp.
+    return -math.fsum(value * math.log(value) for value in positive.tolist())
 
 
 def _entropy32(weights: NDArray[np.float32]) -> float:
@@ -1182,7 +1158,7 @@ def _main_similarity(
         dtype=np.float64,
     )
     difference = _entropy64(query) + _entropy64(candidate) - 2 * _entropy64(mixture)
-    value = fma64(difference, y=1.0 / math.log(4.0), addend=1.0)
+    value = difference * (1.0 / math.log(4.0)) + 1.0
     return 0.0 if value < 0 else 1.0 if value > 1 else value
 
 
@@ -1207,13 +1183,13 @@ def _second_similarity(
     )
     total = mixture.sum()
     return (
-        fma64(
+        (
             _entropy32(query[1])
             + _entropy32(candidate[1])
-            - 2 * _entropy64(mixture * (1.0 / total)),
-            y=1.0 / math.log(4.0),
-            addend=1.0,
+            - 2 * _entropy64(mixture * (1.0 / total))
         )
+        * (1.0 / math.log(4.0))
+        + 1.0
         if total > 0
         else 0.0
     )

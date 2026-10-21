@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Final, cast
+from typing import cast
 
 import numpy as np
 import pytest
-import torch
 
 from priml.baselines.name_that_llm.model import (
     QwenHeads,
@@ -16,22 +14,13 @@ from priml.baselines.name_that_llm.model import (
     random_chunks,
 )
 from priml.baselines.name_that_llm.testing import (
-    NumericalTrace,
-    capture_source,
     centred_branch,
-    completed_record,
     miniature,
     miniature_split,
     plain_branch,
     recipe,
     svm_branch,
 )
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors
-
-
-_THIS: Final = Path(__file__).resolve()
-_CWD: Final = _THIS.parent
 
 
 def test_style_features_include_case_unicode_and_empty_passages() -> None:
@@ -45,8 +34,7 @@ def test_style_features_include_case_unicode_and_empty_passages() -> None:
     assert np.count_nonzero(cast("np.ndarray", actual[1])) == 0
 
 
-def test_style_features_replay_every_source_column() -> None:
-    expected = read_tensors(_CWD / "testdata" / "style_counts.pt")
+def test_style_features_count_every_column() -> None:
     actual = StyleCounts().transform(
         [
             "Abc DEF\n\n« • ;:,'’“\"*#( - !?…...\N{EM DASH}–",
@@ -54,8 +42,18 @@ def test_style_features_replay_every_source_column() -> None:
             "",
         ],
     )
-    report = mismatches(expected, actual={"features": torch.from_numpy(actual)})
-    assert not report, "\n".join(report)
+    # 34 and 20 characters over 7 and 4 words; "..." holds the only three periods
+    # and three of the five sentence marks.
+    first = [np.log(35), np.log(8), 2 / 34 * 100, 1, 1, 1, 1, 3, *[1] * 10]
+    second = [np.log(21), np.log(5), 1 / 20 * 100, *[0] * 15]
+    expected = np.array(
+        [
+            [*first, 4 / 34, 27 / 7, 5 / 7, *[1] * 4],
+            [*second, 4 / 20, 15 / 4, *[0] * 5],
+            [0] * 25,
+        ],
+    )
+    assert np.array_equal(actual, a2=expected)
 
 
 def test_center_preserves_input_and_uses_each_group_mean() -> None:
@@ -125,7 +123,7 @@ def test_blend_requires_one_weight_per_branch(branches: list[str]) -> None:
 def test_plain_heads_fit_every_layer() -> None:
     model = plain_branch().make()
     probabilities = model(miniature_split(), {})
-    # The source fixture specifies three prediction rows and three classes.
+    # The miniature predicts three rows over three classes.
     assert probabilities.shape == (3, 3)
     assert len(model.fitted) == 4
 
@@ -138,33 +136,23 @@ def test_heads_require_a_saved_layer() -> None:
 def test_centered_heads_fit_all_chunks_and_keep_singletons() -> None:
     model = centred_branch().make()
     _, targets, groups, features = miniature()
-    reference = capture_source("centred")
-    plain = reference["plain"].numpy()
-    expected = read_tensors(_THIS.with_name("testdata") / "qwen_centred.pt")
-    with host_agnostic_numerics(), NumericalTrace() as trace:
-        probabilities = model.predict(
-            features,
-            targets=targets,
-            groups=groups,
-            predict=features[:3],
-            clusters=np.array([2, 2, 3]),
-            plain=plain,
-        )
-    report = mismatches(
-        expected,
-        actual=completed_record(
-            trace,
-            outputs={"centred": torch.from_numpy(probabilities)},
-        ),
+    # Four rows over the miniature's three classes; cluster 3 is a singleton.
+    plain = np.arange(12, dtype=np.float64).reshape(4, 3) / 48
+    probabilities = model.predict(
+        features,
+        targets=targets,
+        groups=groups,
+        predict=features[:4],
+        clusters=np.array([2, 2, 2, 3]),
+        plain=plain,
     )
-    assert not report, "\n".join(report)
-    assert probabilities.shape == (3, 3)
+    assert probabilities.shape == (4, 3)
     assert len(model.heads.fitted) == 4
     assert np.array_equal(
-        cast("np.ndarray", probabilities[2]),
-        a2=cast("np.ndarray", plain[2]),
+        cast("np.ndarray", probabilities[3]),
+        a2=cast("np.ndarray", plain[3]),
     )
-    assert not np.array_equal(probabilities[:2], a2=plain[:2])
+    assert not np.array_equal(probabilities[:3], a2=plain[:3])
 
 
 def test_centered_heads_read_their_fallback_from_the_earlier_branches() -> None:

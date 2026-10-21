@@ -44,7 +44,8 @@ from priml.baselines.casmi2026.isolated import (
     IDENTITY_RDKIT,
     SIMULATOR_RDKIT,
 )
-from priml.testing.golden import mismatches, read_tensors
+from priml.baselines.casmi2026.testing import float32_comparands
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -204,7 +205,8 @@ GOLDEN: Final = _BASELINE / "testdata" / "fragnet.pt"
 def test_complete_fragmentation_tables_three_updates_and_all_family_outputs(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(GOLDEN)
+    golden = GOLDEN
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     records: list[FragnetRecord | None] = []
     for index in range(5):
@@ -382,8 +384,19 @@ def test_complete_fragmentation_tables_three_updates_and_all_family_outputs(
         actual[f"features/{case}"] = torch.from_numpy(
             np.column_stack(list(output.values())),
         )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        golden,
+        float32_comparands(
+            actual,
+            inputs=(
+                "input/*",
+                "spectra/*",
+                "stageA/alpha",
+                "stageB/train",
+                "stageB/tree/*",
+            ),
+        ),
+    )
 
 
 @pytest.mark.parametrize(

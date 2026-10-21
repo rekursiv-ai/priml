@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import csv
 import io
 import math
+import statistics
 
 from configgle import Fig, Makeable
 from numpy.typing import NDArray
@@ -19,7 +20,6 @@ import numpy as np
 from priml.baselines.wellbore_geology.data import (
     ExpandPrediction,
     PredictionRows,
-    kahan_add,
 )
 from priml.baselines.wellbore_geology.metrics import pooled_rmse
 from priml.train.custom_types import EMAProtocol, ParallelStrategyProtocol
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from pyarrow import parquet
-    from scipy import signal
 
     import pyarrow as pa
     import torch
@@ -44,7 +43,6 @@ else:
     pa = lazy_import("pyarrow")
     parquet = lazy_import("pyarrow.parquet")
     torch = lazy_import("torch")
-    signal = lazy_import("scipy.signal")
 
 
 class GeographicGate:
@@ -259,24 +257,28 @@ def ordered_table(table: PredictionTable) -> PredictionTable:
 
 
 def diagnostic_mean[Float: np.float32 | np.float64](values: NDArray[Float]) -> Float:
-    """Average every nonmissing diagnostic with compensated accumulation.
+    """Average every nonmissing diagnostic, rounded once to its precision.
 
     Args:
       values: Complete diagnostic observations for one well.
 
     Returns:
-      mean: Mean accumulated in the original precision, or NaN when empty.
+      mean: Float64 mean of float32 values rounded once, the exactly rounded mean
+        of float64 values, or NaN when empty.
 
     """
-    total = values.dtype.type(0)
-    correction = values.dtype.type(0)
-    count = 0
-    for value in values.flat:
-        if math.isnan(value):
-            continue
-        count += 1
-        total, correction = kahan_add(total, correction, value)
-    return values.dtype.type(total / count) if count else values.dtype.type(math.nan)
+    observed = cast("list[float]", values[~np.isnan(values)].tolist())
+    if not observed:
+        return values.dtype.type(math.nan)
+    if values.dtype == np.float32:
+        # math.fsum raises on inf + -inf, whose mean is NaN in the float64 branch too.
+        try:
+            total = math.fsum(observed)
+        except ValueError:
+            total = math.nan
+        return values.dtype.type(total / len(observed))
+    # The sum rounds before its division and misrounds a quarter of float64 means.
+    return values.dtype.type(statistics.mean(observed))
 
 
 def write_table(path: Path, table: PredictionTable) -> None:
@@ -514,7 +516,7 @@ class PublishResults:
 
 
 class SurfaceSmoothing:
-    """Smooth predicted absolute surfaces in their original float64 arithmetic."""
+    """Smooth predicted absolute surfaces with float64 Savitzky-Golay fits."""
 
     class Config(Fig["SurfaceSmoothing"]):
         window: int = 577
@@ -548,11 +550,10 @@ class SurfaceSmoothing:
             window = self.config.window + (self.config.window % 2 == 0)
             window = min(window, len(rows) if len(rows) % 2 else len(rows) - 1)
             if len(rows) >= 3 and window >= 3 and window > self.config.polyorder:
-                surface = signal.savgol_filter(
+                surface = _savgol(
                     surface,
-                    window_length=window,
+                    window=window,
                     polyorder=self.config.polyorder,
-                    mode="interp",
                 )
             candidate[rows] = surface - height[rows]
         final = (raw + self.config.blend * (candidate - raw)).astype(np.float32)
@@ -771,7 +772,7 @@ class PredictionBuilder:
         for well, indices in _well_groups(table).items():
             rows = np.asarray(indices, dtype=np.int64)
             curve = curves[well]
-            order = np.argsort(curve.reference_depth)
+            order = np.argsort(curve.reference_depth, kind="stable")
             depth, gamma = curve.reference_depth[order], curve.reference_gamma[order]
             lower = cast("np.float64", depth[0])
             upper = cast("np.float64", depth[-1])
@@ -908,6 +909,27 @@ class SingleFamilyPrediction:
             if table.column_order
             else (),
         )
+
+
+def _savgol(
+    values: NDArray[np.float64],
+    *,
+    window: int,
+    polyorder: int,
+) -> NDArray[np.float64]:
+    """Fit a centered least-squares polynomial; edge rows use the end window's fit."""
+    half = window // 2
+    offsets = np.arange(-half, half + 1, dtype=np.float64)
+    vandermonde = offsets ** np.arange(polyorder + 1, dtype=np.float64)[:, None]
+    weights = np.linalg.lstsq(vandermonde, np.eye(polyorder + 1)[0], rcond=None)[0]
+    smoothed = np.empty_like(values)
+    smoothed[half : len(values) - half] = np.correlate(values, weights, mode="valid")
+    position = np.arange(window, dtype=np.float64)
+    head = np.polyfit(position, values[:window], polyorder)
+    tail = np.polyfit(position, values[-window:], polyorder)
+    smoothed[:half] = np.polyval(head, position[:half])
+    smoothed[len(values) - half :] = np.polyval(tail, position[window - half :])
+    return smoothed
 
 
 def _well_groups(table: PredictionTable) -> dict[str, list[int]]:

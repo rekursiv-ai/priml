@@ -1,11 +1,11 @@
-"""Check physical DICOM preparation against its source captures."""
+"""Check DICOM decoding and physical preparation on hand-checkable inputs."""
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import math
 import re
@@ -19,14 +19,18 @@ import torch
 
 from priml.baselines.rsna_knee.data import FINDINGS
 from priml.baselines.rsna_knee.imaging import (
+    EXTENT_COLUMNS,
+    MODEL_COLUMNS,
     Acquisition,
     AnatomicalSeries,
     AnatomySampler,
     AnchorConsensus,
     FluidMeasure,
     FrameGeometry,
+    MetadataColumn,
     NamedFrame,
     NativeSeries,
+    ProjectedAnchor,
     R7Render,
     RaptorBag,
     RaptorPrepare,
@@ -34,14 +38,17 @@ from priml.baselines.rsna_knee.imaging import (
     RaptorWindows,
     RenderedStudy,
     SideCheck,
+    SideNote,
     SliceBlock,
     StudyPreparation,
     _categories,
     _csv_rows,
     _PhysicalStudy,
+    _render_slice,
     _resize_input,
     anatomical_mirror,
     canonical_frame,
+    dicom_files,
     evaluation_rows,
     order_frames,
     prepare_series,
@@ -49,11 +56,16 @@ from priml.baselines.rsna_knee.imaging import (
     raptor_slice,
     read_dicom,
     study_side,
+    unchanged,
     window_centers,
 )
-from priml.baselines.rsna_knee.support_test import corrupt_deflate, study_inputs
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import read_tensors
+from priml.baselines.rsna_knee.support_test import (
+    STUDY_PLANES,
+    corrupt_deflate,
+    dicom_file,
+    study_inputs,
+    study_series,
+)
 
 
 if TYPE_CHECKING:
@@ -62,100 +74,130 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from torch._ops import OpOverload
 
-    import cv2
-else:
-    from wrapt import lazy_import
-
-    cv2 = lazy_import("cv2")
+    from priml.baselines.rsna_knee.imaging import DicomFrame
 
 
-_CWD: Final = Path(__file__).resolve().parent
+def test_two_agreeing_candidates_average_by_tissue_mass() -> None:
+    first = _synthetic_series(shape=(8, 10))
+    assert first.affines is not None
+    translated = first.affines.copy()
+    translated[:, 0, 2] += 10
+    lighter = []
+    for index, probability in first.probabilities:
+        trimmed = probability.copy()
+        trimmed[1:4, -2:] = 0
+        lighter.append((index, trimmed))
+    second = replace(first, series="second", affines=translated, probabilities=lighter)
+    result = AnchorConsensus.Config().make()([first, second])
+    assert result.method == "skm_tea_joint_avg2"
+    assert result.reasons == []
+    assert result.joint is not None
+    # Seven slices of 80 and of 60 confident pixels weight the two joints.
+    assert np.array_equal(
+        result.joint,
+        [(13 * 560 + 23 * 420) / 980, 4.5, (-3.5 * 560 - 2.5 * 420) / 980],
+    )
 
 
-def test_full_centroids_consensus_fallback_and_projections_match_source() -> None:
-    expected = read_tensors(_CWD / "testdata" / "anchors.pt")
-    for case in range(6):
-        series: list[AnatomicalSeries] = []
-        for index in range(3):
-            quality = int(expected["input/quality"][case, index])
-            series.append(
-                AnatomicalSeries(
-                    series=str(index),
-                    plane="Coronal" if index == 2 else "Sagittal",
-                    shape=(8, 8),
-                    affines=np.asarray(
-                        expected["input/affines"][case, index].numpy(),
-                        dtype=np.float64,
-                    )
-                    if quality
-                    else None,
-                    aligned=quality == 2,
-                    fluid=1,
-                    probabilities=[
-                        (z, np.asarray(probability.numpy(), dtype=np.float32))
-                        for z, probability in enumerate(
-                            expected["input/probabilities"][index],
-                        )
-                    ]
-                    if index < 2
-                    else [],
-                ),
-            )
-        actual = AnchorConsensus.Config().make()(series)
-        positions = torch.stack(
-            [
-                torch.from_numpy(point)
-                if point is not None
-                else torch.full((3,), float("nan"), dtype=torch.float64)
-                for point in (actual.joint, actual.patella, actual.prior)
-            ],
-        )
-        target = expected["output/positions"][case]
-        assert torch.equal(positions.isnan(), target.isnan())
-        assert torch.equal(positions.nan_to_num(), target.nan_to_num())
-        projections: list[list[float]] = []
-        for index in range(3):
-            entry = actual.series.get(str(index))
-            projections.append(
-                [float("nan")] * 6
-                if entry is None
-                else [
-                    *entry.joint,
-                    float(entry.in_field),
-                    entry.distance_mm,
-                    *(entry.patella or [float("nan")] * 2),
-                ],
-            )
-        projected = torch.tensor(projections, dtype=torch.float64)
-        target = expected["output/projections"][case]
-        assert torch.equal(projected.isnan(), target.isnan())
-        assert torch.equal(projected.nan_to_num(), target.nan_to_num())
-        assert {None: 0, "slab_prior": 1, "skm_tea_joint": 2, "skm_tea_joint_avg2": 3}[
-            actual.method
-        ] == int(expected["output/methods"][case])
-        assert len(actual.reasons) == int(expected["output/reasons"][case])
-        assert (
-            actual.reasons
-            == (
-                [],
-                ["disagree(29mm)"],
-                ["far_from_prior(43mm)", "far_from_prior(43mm)"],
-                ["not_aligned", "not_aligned"],
-                ["no_geo", "no_geo", "no_geometry"],
-                [],
-            )[case]
-        )
-        if case == 0:
-            probability = series[0].probabilities[0][1].copy()
-            probability.view(np.int32)[3, -1, -1] += 1
-            modified = replace(
-                series[0],
-                probabilities=[(0, probability), *series[0].probabilities[1:]],
-            )
-            changed = AnchorConsensus.Config().make()([modified, *series[1:]])
-            assert actual.joint is not None
-            assert changed.joint is not None
-            assert not np.array_equal(actual.joint, changed.joint)
+def test_rejected_series_and_a_far_candidate_fall_back_to_the_slab_prior() -> None:
+    joint = _synthetic_series(shape=(8, 10))
+    assert joint.affines is not None
+    shifted = joint.affines.copy()
+    shifted[:, 1, 2] += 40
+    coronal = replace(
+        joint,
+        series="coronal",
+        plane="Coronal",
+        affines=shifted,
+        probabilities=[],
+    )
+    result = AnchorConsensus.Config().make()(
+        [
+            replace(joint, series="unaligned", aligned=False),
+            replace(joint, series="missing", affines=None),
+            joint,
+            coronal,
+        ],
+    )
+    assert result.reasons == ["not_aligned", "no_geo", "far_from_prior(40mm)"]
+    assert result.method == "slab_prior"
+    assert result.prior is not None
+    assert np.array_equal(result.prior, [13.0, 44.5, -3.5])
+    assert result.joint is result.prior
+    # Every series with geometry, before or after the missing one, is projected.
+    assert list(result.series) == ["unaligned", "synthetic", "coronal"]
+    assert all(anchor.patella is None for anchor in result.series.values())
+
+
+def test_candidates_at_exactly_the_prior_and_agreement_limits_are_kept() -> None:
+    joint = _synthetic_series(shape=(8, 10))
+    assert joint.affines is not None
+    shifted = joint.affines.copy()
+    shifted[:, 1, 2] += 35
+    coronal = replace(
+        joint,
+        series="coronal",
+        plane="Coronal",
+        affines=shifted,
+        probabilities=[],
+    )
+    result = AnchorConsensus.Config().make()([joint, coronal])
+    assert (result.method, result.reasons) == ("skm_tea_joint", [])
+    translated = joint.affines.copy()
+    translated[:, 0, 2] += 20
+    result = AnchorConsensus.Config().make()(
+        [joint, replace(joint, series="second", affines=translated)],
+    )
+    assert result.method == "skm_tea_joint_avg2"
+    assert result.joint is not None
+    assert np.array_equal(result.joint, [23.0, 4.5, -3.5])
+
+
+def test_disagreeing_candidates_keep_the_heaviest_and_report_their_distance() -> None:
+    first = _synthetic_series(shape=(8, 10))
+    assert first.affines is not None
+    translated = first.affines.copy()
+    translated[:, 0, 2] += 30
+    result = AnchorConsensus.Config().make()(
+        [first, replace(first, series="far", affines=translated)],
+    )
+    assert result.method == "skm_tea_joint"
+    assert result.reasons == ["disagree(30mm)"]
+    assert result.joint is not None
+    assert np.array_equal(result.joint, [13.0, 4.5, -3.5])
+
+
+def test_series_without_geometry_leave_no_joint_or_projection() -> None:
+    result = AnchorConsensus.Config().make()(
+        [replace(_synthetic_series(), affines=None)],
+    )
+    assert result.joint is None
+    assert result.method is None
+    assert result.reasons == ["no_geo", "no_geometry"]
+    assert result.series == {}
+
+
+def test_consensus_projects_the_joint_and_an_anterior_patella_into_each_series() -> (
+    None
+):
+    series = _synthetic_series(shape=(16, 20))
+    for _, probability in series.probabilities:
+        probability[0] = 0
+        probability[0, :4, :16] = 0.75
+    result = AnchorConsensus.Config().make()([series])
+    assert result.method == "skm_tea_joint"
+    assert result.joint is not None
+    assert result.patella is not None
+    assert np.array_equal(result.joint, [13.0, 9.5, -7.5])
+    assert np.array_equal(result.patella, [13.0, 7.5, -1.5])
+    assert result.series == {
+        "synthetic": ProjectedAnchor(
+            joint=(0.5, 0.5),
+            in_field=True,
+            distance_mm=0.0,
+            patella=(1.5 / 15, 7.5 / 19),
+        ),
+    }
 
 
 def test_absent_small_or_failed_tissue_predictions_retain_the_slab_prior() -> None:
@@ -229,6 +271,129 @@ def test_equal_fluid_and_tissue_mass_keep_original_acquisition_order() -> None:
     assert np.array_equal(second_joint, [63, 4.5, -3.5])
 
 
+def test_fluid_sensitive_sagittal_series_are_considered_first() -> None:
+    series = _synthetic_series()
+    result = AnchorConsensus.Config().make()(
+        [
+            replace(series, series="plain", fluid=0, aligned=False),
+            replace(series, series="fluid", affines=None),
+        ],
+    )
+    assert result.reasons == ["no_geo", "not_aligned", "no_geometry"]
+
+
+def test_the_heaviest_candidate_leads_and_a_disagreeing_one_lends_its_patella() -> None:
+    lighter = _synthetic_series(shape=(16, 20))
+    for _, probability in lighter.probabilities:
+        probability[0] = 0
+        probability[0, :4, :16] = 0.75
+        probability[1:4, :, -2:] = 0
+    assert lighter.affines is not None
+    translated = lighter.affines.copy()
+    translated[:, 0, 2] += 30
+    heavier = replace(
+        _synthetic_series(shape=(16, 20)),
+        series="heavier",
+        affines=translated,
+    )
+    for _, probability in heavier.probabilities:
+        probability[0] = 0
+    result = AnchorConsensus.Config().make()([lighter, heavier])
+    assert (result.method, result.reasons) == ("skm_tea_joint", ["disagree(30mm)"])
+    assert result.joint is not None
+    assert result.patella is not None
+    # 320 tissue pixels per slice outweigh 288; only the lighter has a patella.
+    assert np.array_equal(result.joint, [43.0, 9.5, -7.5])
+    assert np.array_equal(result.patella, [13.0, 7.5, -1.5])
+
+
+@pytest.mark.parametrize(
+    ("columns", "patella"),
+    [(18, [23.0, 8.5, -1.5]), (16, [13.0, 7.5, -1.5])],
+)
+def test_agreeing_candidates_take_the_heaviest_patella_and_the_first_on_ties(
+    columns: int,
+    patella: list[float],
+) -> None:
+    first = _synthetic_series(shape=(16, 20))
+    for _, probability in first.probabilities:
+        probability[0] = 0
+        probability[0, :4, :16] = 0.75
+    assert first.affines is not None
+    translated = first.affines.copy()
+    translated[:, 0, 2] += 10
+    second = replace(
+        _synthetic_series(shape=(16, 20)),
+        series="second",
+        affines=translated,
+    )
+    for _, probability in second.probabilities:
+        probability[0] = 0
+        probability[0, :4, :columns] = 0.75
+    result = AnchorConsensus.Config().make()([first, second])
+    assert result.method == "skm_tea_joint_avg2"
+    assert result.patella is not None
+    assert np.array_equal(result.patella, patella)
+
+
+def test_candidate_errors_are_reported_in_eighty_characters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(AnchorConsensus, "_candidate", _long_failure)
+    result = AnchorConsensus.Config().make()([_synthetic_series()])
+    # The repr opens with the 14 characters RuntimeError(', leaving 66 x's.
+    assert result.reasons == ["error:RuntimeError('" + "x" * 66]
+
+
+def _long_failure(*args: object, **kwargs: object) -> None:
+    del args, kwargs
+    raise RuntimeError("x" * 100)
+
+
+def test_projections_scale_by_each_series_extent_and_check_both_bounds() -> None:
+    series = _synthetic_series(shape=(17, 21))
+    for _, probability in series.probabilities:
+        probability[0] = 0
+        probability[0, :4, :16] = 0.75
+    assert series.affines is not None
+    shifted = series.affines.copy()
+    shifted[:, 0, 2] += 0.25
+    others = [
+        replace(series, series=name, plane="Axial", shape=shape, probabilities=[])
+        for name, shape in (("rows", (8, 21)), ("columns", (17, 10)))
+    ]
+    tiny = replace(others[0], series="tiny", shape=(2, 2), affines=shifted)
+    result = AnchorConsensus.Config().make()([series, *others, tiny])
+    # The joint sits at row 8, column 10 and the patella at 1.5, 7.5 of every
+    # grid; the tiny stack's nearest slice is 0.25 mm away.
+    assert result.series == {
+        "synthetic": ProjectedAnchor(
+            joint=(0.5, 0.5),
+            in_field=True,
+            distance_mm=0.0,
+            patella=(1.5 / 16, 7.5 / 20),
+        ),
+        "rows": ProjectedAnchor(
+            joint=(8 / 7, 0.5),
+            in_field=False,
+            distance_mm=0.0,
+            patella=(1.5 / 7, 7.5 / 20),
+        ),
+        "columns": ProjectedAnchor(
+            joint=(0.5, 10 / 9),
+            in_field=False,
+            distance_mm=0.0,
+            patella=(1.5 / 16, 7.5 / 9),
+        ),
+        "tiny": ProjectedAnchor(
+            joint=(8.0, 10.0),
+            in_field=False,
+            distance_mm=0.2,
+            patella=(1.5, 7.5),
+        ),
+    }
+
+
 def _synthetic_series(*, shape: tuple[int, int] = (8, 8)) -> AnatomicalSeries:
     # AnchorConsensus._project maps column, row, origin into three LPS coordinates.
     affines = np.zeros((7, 3, 3), dtype=np.float64)
@@ -248,51 +413,51 @@ def _synthetic_series(*, shape: tuple[int, int] = (8, 8)) -> AnatomicalSeries:
     )
 
 
-def test_every_d4_orientation_and_affine_replays_complete_source_arrays() -> None:
-    expected = read_tensors(_CWD / "testdata" / "geometry.pt")
-    for case, row in enumerate(expected["input/metadata"]):
-        geometry = FrameGeometry(
-            orientation=tuple(float(row[index]) for index in range(6)),
-            origin=tuple(float(row[index]) for index in range(6, 9)),
-            spacing=(float(row[9]), float(row[10])),
-            slope=float(row[11]),
-            intercept=float(row[12]),
-            monochrome1=bool(row[13]),
-            side="R" if bool(row[14]) else "L",
-            plane=("Sagittal", "Coronal", "Axial")[int(row[15])],
-        )
-        image = expected["input/pixels"][case].reshape(3, 5).numpy()
-        actual = canonical_frame(np.asarray(image, dtype=np.float32), geometry)
-        assert torch.equal(
-            torch.from_numpy(actual.image).flatten(),
-            expected["canonical/pixels"][case],
-        )
-        assert actual.image.shape == tuple(
-            int(value) for value in expected["canonical/shape"][case]
-        )
-        assert torch.equal(
-            torch.tensor(actual.spacing, dtype=torch.float64),
-            expected["canonical/spacing"][case],
-        )
-        assert torch.equal(
-            torch.from_numpy(actual.affine),
-            expected["canonical/affine"][case],
-        )
-        assert torch.equal(
-            torch.from_numpy(actual.basis),
-            expected["canonical/basis"][case],
-        )
-        if case == 0:
-            perturbed = expected["input/pixels"][case].clone()
-            perturbed.view(torch.int32)[-1].add_(1)
-            changed = canonical_frame(
-                np.asarray(perturbed.reshape(3, 5).numpy(), dtype=np.float32),
-                geometry,
-            )
-            assert not torch.equal(
-                torch.from_numpy(changed.image).flatten(),
-                expected["canonical/pixels"][case],
-            )
+_PLANE_AXES: Final = {
+    "Sagittal": ((0.0, -1.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0)),
+    "Coronal": ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+    "Axial": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+}
+"""Canonical column, row and slice-normal directions of each plane in LPS."""
+
+
+@pytest.mark.parametrize("side", ["L", "R"])
+@pytest.mark.parametrize("transform", range(8))
+@pytest.mark.parametrize("plane", list(_PLANE_AXES))
+def test_canonical_frame_maps_every_d4_orientation_onto_the_plane_axes(
+    plane: str,
+    transform: int,
+    side: str,
+) -> None:
+    first, second, normal = (np.array(axis) for axis in _PLANE_AXES[plane])
+    row, column = (second, first) if transform & 4 else (first, second)
+    row = -row if transform & 1 else row
+    column = -column if transform & 2 else column
+    origin = np.array([1.0, 2.0, 3.0])
+    frame = canonical_frame(
+        np.arange(15, dtype=np.float32).reshape(3, 5),
+        FrameGeometry(
+            orientation=(*row.tolist(), *column.tolist()),
+            origin=(1.0, 2.0, 3.0),
+            spacing=(0.5, 0.25),
+            plane=plane,
+            side=side,
+        ),
+    )
+    # Non-sagittal right knees are mirrored so their columns run toward the right.
+    mirror = -1.0 if side == "R" and plane != "Sagittal" else 1.0
+    assert np.array_equal(frame.affine[:, 0], frame.spacing[1] * mirror * first)
+    assert np.array_equal(frame.affine[:, 1], frame.spacing[0] * second)
+    assert np.array_equal(frame.basis, np.stack([first, second, normal], axis=1))
+    # Every canonical pixel keeps its unique source value and physical position.
+    rows, columns = np.indices(frame.image.shape)
+    source_rows, source_columns = np.divmod(frame.image.astype(np.int64), 5)
+    assert np.array_equal(
+        frame.affine @ np.stack([columns.ravel(), rows.ravel(), np.ones(15)]),
+        origin[:, None]
+        + np.outer(row, 0.25 * source_columns.ravel())
+        + np.outer(column, 0.5 * source_rows.ravel()),
+    )
 
 
 def test_d4_score_ties_choose_the_first_orientation() -> None:
@@ -302,36 +467,58 @@ def test_d4_score_ties_choose_the_first_orientation() -> None:
     assert np.array_equal(canonical_frame(image, geometry).image, image)
 
 
-def test_full_range_encoding_and_side_decisions_replay_source_numbers() -> None:
-    expected = read_tensors(_CWD / "testdata" / "geometry.pt")
+def test_canonical_pixels_apply_the_modality_transform_and_monochrome1_inversion() -> (
+    None
+):
+    image = np.arange(6, dtype=np.float32).reshape(2, 3)
+    geometry = FrameGeometry(slope=2.0, intercept=-1.0)
+    assert np.array_equal(canonical_frame(image, geometry).image, image * 2 - 1)
+    geometry.monochrome1 = True
+    # The scaled range -1..9 inverts around its own extremes.
+    assert np.array_equal(canonical_frame(image, geometry).image, 9 - image * 2)
+
+
+def test_full_range_encoding_scales_every_sample_and_keeps_the_display_window() -> None:
+    # 101 constant slices put the 1st and 99th percentiles on exact samples.
     encoded = quantize_series(
-        [
-            np.asarray(image.numpy(), dtype=np.float32)
-            for image in expected["quantize/input"]
-        ],
+        [np.full((2, 3), level, dtype=np.float32) for level in range(101)],
     )
-    assert torch.equal(torch.from_numpy(encoded.volume), expected["quantize/volume"])
-    assert torch.equal(
-        torch.tensor(
-            [encoded.minimum, encoded.maximum, encoded.error_bound, *encoded.window],
-            dtype=torch.float64,
-        ),
-        expected["quantize/metadata"],
-    )
-    for index, (tags, positions) in enumerate(
-        (
-            (["L"], [-10.0]),
-            (["R"], [10.0]),
-            (["L", "R"], [10.0]),
-            (list[str](), [-10.0]),
-            (list[str](), [10.0]),
-            (list[str](), list[float]()),
-        ),
-    ):
-        side = study_side(tags, positions)
-        assert (0 if side is None else 1 if side == "L" else -1) == int(
-            expected["laterality"][index],
-        )
+    assert encoded.volume.dtype == np.uint16
+    assert encoded.volume[[0, 1, 50, 99, 100], 0, 0].tolist() == [
+        0,
+        655,
+        32_768,
+        64_880,
+        65_535,
+    ]
+    assert (encoded.minimum, encoded.maximum) == (0.0, 100.0)
+    assert encoded.error_bound == 100 / 131_070
+    assert encoded.window == (655.0, 64_880.0)
+    constant = quantize_series([np.full((2, 3), 7.0, dtype=np.float32)])
+    assert not constant.volume.any()
+    assert constant.error_bound == 1e-6 / 131_070
+
+
+@pytest.mark.parametrize(
+    ("tags", "positions", "side"),
+    [
+        (["L"], [-10.0], "L"),
+        (["R"], [10.0], "R"),
+        (["L", "R"], [10.0], None),
+        ([], [-10.0], "R"),
+        ([], [10.0, float("nan")], "L"),
+        # Each median disagrees in sign with the mean and with one extreme.
+        ([], [-3.0, -2.0, 10.0], "R"),
+        ([], [-10.0, 2.0, 3.0], "L"),
+        ([], [], None),
+    ],
+)
+def test_study_side_trusts_one_explicit_tag_before_the_sagittal_position(
+    tags: list[str],
+    positions: list[float],
+    side: str | None,
+) -> None:
+    assert study_side(tags, positions) == side
 
 
 def test_unsupported_physical_geometry_fails_before_pixel_interpolation() -> None:
@@ -420,54 +607,175 @@ def test_nonfinite_pixels_and_two_pixel_affine_denominators(
         )
 
 
-def test_complete_encoded_files_replay_both_original_pixel_contracts() -> None:
-    expected = read_tensors(_CWD / "testdata" / "dicom.pt")
-    cases = sum(name.startswith("input/") for name in expected)
-    for case in range(cases):
-        frame = read_dicom(expected[f"input/{case}"].numpy().tobytes())
-        geometry = frame.geometry("Axial", None)
-        actual = canonical_frame(frame.pixel_array.astype(np.float32), geometry).image
-        assert torch.equal(torch.from_numpy(actual), expected[f"r7/{case}"])
-        pixels = frame.raptor_pixels()
-        assert pixels.dtype == np.float32
-        assert torch.equal(torch.from_numpy(pixels), expected[f"raptor/{case}"])
-        instance = frame.instance_number
-        assert instance is not None
-        assert torch.equal(
-            torch.tensor(
-                [
-                    instance,
-                    *frame.shape,
-                    *geometry.spacing,
-                    *geometry.orientation,
-                    *geometry.origin,
-                    geometry.slope,
-                    geometry.intercept,
-                ],
-                dtype=torch.float64,
-            ),
-            expected[f"header/{case}"],
-        )
-        assert frame.patient_id == "numeric-patient"
-        assert frame.laterality == "R"
-        assert frame.pixel_array is frame.pixel_array
-    payload = bytearray(expected["input/0"].numpy().tobytes())
-    payload[-2] += 1
-    changed = read_dicom(bytes(payload))
-    assert not torch.equal(
-        torch.from_numpy(
-            canonical_frame(
-                changed.pixel_array.astype(np.float32),
-                changed.geometry("Axial", None),
-            ).image,
+_SAMPLES: Final = np.array(
+    [
+        [0, 1, 127, 255, 1023],
+        [2047, 2048, 4095, 32_767, 32_768],
+        [65_535, 592, 17_000, 65_520, 42],
+    ],
+    dtype=np.uint16,
+)
+"""Stored samples whose 8, 10, 12 and 16-bit readings all differ."""
+
+
+@pytest.mark.parametrize(
+    "syntax",
+    [
+        pytest.param("1.2.840.10008.1.2.1", id="explicit-little"),
+        pytest.param("1.2.840.10008.1.2", id="implicit-little"),
+        pytest.param("1.2.840.10008.1.2.2", id="explicit-big"),
+        pytest.param("1.2.840.10008.1.2.1.99", id="deflated"),
+        pytest.param("1.2.840.10008.1.2.5", id="rle"),
+        pytest.param("1.2.840.10008.1.2.4.90", id="jpeg2000-lossless"),
+    ],
+)
+def test_lossless_transfer_syntaxes_round_trip_samples_and_header(syntax: str) -> None:
+    frame = read_dicom(
+        dicom_file(
+            _SAMPLES,
+            position=(13.7, -27.1, 8.2),
+            orientation=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            spacing=(0.3, 0.7),
+            instance=7,
+            laterality="R",
+            syntax=syntax,
+            slope="1.25",
+            intercept="-3",
         ),
-        expected["r7/0"],
+    )
+    assert frame.transfer_syntax == syntax
+    assert frame.little_endian is (syntax != "1.2.840.10008.1.2.2")
+    assert frame.pixel_array is frame.pixel_array
+    assert frame.pixel_array.dtype == np.uint16
+    assert np.array_equal(frame.pixel_array, _SAMPLES)
+    assert (frame.instance_number, frame.shape) == (7, (3, 5))
+    assert (frame.patient_id, frame.laterality) == ("numeric-patient", "R")
+    # Parsed decimal header values are exact binary64, not arithmetic results.
+    assert frame.geometry("Axial", None) == FrameGeometry(
+        orientation=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        origin=(13.7, -27.1, 8.2),
+        spacing=(0.3, 0.7),
+        slope=1.25,
+        intercept=-3.0,
     )
 
 
+@pytest.mark.parametrize(
+    ("samples", "stored", "expected"),
+    [
+        pytest.param(_SAMPLES, 12, _SAMPLES & 0xFFF, id="unsigned-12"),
+        pytest.param(_SAMPLES, 10, _SAMPLES & 0x3FF, id="unsigned-10"),
+        # Bit 11 carries the sign: 0x800 is -2048, 0xFFF is -1 and 0xFF0 is -16.
+        pytest.param(
+            _SAMPLES.view(np.int16),
+            12,
+            np.array(
+                [
+                    [0, 1, 127, 255, 1023],
+                    [2047, -2048, -1, -1, 0],
+                    [-1, 592, 616, -16, 42],
+                ],
+                dtype=np.int16,
+            ),
+            id="signed-12",
+        ),
+        pytest.param(
+            _SAMPLES.view(np.int16),
+            16,
+            _SAMPLES.view(np.int16),
+            id="signed-16",
+        ),
+        pytest.param(
+            _SAMPLES.astype(np.uint8),
+            8,
+            _SAMPLES.astype(np.uint8),
+            id="byte",
+        ),
+    ],
+)
+def test_stored_bits_mask_unsigned_and_sign_extend_signed_samples(
+    samples: NDArray[np.integer],
+    stored: int,
+    expected: NDArray[np.integer],
+) -> None:
+    payload = dicom_file(samples, position=(0.0, 0.0, 0.0), stored=stored)
+    actual = read_dicom(payload).pixel_array
+    assert actual.dtype == expected.dtype
+    assert np.array_equal(actual, expected)
+
+
+def test_baseline_jpeg_decodes_a_flat_byte_matrix_exactly() -> None:
+    flat = np.full((3, 5), 200, dtype=np.uint8)
+    frame = read_dicom(
+        dicom_file(flat, position=(0.0, 0.0, 0.0), syntax="1.2.840.10008.1.2.4.50"),
+    )
+    # A flat block holds only its DC term, 8 * (200 - 128), which the default
+    # quantizer of 8 divides, so lossy compression keeps every sample.
+    assert frame.pixel_array.dtype == np.uint8
+    assert np.array_equal(frame.pixel_array, flat)
+
+
+@pytest.mark.parametrize(
+    ("pixels", "photometric", "slope", "intercept", "expected"),
+    [
+        # Both tags rescale; MONOCHROME1 then inverts around the maximum alone.
+        ([[0, 1, 2], [3, 4, 6]], "MONOCHROME1", "0.5", "4", [[3, 2.5, 2], [1.5, 1, 0]]),
+        # A slope without an intercept leaves the stored samples unscaled.
+        ([[0, 1, 2], [3, 4, 6]], "MONOCHROME2", "0.5", "", [[0, 1, 2], [3, 4, 6]]),
+        # 65535 * 1.23456789 - 0.137 = 80907.26967115 rounds once to 80907.2734375;
+        # rounding the float32 product first lands one 2**-7 spacing lower.
+        (
+            [[65_535] * 3] * 2,
+            "MONOCHROME2",
+            "1.23456789",
+            "-0.137",
+            [[80907.2734375] * 3] * 2,
+        ),
+    ],
+)
+def test_raptor_pixels_rescale_once_in_float64_and_invert_by_the_maximum(
+    pixels: list[list[int]],
+    photometric: str,
+    slope: str,
+    intercept: str,
+    expected: list[list[float]],
+) -> None:
+    frame = read_dicom(
+        dicom_file(
+            np.array(pixels, dtype=np.uint16),
+            position=(0.0, 0.0, 0.0),
+            photometric=photometric,
+            slope=slope,
+            intercept=intercept,
+        ),
+    )
+    actual = frame.raptor_pixels()
+    assert actual.dtype == np.float32
+    assert np.array_equal(actual, np.array(expected, dtype=np.float32))
+
+
+def test_r7_rescales_round_the_float32_product_before_adding_the_intercept() -> None:
+    frame = read_dicom(
+        dicom_file(
+            np.full((2, 3), 65_535, dtype=np.uint16),
+            position=(0.0, 0.0, 0.0),
+            slope="1.23456789",
+            intercept="-0.137",
+        ),
+    )
+    canonical = canonical_frame(
+        frame.pixel_array.astype(np.float32),
+        frame.geometry("Sagittal", None),
+    )
+    # 65535 * 1.23456789 rounds to 80907.40625 in float32; adding -0.137 lands on
+    # 80907.265625, one 2**-7 spacing below the once-rounded 80907.2734375.
+    for image in (canonical.image, frame.modality_pixels()):
+        assert image.dtype == np.float32
+        assert np.array_equal(image, np.full((2, 3), 80907.265625, dtype=np.float32))
+
+
 def test_modality_pixels_rescale_in_float32_and_invert_monochrome1() -> None:
-    expected = read_tensors(_CWD / "testdata" / "dicom.pt")
-    frame = read_dicom(expected["input/0"].numpy().tobytes())
+    frame = _axial(_SAMPLES, z=0.0)
     plain = {
         tag: value
         for tag, value in frame.values.items()
@@ -502,8 +810,7 @@ def test_modality_pixels_rescale_in_float32_and_invert_monochrome1() -> None:
 
 
 def test_nested_undefined_sequences_preserve_every_top_level_field() -> None:
-    expected = read_tensors(_CWD / "testdata" / "dicom.pt")
-    payload = expected["input/0"].numpy().tobytes()
+    payload = dicom_file(_SAMPLES, position=(0.0, 0.0, 0.0))
     frame = read_dicom(payload)
     # Two sequence items: one defined-length, one with nested undefined lengths.
     item = bytes.fromhex("feff00e0")
@@ -526,8 +833,7 @@ def test_nested_undefined_sequences_preserve_every_top_level_field() -> None:
 
 
 def test_header_validation_and_optional_fields() -> None:
-    expected = read_tensors(_CWD / "testdata" / "dicom.pt")
-    frame = read_dicom(expected["input/0"].numpy().tobytes())
+    frame = _axial(_SAMPLES, z=0.0)
     values = dict(frame.values)
     values.update(
         {
@@ -567,14 +873,19 @@ def test_header_validation_and_optional_fields() -> None:
         invalid = replace(frame, values={**frame.values, tag: value})
         with pytest.raises(ValueError, match=message):
             invalid.geometry("Axial", None)
-    jpeg = read_dicom(expected["input/7"].numpy().tobytes())
+    jpeg = read_dicom(
+        dicom_file(
+            _SAMPLES.astype(np.uint8),
+            position=(0.0, 0.0, 0.0),
+            syntax="1.2.840.10008.1.2.4.50",
+        ),
+    )
     with pytest.raises(ValueError, match="payload"):
         _ = replace(jpeg, values={**jpeg.values, 0x00280010: b"\x01\0"}).pixel_array
 
 
 def test_malformed_element_and_fragment_boundaries() -> None:
-    expected = read_tensors(_CWD / "testdata" / "dicom.pt")
-    payload = expected["input/0"].numpy().tobytes()
+    payload = dicom_file(_SAMPLES, position=(0.0, 0.0, 0.0))
     for appended, message in (
         (bytes.fromhex("0800111153510000"), "header is truncated"),
         (bytes.fromhex("080010104c4f1000"), "element extends"),
@@ -591,8 +902,9 @@ def test_malformed_element_and_fragment_boundaries() -> None:
 
 
 def test_rle_packbits_noop_repeat_and_invalid_segments() -> None:
-    expected = read_tensors(_CWD / "testdata" / "dicom.pt")
-    frame = read_dicom(expected["input/6"].numpy().tobytes())
+    frame = read_dicom(
+        dicom_file(_SAMPLES, position=(0.0, 0.0, 0.0), syntax="1.2.840.10008.1.2.5"),
+    )
     values = {
         **frame.values,
         0x00280010: b"\x03\0",
@@ -612,69 +924,154 @@ def test_rle_packbits_noop_repeat_and_invalid_segments() -> None:
             _ = replace(frame, values=values, pixel_data=encoded).pixel_array
 
 
-def test_all_native_pixels_metadata_blocks_and_window_rows_match_source() -> None:
-    expected = read_tensors(_CWD / "testdata" / "render.pt")
-    series: list[NativeSeries] = []
-    for index in range(7):
-        row = expected[f"input/metadata/{index}"]
-        joint = (float(row[7]), float(row[8])) if bool(row[11]) else None
-        patella = (float(row[9]), float(row[10])) if float(row[9]) >= 0 else None
-        series.append(
-            NativeSeries(
-                series=str(index),
-                pixels=np.asarray(
-                    expected[f"input/pixels/{index}"].numpy(),
-                    dtype=np.uint16,
-                ),
-                positions=np.asarray(
-                    expected[f"input/positions/{index}"].numpy(),
-                    dtype=np.float64,
-                ),
-                spacing=np.asarray(
-                    expected[f"input/spacing/{index}"].numpy(),
-                    dtype=np.float64,
-                ),
-                plane=("Sagittal", "Coronal", "Axial")[int(row[1])],
-                slot=int(row[0]),
-                side="R" if int(row[2]) < 0 else "L",
-                fluid=None if int(row[3]) < 0 else int(row[3]),
-                fat=None if int(row[4]) < 0 else int(row[4]),
-                window=(float(row[5]), float(row[6])),
-                joint=joint,
-                patella=patella,
-            ),
-        )
-    previous_dtype = torch.get_default_dtype()
-    try:
-        torch.set_default_dtype(torch.float64)
-        actual = R7Render.Config(image_size=8).make()(series)
-    finally:
-        torch.set_default_dtype(previous_dtype)
-    assert actual.metadata.dtype == torch.float32
-    assert torch.equal(actual.pixels, expected["output/pixels"])
-    assert torch.equal(actual.metadata, expected["output/metadata"])
-    assert actual.removed == int(expected["output/removed"])
+def test_render_maps_each_view_crop_through_the_display_curve() -> None:
+    # _render_slice draws each view on a square canvas; these levels are the full view.
+    levels = np.arange(1, 17).reshape(4, 4)
+    # Each 2x2 block varies by one around its level, so halving by area averages it.
+    image = np.kron(levels, np.ones((2, 2), dtype=np.int64)) + np.tile(
+        [[1, -1], [-1, 1]],
+        (4, 4),
+    )
+    series = NativeSeries(
+        series="7",
+        # 257 maps each stored level onto one display level.
+        pixels=(257 * np.stack([image, image + 1])).astype(np.uint16),
+        positions=np.array([0.0, 4.0]),
+        spacing=np.ones((2, 2)),
+        plane="Sagittal",
+        slot=2,
+        side="L",
+        fluid=1,
+        fat=0,
+        window=(0.0, 65_535.0),
+    )
+    study = R7Render.Config(image_size=4, local_mm=4.0).make()([series])
+    # The full view, then the joint, patellar and posterior 4 mm crops.
+    crops = [levels, image[2:6, 2:6], image[0:4, 4:8], image[4:8, 0:4]]
     assert torch.equal(
+        study.pixels,
+        torch.from_numpy(
+            np.stack([crop + offset for crop in crops for offset in (0, 1)]).astype(
+                np.uint8,
+            ),
+        ),
+    )
+    assert torch.equal(
+        study.metadata,
         torch.tensor(
             [
                 [
-                    int(block.series),
-                    ("Sagittal", "Coronal", "Axial").index(block.plane),
-                    block.n_slices,
+                    0,
+                    2,
+                    0,
                     view,
-                    start,
+                    relative,
+                    math.log1p(4.0),
+                    extent / 130,
+                    1,
+                    0,
+                    index,
+                    2,
+                    0,
                 ]
-                for block in actual.blocks
-                for view, start in block.views
+                for view, extent in zip((0, 1, 4, 5), (8.0, 4.0, 4.0, 4.0), strict=True)
+                for index, relative in enumerate((-1.0, 1.0))
             ],
+            dtype=torch.float32,
         ),
-        expected["output/blocks"],
     )
-    assert torch.equal(
-        torch.from_numpy(
-            evaluation_rows(actual, stride=3, slab_mm=R7Render.Config().slab_mm),
+    assert study.blocks == [
+        SliceBlock(
+            series="7",
+            plane="Sagittal",
+            n_slices=2,
+            views=[(0, 0), (1, 2), (4, 4), (5, 6)],
         ),
-        expected["output/window_rows"],
+    ]
+    assert study.removed == 0
+    assert evaluation_rows(study, stride=1, slab_mm=3.5).tolist() == [
+        row
+        for start in (0, 2, 4, 6)
+        for row in (
+            [0, start, start, start, start + 1],
+            [0, start + 1, start, start + 1, start + 1],
+        )
+    ]
+
+
+def test_evaluation_rows_step_by_the_physical_slab_and_keep_the_last_slice() -> None:
+    metadata = torch.zeros(6, 12)
+    metadata[:, MetadataColumn.LOG_SPACING] = math.log1p(1.0)
+    study = RenderedStudy(
+        pixels=torch.zeros(6, 2, 3, dtype=torch.uint8),
+        metadata=metadata,
+        blocks=[SliceBlock(series="s", plane="Axial", n_slices=6, views=[(0, 0)])],
+        removed=0,
+    )
+    # A 3 mm slab over 1 mm slices steps 3; stride 2 jumps 6 and appends slice 5.
+    assert evaluation_rows(study, stride=2, slab_mm=3.0).tolist() == [
+        [0, 1, 0, 1, 4],
+        [0, 5, 2, 5, 5],
+    ]
+
+
+def test_thin_acquisitions_average_physical_slabs_before_rendering() -> None:
+    levels = 2 * np.arange(8, dtype=np.uint16)
+    series = NativeSeries(
+        series="thin",
+        pixels=np.broadcast_to(257 * levels[:, None, None], (8, 2, 3)).copy(),
+        positions=np.arange(8.0),
+        spacing=np.ones((8, 2)),
+        plane="Sagittal",
+        slot=0,
+        side="R",
+        fluid=None,
+        fat=None,
+        window=(0.0, 65_535.0),
+    )
+    study = R7Render.Config(image_size=3).make()([series])
+    # A right sagittal series runs backward; four 1 mm slices make a 3.5 mm slab.
+    full = np.array([[1, 1, 1], [1, 1, 1], [0, 0, 0]], dtype=np.uint8)
+    local = np.ones((3, 3), dtype=np.uint8)
+    assert torch.equal(
+        study.pixels,
+        torch.from_numpy(
+            np.stack(
+                [
+                    view * level
+                    for view in (full, local, local, local)
+                    for level in (11, 3)
+                ],
+            ),
+        ),
+    )
+    assert study.metadata[:2, MetadataColumn.RELATIVE].tolist() == [-1.0, 1.0]
+    assert torch.equal(
+        study.metadata[:, MetadataColumn.LOG_SPACING],
+        torch.full((8,), math.log1p(4.0)),
+    )
+
+
+def test_slab_grouping_and_spacing_read_the_median_slice_gap() -> None:
+    series = NativeSeries(
+        series="gapped",
+        pixels=np.zeros((16, 2, 3), dtype=np.uint16),
+        positions=np.array([*range(15), 29.0]),
+        spacing=np.ones((16, 2)),
+        plane="Axial",
+        slot=0,
+        side="L",
+        fluid=None,
+        fat=None,
+        window=(0.0, 65_535.0),
+    )
+    study = R7Render.Config(image_size=3).make()([series])
+    # The median 1 mm gap groups four slices; the mean gap, 29/15 mm, is not thin.
+    assert [block.n_slices for block in study.blocks] == [4]
+    # Slab centers 1.5, 5.5, 9.5 and 17 leave a median gap of 4 mm, a maximum of 7.5.
+    assert torch.equal(
+        study.metadata[:, MetadataColumn.LOG_SPACING],
+        torch.full((16,), math.log1p(4.0)),
     )
 
 
@@ -683,8 +1080,10 @@ def test_empty_render_preserves_typed_zero_rows_and_blocks() -> None:
     try:
         torch.set_default_dtype(torch.float64)
         study = R7Render.Config(image_size=3).make()([])
+        rendered = R7Render.Config(image_size=3).make()([_small_series()])
     finally:
         torch.set_default_dtype(previous_dtype)
+    assert rendered.metadata.dtype == torch.float32
     assert study.pixels.shape == (0, 3, 3)
     assert study.pixels.dtype == torch.uint8
     assert study.metadata.shape == (0, 12)
@@ -749,7 +1148,8 @@ def test_only_identical_physical_inputs_are_deduplicated(difference: str) -> Non
         second.pixels = second.pixels + 1
     render = R7Render.Config(image_size=3).make()
     left, right = render([first]), render([second])
-    combined = render([first, second, replace(first, series="duplicate")])
+    # A removed duplicate must not end the scan before the distinct series.
+    combined = render([first, replace(first, series="duplicate"), second])
     assert combined.removed == 1
     assert [block.series for block in combined.blocks] == ["small", "other"]
     assert torch.equal(combined.pixels, torch.cat([left.pixels, right.pixels]))
@@ -793,6 +1193,72 @@ def test_invalid_position_geometry_crop_and_window_are_rejected() -> None:
         R7Render.Config().make()([series])
 
 
+def test_a_window_under_one_level_maps_the_full_range_without_floor_or_knee() -> None:
+    levels = np.array([[0, 51, 102], [153, 204, 255]])
+    rendered, extent = _render_slice(
+        (257 * levels).astype(np.uint16),
+        (1.0, 1.0),
+        3,
+        crop_mm=None,
+        center=(0.5, 0.5),
+        window=(7.0, 7.5),
+        floor=0.02,
+        knee=0.9,
+    )
+    # 0-65535 maps linearly onto 0-1; the 2x3 field fills the top two rows.
+    assert (rendered.tolist(), extent) == ([*levels.tolist(), [0, 0, 0]], 3.0)
+
+
+def test_each_slice_letterboxes_with_its_own_row_and_column_spacing() -> None:
+    config = R7Render.Config(image_size=6)
+    config.view_offsets_mm = {"Axial": []}
+    series = replace(
+        _small_series(),
+        pixels=np.full((2, 3, 4), 65_535, dtype=np.uint16),
+        positions=np.array([0.0, 5.0]),
+        spacing=np.array([[1.0, 2.0], [3.0, 4.0]]),
+        plane="Axial",
+    )
+    study = config.make()([series])
+    # 3x4 pixels of 1x2 mm span 3x8 mm, of 3x4 mm 9x16 mm: 2 and 3 of 6 rows.
+    expected = np.zeros((2, 6, 6), dtype=np.uint8)
+    expected[0, 2:4] = expected[1, 1:4] = 255
+    assert torch.equal(study.pixels, torch.from_numpy(expected))
+    assert torch.equal(
+        study.metadata[:, MetadataColumn.EXTENT],
+        torch.tensor([8 / 130, 16 / 130]),
+    )
+    # Unknown fluid and fat categories are stored as -1.
+    for column in (MetadataColumn.FLUID, MetadataColumn.FAT):
+        assert study.metadata[:, column].tolist() == [-1.0, -1.0]
+
+
+@pytest.mark.parametrize(
+    "spacing",
+    [[[1.0, 2.0], [2.0, 1.0]], [[1.0, 1.0], [2.0, 1.0]]],
+)
+def test_deduplication_compares_each_slice_crop_at_its_own_spacing(
+    spacing: list[list[float]],
+) -> None:
+    config = R7Render.Config(image_size=3, local_mm=6.0)
+    config.view_offsets_mm = {"Axial": [(1, 0.0, 0.0)]}
+    first = replace(
+        _small_series(),
+        pixels=np.zeros((2, 3, 5), dtype=np.uint16),
+        positions=np.array([0.0, 5.0]),
+        spacing=np.array(spacing),
+        plane="Axial",
+        joint=(0.1, 0.1),
+    )
+    # Only the second slice's 2 mm rows crop two of three rows, which the joint
+    # rows 0.1 and 0.9 then place differently.
+    study = config.make()([first, replace(first, series="moved", joint=(0.9, 0.1))])
+    assert (study.removed, [block.series for block in study.blocks]) == (
+        0,
+        ["small", "moved"],
+    )
+
+
 def _small_series() -> NativeSeries:
     return NativeSeries(
         series="small",
@@ -809,133 +1275,190 @@ def _small_series() -> NativeSeries:
     )
 
 
-def test_every_fluid_measurement_and_missing_path_replays_source() -> None:
-    expected = read_tensors(_CWD / "testdata" / "render.pt")
-    blocks: list[SliceBlock] = []
-    for row in expected["output/blocks"]:
-        series, plane, count, view, start = (int(value) for value in row)
-        if not blocks or blocks[-1].series != str(series):
-            blocks.append(
-                SliceBlock(
-                    series=str(series),
-                    plane=("Sagittal", "Coronal", "Axial")[plane],
-                    n_slices=count,
-                    views=[],
-                ),
-            )
-        blocks[-1].views.append((view, start))
-    for index, excluded in enumerate((None, -1, 4, 0)):
-        selected = (
-            []
-            if excluded == -1
-            else [
-                SliceBlock(
-                    series=block.series,
-                    plane=block.plane,
-                    n_slices=block.n_slices,
-                    views=[
-                        (view, start) for view, start in block.views if view != excluded
-                    ],
-                )
-                for block in blocks
-            ]
-        )
-        result = FluidMeasure.Config().make()(
-            RenderedStudy(
-                pixels=expected["output/pixels"],
-                metadata=expected["output/metadata"],
-                blocks=selected,
-                removed=int(expected["output/removed"]),
-            ),
-        )
-        actual = torch.tensor(
-            [
-                float("nan") if value is None else float(value)
-                for value in (
-                    result.effusion,
-                    result.baker,
-                    result.count,
-                    result.median,
-                    result.slices,
-                    result.spacing,
-                )
-            ],
-            dtype=torch.float64,
-        )
-        target = expected["output/fluid"][index]
-        assert torch.equal(actual.isnan(), target.isnan())
-        assert torch.equal(actual.nan_to_num(), target.nan_to_num())
-        assert result.status == (
-            "ok"
-            if index == 0
-            else "no fluid-sensitive sagittal series"
-            if index == 1
-            else "no region view for eff_sag_p99_open"
-            if index == 2
-            else "error: KeyError(0)"
-        )
-
-
-def test_all96_raw_slice_slots_and_failures_replay_the_source() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_prepare.pt")
-    prepare = RaptorPrepare.Config(image_size=4).make()
-    for case in range(6):
-        acquisitions: list[RaptorSeries] = []
-        indices = (
-            torch.cat([torch.tensor([2]), expected["rows"][expected["rows"] != 2]])
-            if case == 5
-            else expected["rows"]
-        )
-        for row in range(len(indices)):
-            index = int(indices[row])
-            if case == 1 and index == 2:
-                continue
-            plane, fluid, _ = prepare.config.slots[index]
-            if case == 5 and index == 2:
-                plane, fluid = "Axial", 0
-            count = (
-                4 if case == 3 and index == 0 else 1 if case >= 4 and index == 0 else 3
-            )
-            frames = [
-                read_dicom(
-                    expected[
-                        "input/bad"
-                        if case == 2 and index == 0 and frame == 1
-                        else f"input/mixed/{frame}"
-                        if case == 3 and index == 0
-                        else "input/near_constant"
-                        if case >= 4 and index == 0
-                        else f"input/{index}/{frame}"
-                    ]
-                    .numpy()
-                    .tobytes(),
-                )
-                for frame in range(count)
-            ]
-            acquisitions.append(
-                RaptorSeries(
-                    series=str(index + 1),
-                    plane=plane,
-                    fluid=fluid,
-                    frames=frames,
-                ),
-            )
-        actual = prepare(acquisitions)
-        assert torch.equal(torch.from_numpy(actual.pixels), expected[f"pixels/{case}"])
-        assert torch.equal(torch.from_numpy(actual.mask), expected[f"mask/{case}"])
-    assert torch.equal(
-        torch.tensor(
-            [
-                (("Sagittal", "Coronal", "Axial").index(plane), fluid, count)
-                for plane, fluid, count in prepare.config.slots
-            ],
+def test_fluid_volume_opens_bright_masks_in_the_lowest_median_sagittal_series() -> None:
+    # FluidMeasure squares the last-dim pixel size of square R7Render slices.
+    pixels = torch.zeros(8, 6, 6, dtype=torch.uint8)
+    # 37 of series 9's 72 pixels are 50, the rest 240: its median stays below
+    # series 8's 100 while its mean and maximum exceed it.
+    pixels[0:2] = 240
+    pixels[0] = 50
+    pixels[1, 0, 0] = 50
+    pixels[2:4, 1:5, 1:5] = 240
+    pixels[4:6, 3, 3] = 255
+    pixels[6:8] = 100
+    metadata = torch.zeros(8, 12)
+    metadata[:, MetadataColumn.FLUID] = 1
+    metadata[:, MetadataColumn.LOG_SPACING] = 0.75
+    # 0.09375 * 130 mm over 6 pixels is 2.03125 mm, so the opening radius is one.
+    metadata[:, MetadataColumn.EXTENT] = 0.09375
+    blocks = [
+        SliceBlock(
+            series="9",
+            plane="Sagittal",
+            n_slices=2,
+            views=[(0, 0), (4, 2), (5, 4)],
         ),
-        expected["slots"],
+        SliceBlock(series="8", plane="Sagittal", n_slices=2, views=[(0, 6)]),
+        SliceBlock(series="2", plane="Coronal", n_slices=2, views=[(0, 0)]),
+    ]
+    result = FluidMeasure.Config().make()(
+        RenderedStudy(pixels=pixels, metadata=metadata, blocks=blocks, removed=0),
+    )
+    slice_mm = float(np.float32(np.expm1(np.float32(0.75))))
+    assert result.status == "ok"
+    assert (result.series, result.count, result.slices, result.median) == (
+        "9",
+        2,
+        2,
+        50.0,
+    )
+    assert result.spacing == slice_mm
+    # Opening a 4x4 square with the 3x3 ellipse keeps all but its four corners.
+    assert result.effusion == 2 * 12 * 2.03125**2 * slice_mm / 1_000.0
+    assert result.baker == 0.0
+    assert result.by_region() == {
+        "eff_sag_p99_open": result.effusion,
+        "bak_sag_p99_open": 0.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("views", "fluid", "status"),
+    [
+        ((0, 4, 5), 0.0, "no fluid-sensitive sagittal series"),
+        ((0, 5), 1.0, "no region view for eff_sag_p99_open"),
+        ((4, 5), 1.0, "error: KeyError(0)"),
+    ],
+)
+def test_fluid_measurement_reports_each_missing_input(
+    views: tuple[int, ...],
+    fluid: float,
+    status: str,
+) -> None:
+    metadata = torch.zeros(6, 12)
+    metadata[:, MetadataColumn.FLUID] = fluid
+    metadata[:, MetadataColumn.EXTENT] = 0.09375
+    block = SliceBlock(
+        series="9",
+        plane="Sagittal",
+        n_slices=2,
+        views=[(view, 2 * index) for index, view in enumerate(views)],
+    )
+    result = FluidMeasure.Config().make()(
+        RenderedStudy(
+            # FluidMeasure squares the last-dim pixel size of square R7Render slices.
+            pixels=torch.full((6, 8, 8), 50, dtype=torch.uint8),
+            metadata=metadata,
+            blocks=[block],
+            removed=0,
+        ),
+    )
+    assert result.status == status
+    assert result.effusion is None
+
+
+def _axial(
+    pixels: NDArray[np.uint16],
+    *,
+    z: float,
+    spacing: tuple[float, float] = (0.5, 0.5),
+) -> DicomFrame:
+    return read_dicom(
+        dicom_file(
+            pixels,
+            position=(0.0, 0.0, z),
+            orientation=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            spacing=spacing,
+        ),
     )
 
 
+def _constant(level: int, *, z: float) -> DicomFrame:
+    return _axial(np.full((2, 3), level, dtype=np.uint16), z=z)
+
+
+def _ramp() -> DicomFrame:
+    return _axial(10 * np.arange(6, dtype=np.uint16).reshape(2, 3), z=0.0)
+
+
+def test_raptor_slots_prefer_fluid_series_pick_ordered_frames_and_truncate() -> None:
+    prepare = RaptorPrepare.Config(
+        image_size=2,
+        slots=[("Sagittal", 1, 3), ("Sagittal", 0, 2), ("Coronal", 1, 2)],
+    ).make()
+    bag = prepare(
+        [
+            RaptorSeries(
+                series="a",
+                plane="Sagittal",
+                fluid=0.0,
+                frames=[
+                    _constant(100, z=2.0),
+                    _constant(0, z=0.0),
+                    _constant(50, z=1.0),
+                ],
+            ),
+            RaptorSeries(
+                series="b",
+                plane="Sagittal",
+                fluid="1",
+                frames=[
+                    _constant(100, z=3.0),
+                    _constant(100, z=2.0),
+                    _constant(50, z=1.0),
+                    _constant(0, z=0.0),
+                ],
+            ),
+            RaptorSeries(series="c", plane="Axial", fluid=1.0, frames=[_ramp()]),
+        ],
+    )
+    # Over a 0-100 window, 50 and 100 truncate to 127 and 254; over 0-50, 50 is 254.
+    levels = np.array([0, 127, 254, 0, 254, 0, 0], dtype=np.uint8)
+    assert np.array_equal(bag.pixels, np.broadcast_to(levels[:, None, None], (7, 2, 2)))
+    assert bag.mask.tolist() == [0, 1, 1, 0, 1, 0, 0]
+    assert (bag.slot_sizes, bag.sagittal_slots) == ((3, 2, 2), (0, 1))
+
+
+def test_raptor_window_spans_the_2nd_to_98th_percentile_of_selected_frames() -> None:
+    prepare = RaptorPrepare.Config(image_size=2, slots=[("Axial", 1, 2)]).make()
+    frames = [
+        _axial(np.full((2, 3), 65_535, dtype=np.uint16), z=2.0),
+        _axial(np.array([[0, 100], [200, 300]], dtype=np.uint16), z=0.0),
+        _axial(np.array([[400, 500], [600, 700]], dtype=np.uint16), z=1.0),
+    ]
+    bag = prepare([RaptorSeries(series="s", plane="Axial", fluid=1, frames=frames)])
+    # Two slots read the two lowest of three frames. Their eight levels 0-700 put
+    # the 2nd and 98th percentiles at 14 and 686; over that 672 span, levels
+    # 100-600 truncate to 32-222 and 700 clips to 255.
+    assert bag.pixels.tolist() == [[[0, 32], [70, 108]], [[146, 184], [222, 255]]]
+
+
+def test_zero_row_spacing_crops_with_the_median_header_spacing() -> None:
+    image = np.zeros((5, 6), dtype=np.uint16)
+    image[0:4, 1:5] = [
+        [100, 100, 0, 0],
+        [100, 0, 0, 0],
+        [0, 0, 100, 0],
+        [0, 0, 100, 100],
+    ]
+    frames = [
+        _axial(image, z=0.0, spacing=(0.0, 0.5)),
+        _axial(np.zeros((5, 6), dtype=np.uint16), z=1.0, spacing=(1.0, 0.5)),
+        _axial(np.zeros((5, 6), dtype=np.uint16), z=2.0, spacing=(4.0, 0.5)),
+    ]
+    prepare = RaptorPrepare.Config(
+        image_size=2,
+        crop_mm=4.0,
+        slots=[("Axial", 1, 1)],
+    ).make()
+    bag = prepare([RaptorSeries(series="s", plane="Axial", fluid=1, frames=frames)])
+    # Spacings 0, 1 and 4 mm have median 1 mm, so the crop is the central 4x4. Area
+    # halving averages its quadrants to 75, 0, 0 and 75; over the 0-100 window of
+    # 24 zeros and 6 hundreds, 75 truncates to 191.
+    assert bag.pixels.tolist() == [[[191, 0], [0, 191]]]
+
+
 def test_empty_missing_header_and_missing_pixel_inputs_keep_all_slots() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_prepare.pt")
     prepare = RaptorPrepare.Config(image_size=3, slots=[("Axial", 1, 5)]).make()
     assert np.count_nonzero(prepare([]).mask) == 0
     assert (
@@ -946,8 +1469,7 @@ def test_empty_missing_header_and_missing_pixel_inputs_keep_all_slots() -> None:
         )
         == 0
     )
-    valid = read_dicom(expected["input/0/0"].numpy().tobytes())
-    invalid_header = read_dicom(expected["input/0/0"].numpy().tobytes())
+    valid, invalid_header = _ramp(), _ramp()
     invalid_header.values[0x00280030] = b"invalid"
     actual = prepare(
         [
@@ -981,23 +1503,67 @@ def test_empty_missing_header_and_missing_pixel_inputs_keep_all_slots() -> None:
     )
 
 
-def test_slice_output_dtype_and_small_spacing_guard() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_prepare.pt")
-    parameters = expected["crop/parameters"]
+def test_a_frame_whose_pixels_fail_to_decode_leaves_its_slot_empty() -> None:
+    prepare = RaptorPrepare.Config(image_size=2, slots=[("Axial", 1, 2)]).make()
+    ramp = 10 * np.arange(6, dtype=np.uint16).reshape(2, 3)
+    broken = replace(_axial(ramp, z=1.0), pixel_data=b"")
+    frames = [_axial(ramp, z=0.0), broken, _axial(ramp, z=2.0)]
+    bag = prepare([RaptorSeries(series="s", plane="Axial", fluid=1, frames=frames)])
+    # Two slots read the two lowest of three frames; the second has no pixels.
+    assert bag.mask.tolist() == [1, 0]
+
+
+@pytest.mark.parametrize(
+    ("fluid", "failure"),
+    [
+        (None, None),
+        ("0", None),
+        (0.0, None),
+        (float("nan"), ValueError),
+        (float("inf"), OverflowError),
+    ],
+)
+def test_csv_fluid_categories_convert_like_integers_and_reject_nonfinite_values(
+    fluid: float | str | None,
+    failure: type[Exception] | None,
+) -> None:
+    prepare = RaptorPrepare.Config(image_size=3, slots=[("Sagittal", 0, 2)]).make()
+    inputs = [
+        RaptorSeries(series="1", plane="Sagittal", fluid=1, frames=[]),
+        RaptorSeries(series="2", plane="Sagittal", fluid=fluid, frames=[_ramp()]),
+    ]
+    if failure is None:
+        assert prepare(inputs).mask.tolist() == [1, 1]
+    else:
+        with pytest.raises(failure):
+            prepare(inputs)
+
+
+def test_raptor_slice_crops_the_center_square_and_truncates_its_window() -> None:
+    image = np.zeros((6, 8), dtype=np.float32)
+    # The centered 4x4 crop holds four 2x2 blocks averaging 4.5, 9, 0 and 2.25.
+    image[1:5, 2:6] = [[0, 9, 9, 9], [9, 0, 9, 9], [0, 0, 9, 0], [0, 0, 0, 0]]
     pixels = raptor_slice(
-        expected["crop/input"].numpy(),
-        spacing=float(parameters[0]),
-        window=expected["crop/window"].numpy(),
-        image_size=int(parameters[1]),
-        crop_mm=float(parameters[2]),
+        image,
+        spacing=0.5,
+        window=np.array([0.0, 9.0]),
+        image_size=2,
+        crop_mm=2.0,
     )
     assert pixels.dtype == np.uint8
-    assert pixels.shape == (3, 3)
-    assert torch.equal(torch.from_numpy(pixels), expected["crop/output"])
-    percentile = np.percentile(expected["percentile/input"].numpy(), [2.0, 98.0])
-    assert percentile.dtype == np.float64
-    assert expected["percentile/output"].dtype == torch.float64
-    assert torch.equal(torch.from_numpy(percentile), expected["percentile/output"])
+    # Over the 9 + 1e-6 span, 2.25, 4.5 and 9 truncate to 63, 127 and 254.
+    assert pixels.tolist() == [[127, 254], [0, 63]]
+    # A zero spacing counts as 1e-3 mm, so the crop spans the narrower side.
+    assert np.array_equal(
+        raptor_slice(
+            np.full((5, 7), 9.0, dtype=np.float32),
+            spacing=0.0,
+            window=np.array([0.0, 9.0]),
+            image_size=2,
+            crop_mm=1.0,
+        ),
+        np.full((2, 2), 254, dtype=np.uint8),
+    )
 
 
 def _slice(
@@ -1082,74 +1648,81 @@ def test_csv_rows_reject_invalid_or_truncated_utf8(
         _csv_rows(path)
 
 
-def test_source_csv_fluid_conversion_and_nonfinite_failure_classes() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_prepare.pt")
-    prepare = RaptorPrepare.Config(image_size=3, slots=[("Sagittal", 0, 2)]).make()
-    valid = read_dicom(expected["input/0/0"].numpy().tobytes())
-    for index in range(len(expected["selection/results"])):
-        outcome = int(expected["selection/results"][index])
-        fluid = (
-            None
-            if index == 0
-            else "0"
-            if index == 1
-            else float(expected["selection/values"][index])
-        )
-        inputs = [
-            RaptorSeries(series="1", plane="Sagittal", fluid=1, frames=[]),
-            RaptorSeries(series="2", plane="Sagittal", fluid=fluid, frames=[valid]),
-        ]
-        if outcome < 0:
-            with pytest.raises(ValueError if outcome == -1 else OverflowError):
-                prepare(inputs)
-        else:
-            assert outcome == 2
-            assert prepare(inputs).mask.tolist() == [1, 1]
+def _triplets(volume: NDArray[np.uint8], centers: Tensor) -> Tensor:
+    return torch.from_numpy(volume)[torch.stack([centers - 1, centers, centers + 1], 1)]
 
 
-def test_all_raptor_windows_replay_source_tensors() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_windows.pt")
-    # Complete raptor_windows.pt fixes 96 slots and square RaptorWindows images.
+def test_raptor_windows_gather_neighbor_triplets_and_normalize_each_channel() -> None:
+    # RaptorWindows rejects non-square slices; 5x5 leaves room for the 3-pixel crop.
     volume = (torch.arange(96 * 5 * 5).reshape(96, 5, 5) % 256).byte().numpy()
-    mask = np.ones(96, dtype=np.uint8)
     config = RaptorWindows.Config()
     config.crop_size = 3
-    with host_agnostic_numerics():
-        windows = config.make()
-        assert torch.equal(
-            windows(_bag(volume, mask), output_size=3),
-            expected["raptor_run"],
-        )
-        assert torch.equal(
-            windows(_bag(volume, mask), output_size=3, reorient=anatomical_mirror),
-            expected["mirror"],
-        )
-        assert torch.equal(
-            windows(_bag(volume, np.zeros(96, dtype=np.uint8)), output_size=3),
-            expected["raptor_run"][:1].expand(94, -1, -1, -1),
-        )
-        config.crop_size = 4
-        assert torch.equal(
-            config.make()(_bag(volume, mask), output_size=2),
-            expected["raptor224_run"],
-        )
-    for index, selected_mask in enumerate(
-        (
-            mask,
-            np.zeros(96, dtype=np.uint8),
-            np.concatenate(
-                [
-                    np.zeros(20, dtype=np.uint8),
-                    np.ones(4, dtype=np.uint8),
-                    np.zeros(72, dtype=np.uint8),
-                ],
-            ),
-        ),
+    windows = config.make()
+    # RaptorWindows normalizes by its three-channel mean and std viewed as (3, 1, 1).
+    mean = torch.tensor(config.mean).view(3, 1, 1)
+    std = torch.tensor(config.std).view(3, 1, 1)
+    # Every slice is valid, so the 94 centers step through 1..94.
+    centers = torch.arange(1, 95)
+    triplets = _triplets(volume, centers)
+    sagittal = (centers < 26 + 22).view(-1, 1, 1, 1)
+    for reorient, expected in (
+        (unchanged, triplets),
+        (anatomical_mirror, torch.where(sagittal, triplets.flip(1), triplets.flip(-1))),
     ):
         assert torch.equal(
-            torch.from_numpy(window_centers(selected_mask, 96, 94)),
-            expected[f"centers/{index}"],
+            windows(
+                _bag(volume, np.ones(96, dtype=np.uint8)),
+                output_size=3,
+                reorient=reorient,
+            ),
+            (expected[..., 1:4, 1:4].float() / 255 - mean) / std,
         )
+    first = _triplets(volume, torch.ones(94, dtype=torch.int64))
+    assert torch.equal(
+        windows(_bag(volume, np.zeros(96, dtype=np.uint8)), output_size=3),
+        (first[..., 1:4, 1:4].float() / 255 - mean) / std,
+    )
+
+
+def test_raptor_windows_resize_crops_to_the_model_side_before_normalizing() -> None:
+    # RaptorWindows checks slices are square and resizes them to a square output_size.
+    levels = (torch.arange(96 * 2 * 2).reshape(96, 2, 2) % 256).byte()
+    volume = torch.zeros(96, 5, 5, dtype=torch.uint8)
+    # Constant 2x2 blocks make the halving bilinear resize exact.
+    volume[:, :4, :4] = levels.repeat_interleave(2, 1).repeat_interleave(2, 2)
+    config = RaptorWindows.Config()
+    config.crop_size = 4
+    mask = np.ones(96, dtype=np.uint8)
+    # RaptorWindows normalizes by its three-channel mean and std viewed as (3, 1, 1).
+    mean = torch.tensor(config.mean).view(3, 1, 1)
+    std = torch.tensor(config.std).view(3, 1, 1)
+    assert torch.equal(
+        config.make()(_bag(volume.numpy(), mask), output_size=2),
+        (_triplets(levels.numpy(), torch.arange(1, 95)).float() / 255 - mean) / std,
+    )
+    # 3-to-2 half-pixel weights are 3/4 and 1/4; nearest, corner and area reads differ.
+    volume = torch.zeros(96, 5, 5, dtype=torch.uint8)
+    volume[:, 1:4, 1:4] = 255 * torch.tensor(
+        [[1, 1, 0], [0, 1, 0], [1, 0, 0]],
+        dtype=torch.uint8,
+    )
+    config.crop_size = 3
+    # RaptorWindows interpolates all 94 windows to a square output_size.
+    weighted = (torch.tensor([[0.8125, 0.25], [0.625, 0.0625]]) - mean) / std
+    assert torch.equal(
+        config.make()(_bag(volume.numpy(), mask), output_size=2),
+        weighted.expand(94, 3, 2, 2),
+    )
+
+
+def test_window_centers_cover_the_valid_interval_with_rounded_steps() -> None:
+    assert window_centers(np.ones(96, dtype=np.uint8), 96, 94).tolist() == list(
+        range(1, 95),
+    )
+    assert window_centers(np.zeros(96, dtype=np.uint8), 96, 94).tolist() == [1] * 94
+    mask = np.zeros(96, dtype=np.uint8)
+    mask[20:24] = 1
+    assert window_centers(mask, 96, 94).tolist() == [21] * 47 + [22] * 47
 
 
 def test_raptor_windows_validate_slot_geometry_and_normalization() -> None:
@@ -1160,7 +1733,7 @@ def test_raptor_windows_validate_slot_geometry_and_normalization() -> None:
         ValueError,
         match=r"^Raptor slots must sum to the complete volume depth\.$",
     ):
-        # Windows need 96 slices of the square 5x5 grid replayed from the source witness.
+        # The default slots hold 96 square slices; 5x5 leaves room for the 3-pixel crop.
         windows(
             _bag(np.zeros((95, 5, 5), dtype=np.uint8), np.zeros(95, dtype=np.uint8)),
             output_size=3,
@@ -1169,7 +1742,7 @@ def test_raptor_windows_validate_slot_geometry_and_normalization() -> None:
         ValueError,
         match=r"^Raptor input pixels and slice mask must match their geometry\.$",
     ):
-        # Windows need 96 slices of the square 5x5 grid replayed from the source witness.
+        # The default slots hold 96 square slices; 5x5 leaves room for the 3-pixel crop.
         windows(
             _bag(np.zeros((96, 5, 5), dtype=np.uint8), np.zeros(95, dtype=np.uint8)),
             output_size=3,
@@ -1182,7 +1755,7 @@ def test_raptor_windows_validate_slot_geometry_and_normalization() -> None:
             _bag(np.zeros((96, 4, 5), dtype=np.uint8), np.zeros(96, dtype=np.uint8)),
             output_size=3,
         )
-    # Windows need 96 slices of the square 5x5 grid replayed from the source witness.
+    # The default slots hold 96 square slices; 5x5 leaves room for the 3-pixel crop.
     full = _bag(np.zeros((96, 5, 5), dtype=np.uint8), np.zeros(96, dtype=np.uint8))
     for output_size in (0, -1):
         with pytest.raises(ValueError, match="crop"):
@@ -1233,7 +1806,7 @@ class _DeviceGather(TorchDispatchMode):
 
 def test_requested_device_owns_gather_tables_indices_and_resize() -> None:
     config = RaptorWindows.Config()
-    # Windows need 96 slices of the square 5x5 grid replayed from the source witness.
+    # The default slots hold 96 square slices; 5x5 leaves room for the 3-pixel crop.
     bag = _bag(np.zeros((96, 5, 5), dtype=np.uint8), np.ones(96, dtype=np.uint8))
     for crop_size in (3, 4):
         config.crop_size = crop_size
@@ -1248,81 +1821,124 @@ def test_requested_device_owns_gather_tables_indices_and_resize() -> None:
         assert result.shape == (94, 3, 3, 3)
 
 
-def test_one_float32_scale_ulp_changes_the_frozen_outputs() -> None:
-    expected = read_tensors(_CWD / "testdata" / "raptor_windows.pt")
-    # Complete raptor_windows.pt fixes 96 slots and square RaptorWindows images.
-    volume = (torch.arange(96 * 5 * 5).reshape(96, 5, 5) % 256).byte().numpy()
-    config = RaptorWindows.Config()
-    config.crop_size = 3
-    scale = torch.tensor(config.std[0], dtype=torch.float32)
-    scale.view(torch.int32).add_(1)
-    config.std = (float(scale), *config.std[1:])
-    with host_agnostic_numerics():
-        assert not torch.equal(
-            config.make()(_bag(volume, np.ones(96, dtype=np.uint8)), output_size=3),
-            expected["raptor_run"],
-        )
-
-
 def test_two_slice_volume_centers_on_its_only_interior_candidate() -> None:
     centers = window_centers(np.ones(2, dtype=np.uint8), 2, 3)
     assert centers.tolist() == [1, 1, 1]
 
 
-def test_all_orientation_inputs_and_four_tissue_outputs_replay_source() -> None:
-    expected = read_tensors(_CWD / "testdata" / "segment.pt")
-    with host_agnostic_numerics():
-        for case in range(5):
-            prediction = _Prediction(expected["input/logits"].clone().requires_grad_())
-            actual, reason = AnatomySampler.Config().make()(
-                np.asarray(expected["input/pixels"].numpy(), dtype=np.uint16),
-                np.asarray(expected["input/spacing"].numpy(), dtype=np.float64),
-                np.asarray(expected["input/affines"][case].numpy(), dtype=np.float64),
-                prediction,
-                device=torch.device("cpu"),
-            )
-            if case == 4:
-                assert actual is None
-                assert reason == "oblique"
-                assert prediction.inputs == []
-            else:
-                assert reason == "ok"
-                assert actual is not None
-                assert len(prediction.inputs) == len(actual) == 1
-                assert torch.equal(
-                    prediction.inputs[0],
-                    expected["output/prepared"][case],
-                )
-                assert torch.equal(
-                    torch.tensor([index for index, _ in actual]),
-                    expected["output/indices"][case],
-                )
-                assert torch.equal(
-                    torch.stack(
-                        [torch.from_numpy(probability) for _, probability in actual],
-                    ),
-                    expected["output/probabilities"][case],
-                )
-                if case == 0:
-                    perturbed = np.asarray(
-                        expected["input/pixels"].numpy(),
-                        dtype=np.uint16,
-                    ).copy()
-                    perturbed[0, 0, 0] += 1
-                    changed = _Prediction(expected["input/logits"])
-                    AnatomySampler.Config().make()(
-                        perturbed,
-                        np.asarray(expected["input/spacing"].numpy(), dtype=np.float64),
-                        np.asarray(
-                            expected["input/affines"][case].numpy(),
-                            dtype=np.float64,
-                        ),
-                        changed,
-                    )
-                    assert not torch.equal(
-                        changed.inputs[0],
-                        expected["output/prepared"][case],
-                    )
+@pytest.mark.parametrize(
+    ("column", "row"),
+    [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)],
+)
+def test_anatomy_input_is_normalized_flipped_and_restored_per_orientation(
+    column: float,
+    row: float,
+) -> None:
+    # 0.3125 mm pixels already match the model, so 16x32 slices pass unresized.
+    volume = (np.arange(3 * 16 * 32).reshape(3, 16, 32) % 7 * 2).astype(np.uint16)
+    affines = np.zeros((3, 3, 3))
+    affines[:, 1, 0], affines[:, 2, 1] = column, row
+    affines[:, 0, 2] = 4.0 * np.arange(3)
+    # AnatomySampler scores one slice per call and restores every output channel.
+    logits = torch.full((1, 4, 16, 32), -math.inf)
+    logits[..., 0, :] = logits[..., :, 0] = math.inf
+    prediction = _Prediction(logits)
+    result, reason = AnatomySampler.Config().make()(
+        volume,
+        np.full((3, 2), 0.3125),
+        affines,
+        prediction,
+    )
+    assert reason == "ok"
+    assert result is not None
+    flip_x, flip_y = column < 0, row > 0
+    normalized = (volume.astype(np.float32) - float(volume.mean())) / float(
+        volume.std(),
+    )
+    expected = normalized[:, :, ::-1] if flip_x else normalized
+    expected = expected[:, ::-1] if flip_y else expected
+    assert [index for index, _ in result] == [0, 1, 2]
+    assert all(
+        torch.equal(inputs, torch.from_numpy(expected[index].copy())[None, None])
+        for index, inputs in enumerate(prediction.inputs)
+    )
+    restored = np.zeros((4, 16, 32), dtype=np.float32)
+    restored[:, 15 if flip_y else 0], restored[:, :, 31 if flip_x else 0] = 1, 1
+    assert all(np.array_equal(probability, restored) for _, probability in result)
+
+
+def test_anatomy_input_pads_by_replication_and_restores_unpadded_output() -> None:
+    # Mean 4 and std 2 normalize these slices to +-(a + b) / 2 at row a, column b.
+    first = 4 + np.array([-2, 1, 1])[:, None] + np.arange(-2, 3)
+    # AnatomySampler reads column, row and origin vectors in three LPS coordinates.
+    affines = np.zeros((4, 3, 3))
+    affines[:, 1, 0], affines[:, 2, 1] = 1.0, -1.0
+    affines[:, 0, 2] = 4.0 * np.arange(4)
+    # Block (i, j) of the cropped 6x10 output holds (i + j) % 5 ones; padding is 0.5.
+    ones = torch.tensor(
+        [
+            [0, 0, 1, 0, 1, 1, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 0, 1, 0, 1, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 0, 0],
+            [0, 0, 0, 0, 1, 0, 1, 1, 0, 0],
+            [1, 1, 1, 1, 1, 1, 0, 0, 1, 0],
+            [0, 0, 1, 0, 1, 1, 0, 0, 0, 0],
+        ],
+        dtype=torch.bool,
+    )
+    # AnatomySampler scores one slice per call and restores every output channel.
+    logits = torch.zeros(1, 4, 8, 12)
+    logits[..., :6, :10] = torch.where(ones, math.inf, -math.inf)
+    prediction = _Prediction(logits)
+    config = AnatomySampler.Config()
+    config.pad_multiple = 4
+    result, reason = config.make()(
+        np.stack([first, 8 - first] * 2).astype(np.uint16),
+        np.full((4, 2), 0.625),
+        affines,
+        prediction,
+    )
+    assert reason == "ok"
+    assert result is not None
+    # 0.625 mm pixels double each axis at half-pixel centers, then replicate to 8x12.
+    rows = np.array([-1, -0.625, 0.125, 0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+    columns = np.array(
+        [-1, -0.875, -0.625, -0.375, -0.125, 0.125, 0.375, 0.625, 0.875, 1, 1, 1],
+        dtype=np.float32,
+    )
+    prepared = torch.from_numpy(rows[:, None] + columns)[None, None]
+    assert len(prediction.inputs) == 4
+    assert all(
+        torch.equal(inputs, expected)
+        for inputs, expected in zip(
+            prediction.inputs,
+            [prepared, -prepared] * 2,
+            strict=True,
+        )
+    )
+    # A half-pixel restore to 3x5 averages each 2x2 block of ones.
+    restored = np.array([[0, 1, 2, 3, 4], [1, 2, 3, 4, 0], [2, 3, 4, 0, 1]]) / 4
+    assert [index for index, _ in result] == [0, 1, 2, 3]
+    assert all(
+        np.array_equal(probability, np.broadcast_to(restored, (4, 3, 5)))
+        for _, probability in result
+    )
+
+
+def test_oblique_sagittal_geometry_skips_the_anatomy_model() -> None:
+    # AnatomySampler reads column, row and origin vectors in three LPS coordinates.
+    affines = np.zeros((4, 3, 3))
+    affines[0, 0, 0] = affines[0, 2, 1] = 1.0
+    # AnatomySampler scores one slice per call, padded to its 16-pixel minimum side.
+    prediction = _Prediction(torch.zeros(1, 4, 16, 16))
+    result, reason = AnatomySampler.Config().make()(
+        np.zeros((4, 3, 5), dtype=np.uint16),
+        np.ones((4, 2)),
+        affines,
+        prediction,
+    )
+    assert (result, reason) == (None, "oblique")
+    assert prediction.inputs == []
 
 
 def test_all_seven_physical_slices_and_constant_volume_normalization() -> None:
@@ -1356,31 +1972,64 @@ def test_all_seven_physical_slices_and_constant_volume_normalization() -> None:
 
 
 def test_prepared_model_input_reaches_the_requested_device() -> None:
-    expected = read_tensors(_CWD / "testdata" / "segment.pt")
+    affines = np.array([[[0.0, 0.0, 13.0], [1.0, 0.0, -2.0], [0.0, -1.0, 7.0]]])
+    # 3 rows of 3.125 mm and 5 columns of 0.625 mm resize to 30x16, padded to 32x16.
     with pytest.raises(_AtModelError, match=r"^requested device$"):
         AnatomySampler.Config().make()(
-            np.asarray(expected["input/pixels"].numpy(), dtype=np.uint16),
-            np.asarray(expected["input/spacing"].numpy(), dtype=np.float64),
-            np.asarray(expected["input/affines"][0].numpy(), dtype=np.float64),
+            np.arange(15, dtype=np.uint16).reshape(1, 3, 5),
+            np.array([[3.125, 0.625]]),
+            affines,
             _DeviceProbe(),
             device="meta",
         )
 
 
-@pytest.mark.parametrize("canonical", [False, True])
-def test_resize_preserves_nonbinary_horizontal_and_vertical_coefficients(
-    canonical: bool,
-) -> None:
-    expected = read_tensors(_CWD / "testdata" / "segment.pt")
-    image = expected["interpolation/input"]
-    if canonical:
-        with host_agnostic_numerics():
-            actual = _resize_input(image, size=(17, 19))
-    else:
-        actual = _resize_input(image, size=(17, 19))
-    assert torch.equal(
-        actual.view(torch.int32),
-        expected["interpolation/output"].view(torch.int32),
+def test_resize_interpolates_half_pixel_centers_and_clamps_the_edges() -> None:
+    image = np.array([[0.0, 4.0], [8.0, 12.0]], dtype=np.float32)
+    resized = _resize_input(image, size=(4, 4))
+    assert resized.dtype == np.float32
+    assert np.array_equal(
+        resized,
+        [
+            [0.0, 1.0, 3.0, 4.0],
+            [2.0, 3.0, 5.0, 6.0],
+            [6.0, 7.0, 9.0, 10.0],
+            [8.0, 9.0, 11.0, 12.0],
+        ],
+    )
+    assert np.array_equal(
+        _resize_input(image, size=(2, 8)),
+        [
+            [0.0, 0.0, 0.5, 1.5, 2.5, 3.5, 4.0, 4.0],
+            [8.0, 8.0, 8.5, 9.5, 10.5, 11.5, 12.0, 12.0],
+        ],
+    )
+
+
+def test_resize_keeps_seventh_weights_in_float64_until_one_rounding() -> None:
+    # Columns sample (3j - 2) / 7 and rows -1/6, 1/2, 7/6, so every output is a
+    # whole or half value; float32 weights put 105 / 7 one ULP above 15. The
+    # transposed input moves the sevenths onto the rows.
+    image = np.array([[0.0, 105.0, 35.0], [70.0, 0.0, 140.0]], dtype=np.float32)
+    expected = np.array(
+        [
+            [0.0, 15.0, 60.0, 105.0, 75.0, 45.0, 35.0],
+            [35.0, 37.5, 45.0, 52.5, 67.5, 82.5, 87.5],
+            [70.0, 60.0, 30.0, 0.0, 60.0, 120.0, 140.0],
+        ],
+    )
+    assert np.array_equal(_resize_input(image, size=(3, 7)), expected)
+    assert np.array_equal(_resize_input(image.T, size=(7, 3)), expected.T)
+
+
+def test_resize_subtracts_pixels_in_float64_before_one_rounding() -> None:
+    # 1 + 2**-23 and 2**-24 - 1 average to 3 * 2**-25, but their float32
+    # difference rounds to -2. Columns 4 -> 2 and rows 2 -> 3 take midpoints.
+    high, low = 1 + 2**-23, 2**-24 - 1
+    image = np.array([[high, low, high, high], [0.0, 0.0, low, low]], dtype=np.float32)
+    assert np.array_equal(
+        _resize_input(image, size=(3, 2)),
+        [[3 * 2**-25, high], [3 * 2**-26, 3 * 2**-25], [0.0, low]],
     )
 
 
@@ -1405,70 +2054,63 @@ class _Prediction:
         return self.logits
 
 
-def test_complete_physical_series_replay() -> None:
-    expected = read_tensors(_CWD / "testdata" / "series.pt")
-    for series, plane in enumerate(("Sagittal", "Coronal", "Axial")):
-        frames = [
-            NamedFrame(
-                name=f"{index}.dcm",
-                frame=read_dicom(expected[f"input/{series}/{index}"].numpy().tobytes()),
-            )
-            for index in expected[f"enumeration/{series}"].tolist()
-        ]
-        order = order_frames(frames, plane)
-        metadata = expected[f"metadata/{series}"]
-        result = prepare_series(
-            order,
-            series=str(series + 1),
-            side="R",
-            fat=int(metadata[1]),
-            fluid=int(metadata[2]),
+def _sagittal_payloads() -> list[bytes]:
+    """Return four 3x5 sagittal files named 0-3, enumerated out of physical order."""
+    image = np.arange(15, dtype=np.uint16).reshape(3, 5)
+    return [
+        dicom_file(
+            image + index,
+            position=(x, 0.0, 0.0),
+            spacing=(0.5, 0.25),
+            instance=index + 1,
+            laterality="R",
         )
-        native, quality = result.native, result.quality
-        assert torch.equal(
-            torch.from_numpy(native.pixels),
-            expected[f"volume/{series}"],
-        )
-        assert torch.equal(
-            torch.from_numpy(native.positions),
-            expected[f"positions/{series}"],
-        )
-        assert torch.equal(
-            torch.from_numpy(native.spacing),
-            expected[f"spacing/{series}"],
-        )
-        assert torch.equal(
-            torch.from_numpy(result.affines),
-            expected[f"affines/{series}"],
-        )
-        assert torch.equal(torch.from_numpy(quality.depth), expected[f"depth/{series}"])
-        assert torch.equal(
-            torch.tensor(
-                [
-                    float(quality.aligned),
-                    quality.drift_mm,
-                    quality.axis_difference,
-                    *quality.normal,
-                ],
-                dtype=torch.float64,
-            ),
-            expected[f"quality/{series}"],
-        )
-        assert torch.equal(
-            torch.tensor(result.intensity, dtype=torch.float64),
-            expected[f"intensity/{series}"],
-        )
-        assert torch.equal(
-            torch.tensor([native.slot, native.fat, native.fluid]),
-            metadata,
-        )
-        assert torch.equal(
-            torch.tensor([int(Path(name).stem) for name in result.files]),
-            expected[f"order/{series}"],
-        )
-        assert order.sides == ("R",)
-        assert native.side == "R"
-        assert result.errors == []
+        for index, x in enumerate((3.0, 0.0, 2.0, 1.0))
+    ]
+
+
+def _sagittal_frames() -> list[NamedFrame]:
+    return [
+        NamedFrame(name=f"{index}.dcm", frame=read_dicom(payload))
+        for index, payload in enumerate(_sagittal_payloads())
+    ]
+
+
+def test_series_preparation_orders_canonicalizes_and_quantizes_the_acquisition() -> (
+    None
+):
+    order = order_frames(_sagittal_frames(), "Sagittal")
+    names = [1, 3, 2, 0]
+    assert [item.name for item in order.frames] == [f"{name}.dcm" for name in names]
+    assert order.positions.tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert (order.sides, order.median_x) == (("R",), 1.5)
+    result = prepare_series(order, series="1", side="R", fat=1, fluid=0)
+    native = result.native
+    # Canonical sagittal columns run anterior, reversing stored ones; 65535/17 = 3855.
+    image = np.arange(15, dtype=np.uint16).reshape(3, 5)[:, ::-1]
+    assert np.array_equal(native.pixels, 3_855 * np.stack([image + n for n in names]))
+    assert native.positions.tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert native.spacing.tolist() == [[0.5, 0.25]] * 4
+    assert (native.slot, native.side, native.fat, native.fluid) == (1, "R", 1, 0)
+    assert np.array_equal(
+        result.affines,
+        [[[0.0, 0.0, x], [-0.25, 0.0, 1.0], [0.0, -0.5, 0.0]] for x in range(4)],
+    )
+    quality = result.quality
+    assert (quality.aligned, quality.drift_mm, quality.axis_difference) == (
+        True,
+        0.0,
+        0.0,
+    )
+    assert quality.normal.tolist() == [1.0, 0.0, 0.0]
+    assert quality.depth.tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert result.intensity[:3] == (0.0, 17.0, 17 / 131_070)
+    # The window samples rows 0 and columns 0 and 4: levels 0-7 times 3855.
+    low, high = result.intensity[3:]
+    assert 0 < low < 3_855 < 6 * 3_855 < high < 7 * 3_855
+    assert native.window == (low, high)
+    assert result.files == [f"{name}.dcm" for name in names]
+    assert result.errors == []
 
 
 @pytest.mark.parametrize(
@@ -1508,28 +2150,14 @@ def test_rejects_incomplete_or_changing_headers(
     value: bytes,
     message: str,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "series.pt")
-    frames = [
-        NamedFrame(
-            name=f"{index}.dcm",
-            frame=read_dicom(expected[f"input/0/{index}"].numpy().tobytes()),
-        )
-        for index in range(4)
-    ]
+    frames = _sagittal_frames()
     frames[0].frame.values[tag] = value
     with pytest.raises(ValueError, match=message):
         order_frames(frames, "Sagittal")
 
 
 def test_order_guards_normals_axes_projection_and_plane() -> None:
-    expected = read_tensors(_CWD / "testdata" / "series.pt")
-    frames = [
-        NamedFrame(
-            name=f"{index}.dcm",
-            frame=read_dicom(expected[f"input/0/{index}"].numpy().tobytes()),
-        )
-        for index in range(4)
-    ]
+    frames = _sagittal_frames()
     with pytest.raises(
         ValueError,
         match=r"^The acquisition contains no DICOM frames\.$",
@@ -1563,32 +2191,16 @@ def test_order_guards_normals_axes_projection_and_plane() -> None:
 
 
 def test_axis_normalization_accepts_the_exact_minimum_nonzero_length() -> None:
-    expected = read_tensors(_CWD / "testdata" / "series.pt")
-    frames = [
-        NamedFrame(
-            name=f"{index}.dcm",
-            frame=read_dicom(expected[f"input/0/{index}"].numpy().tobytes()),
-        )
-        for index in range(4)
-    ]
+    frames = _sagittal_frames()
     for item in frames:
         item.frame.values[0x00200037] = b"0\\-1e-8\\0\\0\\0\\-2"
-    order = order_frames(frames, "Sagittal")
-    assert torch.equal(torch.from_numpy(order.positions), expected["positions/0"])
+    assert order_frames(frames, "Sagittal").positions.tolist() == [0.0, 1.0, 2.0, 3.0]
 
 
 def test_per_slice_decode_failures_and_matrix_changes_preserve_the_other_slices() -> (
     None
 ):
-    expected = read_tensors(_CWD / "testdata" / "series.pt")
-    frames = [
-        NamedFrame(
-            name=f"{index}.dcm",
-            frame=read_dicom(expected[f"input/0/{index}"].numpy().tobytes()),
-        )
-        for index in range(4)
-    ]
-    order = order_frames(frames, "Sagittal")
+    order = order_frames(_sagittal_frames(), "Sagittal")
     order.frames[0].frame = replace(order.frames[0].frame, pixel_data=b"")
     order.frames[1].frame.values[0x00280010] = b"\x02\0"
     # The first successfully decoded frame establishes the retained matrix.
@@ -1608,13 +2220,18 @@ def test_per_slice_decode_failures_and_matrix_changes_preserve_the_other_slices(
 
 
 def test_one_original_integer_sample_changes_the_complete_quantized_volume() -> None:
-    expected = read_tensors(_CWD / "testdata" / "series.pt")
-    frames: list[NamedFrame] = []
-    for index in range(4):
-        payload = bytearray(expected[f"input/0/{index}"].numpy().tobytes())
-        if index == 0:
-            payload[-2] += 1
-        frames.append(NamedFrame(name=f"{index}.dcm", frame=read_dicom(bytes(payload))))
+    payloads = _sagittal_payloads()
+    reference = prepare_series(
+        order_frames(_sagittal_frames(), "Sagittal"),
+        series="series",
+        side="R",
+        fat=1,
+        fluid=1,
+    )
+    changed = bytearray(payloads[0])
+    changed[-2] += 1
+    frames = _sagittal_frames()
+    frames[0] = NamedFrame(name="0.dcm", frame=read_dicom(bytes(changed)))
     result = prepare_series(
         order_frames(frames, "Sagittal"),
         series="series",
@@ -1622,71 +2239,102 @@ def test_one_original_integer_sample_changes_the_complete_quantized_volume() -> 
         fat=1,
         fluid=1,
     )
-    assert not torch.equal(torch.from_numpy(result.native.pixels), expected["volume/0"])
+    assert not np.array_equal(result.native.pixels, reference.native.pixels)
 
 
-class _Resize(Protocol):
-    def __call__(
-        self,
-        pixels: NDArray[np.float64],
-        shape: tuple[int, int],
-        *,
-        interpolation: int,
-    ) -> NDArray[np.float64]: ...
+def _volume() -> NDArray[np.uint16]:
+    # SideCheck's stride-4 window subsample reads four of these 5x6 pixels.
+    return np.arange(11 * 5 * 6, dtype=np.uint16).reshape(11, 5, 6)
 
 
-class _ReplayOperators:
-    def __init__(self, samples: Tensor, normalized: Tensor) -> None:
-        self.samples = samples
-        self.normalized = normalized
-        self.percentile_calls = self.resize_calls = 0
-        self.original_percentile = cast(
-            "Callable[[NDArray[np.float32], list[int]], NDArray[np.float64]]",
-            np.percentile,
-        )
-        self.original_resize = cast(_Resize, cv2.resize)
-
-    def percentile(
-        self,
-        pixels: NDArray[np.float32],
-        quantiles: list[int],
-    ) -> NDArray[np.float64]:
-        expected = self.samples[self.percentile_calls]
-        actual = torch.from_numpy(pixels)
-        assert actual.dtype == expected.dtype
-        assert torch.equal(actual, expected)
-        self.percentile_calls += 1
-        return self.original_percentile(pixels, quantiles)
-
-    def resize(
-        self,
-        pixels: NDArray[np.float64],
-        shape: tuple[int, int],
-        *,
-        interpolation: int,
-    ) -> NDArray[np.float64]:
-        expected = self.normalized[self.resize_calls]
-        actual = torch.from_numpy(pixels)
-        assert actual.dtype == expected.dtype
-        assert torch.equal(actual, expected)
-        self.resize_calls += 1
-        return self.original_resize(pixels, shape, interpolation=interpolation)
+def _blocky(blocks: NDArray[np.int64]) -> NDArray[np.uint16]:
+    """Upsample 4x4 levels to 8x12, varying mid-range blocks around their means."""
+    middle = ((blocks >= 20) & (blocks <= 80)).astype(np.int64)
+    pattern = np.kron(middle, [[10, -10, 0], [-10, 10, 0]])
+    return (np.kron(blocks, np.ones((2, 3), dtype=np.int64)) + pattern).astype(
+        np.uint16,
+    )
 
 
-class _FrozenSide(nn.Module):
-    def __init__(self, inputs: Tensor, outputs: Tensor) -> None:
+def test_side_inputs_window_each_distinct_middle_slice_and_area_resize_it() -> None:
+    # Each slice's six stride-4 samples include two 0s and two 100s: a 0-100 window.
+    blocks = np.array(
+        [[0, 20, 100, 40], [60, 150, 0, 80], [0, 40, 100, 20], [100, 80, 0, 150]],
+    )
+    volume = np.full((11, 8, 12), 7, dtype=np.uint16)
+    order = [0, 3, 2, 1]
+    for index, slice_blocks in zip(
+        (4, 5, 6),
+        (blocks, blocks.T, blocks[:, order]),
+        strict=True,
+    ):
+        volume[index] = _blocky(slice_blocks)
+    check = SideCheck.Config(image_size=4).make()
+    images = check.inputs(volume)
+    # Area averaging restores each 2x3 block's level; 150 clips to the window top.
+    expected = np.array(
+        [[0, 51, 255, 102], [153, 255, 0, 204], [0, 102, 255, 51], [255, 204, 0, 255]],
+        dtype=np.uint8,
+    )
+    assert images.dtype == np.uint8
+    assert np.array_equal(images, np.stack([expected, expected.T, expected[:, order]]))
+    # A constant slice keeps the 1e-6 span floor and renders black.
+    assert not check.inputs(np.full((3, 8, 12), 7, dtype=np.uint16)).any()
+    empty = check.inputs(volume[:0])
+    assert (empty.shape, empty.dtype) == ((0, 4, 4), np.uint8)
+
+
+def test_side_window_reads_the_1st_and_99th_percentiles_of_the_subsample() -> None:
+    levels = np.array([[0, 100, 300], [600, 1000, 1500], [2100, 2800, 3600]])
+    volume = np.kron(levels, np.ones((4, 3), dtype=np.int64)).astype(np.uint16)
+    images = SideCheck.Config(image_size=3).make().inputs(volume[None])
+    # The stride-4 subsample holds the nine levels, whose 1st and 99th percentiles
+    # are 8 and 3536; area averaging restores each 4x3 level block before rounding.
+    assert images.tolist() == [[[0, 7, 21], [43, 72, 108], [151, 202, 255]]]
+
+
+def test_area_resizes_weight_partial_pixels_at_a_three_to_two_scale() -> None:
+    # Area weights 2/3 and 1/3 read a ramp at 1/3 and 5/3; bilinear reads 1/4 and 7/4.
+    # Halving cannot tell the two apart.
+    ramp = 27 * np.arange(3)[:, None] + 9 * np.arange(3)
+    rendered, extent = _render_slice(
+        (257 * ramp).astype(np.uint16),
+        (1.0, 1.0),
+        2,
+        crop_mm=None,
+        center=(0.5, 0.5),
+        window=(0.0, 65_535.0),
+        floor=0.0,
+        knee=1.0,
+    )
+    assert (rendered.tolist(), extent) == ([[12, 24], [48, 60]], 3.0)
+    # Over the 96 + 1e-6 span, 12, 24, 48 and 60 truncate to 31, 63, 127 and 159.
+    raptor = raptor_slice(
+        ramp.astype(np.float32),
+        spacing=1.0,
+        window=np.array([0.0, 96.0]),
+        image_size=2,
+        crop_mm=3.0,
+    )
+    assert raptor.tolist() == [[31, 63], [127, 159]]
+    # Corners set a 0-100 window; 72 weighs 1/9 everywhere, each right 100 4/9.
+    volume = np.array([[[0, 0, 100], [0, 72, 0], [0, 0, 100]]], dtype=np.uint16)
+    side = SideCheck.Config(image_size=2, percentile_stride=2).make()
+    assert side.inputs(volume).tolist() == [[[20, 134], [20, 134]]]
+
+
+class _SideModel(nn.Module):
+    def __init__(self, logits: list[float]) -> None:
         super().__init__()
-        self.inputs = inputs
-        self.outputs = outputs
-        self.calls = 0
+        self.logits = torch.tensor(logits).view(-1, 1)
+        self.inputs: list[Tensor] = []
 
     @override
     def forward(self, images: Tensor) -> Tensor:
-        assert images.dtype == self.inputs.dtype
-        assert torch.equal(images, self.inputs)
+        assert images.shape == (len(self.logits), 1, 4, 4)
         assert torch.is_inference_mode_enabled()
-        self.calls += 1
-        return self.outputs.clone()
+        self.inputs.append(images.clone())
+        return self.logits.clone()
 
 
 def _rerender(side: str, *, corrections: list[str]) -> set[str | None]:
@@ -1694,120 +2342,228 @@ def _rerender(side: str, *, corrections: list[str]) -> set[str | None]:
     return {side}
 
 
-def test_every_source_side_decision_prepared_image_and_rebuild_request() -> None:
-    expected = read_tensors(_CWD / "testdata" / "side_check.pt")
-    statuses = (
-        "unknown_no_explicit_tags",
-        "explicit_study_tags",
-        "conflicting_study_tags",
-    )
-    for index in range(2):
-        pixels = (
-            SideCheck.Config(image_size=4)
-            .make()
-            .inputs(expected["volumes"][index].numpy())
-        )
-        assert torch.equal(torch.from_numpy(pixels), expected[f"images/{index}"])
-        assert pixels.dtype == np.uint8
-    empty = (
-        SideCheck.Config(image_size=4).make().inputs(expected["volumes"][0, :0].numpy())
-    )
-    assert torch.equal(torch.from_numpy(empty), expected["images/empty"])
-    assert empty.dtype == np.uint8
-    for case in range(sum(name.startswith("case/") for name in expected)):
-        fields = expected[f"case/{case}"]
-        current = None if int(fields[0]) == 0 else "L" if int(fields[0]) == 1 else "R"
-        status = statuses[int(fields[1])]
-        x = float(fields[3]) if bool(fields[2]) else None
-        planes = (
-            ("Sagittal", "Coronal", "Axial")
-            if int(fields[5]) == 0
-            else ("Coronal", "Axial")
-            if int(fields[5]) == 1
-            else ("Sagittal",)
-        )
-        acquisitions = [
-            NativeSeries(
-                series=str(index),
-                pixels=expected["volumes"][index % 2, :0].numpy()
-                if bool(fields[6])
-                else expected["volumes"][index % 2].numpy(),
-                positions=np.array([] if x is None else [x]),
-                spacing=np.ones((11, 2)),
-                plane=plane,
-                slot=1,
-                side=current,
-                fluid=0,
-                fat=0,
-                window=(0, 65_535),
-            )
-            for index, plane in enumerate(planes)
-        ]
-        model = _FrozenSide(expected[f"prepared/{case}"], expected[f"logits/{case}"])
-        corrections: list[str] = []
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _SideCase:
+    """One study's side evidence and the note the check must report."""
 
-        # The source disabled the position bypass with a zero distance.
-        max_x = float(fields[4]) or math.inf
-        check = SideCheck.Config(image_size=4, max_x=max_x).make()
-        note = check(
-            acquisitions,
-            {status},
-            model if bool(fields[7]) else None,
-            device="cpu",
-            rerender=partial(_rerender, corrections=corrections),
-        )
-        if note is None:
-            result = [0.0] * 11
-        else:
-            result = [
-                1.0,
-                0.0 if note.side is None else 1.0 if note.side == "L" else -1.0,
-                float(statuses.index(note.status)),
-                float(note.x is not None),
-                note.x or 0.0,
-                float(note.score is not None),
-                note.score or 0.0,
-                float(note.flipped),
-                0.0 if note.new_side is None else 1.0 if note.new_side == "L" else -1.0,
-                float(note.tag_contradicted_by_position),
-                float(1 + len(corrections)),
-            ]
-        assert torch.equal(
-            torch.tensor(result, dtype=torch.float64),
-            expected[f"result/{case}"],
-        )
-        assert model.calls == int(bool(expected[f"logits/{case}"].numel()))
+    current: str | None
+    status: str = "unknown_no_explicit_tags"
+    x: float | None = None
+    max_x: float = math.inf
+    planes: tuple[str, ...] = STUDY_PLANES
+    logits: list[float] | None = None
+    score: float | None = None
+    flipped: bool = False
+    new_side: str | None = None
+    contradicted: bool = False
 
 
-def test_full_intermediate_dtype_and_epsilon_boundaries(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            _SideCase(current="R", status="explicit_study_tags", x=-22.0),
+            id="position-agrees",
+        ),
+        pytest.param(
+            _SideCase(current="R", status="explicit_study_tags", x=19.9),
+            id="position-central",
+        ),
+        pytest.param(
+            _SideCase(
+                current="R",
+                status="explicit_study_tags",
+                x=20.0,
+                logits=[-3.0] * 6,
+                score=-3.0,
+                flipped=True,
+                new_side="L",
+                contradicted=True,
+            ),
+            id="right-tag-contradicted",
+        ),
+        pytest.param(
+            _SideCase(
+                current="L",
+                status="explicit_study_tags",
+                x=-20.0,
+                logits=[-3.0] * 6,
+                score=-3.0,
+                flipped=True,
+                new_side="R",
+                contradicted=True,
+            ),
+            id="left-tag-contradicted",
+        ),
+        pytest.param(
+            _SideCase(
+                current="L",
+                x=5.0,
+                logits=[-3.0] * 6,
+                score=-3.0,
+                flipped=True,
+                new_side="R",
+            ),
+            id="unknown-flips",
+        ),
+        pytest.param(
+            _SideCase(
+                current=None,
+                status="conflicting_study_tags",
+                logits=[-3.0] * 6,
+                score=-3.0,
+                flipped=True,
+                new_side="R",
+            ),
+            id="conflicting-without-position",
+        ),
+        pytest.param(
+            _SideCase(
+                current=None,
+                planes=STUDY_PLANES[1:],
+                logits=[-3.0] * 6,
+                score=-3.0,
+                flipped=True,
+                new_side="R",
+            ),
+            id="coronal-and-axial",
+        ),
+        pytest.param(
+            _SideCase(current="L", x=20.0, max_x=20.0),
+            id="far-position-bypass",
+        ),
+        pytest.param(
+            # Half-precision logits with a float32 mean just below -2 that rounds to -2.
+            _SideCase(
+                current="L",
+                x=19.999,
+                max_x=20.0,
+                logits=[-2.001953125, -1.9990234375] * 2 + [-2.0, -2.0],
+                score=-2.0,
+                flipped=True,
+                new_side="R",
+            ),
+            id="mean-below-threshold",
+        ),
+        pytest.param(
+            _SideCase(current="L", x=-10.0, logits=[-2.0] * 6, score=-2.0),
+            id="mean-at-threshold",
+        ),
+        pytest.param(
+            _SideCase(current=None, planes=STUDY_PLANES[:1]),
+            id="sagittal-only",
+        ),
+    ],
+)
+def test_side_check_respects_explicit_evidence_and_flips_low_scores(
+    case: _SideCase,
 ) -> None:
-    expected = read_tensors(_CWD / "testdata" / "side_check.pt")
-    check = SideCheck.Config(image_size=4).make()
-    for index in range(3):
-        operators = _ReplayOperators(
-            expected[f"percentile/{index}"],
-            expected[f"resize/{index}"],
+    series = [
+        NativeSeries(
+            series=str(index),
+            pixels=_volume(),
+            positions=np.array([] if case.x is None else [case.x]),
+            spacing=np.ones((11, 2)),
+            plane=plane,
+            slot=1,
+            side=case.current,
+            fluid=0,
+            fat=0,
+            window=(0.0, 65_535.0),
         )
-        with monkeypatch.context() as replay:
-            replay.setattr(np, "percentile", operators.percentile)
-            replay.setattr(cv2, "resize", operators.resize)
-            actual = check.inputs(
-                expected["volumes"][index].numpy()
-                if index < 2
-                else expected["guarded"].numpy(),
-            )
-        assert actual.dtype == np.uint8
-        assert torch.equal(torch.from_numpy(actual), expected[f"images/{index}"])
-        assert operators.percentile_calls == len(expected[f"percentile/{index}"])
-        assert operators.resize_calls == len(expected[f"resize/{index}"])
+        for index, plane in enumerate(case.planes)
+    ]
+    model = _SideModel(case.logits or [])
+    corrections: list[str] = []
+    check = SideCheck.Config(image_size=4, max_x=case.max_x).make()
+    note = check(
+        series,
+        {case.status},
+        model,
+        device="cpu",
+        rerender=partial(_rerender, corrections=corrections),
+    )
+    assert note == SideNote(
+        side=case.current,
+        status=case.status,
+        x=None if case.x is None else round(case.x, 1),
+        score=case.score,
+        flipped=case.flipped,
+        new_side=case.new_side,
+        tag_contradicted_by_position=case.contradicted,
+    )
+    assert corrections == ([] if case.new_side is None else [case.new_side])
+    assert len(model.inputs) == int(case.logits is not None)
+    if case.logits is not None:
+        batch = np.concatenate(
+            [check.inputs(item.pixels) for item in series if item.plane != "Sagittal"],
+        )
+        assert torch.equal(
+            model.inputs[0],
+            (torch.from_numpy(batch).float()[:, None] / 255 - 0.45) / 0.25,
+        )
+
+
+def test_side_check_is_disabled_without_a_model_and_skips_empty_acquisitions() -> None:
+    series = [
+        NativeSeries(
+            series=plane,
+            pixels=_volume()[:0],
+            positions=np.array([10.0]),
+            spacing=np.ones((11, 2)),
+            plane=plane,
+            slot=1,
+            side="L",
+            fluid=0,
+            fat=0,
+            window=(0.0, 65_535.0),
+        )
+        for plane in STUDY_PLANES
+    ]
+    check = SideCheck.Config(image_size=4).make()
+    statuses = {"unknown_no_explicit_tags"}
+    assert check(series, statuses, None, device="cpu", rerender=_never) is None
+    model = _SideModel([])
+    note = check(series, statuses, model, device="cpu", rerender=_never)
+    assert note == SideNote(side="L", status="unknown_no_explicit_tags", x=10.0)
+    assert model.inputs == []
+
+
+def test_side_position_is_the_median_of_each_sagittal_series_median() -> None:
+    series = [
+        NativeSeries(
+            series=str(index),
+            pixels=_volume(),
+            positions=np.array(positions),
+            spacing=np.ones((11, 2)),
+            plane="Sagittal",
+            slot=1,
+            side="R",
+            fluid=0,
+            fat=0,
+            window=(0.0, 65_535.0),
+        )
+        for index, positions in enumerate(([-22.0], [-60.0, -21.0, 50.0], [30.0]))
+    ]
+    note = SideCheck.Config(image_size=4).make()(
+        series,
+        {"explicit_study_tags"},
+        _SideModel([]),
+        device="cpu",
+        rerender=_never,
+    )
+    # Series medians -22, -21 and 30 mm place the study at -21 mm, agreeing with R.
+    assert note == SideNote(side="R", status="explicit_study_tags", x=-21.0)
+
+
+def _never(side: str) -> set[str | None]:
+    raise AssertionError(f"Unexpected rebuild for side {side}.")
 
 
 def test_failed_rebuild_is_rejected_before_reporting_a_flip() -> None:
-    expected = read_tensors(_CWD / "testdata" / "side_check.pt")
     acquisition = NativeSeries(
         series="coronal",
-        pixels=expected["volumes"][0].numpy(),
+        pixels=_volume(),
         positions=np.array([0.0]),
         spacing=np.ones((11, 2)),
         plane="Coronal",
@@ -1845,23 +2601,17 @@ def test_failed_rebuild_is_rejected_before_reporting_a_flip() -> None:
     assert note.score is None
 
 
-class _FrozenModel(nn.Module):
-    def __init__(self, inputs: Tensor, outputs: Tensor) -> None:
-        super().__init__()
-        self.inputs, self.outputs = inputs, outputs
-        self.calls = 0
+class _Calls:
+    def __init__(self, model: Callable[[Tensor], Tensor]) -> None:
+        self.model = model
+        self.inputs: list[Tensor] = []
 
-    @override
-    def forward(self, inputs: Tensor) -> Tensor:
-        assert inputs.dtype == self.inputs.dtype
-        assert torch.equal(inputs, self.inputs[self.calls])
-        assert not torch.is_grad_enabled()
-        output = self.outputs[self.calls].clone()
-        self.calls += 1
-        return output
+    def __call__(self, images: Tensor) -> Tensor:
+        self.inputs.append(images.clone())
+        return self.model(images)
 
 
-def _acquisitions(expected: dict[str, Tensor]) -> list[Acquisition]:
+def _acquisitions() -> list[Acquisition]:
     return [
         Acquisition(
             series=str(index + 1),
@@ -1869,70 +2619,18 @@ def _acquisitions(expected: dict[str, Tensor]) -> list[Acquisition]:
             fat=(1, 0, -1)[index],
             fluid=(1, 1, 0)[index],
             frames=[
-                NamedFrame(
-                    name=f"{number}.dcm",
-                    frame=read_dicom(
-                        expected[f"input/{index}/{number}"].numpy().tobytes(),
-                    ),
-                )
-                for number in expected[f"enumeration/{index}"].tolist()
+                NamedFrame(name=f"{number}.dcm", frame=read_dicom(payload))
+                for number, payload in files
             ],
         )
-        for index, plane in enumerate(("Sagittal", "Coronal", "Axial"))
+        for index, (plane, files) in enumerate(
+            zip(STUDY_PLANES, study_series(), strict=True),
+        )
     ]
 
 
-def test_source_complete_side_correction_rebuild_anchors_fluid_and_windows() -> None:
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
-    side = _FrozenModel(expected["side/input"], expected["side/output"])
-    anatomy = _FrozenModel(expected["anatomy/input"], expected["anatomy/output"])
-    config = StudyPreparation.Config()
-    config.render.image_size = config.side.image_size = 4
-    actual = config.make()(_acquisitions(expected), anatomy=anatomy, side=side)
-    assert actual.images.dtype == expected["images"].dtype
-    assert torch.equal(actual.images, expected["images"])
-    assert actual.metadata.dtype == expected["metadata"].dtype
-    assert torch.equal(actual.metadata, expected["metadata"])
-    assert side.calls == len(expected["side/input"])
-    assert anatomy.calls == len(expected["anatomy/input"])
-    assert actual.errors == []
-    assert {item.native.side for item in actual.acquisitions} == {"L"}
-    assert actual.anchors.method == "slab_prior"
-    assert actual.anchors.reasons == ["mass<250(0)"]
-    assert actual.side is not None
-    assert actual.side.side == "R"
-    assert actual.side.status == "explicit_study_tags"
-    assert actual.side.x == 33.1
-    assert actual.side.score == -3.0
-    assert actual.side.flipped
-    assert actual.side.new_side == "L"
-    assert actual.side.tag_contradicted_by_position
-    fluid = actual.fluid
-    assert fluid.status == "ok"
-    assert torch.equal(
-        torch.tensor(
-            [
-                fluid.effusion,
-                fluid.baker,
-                fluid.count,
-                fluid.median,
-                fluid.slices,
-                fluid.spacing,
-                int(fluid.series or "0"),
-            ],
-            dtype=torch.float64,
-        ),
-        expected["fluid"],
-    )
-
-
-def test_empty_physical_study_fails_before_model_inference() -> None:
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
-    model = _FrozenModel(expected["side/input"], expected["side/output"])
-    with pytest.raises(ValueError, match=r"^The study contains no usable windows\.$"):
-        StudyPreparation.Config().make()([], anatomy=model, side=model)
-    assert model.calls == 0
-    assert _PhysicalStudy().statuses() == set()
+def _low_side(images: Tensor) -> Tensor:
+    return images.new_full((len(images), 1), -3.0)
 
 
 def _zero_anatomy(images: Tensor) -> Tensor:
@@ -1943,10 +2641,69 @@ def _zero_side(images: Tensor) -> Tensor:
     return images.new_zeros((len(images), 1))
 
 
+def test_study_preparation_flips_a_contradicted_side_and_assembles_every_window() -> (
+    None
+):
+    anatomy, side = _Calls(_zero_anatomy), _Calls(_low_side)
+    config = StudyPreparation.Config()
+    config.render.image_size = config.side.image_size = 4
+    actual = config.make()(_acquisitions(), anatomy=anatomy, side=side)
+    assert actual.errors == []
+    # The sagittal series sits at x 33.1 mm, contradicting its right tags.
+    assert actual.side == SideNote(
+        side="R",
+        status="explicit_study_tags",
+        x=33.1,
+        score=-3.0,
+        flipped=True,
+        new_side="L",
+        tag_contradicted_by_position=True,
+    )
+    assert {item.native.side for item in actual.acquisitions} == {"L"}
+    # Two middle slices per coronal and axial series; both sagittal slices.
+    assert [images.shape for images in side.inputs] == [(4, 1, 4, 4)]
+    assert [images.shape for images in anatomy.inputs] == [(1, 1, 16, 16)] * 2
+    assert actual.anchors.method == "slab_prior"
+    assert actual.anchors.reasons == ["mass<250(0)"]
+    rows = torch.from_numpy(evaluation_rows(actual.rendered, stride=1, slab_mm=3.5))
+    pixels, metadata = actual.rendered.pixels, actual.rendered.metadata
+    assert torch.equal(actual.images, pixels[rows[:, 2:]])
+    assert torch.equal(
+        actual.metadata,
+        metadata[rows[:, 1]][
+            :,
+            [int(column) for column in (*MODEL_COLUMNS, *EXTENT_COLUMNS)],
+        ],
+    )
+    fluid = actual.fluid
+    assert (fluid.status, fluid.series, fluid.count, fluid.slices) == ("ok", "1", 1, 2)
+
+
+def test_only_in_field_anchors_reach_the_rendered_series() -> None:
+    config = StudyPreparation.Config()
+    config.render.image_size = config.side.image_size = 4
+    prepare = config.make()
+    # Alone, the sagittal series' slab prior is its own middle-slice center.
+    alone = prepare(_acquisitions()[:1], anatomy=_zero_anatomy, side=_zero_side)
+    (native,) = [item.native for item in alone.acquisitions]
+    assert (native.joint, native.patella) == ((0.5, 0.5), None)
+    # Beside the coronal and axial stacks, the prior projects outside every series.
+    study = prepare(_acquisitions(), anatomy=_zero_anatomy, side=_zero_side)
+    assert not any(anchor.in_field for anchor in study.anchors.series.values())
+    assert [item.native.joint for item in study.acquisitions] == [None] * 3
+
+
+def test_empty_physical_study_fails_before_model_inference() -> None:
+    model = _Calls(_low_side)
+    with pytest.raises(ValueError, match=r"^The study contains no usable windows\.$"):
+        StudyPreparation.Config().make()([], anatomy=model, side=model)
+    assert model.inputs == []
+    assert _PhysicalStudy().statuses() == set()
+
+
 @pytest.mark.parametrize("mode", ["unknown", "conflicting"])
 def test_anatomical_tag_trust_is_resolved_across_retained_series(mode: str) -> None:
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
-    acquisitions = _acquisitions(expected)
+    acquisitions = _acquisitions()
     for index, acquisition in enumerate(acquisitions):
         acquisition.frames = [
             replace(
@@ -1978,8 +2735,7 @@ def test_anatomical_tag_trust_is_resolved_across_retained_series(mode: str) -> N
 
 
 def test_bad_acquisitions_preserve_every_other_series_and_its_side_correction() -> None:
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
-    acquisitions = _acquisitions(expected)
+    acquisitions = _acquisitions()
     missing_pixels = replace(
         acquisitions[1],
         series="missing-pixels",
@@ -1996,10 +2752,11 @@ def test_bad_acquisitions_preserve_every_other_series_and_its_side_correction() 
     ]
     config = StudyPreparation.Config()
     config.render.image_size = config.side.image_size = 4
-    side = _FrozenModel(expected["side/input"], expected["side/output"])
-    anatomy = _FrozenModel(expected["anatomy/input"], expected["anatomy/output"])
-    actual = config.make()([*invalid, *acquisitions], anatomy=anatomy, side=side)
-    assert torch.equal(actual.images, expected["images"])
+    prepare = config.make()
+    clean = prepare(acquisitions, anatomy=_zero_anatomy, side=_low_side)
+    actual = prepare([*invalid, *acquisitions], anatomy=_zero_anatomy, side=_low_side)
+    assert torch.equal(actual.images, clean.images)
+    assert actual.side == clean.side
     assert [item.native.series for item in actual.acquisitions] == ["1", "2", "3"]
     assert len(actual.errors) == 3
     assert {series for series, _ in actual.errors} == {
@@ -2010,8 +2767,7 @@ def test_bad_acquisitions_preserve_every_other_series_and_its_side_correction() 
 
 
 def test_patient_conflicts_and_nonfinite_categories_fail_before_model_calls() -> None:
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
-    acquisitions = _acquisitions(expected)
+    acquisitions = _acquisitions()
     acquisitions[0].frames = [
         replace(
             item,
@@ -2028,15 +2784,14 @@ def test_patient_conflicts_and_nonfinite_categories_fail_before_model_calls() ->
         match=r"^Conflicting patients occur within one study\.$",
     ):
         prepare(acquisitions, anatomy=_zero_anatomy, side=None)
-    acquisitions = _acquisitions(expected)
+    acquisitions = _acquisitions()
     acquisitions[0].fluid = float("inf")
     with pytest.raises(OverflowError, match="cannot convert float infinity to integer"):
         prepare(acquisitions, anatomy=_zero_anatomy, side=None)
 
 
 def test_unknown_categories_and_failed_anatomy_keep_slab_prior() -> None:
-    expected = read_tensors(_CWD / "testdata" / "study.pt")
-    acquisitions = _acquisitions(expected)
+    acquisitions = _acquisitions()
     acquisitions[0].fat, acquisitions[0].fluid = None, float("nan")
 
     def failed(images: Tensor) -> Tensor:
@@ -2185,6 +2940,17 @@ def test_files_that_are_not_dicom_members_are_not_slices(tmp_path: Path) -> None
     after = [frame.name for frame in config.make().load("study").physical[0].frames]
     assert after == before
     assert "notes.txt" not in after
+
+
+def test_dicom_files_list_case_insensitive_members_in_lexical_order(
+    tmp_path: Path,
+) -> None:
+    for name in ("b.dcm", "A.DCM", "notes.txt", "c.dCm"):
+        (tmp_path / name).write_bytes(b"")
+    assert dicom_files(tmp_path) == [
+        tmp_path / name for name in ("A.DCM", "b.dcm", "c.dCm")
+    ]
+    assert dicom_files(tmp_path / "missing") == []
 
 
 if __name__ == "__main__":

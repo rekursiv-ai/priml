@@ -1,24 +1,15 @@
-"""Replay the source's subject folds and reject cohorts that leave no training set."""
+"""Greedy subject folds and fixed cohorts that must leave a training set."""
 
 from __future__ import annotations
-
-from pathlib import Path
-from typing import Final
-
-from treekle import from_plain
 
 import pytest
 import torch
 
 from priml.baselines.motor_imagery.data import Trial
 from priml.baselines.motor_imagery.folds import FixedCohort, GroupedFolds
-from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
-
-def test_subject_folds_match_reference_for_every_unequal_group_window() -> None:
+def test_subject_folds_place_the_largest_people_first() -> None:
     cfg = GroupedFolds.Config()
     cfg.count = 3
     trials = [
@@ -30,31 +21,12 @@ def test_subject_folds_match_reference_for_every_unequal_group_window() -> None:
         )
         for index, count in enumerate((2, 4, 5, 7))
     ]
-    windows = [
-        (trial.trial_id, window)
-        for trial in trials
-        for window in range(len(trial.windows))
-    ]
-    record = read_tensors(_CWD / "testdata" / "subject_folds.pt")
-    expected = [
-        {windows[index] for index in from_plain(indices.tolist(), list[int])}
-        for indices in (record[f"unequal/{fold}"] for fold in range(cfg.count))
-    ]
-    actual = [
-        {
-            (trial.trial_id, window)
-            for trial in trials
-            if trial.subject in people
-            for window in range(len(trial.windows))
-        }
-        for people in cfg.make()(trials)
-    ]
-    assert actual == expected
-    assert {window for fold in actual for window in fold} == set(windows)
+    # Windows 7 and 5 open two folds; 4 then 2 both join the lightest third.
+    assert list(cfg.make()(trials)) == [["S004"], ["S003"], ["S001", "S002"]]
 
 
 @pytest.mark.parametrize("reverse", argvalues=[False, True])
-def test_subject_folds_replay_source_equal_count_ties(reverse: bool) -> None:
+def test_subject_folds_pair_equal_count_people(reverse: bool) -> None:
     cfg = GroupedFolds.Config()
     cfg.count = 3
     counts = (3, 6, 3, 6, 3, 6)
@@ -67,17 +39,11 @@ def test_subject_folds_replay_source_equal_count_ties(reverse: bool) -> None:
         )
         for index, count in enumerate(counts)
     ]
-    windows = [
-        (trial.subject, window)
-        for trial in trials
-        for window in range(len(trial.windows))
+    assert list(cfg.make()(trials[::-1] if reverse else trials)) == [
+        ["S004", "S005"],
+        ["S002", "S003"],
+        ["S000", "S001"],
     ]
-    record = read_tensors(_CWD / "testdata" / "subject_folds.pt")
-    for fold, people in enumerate(cfg.make()(trials[::-1] if reverse else trials)):
-        actual = {
-            index for index, (subject, _) in enumerate(windows) if subject in people
-        }
-        assert actual == set(from_plain(record[f"ties/{fold}"].tolist(), list[int]))
 
 
 @pytest.mark.parametrize("count", [1, 5])

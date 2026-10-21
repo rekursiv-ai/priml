@@ -1,11 +1,9 @@
-"""Replay reference-minted model and optimizer tensors without importing upstream."""
+"""Construction, costing, and the init-and-forward golden of the EEG networks."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, Literal, Self, override
-
-import re
+from typing import Final, Self, override
 
 from configgle import Fig, InlineConfig
 
@@ -20,7 +18,6 @@ from priml.baselines.motor_imagery.model import (
 from priml.baselines.motor_imagery.testing import (
     compare_record,
     model_record,
-    read_source_record,
 )
 from priml.cost import Cost, cost
 from priml.model.conv import Conv2d
@@ -34,8 +31,7 @@ from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import (
     PinnedRandom,
-    mismatches,
-    read_tensors,
+    assert_tensor_golden_part,
     tensor_bits_equal,
 )
 
@@ -61,33 +57,6 @@ def _small(
 
 
 @pytest.mark.parametrize(
-    "name",
-    ["multiscaleeegnet", "shallowconvnet", "attentioneegnet"],
-)
-@pytest.mark.parametrize(
-    "field",
-    [
-        "initial/classifier.weight",
-        "final/classifier.weight",
-        "gradient/classifier.weight",
-        "optimizer/0/exp_avg",
-        "losses",
-        "eval_logits",
-    ],
-)
-def test_source_record_rejects_one_ulp_in_every_state_family(
-    name: str,
-    field: str,
-) -> None:
-    expected = read_tensors(_CWD / "testdata" / f"{name}.pt")
-    actual = {key: value.clone() for key, value in expected.items()}
-    changed = actual[field].flatten()
-    changed[0] = torch.nextafter(changed[0], torch.full_like(changed[0], float("inf")))
-    with pytest.raises(ValueError, match=re.escape(field)):
-        compare_record(expected, actual)
-
-
-@pytest.mark.parametrize(
     "model_type",
     [MultiScaleEEGNet, ShallowConvNet, AttentionEEGNet],
 )
@@ -107,42 +76,6 @@ def test_state_saved_under_the_source_names_loads_strictly(
         model_record(saved, prefix="model"),
         model_record(loaded, prefix="model"),
     )
-
-
-@pytest.mark.parametrize(
-    "model_type",
-    [MultiScaleEEGNet, ShallowConvNet, AttentionEEGNet],
-)
-@pytest.mark.parametrize("mutation", ["uniform", "bernoulli", "dropout"])
-def test_constructor_rejects_stochastic_draw_order_changes(
-    model_type: type[MultiScaleEEGNet | ShallowConvNet | AttentionEEGNet],
-    mutation: Literal["uniform", "bernoulli", "dropout"],
-) -> None:
-    cfg = _small(model_type)
-    if mutation == "dropout":
-        if isinstance(cfg, ShallowConvNet.Config):
-            cfg.drop = InlineConfig(torch.nn.Identity)
-        else:
-            assert isinstance(cfg, (MultiScaleEEGNet.Config, AttentionEEGNet.Config))
-            cfg.drop1 = InlineConfig(torch.nn.Identity)
-    expected = {
-        key: value
-        for key, value in read_source_record(
-            _CWD / "testdata" / f"{model_type.__name__.lower()}.pt",
-        ).items()
-        if key.startswith("initial/")
-    }
-    with (
-        host_agnostic_numerics(),
-        PinnedRandom(),
-    ):
-        if mutation == "uniform":
-            torch.empty(2, 3).uniform_()
-        if mutation == "bernoulli":
-            torch.empty(2, 3).bernoulli_()
-        actual = model_record(cfg.make(), prefix="initial")
-    with pytest.raises(ValueError, match="initial/"):
-        compare_record(expected, actual)
 
 
 @pytest.mark.parametrize(
@@ -442,52 +375,25 @@ def test_constructor_dummy_updates_every_batch_norm_running_buffer(
     "model_type",
     [MultiScaleEEGNet, ShallowConvNet, AttentionEEGNet],
 )
-def test_model_forward_matches_pinned_public_reference(
+def test_model_init_and_forward_match_golden(
     model_type: type[MultiScaleEEGNet | ShallowConvNet | AttentionEEGNet],
 ) -> None:
-    record = read_source_record(
-        _CWD / "testdata" / f"{model_type.__name__.lower()}.pt",
-    )
-    cfg = _small(model_type)
     with (
         host_agnostic_numerics(),
         PinnedRandom(),
     ):
-        model = cfg.make()
-        assert not mismatches(
-            {key: value for key, value in record.items() if key.startswith("initial/")},
-            model_record(model, prefix="initial"),
-        )
+        model = _small(model_type).make()
+        record = model_record(model, prefix="init")
         model.eval()
-        # The reference Conv2d explicitly requires its singleton input plane.
+        # Every network's Conv2d requires a singleton input plane.
         media = torch.arange(4 * 3 * 100).reshape(4, 1, 3, 100).float() / 100
         with torch.no_grad():
-            logits = model(media)
-        assert not mismatches({"logits": record["logits"]}, {"logits": logits})
-
-
-def test_reference_golden_detects_a_logit_shift_even_when_argmax_is_unchanged() -> None:
-    record = read_source_record(_CWD / "testdata" / "multiscaleeegnet.pt")
-    cfg = MultiScaleEEGNet.Config(8, 2)
-    cfg.channels_in = 3
-    cfg.num_samples = 100
-    cfg.channels_hidden = cfg.channels_projection = 2
-    with (
-        host_agnostic_numerics(),
-        PinnedRandom(),
-    ):
-        model = cfg.make()
-        model.eval()
-        with torch.no_grad():
-            projection = _as(model.proj_out, Linear)
-            assert projection.bias is not None
-            projection.bias.add_(1.0)
-            # MultiScaleEEGNet.__init__ fixes the Conv2d input plane to one.
-            media = torch.arange(4 * 3 * 100).reshape(4, 1, 3, 100).float() / 100
-            logits = model(media)
-    assert torch.equal(logits.argmax(dim=1), record["logits"].argmax(dim=1))
-    with pytest.raises(ValueError, match="logits: 8/8 differ"):
-        compare_record({"logits": record["logits"]}, {"logits": logits})
+            record["init/logits"] = model(media)
+    assert_tensor_golden_part(
+        _CWD / "testdata" / f"{model_type.__name__.lower()}.pt",
+        prefix="init/",
+        record=record,
+    )
 
 
 @pytest.mark.parametrize(

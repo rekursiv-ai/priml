@@ -8,7 +8,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from random import Random
 from typing import (
-    TYPE_CHECKING,
     Final,
     Protocol,
     cast,
@@ -21,8 +20,10 @@ import csv
 import math
 import random
 import re
+import statistics
 
 from configgle import Fig, InlineConfig, Makeable
+from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data._utils.worker import WorkerInfo, get_worker_info
@@ -39,13 +40,6 @@ from priml.baselines.wellbore_geology.folds import (
 from priml.data.na_values import PANDAS_NA_VALUES
 from priml.math.fused import fma64
 
-
-if TYPE_CHECKING:
-    from priml.math.fused import fma32
-else:
-    from wrapt import lazy_import
-
-    fma32 = lazy_import("priml.math.fused", "fma32")
 
 PARTICLE_PLANES: Final = (
     "pf_prob",
@@ -1151,7 +1145,7 @@ class GammaBias:
             window = component.window
             raw = numpy.normal(0, 1, size=len(depth) + window - 1).astype(np.float32)
             if window > 1:
-                raw = _boxcar_noise(raw, width=window)
+                raw = _boxcar_mean(raw, width=window)
             components.append(np.float64(weight) ** np.float64(0.5) * _standardize(raw))
         noise = (
             np.float32(config.depth_std) * _standardize(np.sum(components, axis=0))
@@ -1808,39 +1802,11 @@ def _validate_distribution(
         raise ValueError(f"{name} weights must form a positive distribution.")
 
 
-def _boxcar_noise(values: NDArray[np.float32], *, width: int) -> NDArray[np.float32]:
-    """Average complete noise windows in the reference binary32 reduction order."""
-    if width < 32:
-        return np.convolve(
-            values,
-            np.full(width, 1 / width, dtype=np.float32),
-            mode="valid",
-        )
-    windows = torch.from_numpy(values).unfold(0, width, 1)
-    rows = windows.shape[0]
-    scale = torch.tensor(float(np.float32(1 / width)), dtype=torch.float32)
-    accumulators = torch.zeros((rows, 4, 16), dtype=torch.float32)
-    complete = width // 64 * 64
-    for start in range(0, complete, 64):
-        accumulators = fma32(
-            windows[:, start : start + 64].reshape(rows, 4, 16),
-            y=scale,
-            addend=accumulators,
-        )
-    halves = accumulators[:, :, :8] + accumulators[:, :, 8:]
-    if width % 64 >= 32:
-        halves = fma32(
-            windows[:, complete : complete + 32].reshape(rows, 4, 8),
-            y=scale,
-            addend=halves,
-        )
-    combined = ((halves[:, 0] + halves[:, 1]) + halves[:, 2]) + halves[:, 3]
-    lanes = combined[:, :4] + combined[:, 4:]
-    vector = (lanes[:, 0] + lanes[:, 1]) + (lanes[:, 2] + lanes[:, 3])
-    tail = torch.zeros(rows, dtype=torch.float64)
-    for index in range(width // 32 * 32, width):
-        tail += (windows[:, index] * scale).double()
-    return cast("NDArray[np.float32]", (tail + vector.double()).float().numpy())
+def _boxcar_mean(values: NDArray[np.float32], *, width: int) -> NDArray[np.float32]:
+    """Average every complete window in float64, rounded once to float32."""
+    # np.convolve sends each window to BLAS dot, whose summation order varies by host.
+    windows = sliding_window_view(values.astype(np.float64), width)
+    return (windows.sum(axis=1) / width).astype(np.float32)
 
 
 def _standardize(values: NDArray[np.generic]) -> NDArray[np.float32]:
@@ -1856,12 +1822,7 @@ def _smooth(values: NDArray[np.float32], width: int) -> NDArray[np.float32]:
         return values.copy()
     if width % 2 == 0:
         width -= 1
-    kernel = np.full(width, 1 / width, dtype=np.float32)
-    return np.convolve(
-        np.pad(values, (width // 2, width // 2), mode="edge"),
-        kernel,
-        mode="valid",
-    )
+    return _boxcar_mean(np.pad(values, width // 2, mode="edge"), width=width)
 
 
 def _fill(values: NDArray[np.generic]) -> NDArray[np.float32]:
@@ -2199,28 +2160,6 @@ def read_centroids(path: Path, *, well_ids: Sequence[str]) -> NDArray[np.float64
     return coordinates
 
 
-def kahan_add[Float: np.floating](
-    total: Float,
-    correction: Float,
-    value: Float,
-) -> tuple[Float, Float]:
-    """Add one value with the recipe's plain Kahan compensation.
-
-    Args:
-      total: Running sum in the accumulation precision.
-      correction: Running compensation for the bits lost so far.
-      value: Next term in the same precision.
-
-    Returns:
-      total: Running sum including the value.
-      correction: Compensation for the bits lost by this addition.
-
-    """
-    adjusted = value - correction
-    updated = total + adjusted
-    return updated, updated - total - adjusted
-
-
 class ReferenceCalibration:
     """Blend rounded prefix means into the raw reference curve inside its support."""
 
@@ -2276,18 +2215,20 @@ class ReferenceCalibration:
         if np.count_nonzero(valid) == 0:
             return result
         rounded = np.round(depth[valid] * cfg.resolution) / cfg.resolution
-        groups, inverse = np.unique(rounded, return_inverse=True)
-        values = gamma[valid]
-        sums = np.zeros(len(groups))
-        compensation = np.zeros_like(sums)
-        for row in range(len(values)):
-            group = cast("np.int64", inverse[row])
-            sums[group], compensation[group] = kahan_add(
-                cast("np.float64", sums[group]),
-                cast("np.float64", compensation[group]),
-                cast("np.float64", values[row]),
-            )
-        means = sums / np.bincount(inverse)
+        groups, inverse, counts = np.unique(
+            rounded,
+            return_inverse=True,
+            return_counts=True,
+        )
+        members = np.split(
+            gamma[valid][np.argsort(inverse, kind="stable")],
+            np.cumsum(counts)[:-1],
+        )
+        # A float64 sum rounds before its division and misrounds a quarter of means.
+        means = np.asarray(
+            [statistics.mean(cast("list[float]", group.tolist())) for group in members],
+            dtype=np.float64,
+        )
         left = cast("np.float64", groups[0])
         right = cast("np.float64", groups[-1])
         supported = (reference_depth >= left) & (reference_depth <= right)
@@ -2657,7 +2598,7 @@ def prepare_well(
         reference_gamma=well.reference_gamma,
     )
     reference_depth = well.reference_depth.astype(np.float32)
-    order = np.argsort(reference_depth)
+    order = np.argsort(reference_depth, kind="stable")
     return WellRecord(
         well_id=well.well_id,
         horizontal=horizontal,
@@ -2859,7 +2800,7 @@ class ExpandPrediction:
 
 
 def _csv_float(value: str) -> float:
-    """Parse competition numbers with the pinned 17-digit binary64 arithmetic."""
+    """Parse one competition number to the nearest binary64 value."""
     if value in PANDAS_NA_VALUES:
         return float("nan")
     token = value.strip()
@@ -2871,20 +2812,7 @@ def _csv_float(value: str) -> float:
     )
     if match is None or not (match[2] or match[3]):
         raise ValueError(f"Invalid numeric CSV observation: {value!r}.")
-    integer = match[2]
-    digits = (integer + (match[3] or ""))[:17]
-    number = 0.0
-    for digit in digits:
-        number = number * 10.0 + int(digit)
-    if match[1] == "-":
-        number = -number
-    scale = len(integer) - len(digits) + int(match[4] or "0")
-    if scale > 308:
+    number = float(token)
+    if math.isinf(number):
         raise ValueError(f"Numeric CSV observation exceeds float64 range: {value!r}.")
-    if scale < -616:
-        return 0.0
-    if scale < -308:
-        return number / float(f"1e{-308 - scale}") / 1e308
-    if scale > 0:
-        return number * float(f"1e{scale}")
-    return number / float(f"1e{-scale}")
+    return number

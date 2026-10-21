@@ -32,7 +32,12 @@ from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.newton import Newton
 from priml.runtime import SingleProcess
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, read_tensors, rng_fingerprint
+from priml.testing.golden import (
+    assert_tensor_golden,
+    mismatches,
+    read_tensors,
+    rng_fingerprint,
+)
 from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA
 from priml.train.parallelism import NoParallel
@@ -58,7 +63,7 @@ def tiny_step() -> FingerprintFineTune.Config:
 
 
 def batch() -> SpectrumData.Batch:
-    """Rebuild deterministic source-capture inputs without storing duplicate data."""
+    """Rebuild the deterministic inputs instead of storing them."""
     mz, it, pad, prec, ad, ce, known, merged, mode = inputs()
     return {
         "mz": mz,
@@ -77,39 +82,28 @@ def batch() -> SpectrumData.Batch:
     }
 
 
-def test_three_steps_match_every_source_state_tensor() -> None:
-    expected = read_tensors(GOLDEN)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+def test_three_steps_match_every_state_tensor() -> None:
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         _ = torch.manual_seed(42)
         step = tiny_step().make()
         model = step.model
         assert isinstance(model, FPNet)
         actual = {
             f"initial/{name}": value.detach().clone()
-            for name, value in model.released_state().items()
+            for name, value in model.state_dict().items()
         }
         actual["initial/rng"] = rng_fingerprint()
         actual["loss"] = torch.stack(
             [step.train_step(**batch())["loss"] for _ in range(3)],
         ).float()
-        for name, value in model.released_state().items():
-            actual[f"final/{name}"] = value.detach().clone().float()
+        for name, value in model.state_dict().items():
+            actual[f"final/{name}"] = value.detach().clone()
         optimizer = step.optimizer.state_dict()
         state = from_plain(optimizer["state"], dict[int, dict[str, Tensor]])
-        native_parameters = dict(model.named_parameters())
-        native_names = list(native_parameters)
-        released_indices = {
-            name: index
-            for index, name in enumerate(
-                native
-                for native in model.checkpoint_names().values()
-                if native in native_parameters
-            )
-        }
+        names = [name for name, _ in model.named_parameters()]
         for index, values in state.items():
             for name, value in values.items():
-                released_index = released_indices[native_names[index]]
-                actual[f"optimizer/{released_index}/{name}"] = (
+                actual[f"optimizer/{names[index]}/{name}"] = (
                     value.detach().clone().float()
                 )
         step.model.eval()
@@ -121,7 +115,7 @@ def test_three_steps_match_every_source_state_tensor() -> None:
         actual["inference/logits"] = inference[0].detach().float()
         actual["inference/elements"] = inference[1].detach().float()
         actual["final/rng"] = rng_fingerprint()
-    assert not mismatches(expected, actual), "\n".join(mismatches(expected, actual))
+    assert_tensor_golden(GOLDEN, actual)
 
 
 def test_native_eval_and_keyword_contract() -> None:
@@ -130,33 +124,6 @@ def test_native_eval_and_keyword_contract() -> None:
     output = from_plain(step.train_loss(**batch())["model"], tuple[Tensor, Tensor])
     assert output[0].shape == (3, 7)
     assert output[1].shape == (3, 6)
-
-
-def test_source_golden_detects_a_single_parameter_ulp() -> None:
-    expected = {
-        key: value
-        for key, value in read_tensors(GOLDEN).items()
-        if key.startswith("initial/") and key != "initial/rng"
-    }
-    with torch.random.fork_rng(), host_agnostic_numerics():
-        _ = torch.manual_seed(42)
-        model = tiny_model().make()
-        actual = {
-            f"initial/{key}": value.detach().clone()
-            for key, value in model.released_state().items()
-        }
-        assert not mismatches(expected, actual)
-        weight = model.head.up_proj.weight
-        with torch.no_grad():
-            # Change one float32 ULP directly; the portable context upcasts nextafter.
-            _ = weight.view(torch.int32).reshape(-1)[0].bitwise_xor_(1)
-        actual = {
-            f"initial/{key}": value.detach().clone()
-            for key, value in model.released_state().items()
-        }
-    assert mismatches(expected, actual) == [
-        f"initial/head.0.weight: 1/{weight.numel()} differ",
-    ]
 
 
 def test_pretrained_state_is_loaded_exactly(tmp_path: Path) -> None:
@@ -266,13 +233,13 @@ def test_closure_optimizer_is_rejected_before_training(kind: str) -> None:
         _ = config.make()
 
 
-def test_native_evaluation_context_and_source_context_are_explicit() -> None:
+def test_native_evaluation_context_is_explicit() -> None:
     expected = read_tensors(GOLDEN)
     with host_agnostic_numerics():
         step = tiny_step().make()
         model = step.model
         assert isinstance(model, FPNet)
-        model.load_released_state(
+        model.load_state_dict(
             {
                 name.removeprefix("final/"): tensor
                 for name, tensor in expected.items()

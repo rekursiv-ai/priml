@@ -21,5 +21,5 @@ This explicit job obtains a token from the authenticated Kaggle CLI, downloads
 selected ZIP members, verifies lengths, CRC32, and SHA-256, and writes an
 acquisition receipt. The [acquisition section](README.md#acquire-complete-dicom-series)
 explains receipt transfer and revalidation. No test downloads DICOM or requests
-Kaggle credentials. Tests construct small CSV/DICOM inputs in `tmp_path` and
-replay checked-in `.pt` witnesses.
+Kaggle credentials. Tests construct small CSV/DICOM inputs in `tmp_path`; the
+checked-in goldens are minted in-tree from this package.

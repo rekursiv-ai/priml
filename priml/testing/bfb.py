@@ -103,7 +103,8 @@ Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
        UNFUSED kernel: build HF with ``attn_implementation="eager"`` (plain
        matmul+softmax) and use loop's ``SdpaNaive`` attention kernel. Both then
        run the identical op sequence and ``torch.equal`` holds cross-platform.
-       See ``priml/model/transformer/qwen3_hf_test.py`` for the canonical example.
+       See ``priml/model/transformer/qwen3_5_hf_test.py`` for the canonical
+       example.
 
   Do NOT "fix" such a test by loosening ``torch.equal`` to ``allclose`` with a
   tolerance -- that hides the very reduction-order regression the bit-for-bit
@@ -298,11 +299,11 @@ def host_agnostic_numerics() -> Generator[None]:
     Caveat for third-party interop: this intercepts ops at the aten-dispatch
     layer, so it upcasts everything torch itself dispatches -- but it does NOT
     reach inside a fused kernel that a third-party model invokes as one opaque
-    call (e.g. HuggingFace's default ``F.scaled_dot_product_attention``). To
-    compare bit-for-bit against such a model, also force it onto an UNFUSED
-    kernel (HF: ``attn_implementation="eager"``) so both sides issue the same
-    primitive ops. See the module docstring's cross-implementation section and
-    ``priml/model/transformer/qwen3_hf_test.py``.
+    call (e.g. HuggingFace's default ``F.scaled_dot_product_attention``). The
+    parity harness must force every such outside fused kernel unfused (HF:
+    ``attn_implementation="eager"``) so both sides issue the same primitive
+    ops. See the module docstring's cross-implementation section and
+    ``priml/model/transformer/qwen3_5_hf_test.py``.
 
     Yields:
       item: Nothing; used as a context manager for computation.
@@ -314,7 +315,7 @@ def host_agnostic_numerics() -> Generator[None]:
 
 @contextmanager
 def portable_half_precision() -> Generator[None]:
-    """Run bf16/f16 CPU arithmetic on torch's native kernels, not oneDNN's.
+    """Run CPU arithmetic on torch's native kernels, not oneDNN's.
 
     oneDNN refuses the half-precision BACKWARD of a convolution on a CPU
     whose ISA it does not cover (``DNNL does not support bf16/f16 backward on
@@ -322,6 +323,9 @@ def portable_half_precision() -> Generator[None]:
     fails on that host and passes on an AVX-512 one. Torch's fallback kernels
     run everywhere; the two sides of a comparison both take them here, so
     the test measures the model and not the host.
+
+    It turns oneDNN off for every dtype. On aarch64 oneDNN also runs float32
+    linear layers and convolutions, so both sides of a comparison run inside it.
 
     Yields:
       item: Nothing; used as a context manager for computation.

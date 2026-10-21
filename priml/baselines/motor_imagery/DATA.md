@@ -17,6 +17,6 @@ the [README](README.md#stage-and-run) gives the run commands. Staging does not
 filter EEG or train a model.
 
 Tests create a ZIP with one tiny training CSV and one tiny test CSV under
-`tmp_path`, then call `stage_archive` directly. Ingestion and numerical tests
-use small generated arrays and checked-in `.pt` records. They need no Kaggle
-account or full competition archive.
+`tmp_path`, then call `stage_archive` directly. Ingestion and filter tests use
+small generated arrays; only the model and step goldens are checked-in `.pt`
+records. They need no Kaggle account or full competition archive.

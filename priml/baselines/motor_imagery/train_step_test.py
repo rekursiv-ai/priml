@@ -1,4 +1,4 @@
-"""Exact independent-source training replay and mean-loss arithmetic."""
+"""Three-epoch step golden, update controls, and off-target loss arithmetic."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from priml.baselines.motor_imagery.testing import (
     model_record,
     optimizer_record,
     random_record,
-    read_source_record,
     source_step,
 )
 from priml.baselines.motor_imagery.train_step import (
@@ -40,7 +39,7 @@ from priml.optimizers.lr import learning_rate
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.optimizers.newton import Newton
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import PinnedRandom
+from priml.testing.golden import PinnedRandom, assert_tensor_golden_part
 from priml.timer import CheckpointableStepTimer
 from priml.train.train_step import TrainStep
 
@@ -151,26 +150,23 @@ def test_mean_loss_backward_uses_shared_update_and_clears_gradients() -> None:
 
 
 @pytest.mark.parametrize("horizon", [3, 16, 18])
-def test_epoch_schedule_slot_replays_every_original_rate(horizon: int) -> None:
+def test_epoch_schedule_slot_indexes_each_rate_by_completed_passes(
+    horizon: int,
+) -> None:
     cfg = linear_step_config()
     cfg.optimizer = PartialConfig(torch.optim.SGD, lr=1e-3)
-    cfg.lr_schedule = RecursiveCosine.Config(T_max=horizon, eta_min=1e-5)
-    reference_optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(1))], lr=1e-3)
-    reference = torch.optim.lr_scheduler.CosineAnnealingLR(
-        reference_optimizer,
-        T_max=horizon,
-        eta_min=1e-5,
-    )
+    schedule = cfg.lr_schedule = RecursiveCosine.Config(T_max=horizon, eta_min=1e-5)
+    rates = schedule.make()
     step = cfg.make()
-    for _ in range(2 * horizon + 3):
-        step.train_step(media=torch.ones(2, 3), label=torch.tensor([0, 1]))
-        assert (
-            float(learning_rate(step.optimizer)).hex()
-            == float(reference.get_last_lr()[0]).hex()
-        )
-        reference_optimizer.step()
+    for epoch in range(2 * horizon + 3):
+        # Two updates per pass, so the update count never equals the pass count.
+        for _ in range(2):
+            step.train_step(media=torch.ones(2, 3), label=torch.tensor([0, 1]))
+            assert learning_rate(step.optimizer) == rates.learning_rate(
+                1e-3,
+                step=epoch,
+            )
         finish_epoch(step)
-        reference.step()
 
 
 def test_schedule_clock_is_the_bound_epoch_timer() -> None:
@@ -327,10 +323,9 @@ def test_step_honors_the_shared_schedule_budget_horizons(
     "model_type",
     [MultiScaleEEGNet, ShallowConvNet, AttentionEEGNet],
 )
-def test_three_training_epochs_match_public_reference(
+def test_three_training_epochs_match_golden(
     model_type: type[MultiScaleEEGNet | ShallowConvNet | AttentionEEGNet],
 ) -> None:
-    record = read_source_record(_CWD / "testdata" / f"{model_type.__name__.lower()}.pt")
     cfg = model_type.Config(3, 2)
     cfg.num_samples = 100
     cfg.channels_hidden = 2
@@ -344,7 +339,7 @@ def test_three_training_epochs_match_public_reference(
         step_cfg.update(source_step(cfg, epochs=3))
         step = step_cfg.make()
         model = step.model
-        # The source Conv2d requires a singleton input plane and binary targets.
+        # Every network's Conv2d requires a singleton input plane; targets are binary.
         media = torch.arange(4 * 3 * 100).reshape(4, 1, 3, 100).float() / 100
         label = torch.tensor([0, 1, 0, 1])
         loader = DataLoader(
@@ -377,12 +372,11 @@ def test_three_training_epochs_match_public_reference(
         actual["eval_loss"] = evaluated["loss"].mean()
         actual["probabilities"] = evaluated["model"].softmax(dim=1)[:, 1]
         actual.update(random_record(pins))
-    expected = {
-        key: value
-        for key, value in record.items()
-        if key != "logits" and not key.startswith("initial/")
-    }
-    compare_record(expected, actual)
+    assert_tensor_golden_part(
+        _CWD / "testdata" / f"{model_type.__name__.lower()}.pt",
+        prefix="train/",
+        record={f"train/{key}": value for key, value in actual.items()},
+    )
     assert step.global_step == 3
 
 

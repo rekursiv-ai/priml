@@ -103,7 +103,7 @@ class FrozenQwen:
         attention_kernel: Makeable[AttentionKernel] = field(
             default_factory=SdpaFused.Config,
         )
-        """Native attention kernel; source-minted CPU replay injects eager attention."""
+        """Native attention kernel; the CPU golden injects unfused attention."""
 
         release_model: Callable[[], object] = gc.collect
         """Collection policy after releasing each frozen-weight instance."""
@@ -145,8 +145,7 @@ class FrozenQwen:
                 )
             ],
         )
-        # Match the public reference's default tie order and batch membership.
-        order = np.argsort(-lengths)
+        order = np.argsort(-lengths, kind="stable")
 
         embeddings = np.zeros(
             (len(texts), len(config.layers), config.channels_hidden),

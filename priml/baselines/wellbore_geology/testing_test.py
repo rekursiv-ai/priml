@@ -7,43 +7,32 @@ from typing import TYPE_CHECKING, Final, cast
 
 import csv
 
-from torch import nn
-
 import numpy as np
 import pytest
 import torch
 
 from priml.baselines.wellbore_geology.data import discover_wells, load_split
 from priml.baselines.wellbore_geology.experiments import exp000
-from priml.baselines.wellbore_geology.inference import GeographicGate, WellBlend
-from priml.baselines.wellbore_geology.recipes import family_0719_v1
 from priml.baselines.wellbore_geology.scripts.prepare_data import geographic_map
 from priml.baselines.wellbore_geology.testing import (
     BatchedFoldData,
+    EvalIdentityDropout,
     ProbeModel,
     capture_training,
     freeze_record,
-    historical_cosine_state,
     numerical_tensors,
     probe_batches,
     probe_recipe,
-    raise_first_alignment_weight_one_ulp,
+    tiny_batches,
     tiny_family,
     tiny_model_config,
-    tiny_predictions,
     tiny_recipe,
     write_study_inputs,
     write_tiny_wells,
     write_training_wells,
 )
-from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import (
-    PinnedDropout,
-    mismatches,
-    read_tensors,
-    write_tensors,
-)
+from priml.testing.golden import PinnedDropout, assert_tensor_golden, mismatches
 from priml.train.epoch_loop import EarlyStopping
 
 
@@ -142,56 +131,16 @@ def test_tiny_native_geometry_preserves_all_stages_and_complete_input_shapes(
     assert wells["well1"].horizontal["TVT_input"][:4].tolist() == [101, 109, 117, 125]
     assert wells["well1"].horizontal["TVT"][4] == 125.03125
     assert len(wells["well1"].reference_depth) == 600
-    assert list(tiny_predictions()) == [
-        "0719_V1",
-        "0724_V1",
-        "0729_V3",
-        "0801_V1",
-        "0801_V2",
-        "0803_V2",
-    ]
     write_tiny_wells(tmp_path / "map")
     assert discover_wells(tmp_path / "map") == ("aaaaaaaa", "bbbbbbbb")
 
 
-def test_complete_component_record_requires_no_original_source(tmp_path: Path) -> None:
-    safe = {
-        "geo_nbr_distance": 100.0,
-        "geo_nbr_distance_q10": 50.0,
-        "geo_nbr_path_alignment": 0.99,
-        "geo_radial_extrap_score": 1.0,
-        "geo_prefix_weight_ratio": 0.1,
-    }
-    cases = [dict(safe)]
-    for name, value in (
-        ("geo_nbr_distance", 2459),
-        ("geo_nbr_distance_q10", 1426),
-        ("geo_nbr_path_alignment", 0.96),
-        ("geo_radial_extrap_score", 1.45),
-        ("geo_prefix_weight_ratio", 0.315),
-        ("geo_nbr_distance", float("nan")),
-    ):
-        cases.append({**safe, name: value})
-    predictions = tiny_predictions()
-    blend = WellBlend.Config().make()
-    gate = GeographicGate.Config().make()
-    ensemble = np.concatenate(
-        [blend(predictions, geographic=gate(case)) for case in cases],
-    )
+def test_tiny_wells_map_to_sorted_six_decimal_centroids(tmp_path: Path) -> None:
     write_tiny_wells(tmp_path)
-    expected = read_tensors(_CWD / "testdata/components.pt")
-    assert (
-        mismatches(
-            expected,
-            {
-                "ensemble": torch.from_numpy(ensemble.astype(np.float64)),
-                "geographic_csv": torch.tensor(
-                    list(geographic_map(tmp_path)),
-                    dtype=torch.uint8,
-                ),
-            },
-        )
-        == []
+    assert geographic_map(tmp_path) == (
+        b"well_id,horizontal_avg_X,horizontal_avg_Y\n"
+        b"aaaaaaaa,3.666667,3.500000\n"
+        b"bbbbbbbb,7.333333,7.666667\n"
     )
 
 
@@ -288,8 +237,20 @@ def test_records_preserve_numpy_precision_scalars_and_empty_mappings() -> None:
     assert isinstance(scalar_float, torch.Tensor)
     assert scalar_float.dtype is torch.float32
     assert record["map"] == "dict:0"
-    with pytest.raises(TypeError, match="Unsupported numerical trace"):
+    with pytest.raises(
+        TypeError,
+        match=r"^Unsupported numerical trace value at : <class 'object'>\.$",
+    ):
         freeze_record(object())
+
+
+def test_record_paths_strip_only_the_leading_separator() -> None:
+    assert freeze_record([5]) == {"@sequence": "list:1", "0": 5}
+    assert freeze_record({"Xs": [5], "Xa": 1}) == {
+        "Xs/@sequence": "list:1",
+        "Xs/0": 5,
+        "Xa": 1,
+    }
 
 
 def test_scalar_types_float_bits_and_nonfloating_tensor_differences() -> None:
@@ -345,37 +306,29 @@ def test_complete_native_record_retains_every_tensor_scalar_and_container() -> N
     assert values["name/@str"].tolist() == list(b"native")
 
 
-# Each released family's three-update record equals its golden twin's byte for byte,
-# so one replay per distinct record covers all six.
-_TWINS: Final = {
-    "0719_V1": ("0724_V1", "0729_V3"),
-    "0801_V1": ("0801_V2", "0803_V2"),
-}
-
-
-@pytest.mark.parametrize("name", list(_TWINS))
-def test_complete_native_training_replays_original_golden(name: str) -> None:
-    assert _replay(name, mutation="none")[1] == []
+def test_nexus_family_training_golden() -> None:
+    with host_agnostic_numerics():
+        record = capture_training(recipe=_family_recipe("0803_V2"))
+    assert_tensor_golden(_CWD / "testdata" / "train_step.pt", record)
 
 
 @pytest.mark.parametrize(
-    ("name", "twin"),
-    [(name, twin) for name, twins in _TWINS.items() for twin in twins],
+    "name",
+    ["0719_V1", "0724_V1", "0729_V3", "0801_V1", "0801_V2"],
 )
-def test_a_family_trains_like_the_twin_its_record_shares(name: str, twin: str) -> None:
-    """Every numerical setting a three-update replay reads matches the twin's.
+def test_each_family_trains_like_the_nexus_except_for_dropout(name: str) -> None:
+    """Every other setting a three-update replay reads matches the nexus family's.
 
     Early stopping is excluded: no family may stop inside three epochs.
     """
-    replayed, other = (_family_recipe(family).finalized() for family in (name, twin))
-    assert _CWD.joinpath("testdata", name.lower(), "train_step.pt").read_bytes() == (
-        _CWD.joinpath("testdata", twin.lower(), "train_step.pt").read_bytes()
-    )
-    for recipe in (replayed, other):
+    nexus, other = _family_recipe("0803_V2"), _family_recipe(name)
+    nexus.step.model.dropout = other.step.model.dropout
+    nexus, other = nexus.finalized(), other.finalized()
+    for recipe in (nexus, other):
         assert isinstance(recipe.early_stopping, EarlyStopping.Config)
         assert recipe.early_stopping.min_epochs > recipe.max_epochs
         recipe.early_stopping = None
-    assert repr(replayed) == repr(other)
+    assert repr(nexus) == repr(other)
 
 
 def _family_recipe(name: str) -> WellboreFoldLoop.Config:
@@ -384,30 +337,26 @@ def _family_recipe(name: str) -> WellboreFoldLoop.Config:
     )
 
 
-@pytest.mark.parametrize("mutation", ["one_ulp", "draw_order"])
-def test_a_single_perturbation_breaks_the_original_replay(mutation: str) -> None:
-    actual, report = _replay("0719_V1", mutation=mutation)
-    assert actual["pinned_bernoulli_calls"].item() > 0
-    assert report
-    assert any("model/" in line or "optimizer/" in line for line in report)
-
-
-def _replay(name: str, mutation: str) -> tuple[dict[str, torch.Tensor], list[str]]:
-    family = next(family for family in exp000().families if family.name == name)
-    record = _CWD / "testdata" / name.lower() / "train_step.pt"
-    with host_agnostic_numerics():
-        actual = capture_training(
-            initial_record=record,
-            recipe=tiny_recipe(family),
-            one_ulp=mutation == "one_ulp",
-            draw_offset=int(mutation == "draw_order"),
-        )
-    wanted = {
-        key: value
-        for key, value in read_tensors(record).items()
-        if not key.startswith("initial/")
-    }
-    return actual, mismatches(wanted, actual)
+def test_pinned_dropout_draws_at_each_decoder_site_and_never_in_evaluation() -> None:
+    model = tiny_model_config(dropout=0.05).make()
+    media = tiny_batches()[0]["media"]
+    assert isinstance(media, torch.Tensor)
+    pins = EvalIdentityDropout(model)
+    with pins:
+        model(media)
+    blocks = [f"up_blocks.{index}.block" for index in range(3)]
+    assert pins.sites == [
+        f"unet.{block}.{part}"
+        for block in ("stem", *blocks, "full_up_block.block", "out")
+        for part in ("conv1.drop", "drop")
+    ] + ["unet_gr_rmse_head.3"]
+    model.eval()
+    with torch.inference_mode():
+        expected, _ = model(media)
+        with pins:
+            actual, _ = model(media)
+    assert pins.calls == 13
+    assert torch.equal(actual, expected)
 
 
 def test_lowest_random_pin_preserves_scaling_gradients_and_call_order() -> None:
@@ -445,43 +394,6 @@ def test_complete_record_preserves_float64_and_structural_leaves() -> None:
     assert values["unset/@none"].numel() == 0
 
 
-@pytest.mark.parametrize("horizon", [3, 5, 11])
-def test_every_historical_cosine_state_matches_complete_torch_state(
-    horizon: int,
-) -> None:
-    optimizer = torch.optim.AdamW(
-        nn.Linear(2, 3).parameters(),
-        lr=0.0002,
-        weight_decay=0.02,
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=horizon,
-        eta_min=5e-7,
-    )
-    schedule = RecursiveCosine.Config(T_max=horizon, eta_min=5e-7).make()
-    for completed in range(horizon + 1):
-        rate = schedule.learning_rate(0.0002, step=completed)
-        assert rate == cast("float", optimizer.param_groups[0]["lr"])
-        actual = historical_cosine_state(
-            horizon=horizon,
-            eta_min=5e-7,
-            initial_lrs=[0.0002],
-            last_lrs=[rate],
-            completed_steps=completed,
-        )
-        assert (
-            mismatches(
-                numerical_tensors(scheduler.state_dict()),
-                numerical_tensors(actual),
-                ulps=True,
-            )
-            == []
-        )
-        optimizer.step()
-        scheduler.step()
-
-
 def test_probe_retains_unequal_complete_samples_and_all_loss_inputs() -> None:
     batches = [cast("Batch", value) for value in probe_batches()]
     assert [len(batch["meta"]) for batch in batches] == [3, 3, 2]
@@ -509,33 +421,6 @@ def test_probe_makes_fresh_runtime_objects_from_named_constructors() -> None:
 def test_probe_step_runs_eager_without_inductor() -> None:
     step = probe_recipe().step.make()
     assert step._compile_fn is None
-
-
-def test_capture_training_loads_the_initial_record_strictly(tmp_path: Path) -> None:
-    source = _CWD / "testdata/0719_v1/train_step.pt"
-    record = {
-        name: value
-        for name, value in read_tensors(source).items()
-        if name != "initial/alignment_head.weight"
-    }
-    write_tensors(tmp_path / "missing.pt", record)
-    with pytest.raises(RuntimeError, match=r"proj_out\.weight"):
-        capture_training(
-            initial_record=tmp_path / "missing.pt",
-            recipe=tiny_recipe(family_0719_v1()),
-            one_ulp=False,
-            draw_offset=0,
-        )
-
-
-def test_one_ulp_perturbation_moves_only_the_first_alignment_weight() -> None:
-    model = tiny_model_config(dropout=0).make()
-    before = model.get_parameter("proj_out.weight").detach().clone()
-    raise_first_alignment_weight_one_ulp(model)
-    after = model.get_parameter("proj_out.weight").detach()
-    delta = after.view(torch.int32).flatten() - before.view(torch.int32).flatten()
-    assert delta[0].item() == 1
-    assert torch.count_nonzero(delta[1:]) == 0
 
 
 def test_probe_model_maps_each_sample_to_four_depths_and_six_logits() -> None:

@@ -10,6 +10,7 @@ import copy
 import hashlib
 import heapq
 import json
+import math
 import re
 import sys
 
@@ -22,7 +23,6 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.casmi2026 import second_engine
 from priml.baselines.casmi2026.chemistry import PeakStore
 from priml.baselines.casmi2026.custom_types import (
     Analog,
@@ -36,7 +36,6 @@ from priml.baselines.casmi2026.isolated import (
 from priml.baselines.casmi2026.main_engine import view_features
 from priml.baselines.casmi2026.model import SecondFPNet
 from priml.baselines.casmi2026.model_test import tiny_second
-from priml.baselines.casmi2026.scores import average_ranks
 from priml.baselines.casmi2026.second_engine import (
     EngineIdentityTable,
     FeatureMatrix,
@@ -63,6 +62,7 @@ from priml.baselines.casmi2026.second_engine import (
     _polarity_features,
     _proton_carrier,
     _relative,
+    _sigmoid,
     analog_features,
     blend_histograms,
     collision_energy,
@@ -73,13 +73,18 @@ from priml.baselines.casmi2026.second_engine import (
     second_fragments,
 )
 from priml.baselines.casmi2026.testing import (
+    float32_comparands,
     identity_rows,
     retrieval_inputs,
     write_identity,
 )
 from priml.model.ae.checkpoint import LocalFile
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import expect_golden_mismatch, mismatches, read_tensors
+from priml.testing.golden import (
+    assert_tensor_golden,
+    mismatches,
+    read_tensors,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -109,7 +114,7 @@ def peaks(
 
 
 def preprocessing_record() -> dict[str, Tensor]:
-    """Exercise every source filtering, window quota and adjacent-merge branch."""
+    """Exercise every filtering, window quota and adjacent-merge branch."""
     record: dict[str, Tensor] = {}
     for name, mass, intensity, precursor, maximum, window, per_window in (
         ("empty", list[float](), list[float](), 100.0, 5, 50.0, 2),
@@ -209,10 +214,11 @@ def preprocessing_record() -> dict[str, Tensor]:
     return record
 
 
-def test_entire_preprocessing_and_model_bank_match_source_values() -> None:
-    expected = read_tensors(BANK_GOLDEN)
+def test_entire_preprocessing_and_model_bank_values() -> None:
+    golden = BANK_GOLDEN
+    expected = read_tensors(golden)
     actual = preprocessing_record()
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         models: list[SecondFPNet] = []
         for index in range(2):
             config = tiny_second()
@@ -276,8 +282,7 @@ def test_entire_preprocessing_and_model_bank_match_source_values() -> None:
             actual[f"bank/{name}/logits"] = (
                 torch.zeros(0) if result is None else torch.from_numpy(result)
             )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, float32_comparands(actual))
 
 
 @pytest.mark.parametrize(
@@ -402,17 +407,16 @@ def view_record() -> dict[str, Tensor]:
     return record
 
 
-def test_complete_feature_values_match_external_source_record() -> None:
-    report = mismatches(read_tensors(FEATURES_GOLDEN), analog_record() | view_record())
-    assert not report, "\n".join(report)
+def test_complete_feature_values() -> None:
+    assert_tensor_golden(FEATURES_GOLDEN, analog_record() | view_record())
 
 
-def test_engine_two_ordinal_ties_cannot_be_consolidated_with_average_ties(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(second_engine, "ordinal_ranks", average_ranks)
-    with expect_golden_mismatch("analog/constant"):
-        test_complete_feature_values_match_external_source_record()
+def test_sigmoid_is_the_libm_logistic_and_saturates_without_overflow() -> None:
+    assert _sigmoid(0.0) == 0.5
+    assert _sigmoid(2.0) == 1.0 / (1.0 + math.exp(-2.0))
+    assert _sigmoid(-2.0) == 1.0 / (1.0 + math.exp(2.0))
+    assert _sigmoid(1000.0) == 1.0
+    assert _sigmoid(-1000.0) == 0.0
 
 
 def test_fragment_proton_carrier_keeps_positive_zero_and_negative_modes() -> None:
@@ -534,7 +538,7 @@ def test_explanation_is_zero_without_masses_peaks_or_intensity() -> None:
     )
 
 
-def test_whole_second_engine_features_and_fragment_panels_match_source() -> None:
+def test_whole_second_engine_features_and_fragment_panels() -> None:
     _, pool, _ = retrieval_inputs()
     # pool_fps fixes6930 selected bits and discards six trailing padding bits.
     pool = replace(
@@ -653,14 +657,10 @@ def test_whole_second_engine_features_and_fragment_panels_match_source() -> None
                 logits=model,
             ),
         )
-    report = mismatches(
-        read_tensors(_BASELINE / "testdata" / "fragment_features.pt"),
-        actual,
-    )
-    assert not report, "\n".join(report)
+    assert_tensor_golden(_BASELINE / "testdata" / "fragment_features.pt", actual)
 
 
-def test_whole_second_engine_retrieval_matches_source() -> None:
+def test_whole_second_engine_retrieval() -> None:
     library, _, spectra = retrieval_inputs()
     actual: dict[str, Tensor] = {}
     second_library = SecondLibrary(
@@ -679,8 +679,8 @@ def test_whole_second_engine_retrieval_matches_source() -> None:
     config_second.n_analog = 2
     second = config_second.make()
     index = second.index(second_library)
-    actual["prvsiyan/lib_rows"] = torch.from_numpy(index.rows)
-    actual["prvsiyan/lib_mass"] = torch.from_numpy(index.mass)
+    actual["second/lib_rows"] = torch.from_numpy(index.rows)
+    actual["second/lib_mass"] = torch.from_numpy(index.mass)
     for name, representatives in (
         ("all", index.all),
         ("pos", index.positive),
@@ -694,7 +694,7 @@ def test_whole_second_engine_retrieval_matches_source() -> None:
             "rmz": representatives.store.mz,
             "rit": representatives.store.intensity,
         }.items():
-            actual[f"prvsiyan/{name}/{field}"] = torch.from_numpy(value)
+            actual[f"second/{name}/{field}"] = torch.from_numpy(value)
     for case, (query, target) in enumerate(
         (
             (spectra, 100.0),
@@ -725,11 +725,10 @@ def test_whole_second_engine_retrieval_matches_source() -> None:
                 [[analog.sid, analog.similarity] for analog in analogs],
                 dtype=torch.float64,
             ).reshape(-1, 2)
-    report = mismatches(
-        read_tensors(_BASELINE / "testdata" / "second_retrieval.pt"),
-        actual,
+    assert_tensor_golden(
+        _BASELINE / "testdata" / "second_retrieval.pt",
+        float32_comparands(actual),
     )
-    assert not report, "\n".join(report)
 
 
 def test_minimal_pool_preserves_first_and_last_tied_rows_and_all_packed_bits(
@@ -798,10 +797,11 @@ def test_minimal_pool_preserves_first_and_last_tied_rows_and_all_packed_bits(
     np.testing.assert_array_equal(bounded.window(100.0, ppm=10), [1, 2, 3, 4])
 
 
-def test_entire_source_second_pipeline_and_all_twelve_fitted_models(
+def test_entire_second_pipeline_and_all_twelve_fitted_models(
     tmp_path: Path,
 ) -> None:
-    expected = read_tensors(_BASELINE / "testdata/second_pipeline.pt")
+    golden = _BASELINE / "testdata/second_pipeline.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     library, original_pool, _ = retrieval_inputs()
     pool = SecondPool(
@@ -832,7 +832,7 @@ def test_entire_source_second_pipeline_and_all_twelve_fitted_models(
         ),
         mass=np.concatenate(rows),
     )
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         old = read_tensors(_BASELINE / "testdata/bank.pt")
         paths: list[Path] = []
         for index, name in enumerate(("single_a", "merged_b", "single_c", "merged_d")):
@@ -1124,8 +1124,7 @@ def test_entire_source_second_pipeline_and_all_twelve_fitted_models(
         )
         assert overflow.target == float(2**63)
         assert len(overflow.rows) == 0
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, float32_comparands(actual, inputs=("input/*",)))
 
 
 def test_query_preparation_keeps_zero_peaks_and_original_metadata() -> None:
@@ -1156,7 +1155,7 @@ def test_query_preparation_keeps_zero_peaks_and_original_metadata() -> None:
 
 
 def pipeline_queries(target: float) -> list[SpectrumRequest]:
-    """Rebuild only literal query inputs shared by the whole public-source control."""
+    """Rebuild the literal query inputs shared by the pipeline golden."""
     queries: list[SpectrumRequest] = [
         {
             "mz": [20, 30, 40, 104],
@@ -1198,7 +1197,7 @@ def pipeline_queries(target: float) -> list[SpectrumRequest]:
 HGB_GOLDEN: Final = _BASELINE / "testdata" / "hgb.pt"
 
 
-def test_every_histogram_tree_and_three_boosting_rounds_match_source() -> None:
+def test_every_histogram_tree_and_three_boosting_rounds() -> None:
     actual: dict[str, Tensor] = {}
     for case in range(12):
         rows = 16 if case == 5 else 12
@@ -1279,8 +1278,7 @@ def test_every_histogram_tree_and_three_boosting_rounds_match_source() -> None:
         HistogramBoosting.loss_score(logits, targets, weights),
         dtype=torch.float64,
     )
-    report = mismatches(read_tensors(HGB_GOLDEN), actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(HGB_GOLDEN, float32_comparands(actual))
 
 
 def test_boosting_requires_the_seed_that_its_owner_assigns() -> None:
@@ -1420,7 +1418,7 @@ def test_exporting_an_internal_node_without_a_split_is_an_error() -> None:
 ENSEMBLE_GOLDEN: Final = _BASELINE / "testdata" / "rankers.pt"
 
 
-def test_all_twelve_fitted_rankers_and_blended_scores_match_source(
+def test_all_twelve_fitted_rankers_and_blended_scores(
     tmp_path: Path,
 ) -> None:
     indices = np.arange(8, dtype=np.int64)
@@ -1502,8 +1500,7 @@ def test_all_twelve_fitted_rankers_and_blended_scores_match_source(
         actual[f"ties{case}"] = torch.from_numpy(
             blend_histograms(first, second, weight_fingerprint=0.88),
         )
-    report = mismatches(read_tensors(ENSEMBLE_GOLDEN), actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(ENSEMBLE_GOLDEN, float32_comparands(actual))
 
 
 def test_simulation_reader_accepts_second_without_block_metadata(
@@ -1551,7 +1548,7 @@ def test_histogram_ensemble_requires_declared_priors_and_seeds() -> None:
 
 
 def engine_keys() -> dict[str, str | None]:
-    """Read every source-minted engine key without chemical reinterpretation."""
+    """Read the staged engine keys without chemical reinterpretation."""
     expected = read_tensors(_BASELINE / "testdata/recipe_policy.pt")
     return json_loads(
         expected["engine/identities"].numpy().tobytes().decode(),
@@ -1559,7 +1556,7 @@ def engine_keys() -> dict[str, str | None]:
     )
 
 
-def test_every_source_engine_key_and_first_duplicate_without_rdkit(
+def test_every_staged_engine_key_and_first_duplicate_without_rdkit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1616,7 +1613,7 @@ def tiny_bank(
     *,
     device: str = "cpu",
 ) -> SecondBank.Config:
-    """Declare the source checkpoints and the geometry of their tiny model."""
+    """Declare the checkpoints and the geometry of their tiny model."""
     config = SecondBank.Config()
     config.model = tiny_second()
     config.model.adduct.channels_in = 26
@@ -1626,7 +1623,7 @@ def tiny_bank(
     return config
 
 
-def test_entire_source_bank_through_complete_checkpoint_assembly(
+def test_entire_bank_through_complete_checkpoint_assembly(
     tmp_path: Path,
 ) -> None:
     expected = read_tensors(_BASELINE / "testdata" / "bank.pt")
@@ -1679,7 +1676,7 @@ def test_entire_source_bank_through_complete_checkpoint_assembly(
             (np.zeros(0), np.zeros(0), 30.0, "[M-H]-", None, 0.0, 1.0),
         )
     ]
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         bank = tiny_bank(
             single=tuple(zip(paths[:2], seals[:2], strict=True)),
             merged=((paths[2], seals[2]),),
@@ -1776,7 +1773,7 @@ def test_checkpoint_is_read_as_cpu_tensors_before_target_device_transfer(
         )
 
     monkeypatch.setattr(torch, "load", tensor_load)
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         bank = tiny_bank(single=((path, seal),), device="meta").make()
     assert calls == [path]
     assert all(
@@ -1797,14 +1794,7 @@ def test_bank_builds_each_family_from_its_own_independent_slot() -> None:
     assert bank.own is not bank.pv
 
 
-@pytest.mark.parametrize("mutation", ["none", "state", "score"])
-def test_bank_replays_every_fitted_source_state_and_score(mutation: str) -> None:
-    """Compare all twelve models and prove both fitted-state and score sensitivity.
-
-    Args:
-        mutation: Complete positive replay or one-ULP perturbation location.
-
-    """
+def test_bank_replays_every_fitted_state_and_score() -> None:
     bank = _tiny_config().make()
     rows, query = _simulation()
     pv_rows = SimulationRows(
@@ -1838,17 +1828,8 @@ def test_bank_replays_every_fitted_source_state_and_score(mutation: str) -> None
         actual[f"ties{case}"] = torch.from_numpy(
             blend_histograms(first, own=second, weight_fingerprint=0.88),
         )
-    if mutation != "none":
-        key = "family1/model7/trees/2/value" if mutation == "state" else "family1/mean"
-        values = actual[key].reshape(-1)
-        values[0] = torch.nextafter(
-            values[0],
-            other=torch.tensor(torch.inf, dtype=values.dtype),
-        )
-    report = mismatches(read_tensors(_BASELINE / "testdata/rankers.pt"), actual)
-    assert bool(report) == (mutation != "none"), "\n".join(report)
-    if mutation != "none":
-        assert len(report) == 1
+    report = mismatches(read_tensors(ENSEMBLE_GOLDEN), float32_comparands(actual))
+    assert not report, "\n".join(report)
 
 
 def test_bank_defers_unfitted_prediction_to_the_fitted_ensemble_contract() -> None:
@@ -1948,7 +1929,7 @@ def test_complete_second_assets_preserve_raw_rows_fragments_keys_and_twelve_mode
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
     config = second_config(tmp_path)
-    with torch.random.fork_rng(), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         inputs = config.make().read()
     chemistry = config.chemistry.copy_tree().make()
     assert inputs.formulas == tuple(
@@ -2012,7 +1993,7 @@ def test_complete_second_assets_preserve_raw_rows_fragments_keys_and_twelve_mode
                 weight_fingerprint=0.88,
             ),
         )
-    report = mismatches(read_tensors(_BASELINE / "testdata/rankers.pt"), actual)
+    report = mismatches(read_tensors(ENSEMBLE_GOLDEN), float32_comparands(actual))
     assert not report, "\n".join(report)
     mass = Path(config.library_dir) / "nm.npy"
     np.save(mass, np.zeros(3, np.float32))
@@ -2089,7 +2070,7 @@ def test_second_defaults_keep_group_archives_and_full_budget() -> None:
 
 
 def second_config(root: Path) -> SecondAssets.Config:
-    """Publish complete test primitive inputs using unchanged source states."""
+    """Publish complete test primitive inputs with the stored bank states."""
     config = SecondAssets.Config()
     pool, library, fragments, chemistry, identities = (
         root / name
@@ -2099,9 +2080,8 @@ def second_config(root: Path) -> SecondAssets.Config:
     config.chemistry.working_dir, config.identities_dir = chemistry, identities
     for directory in (pool, library, fragments, chemistry, identities):
         directory.mkdir()
-    identity = read_tensors(_BASELINE / "testdata/identity_preparation.pt")
-    write_identity(chemistry, identity)
-    smiles = tuple(row["smiles"] for row in identity_rows(identity)[:2])
+    write_identity(chemistry)
+    smiles = tuple(row["smiles"] for row in identity_rows()[:2])
     parquet.write_table(
         Table.from_pydict({"key": ["duplicate", "duplicate"], "smiles": smiles}),
         pool / "pool_meta.parquet",

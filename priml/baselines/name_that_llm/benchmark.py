@@ -250,7 +250,7 @@ class Benchmark:
         )
         budget.check()
         result["public_best_parity"] = (
-            "tiny source-minted CPU witnesses; see README.md for scope"
+            "tiny CPU goldens minted in-tree; see README.md for scope"
         )
         result["submission_rows"] = len(predictions)
 

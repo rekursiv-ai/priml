@@ -1,4 +1,4 @@
-"""Real staging CLI boundaries, archive safety, and raw-data provenance."""
+"""Staging CLI argument handling, archive safety, and raw-data provenance."""
 
 from __future__ import annotations
 
@@ -84,12 +84,18 @@ def test_cli_prints_full_config_without_data(
     assert "max_epochs=18" in capsys.readouterr().out
 
 
-def test_cli_extracts_explicit_archive(
+def test_cli_stages_an_explicit_archive_without_downloading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    staged: list[tuple[Path, Path]] = []
+
+    def stage(archive: Path, *, directory: Path) -> None:
+        staged.append((archive, directory))
+
+    monkeypatch.setattr(f"{main.__module__}.stage_archive", stage)
+    monkeypatch.setattr(subprocess, name="run", value=_refuse_download)
     archive = tmp_path / "input.zip"
-    write_archive(archive)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -102,6 +108,7 @@ def test_cli_extracts_explicit_archive(
         ],
     )
     assert main() == 0
+    assert staged == [(archive, tmp_path / "raw")]
 
 
 def test_cli_refuses_an_existing_stage_before_any_download(
@@ -125,17 +132,18 @@ def test_cli_download_uses_existing_auth_without_accepting_terms(
 ) -> None:
     output = tmp_path / "raw"
     cache = tmp_path / "cache"
+    downloads: list[list[str]] = []
+    staged: list[tuple[Path, Path]] = []
 
     def download(argv: list[str], *, check: bool) -> None:
         assert check
-        assert argv[1:4] == ["competitions", "download", "-c"]
-        assert "auth" not in argv
-        assert "accept" not in argv
-        write_archive(
-            cache / "low-cost-motor-imagery-decoding-for-rehab-cross-subject.zip",
-        )
+        downloads.append(argv)
+
+    def stage(archive: Path, *, directory: Path) -> None:
+        staged.append((archive, directory))
 
     monkeypatch.setattr(subprocess, "run", download)
+    monkeypatch.setattr(f"{main.__module__}.stage_archive", stage)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -148,6 +156,23 @@ def test_cli_download_uses_existing_auth_without_accepting_terms(
         ],
     )
     assert main() == 0
+    (argv,) = downloads
+    assert argv[1:] == [
+        "competitions",
+        "download",
+        "-c",
+        "low-cost-motor-imagery-decoding-for-rehab-cross-subject",
+        "-p",
+        str(cache),
+    ]
+    assert staged == [
+        (cache / "low-cost-motor-imagery-decoding-for-rehab-cross-subject.zip", output),
+    ]
+
+
+def _refuse_download(argv: list[str], *, check: bool) -> None:
+    del check
+    raise AssertionError(f"Unexpected download: {argv}.")
 
 
 if __name__ == "__main__":

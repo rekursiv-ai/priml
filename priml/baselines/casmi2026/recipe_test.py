@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from difflib import unified_diff
 from pathlib import Path
 from queue import SimpleQueue
 from typing import TYPE_CHECKING, Final, Literal, TypedDict, Unpack, cast
@@ -141,11 +140,12 @@ from priml.baselines.casmi2026.simulators_test import (
     observe_result,
 )
 from priml.baselines.casmi2026.testing import (
+    float32_comparands,
     identity_rows,
     retrieval_inputs,
     write_identity,
 )
-from priml.testing.golden import mismatches, read_tensors
+from priml.testing.golden import assert_tensor_golden, mismatches, read_tensors
 
 
 if TYPE_CHECKING:
@@ -212,8 +212,9 @@ class _Input(TypedDict):
     formulas: tuple[str, ...]
 
 
-def test_complete_source_outer_shortlists_popularity_and_all_key_decisions() -> None:
-    expected = read_tensors(_BASELINE / "testdata/recipe_policy.pt")
+def test_complete_outer_shortlists_popularity_and_all_key_decisions() -> None:
+    golden = _BASELINE / "testdata/recipe_policy.pt"
+    expected = read_tensors(golden)
     actual: dict[str, Tensor] = {}
     for label in ("capped", "flat", "singleton", "empty"):
         prefix = "main/" + label
@@ -304,8 +305,10 @@ def test_complete_source_outer_shortlists_popularity_and_all_key_decisions() -> 
                 label: {"smiles": list(ranked.smiles), "keys": list(ranked.keys)},
             },
         )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(
+        golden,
+        float32_comparands(actual, inputs=("*/scores", "*/popularity")),
+    )
 
 
 def test_default_prescreen_stops_before_the_eighty_first_novel_structure() -> None:
@@ -607,34 +610,155 @@ def _proposal() -> PubChemResult:
     }
 
 
-def test_every_source_query_field_mass_order_and_raw_row_without_rdkit(
+def query_rows() -> list[QueryRow]:
+    """Return six query spectra covering every polarity, energy and empty-field form.
+
+    Returns:
+      rows: Three molecules plus an unparseable one, in non-sorted encounter order.
+
+    """
+    return [
+        {
+            "molecule_id": "m02",
+            "spectrum_id": "s0",
+            "precursor_mz": 101.00727645217,
+            "adduct": "[M+H]+",
+            "ionization_mode": "positive",
+            "collision_energy_ev": None,
+            "collision_energy_orig_units": None,
+            "collision_energy_orig": None,
+            "instrument_type": "timsTOF",
+            "ms2_mzs": [30.0, 60.0, 104.0],
+            "ms2_normalized_intensities": [1.0, 0.5, 0.01],
+        },
+        {
+            "molecule_id": "m01",
+            "spectrum_id": "s1",
+            "precursor_mz": 98.99272354783,
+            "adduct": "[M-H]-",
+            "ionization_mode": "negative",
+            "collision_energy_ev": [],
+            "collision_energy_orig_units": "eV",
+            "collision_energy_orig": "",
+            "instrument_type": None,
+            "ms2_mzs": [],
+            "ms2_normalized_intensities": [],
+        },
+        {
+            "molecule_id": "m02",
+            "spectrum_id": "s2",
+            "precursor_mz": 123.989220701,
+            "adduct": "[M+Na]+",
+            "ionization_mode": "positive",
+            "collision_energy_ev": [20.0, 40.0],
+            "collision_energy_orig_units": "eV",
+            "collision_energy_orig": "20/40",
+            "instrument_type": "QTOF",
+            "ms2_mzs": [44.0, 70.0],
+            "ms2_normalized_intensities": [0.3, 1.0],
+        },
+        {
+            "molecule_id": "bad",
+            "spectrum_id": "s3",
+            "precursor_mz": 70.0,
+            "adduct": "unknown",
+            "ionization_mode": None,
+            "collision_energy_ev": [None],
+            "collision_energy_orig_units": "NCE",
+            "collision_energy_orig": "20/40 NCE",
+            "instrument_type": "Orbitrap",
+            "ms2_mzs": [80.0],
+            "ms2_normalized_intensities": [1.0],
+        },
+        {
+            "molecule_id": "m03",
+            "spectrum_id": "s4",
+            "precursor_mz": 151.00727645217,
+            "adduct": "[M+H]+",
+            "ionization_mode": "positive",
+            "collision_energy_ev": [-10.0, -20.0],
+            "collision_energy_orig_units": "eV",
+            "collision_energy_orig": "-10/-20",
+            "instrument_type": "Orbitrap",
+            "ms2_mzs": [10.0, 20.0, 30.0, 40.0],
+            "ms2_normalized_intensities": [0.1, 0.2, 0.4, 1.0],
+        },
+        {
+            "molecule_id": "m01",
+            "spectrum_id": "s5",
+            "precursor_mz": 134.9694012599,
+            "adduct": "[M+Cl]-",
+            "ionization_mode": "negative",
+            "collision_energy_ev": [10.0, None, 30.0],
+            "collision_energy_orig_units": "NCE",
+            "collision_energy_orig": "10,30%",
+            "instrument_type": "TOF",
+            "ms2_mzs": [20.0, 80.0],
+            "ms2_normalized_intensities": [1.0, 0.25],
+        },
+    ]
+
+
+def test_every_query_field_mass_order_and_raw_row_without_rdkit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/query_inputs.pt")
-    rows = json_loads(
-        expected["inputs/rows"].numpy().tobytes().decode(),
-        list[QueryRow],
-    )
+    rows = query_rows()
     path = tmp_path / "test.parquet"
     parquet.write_table(Table.from_pylist(rows), path)
     data = read_queries(path)
-    actual = {
-        "inputs/rows": _text(list(data.rows)),
-        "main/order": _text([molecule.mid for molecule in data.molecules]),
-        "engine/order": _text(list(data.engine_order)),
-    }
-    for index, molecule in enumerate(data.molecules):
-        prefix = f"main/{index}"
-        actual[prefix + "/mid"] = _text(molecule.mid)
-        actual[prefix + "/finite"] = torch.from_numpy(molecule.finite_mass)
-        actual[prefix + "/target_valid"] = torch.tensor(molecule.target is not None)
-        actual[prefix + "/target"] = torch.tensor(
-            molecule.target if molecule.target is not None else math.nan,
-            dtype=torch.float64,
-        )
-        actual[prefix + "/spectra"] = _text(list(molecule.main))
+    assert torch.equal(_text(list(data.rows)), _text(rows))
+    assert [molecule.mid for molecule in data.molecules] == ["m02", "m01", "bad", "m03"]
+    assert data.engine_order == ("bad", "m01", "m02", "m03")
+    expected: tuple[tuple[list[float], float | None, list[SpectrumRequest]], ...] = (
+        (
+            [100.0, 101.0],
+            100.5,
+            [
+                _main([30.0, 60.0, 104.0], [1.0, 0.5, 0.01], prec=101.00727645217),
+                _main(
+                    [44.0, 70.0],
+                    [0.3, 1.0],
+                    adduct="[M+Na]+",
+                    prec=123.989220701,
+                    ce=(30.0, 2),
+                ),
+            ],
+        ),
+        (
+            [100.0, 100.0],
+            100.0,
+            [
+                _main([], [], adduct="[M-H]-", prec=98.99272354783),
+                _main(
+                    [20.0, 80.0],
+                    [1.0, 0.25],
+                    adduct="[M+Cl]-",
+                    prec=134.9694012599,
+                    ce=(math.nan, 3),
+                ),
+            ],
+        ),
+        ([], None, []),
+        (
+            [150.0],
+            150.0,
+            [
+                _main(
+                    [10.0, 20.0, 30.0, 40.0],
+                    [0.1, 0.2, 0.4, 1.0],
+                    prec=151.00727645217,
+                    ce=(-15.0, 2),
+                ),
+            ],
+        ),
+    )
+    for molecule, (finite, target, main) in zip(data.molecules, expected, strict=True):
+        assert molecule.finite_mass.dtype == np.float64
+        np.testing.assert_array_equal(molecule.finite_mass, finite)
+        assert molecule.target == target
+        assert torch.equal(_text(list(molecule.main)), _text(main))
         inputs = [row for row in rows if row["molecule_id"] == molecule.source_id]
         assert len(molecule.raw) == len(inputs)
         for raw, original in zip(molecule.raw, inputs, strict=True):
@@ -659,16 +783,29 @@ def test_every_source_query_field_mass_order_and_raw_row_without_rdkit(
                 if values is not None
                 else None,
             )
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+
+
+def _main(
+    mz: list[float],
+    it: list[float],
+    *,
+    prec: float,
+    adduct: str = "[M+H]+",
+    ce: tuple[float, int] = (math.nan, 1),
+) -> SpectrumRequest:
+    return {
+        "mz": mz,
+        "it": it,
+        "mode": 1 if adduct.endswith("+") else -1,
+        "adduct": adduct,
+        "prec": prec,
+        "ce": ce[0],
+        "ce_n": ce[1],
+    }
 
 
 def test_numeric_ids_keep_encounter_order_and_sort_numerically(tmp_path: Path) -> None:
-    expected = read_tensors(_BASELINE / "testdata/query_inputs.pt")
-    row = json_loads(
-        expected["inputs/rows"].numpy().tobytes().decode(),
-        list[QueryRow],
-    )[0]
+    row = query_rows()[0]
     rows = [{**row, "molecule_id": mid} for mid in (10, 2, 10, 1)]
     path = tmp_path / "numeric.parquet"
     parquet.write_table(Table.from_pylist(rows), path)
@@ -682,12 +819,7 @@ def test_numeric_ids_keep_encounter_order_and_sort_numerically(tmp_path: Path) -
 
 
 def test_tail_mass_preserves_infinities_before_its_later_finite_gate() -> None:
-    record = read_tensors(_BASELINE / "testdata/query_inputs.pt")
-    rows = json_loads(
-        record["inputs/rows"].numpy().tobytes().decode(),
-        list[QueryRow],
-    )
-    precursor = rows[0]["precursor_mz"]
+    precursor = query_rows()[0]["precursor_mz"]
     raw: tuple[SpectrumRequest, ...] = tuple(
         {
             "mz": [],
@@ -729,20 +861,17 @@ def test_tail_mass_preserves_infinities_before_its_later_finite_gate() -> None:
 type _BaseInput = tuple[list[str], list[str], float, list[float], list[str]]
 
 
-def test_every_source_union_panel_reorder_map_and_counter(tmp_path: Path) -> None:
-    expected = read_tensors(_BASELINE / "testdata/list_policy.pt")
-    rows = json_loads(
-        expected["inputs/rows"].numpy().tobytes().decode(),
-        list[QueryRow],
-    )
+def test_every_union_panel_reorder_map_and_counter(tmp_path: Path) -> None:
+    golden = _BASELINE / "testdata/list_policy.pt"
+    expected = read_tensors(golden)
     path = tmp_path / "queries.parquet"
-    parquet.write_table(Table.from_pylist(rows), path)
+    parquet.write_table(Table.from_pylist(query_rows()), path)
     queries = read_queries(path)
     formulas = json_loads(
         expected["inputs/formulas"].numpy().tobytes().decode(),
         dict[str, str],
     )
-    actual = {"inputs/rows": _text(rows), "inputs/formulas": _text(formulas)}
+    actual = {"inputs/formulas": _text(formulas)}
     for label in ("complete", "no_engine", "no_pc", "no_gl"):
         prefix = label + "/"
         base = json_loads(
@@ -817,8 +946,7 @@ def test_every_source_union_panel_reorder_map_and_counter(tmp_path: Path) -> Non
         actual[prefix + "reranked/PC"] = _text(ranked.proposals)
         actual[prefix + "reranked/ice_stats"] = _text(ranked.ice_stats)
         actual[prefix + "reranked/gl_stats"] = _text(ranked.glacier_stats)
-    report = mismatches(expected, actual)
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_empty_reordering_keeps_all_maps_and_counters_absent() -> None:
@@ -876,7 +1004,7 @@ def test_union_caps_each_source_prefix_and_retains_empty_query_groups() -> None:
     assert "pc_form" not in pc
 
 
-def test_source_reorder_prefix_key_fallback_weights_and_accumulation() -> None:
+def test_reorder_prefix_key_fallback_weights_and_accumulation() -> None:
     labels = (
         "single",
         "key",
@@ -1012,7 +1140,7 @@ class _Identity(TypedDict):
 
 
 class Prepared:
-    """Bind every complete source primitive input without loading a supplier runtime."""
+    """Bind every stored primitive input without loading a supplier runtime."""
 
     def __init__(self, expected: dict[str, Tensor]) -> None:
         self.identities = json_loads(
@@ -1041,19 +1169,19 @@ class Prepared:
             )
 
     def key(self, smiles: str) -> str | None:
-        """Return the source-minted older key or raise for undeclared strings."""
+        """Return the staged older key or raise for undeclared strings."""
         return self.identities[smiles]["key"]
 
     def formula(self, smiles: str) -> str:
-        """Return the source raw formula or original fallback."""
+        """Return the staged raw formula or original fallback."""
         return self.identities[smiles]["formula"]
 
     def identity(self, smiles: str) -> MetricIdentity | None:
-        """Return the complete source-minted official identity."""
+        """Return the staged official identity."""
         return self.identities[smiles]["identity"]
 
     def for_smiles(self, smiles: str) -> GapGraph | None:
-        """Return complete source numeric graph input, preserving explicit invalidity."""
+        """Return the staged numeric graph, preserving explicit invalidity."""
         return self.graphs[smiles]
 
 
@@ -1065,14 +1193,11 @@ def replay_outputs(
 ) -> None:
     """Replay all fields or supply one explicitly malformed controller input."""
     monkeypatch.setitem(sys.modules, "rdkit", None)
-    expected = read_tensors(_BASELINE / "testdata/recipe_outer.pt")
+    golden = _BASELINE / "testdata/recipe_outer.pt"
+    expected = read_tensors(golden)
     prepared = Prepared(expected)
-    rows = json_loads(
-        expected["inputs/rows"].numpy().tobytes().decode(),
-        list[QueryRow],
-    )
     query_path = tmp_path / "test.parquet"
-    parquet.write_table(Table.from_pylist(rows), query_path)
+    parquet.write_table(Table.from_pylist(query_rows()), query_path)
     queries = read_queries(query_path)
     sample_ids = json_loads(
         expected["inputs/sample"].numpy().tobytes().decode(),
@@ -1204,32 +1329,7 @@ def replay_outputs(
                 list((output / name.removeprefix("files/")).read_bytes()),
                 dtype=torch.uint8,
             )
-    report = mismatches(expected, actual)
-    for name in expected:
-        if (
-            name.startswith("files/")
-            and name.endswith(".json")
-            and not torch.equal(expected[name], actual[name])
-        ):
-            report.append(
-                "".join(
-                    unified_diff(
-                        expected[name]
-                        .numpy()
-                        .tobytes()
-                        .decode()
-                        .splitlines(keepends=True),
-                        actual[name]
-                        .numpy()
-                        .tobytes()
-                        .decode()
-                        .splitlines(keepends=True),
-                        fromfile=name + " source",
-                        tofile=name + " native",
-                    ),
-                ),
-            )
-    assert not report, "\n".join(report)
+    assert_tensor_golden(golden, actual)
 
 
 def test_complete_outer_lists_control_gap_audits_and_every_source_file(
@@ -1284,7 +1384,7 @@ def test_a_processed_tail_without_audit_cannot_publish(
     "case",
     ["none", "missing_gl", "null_gl", "empty_ice", "triple", "pair"],
 )
-def test_source_legacy_gate_key_fallback_full_forty_window_and_prefixes(
+def test_legacy_gate_key_fallback_full_forty_window_and_prefixes(
     case: str,
 ) -> None:
     prepared = Prepared(read_tensors(_BASELINE / "testdata/recipe_outer.pt"))
@@ -1883,7 +1983,7 @@ def test_complete_main_stage_is_lazy_ranks_and_releases_models(
     config.assets = main_assets
     config.engine.max_query_spectra = 2
     resource = config.make()
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         ranked = resource.rank("molecule", _resources_queries(), 100.0)
         assert resource.rank("again", _resources_queries(), 100.0) == ranked
     assert ranked.smiles
@@ -1918,7 +2018,7 @@ def test_main_data_reads_all_positions_and_casts_each_popularity_before_sum(
     main_assets: MainAssets.Config,
 ) -> None:
     config = main_assets
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         inputs = config.make().read()
     assert inputs.families.pool is inputs.pool
     assert inputs.families.train_smiles == inputs.library.smiles
@@ -1993,7 +2093,7 @@ def test_second_stage_reaches_native_index_models_and_accepts_empty_raw_key(
         )
     config.assets = assets
     resource = config.make()
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         ranked = resource.rank("engine", _resources_queries())
         assert ranked is not None
         assert ranked.keys == ("",)
@@ -2026,7 +2126,7 @@ def test_main_resource_honors_shortlist_and_popularity_overrides(
     config.limit = limit
     config.popularity_weight = weight
     resource = config.make()
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         ranked = resource.rank("override", _resources_queries(), 100.0)
     assert len(ranked.keys) == count
     assert ranked.popularity_applied is False
@@ -2037,7 +2137,7 @@ def test_pubchem_stage_uses_both_v3_models_and_releases_them(tmp_path: Path) -> 
     config = PubChemResource.Config()
     config.assets = _pubchem_assets(tmp_path)
     resource = config.make()
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         ranked = resource.rank("pubchem", _resources_queries())
         assert ranked is not None
         assert ranked["pc"] == ["CCO"]
@@ -2295,7 +2395,7 @@ def test_main_generation_keeps_fallback_pool_aliases_and_all_support_logs(
     rankers.write_bytes(pickle.dumps({"features": names, "boosters": [text] * 4}))
     assets.rankers.sha256 = _seal(rankers)
     resource = config.make()
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         ranked = resource.rank("generation", _resources_queries(), 100.0)
     assert ranked.keys[0] == "a"
     assert ranked.formulas[0] == "C2H6O|gen"
@@ -2444,10 +2544,7 @@ def _main_assets(directory: Path) -> MainAssets.Config:
     chemistry_dir = directory / "identities"
     config.chemistry.working_dir = chemistry_dir
     chemistry_dir.mkdir()
-    write_identity(
-        chemistry_dir,
-        read_tensors(_BASELINE / "testdata/identity_preparation.pt"),
-    )
+    write_identity(chemistry_dir)
     reactions_dir = directory / "reactions"
     config.reactions_dir = reactions_dir
     reactions_dir.mkdir()
@@ -2669,7 +2766,7 @@ class _RunStage:
 
 
 @pytest.mark.parametrize("precreated", [False, True])
-def test_complete_native_outer_join_preserves_every_source_field_and_file(
+def test_complete_native_outer_join_preserves_every_field_and_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -2685,7 +2782,7 @@ def assert_recipe_output(
     expected: dict[str, Tensor],
     output: Path,
 ) -> None:
-    """Compare every complete source output and publication byte without reminting."""
+    """Compare every output and publication byte with the recipe golden."""
     actual = {
         name: tensor.clone()
         for name, tensor in expected.items()
@@ -2758,13 +2855,12 @@ def replay_recipe(
     precreated: bool = False,
     native_entry: bool = False,
 ) -> tuple[RecipeResults, dict[str, Tensor]]:
-    """Bind complete immutable source numerical outputs at each qualified arm seam."""
+    """Bind the stored arm outputs at each qualified seam of the recipe."""
     monkeypatch.setitem(sys.modules, "rdkit", None)
     expected = read_tensors(_BASELINE / "testdata/recipe_outer.pt")
     policy = read_tensors(_BASELINE / "testdata/list_policy.pt")
-    rows = json_loads(policy["inputs/rows"].numpy().tobytes().decode(), list[QueryRow])
     query_path = root / "queries.parquet"
-    parquet.write_table(Table.from_pylist(rows), query_path)
+    parquet.write_table(Table.from_pylist(query_rows()), query_path)
     queries = read_queries(query_path)
     sample = root / "sample.csv"
     sample.write_bytes(expected["files/sample_submission.csv"].numpy().tobytes())
@@ -2870,7 +2966,7 @@ def replay_recipe(
 class _EntryStage:
     class Config(Fig["_EntryStage"]):
         runner: SimulationRunner | None = None
-        """Complete source-minted simulator seam, preserving every panel and map."""
+        """Stored simulator seam, preserving every panel and map."""
 
     def __init__(self, config: Config) -> None:
         assert config.runner is not None
@@ -2908,7 +3004,7 @@ def native_run(
     gpu: str | None = None,
     clock: Callable[[], float],
 ) -> RecipeResults:
-    """Run the actual native entry with complete captured numerical stage boundaries."""
+    """Run the actual native entry with stored numerical stage boundaries."""
     del queries, started
     assert dreams is None
     assert gpu is None
@@ -3001,14 +3097,14 @@ class DeviceFailureBackend:
         self.counters.releases += 1
 
 
-def test_complete_source_stages_all_publications_caches_order_and_stops(
+def test_complete_stages_all_publications_caches_order_and_stops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     asset = tmp_path / "weights.bin"
     asset.write_bytes(b"complete declared scientific data")
@@ -3042,7 +3138,7 @@ def test_complete_source_stages_all_publications_caches_order_and_stops(
     assert not report, "\n".join(report)
 
 
-def test_source_defaults_and_bad_checkpoint_pin_cannot_load_a_backend(
+def test_defaults_and_bad_checkpoint_pin_cannot_load_a_backend(
     tmp_path: Path,
 ) -> None:
     ice, gl = SimulatorStage.Config(), glacier_stage(backend=GlacierBackend.Config())
@@ -3052,7 +3148,7 @@ def test_source_defaults_and_bad_checkpoint_pin_cannot_load_a_backend(
     assert (gl.budget.seconds, gl.batch_size, gl.chunk_jobs) == (4000.0, 32, 3000)
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     asset = tmp_path / "weights.bin"
     asset.write_bytes(b"corrupted data")
@@ -3076,7 +3172,7 @@ def test_every_failed_prediction_batch_releases_the_backend_cache(
 ) -> None:
     _write(
         tmp_path,
-        admission_rows(read_tensors(_BASELINE / "testdata/simulator_admission.pt")),
+        admission_rows(),
     )
     backend = DeviceFailureBackend.Config()
     config = SimulatorStage.Config()
@@ -3216,7 +3312,7 @@ def test_native_job_rejects_output_inside_or_above_protected_inputs(
     assert not Path(config.working_dir).exists()
 
 
-def test_native_entry_runs_the_complete_source_outer_record(
+def test_native_entry_runs_the_complete_outer_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3923,10 +4019,7 @@ def test_product_job_joins_complete_sid_pool_proposal_and_window_coverage(
     config.reactions = source
     config.identities = tmp_path / "identity"
     config.identities.mkdir()
-    expected = read_tensors(
-        _RECIPE_PREPARATION_BASELINE / "testdata/identity_preparation.pt",
-    )
-    write_identity(config.identities, expected)
+    write_identity(config.identities)
     config.pool_metadata = tmp_path / "pool.parquet"
     config.training = tmp_path / "train.parquet"
     config.second_metadata = tmp_path / "second.parquet"
@@ -4106,10 +4199,7 @@ def _planning(root: Path) -> PlanningPreparation.Config:
 def _reactions(root: Path) -> tuple[Path, str]:
     source = root / "reactions"
     source.mkdir()
-    record = read_tensors(
-        _RECIPE_PREPARATION_BASELINE / "testdata/identity_preparation.pt",
-    )
-    raw = identity_rows(record)[0]["smiles"]
+    raw = identity_rows()[0]["smiles"]
     request: ReactionRequest = {"smiles": "parent", "delta": 14.0}
     parquet.write_table(
         Table.from_pylist([normalize_request(request)]),

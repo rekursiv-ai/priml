@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import partialmethod
 from pathlib import Path
-from typing import Final, cast
+from typing import cast
 
 import csv
 import hashlib
@@ -14,38 +14,39 @@ import pytest
 
 from priml.baselines.name_that_llm.data import CompetitionData
 from priml.data.folds import grouped_folds
-from priml.testing.golden import read_tensors
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize(
-    ("name", "counts", "count"),
+    ("counts", "expected"),
     argvalues=[
-        ("unequal", (2, 4, 5, 7), 3),
-        ("equal", (4, 4, 4, 4), 2),
-        ("ties", (3, 6, 3, 6, 3, 6), 3),
+        (
+            (2, 4, 5, 7),
+            [list(range(11, 18)), list(range(6, 11)), list(range(6))],
+        ),
+        (
+            (4, 4, 4, 4),
+            [[4, 5, 6, 7, 12, 13, 14, 15], [0, 1, 2, 3, 8, 9, 10, 11]],
+        ),
+        (
+            (3, 6, 3, 6, 3, 6),
+            [list(range(18, 27)), list(range(9, 18)), list(range(9))],
+        ),
     ],
 )
-def test_grouped_folds_replay_complete_source_assignments(
-    name: str,
+def test_grouped_folds_assign_whole_groups_largest_first(
     counts: tuple[int, ...],
-    count: int,
+    expected: list[list[int]],
 ) -> None:
-    record = read_tensors(_CWD / "testdata" / "grouped_folds.pt")
     groups = np.repeat(
         np.array([f"g{index}" for index in range(len(counts))]),
         repeats=counts,
     )
-    folds = grouped_folds(groups, count=count)
-    assert len(folds) == count
-    for fold, (train, valid) in enumerate(folds):
-        expected = record[f"{name}/{fold}"].numpy()
-        assert np.array_equal(valid, a2=expected)
+    folds = grouped_folds(groups, count=len(expected))
+    assert [valid.tolist() for _, valid in folds] == expected
+    for train, valid in folds:
         assert np.array_equal(
             train,
-            a2=np.setdiff1d(np.arange(len(groups)), ar2=expected),
+            a2=np.setdiff1d(np.arange(len(groups)), ar2=valid),
         )
 
 

@@ -205,16 +205,10 @@ class LinearSVC:
         """
         if len(self.classes_) == 0 or features.shape[1] != self.n_features_in_:
             raise ValueError("Expected fitted classifier feature columns.")
-        # The source scored with SciPy's csr_matvecs, which rounds each product
-        # before adding it on x86; its aarch64 wheels fuse the two.
+        # Products summed in stored order; a BLAS product would round per host.
         rows = np.repeat(np.arange(features.shape[0]), repeats=np.diff(features.indptr))
         scores = np.zeros((features.shape[0], len(self.classes_)))
-        for column, weights in enumerate(self.coef_):
-            np.add.at(
-                scores[:, column],
-                rows,
-                features.data * weights[features.indices],
-            )
+        np.add.at(scores, rows, features.data[:, None] * self.coef_.T[features.indices])
         return scores + self.intercept_
 
 

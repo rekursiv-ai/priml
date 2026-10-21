@@ -88,13 +88,13 @@ def test_global_sampled_minimum_matches_source_draw_order() -> None:
     """Use halt-logit draws followed by int32 minimum-depth draws."""
     halt_logits = torch.tensor([0.25, -0.5, 0.75], dtype=torch.bfloat16)
     steps = torch.tensor([1, 2, 3], dtype=torch.int32)
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(731)
         expected_explore = torch.rand_like(halt_logits) < 0.1
         expected_minimum = torch.randint_like(steps, low=2, high=4)
         expected = (halt_logits > 0) & (steps >= (expected_explore * expected_minimum))
         expected_next = torch.rand(())
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(731)
         actual = GlobalSampledMinimum.Config().make()(
             halt_logits > 0,
@@ -129,10 +129,10 @@ def test_global_sampled_minimum_skips_draws_at_one_step_cap() -> None:
     subject = GlobalSampledMinimum.Config().make()
     halt_logits = torch.ones(SLOTS)
     steps = torch.ones(SLOTS, dtype=torch.int32)
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(812)
         expected_next = torch.rand(())
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(812)
         actual = subject(
             halt_logits > 0,

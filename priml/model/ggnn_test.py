@@ -147,7 +147,7 @@ def test_a_second_edge_initializer_redraws_weights_and_zeroes_biases() -> None:
 
 def test_construction_builds_the_children_then_resets_the_cell_and_edge_maps() -> None:
     config = tiny_graph().finalize()
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         _ = torch.manual_seed(2)
         model = config.make()
         _ = torch.manual_seed(2)

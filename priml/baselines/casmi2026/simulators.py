@@ -678,7 +678,7 @@ class PeakReduction(Protocol):
 
 
 class SumReduction:
-    """Sum duplicate masses and take the top peaks with the released quicksort."""
+    """Sum duplicate masses; take the top peaks, earliest mass first among equals."""
 
     class Config(Fig["SumReduction"]):
         """ICE reduction; it has no tunables."""
@@ -701,8 +701,8 @@ class SumReduction:
         return np.bincount(inverse, weights=weights)
 
     def top(self, intensity: NDArray[np.float64], count: int) -> NDArray[np.intp]:
-        """Take the strongest peaks by the unstable released sort."""
-        return np.argsort(-intensity, kind="quicksort")[:count]
+        """Take the strongest peaks, earliest mass first among equals."""
+        return np.argsort(-intensity, kind="stable")[:count]
 
 
 class MaxReduction:
@@ -1205,7 +1205,7 @@ def remove_atoms(
     group_counts = torch.bincount(labels)
     # This temporary one-segment graph is regrouped before the next graph operation.
     subgraph = mask_nodes(subgraph, touched, touched.sum().reshape(1))
-    permutation = torch.argsort(labels)
+    permutation = torch.argsort(labels, stable=True)
     inverse = torch.empty_like(permutation)
     inverse[permutation] = torch.arange(len(permutation), device=device)
     source = inverse[subgraph.topology.source]
@@ -1688,7 +1688,10 @@ def grow_fragments(
         candidates = pad_atoms(probability[:, None] * leaving, fragment_counts)
         candidates = candidates.view(batch_size, -1)
         combined = torch.cat([probabilities, candidates], dim=1)
-        selected = combined.argsort(dim=1, descending=True)[:, : 2 * max_nodes]
+        selected = combined.argsort(dim=1, descending=True, stable=True)[
+            :,
+            : 2 * max_nodes,
+        ]
         rows = torch.arange(batch_size, device=device)[:, None]
         eligible = (selected >= max_nodes) & (combined[rows, selected] > threshold)
         selected_molecule, selected_position = eligible.nonzero(as_tuple=True)
@@ -1743,7 +1746,11 @@ def grow_fragments(
         unique = torch.zeros_like(combined_probabilities, dtype=torch.bool)
         unique[first // width, first % width] = True
         combined_probabilities[~unique & (combined_probabilities > 0)] = -1
-        selected = combined_probabilities.argsort(dim=1, descending=True)[:, :max_nodes]
+        selected = combined_probabilities.argsort(
+            dim=1,
+            descending=True,
+            stable=True,
+        )[:, :max_nodes]
         probabilities = combined_probabilities.gather(1, selected)
         masks = combined_masks[rows, selected]
         combined_broken = torch.cat([broken_orders, pad_atoms(cuts, new_counts)], dim=1)
