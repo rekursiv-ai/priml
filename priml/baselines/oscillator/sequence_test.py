@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from torch import Tensor
 
@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from priml.baselines.oscillator.experiments import exp036, exp037
-from priml.baselines.oscillator.nonlinear import HistoryNetwork
+from priml.baselines.oscillator.nonlinear import HistoryNetwork, NeuralForecast
 from priml.baselines.oscillator.sequence import (
     PatchSequence,
     RbfKernel,
@@ -25,10 +25,6 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import assert_pprint_golden
-
-
-if TYPE_CHECKING:
-    from priml.baselines.oscillator.suite import BudgetStudy
 
 
 @pytest.mark.parametrize("recurrent", [False, True])
@@ -94,6 +90,33 @@ def test_recurrent_sequence_defaults_and_rejects_incompatible_widths() -> None:
         cfg.make()
 
 
+def test_patch_sequence_matches_manual_module_composition() -> None:
+    model = _config(recurrent=False).make()
+    assert isinstance(model.block, PatchSequence)
+    media = torch.arange(3 * 10 * 2).reshape(3, 10, 2).float() / 31
+    patches = torch.stack(
+        [media[:, start : start + 2].flatten(start_dim=1) for start in range(0, 10, 2)],
+        dim=1,
+    )
+    projected = model.block.proj_in(patches)
+    encoded = model.block.block(projected)
+    ordered = torch.cat(encoded.unbind(dim=1), dim=-1)
+    expected = model.block.proj_out(ordered).reshape(3, 7, 2)
+    assert expected.abs().max() > 0
+    assert torch.equal(model(media), expected)
+
+
+def test_recurrent_wrapper_returns_fresh_owned_sequence() -> None:
+    cfg = RecurrentSequence.Config(channels_in=5)
+    model = cfg.make()
+    values = torch.arange(2 * 3 * 5).reshape(2, 3, 5).float() / 17
+    expected, _ = model.block(values)
+    assert expected.abs().max() > 0
+    assert torch.equal(model(values), expected)
+    model(values.flip(dims=(1,)))
+    assert torch.equal(model(values), expected)
+
+
 @pytest.mark.parametrize("bad", ["patch", "partial", "output", "head"])
 def test_bad_temporal_geometry_is_rejected(bad: str) -> None:
     cfg = _config(recurrent=False)
@@ -132,12 +155,25 @@ def test_radial_kernel_is_symmetric_bounded_and_sensitive_to_scale() -> None:
         cfg.make()
 
 
-@pytest.mark.parametrize(("factory", "name"), [(exp036, "exp036"), (exp037, "exp037")])
-def test_temporal_recipes_are_fully_printable(
-    factory: Callable[[], BudgetStudy.Config],
-    name: str,
-) -> None:
-    assert_pprint_golden(test_file=__file__, name=name, config=factory())
+def test_patch_sequence_nexus_is_fully_printable() -> None:
+    assert_pprint_golden(test_file=__file__, name="exp036", config=exp036())
+
+
+def test_recurrent_fork_changes_only_the_finalized_mixing_stack() -> None:
+    before = exp036().finalize()
+    after = exp037().finalize()
+    assert isinstance(before.method, NeuralForecast.Config)
+    assert isinstance(after.method, NeuralForecast.Config)
+    assert isinstance(before.method.step.model.block, PatchSequence.Config)
+    assert isinstance(after.method.step.model.block, PatchSequence.Config)
+    mixer = after.method.step.model.block.block
+    assert isinstance(mixer, RecurrentSequence.Config)
+    assert mixer.channels_in == mixer.channels_out == 32
+    assert mixer.block.channels_in == mixer.block.channels_hidden == 32
+    assert mixer.block.num_layers == 2
+    after.method.step.model.block.block = before.method.step.model.block.block
+    after.experiment_name = before.experiment_name
+    assert after == before
 
 
 def _config(*, recurrent: bool) -> HistoryNetwork.Config:
@@ -161,3 +197,9 @@ def _config(*, recurrent: bool) -> HistoryNetwork.Config:
         )
         block.block.elements.ffn.channels_hidden = 8
     return cfg
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

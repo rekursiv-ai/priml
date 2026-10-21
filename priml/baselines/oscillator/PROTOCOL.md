@@ -48,10 +48,12 @@ learning recipe to an unseen mechanism; it does not test a single set of learned
 weights across all mechanisms. The combined-force family is a compositional
 holdout, while the other audit forces are absent from the development library.
 
-Before audit, the runner writes a lock containing the complete suite config and
-source digests. Audit refuses a changed config or source tree. A test result may
-not be used to change the frozen recipe and retain the same audit claim. A later
-revision must disclose prior audit exposure and use a fresh audit cohort.
+Choose the complete experiment configuration before evaluating the audit. A test
+result may not be used to change a recipe and retain the same audit claim. A
+later revision must disclose prior audit exposure and use a fresh audit cohort.
+The native experiment saves its declared template configuration and each
+attempt's actual finalized configuration with the results; this
+is a record of the run, not an independently timestamped preregistration.
 
 ## Comparisons
 
@@ -91,6 +93,10 @@ independent systems within each fixed family, keeping paired method comparisons
 together. Model seeds and individual timesteps are not independent task samples.
 Intervals describe these sampled systems, not all possible dynamical laws.
 
+Each summary row names its comparator in `baseline` (DLinear by default).
+`paired_difference` is the method's scaled MSE minus that comparator's scaled
+MSE; `paired_difference_interval` reports the paired bootstrap bounds.
+
 All attempted runs must remain in the report. Missing runs invalidate a complete
 audit. A nonfinite forecast is a recorded failure, not a row to discard; a method
 with a failed system receives no finite aggregate score. Individual families and
@@ -102,12 +108,15 @@ The evaluator checks split isolation, budget accounting, deterministic task
 generation, and consistency between a reference rollout and its targets. It
 compares the reference forecast with a four-times-finer integration grid, recording
 the discrepancy rather than claiming continuous-time ground truth. Tests cover
-test-target isolation, incomplete results, and stale-lock rejection.
+test-target isolation, incomplete results, and resuming with changed configuration
+or default tensor dtype.
 
-Runs record source hashes and installed versions. Public pretrained weights are
-pinned to exact revisions and staged before evaluation; the ordinary benchmark
-and its tests require no model download. Generated data and full run logs stay
-outside Git. The report must state the hardware and all limitations.
+Public pretrained weights are pinned to exact revisions and prepared before
+evaluation; their local files are checked against manifests. The simulator and
+offline tests require no model download. Runs retain every attempt and record
+the full configuration and default tensor dtype. Generated data and full run
+logs stay outside Git. Reported results must state the hardware, software
+versions, and all limitations.
 
 ## Scope of a first release
 

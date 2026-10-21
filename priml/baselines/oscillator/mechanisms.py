@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import field
+from typing import Self, override
 
 import math
 
-from configgle import Fig
+from configgle import Fig, Maker, traverse
 from torch import Tensor
 
 import torch
@@ -117,7 +118,16 @@ class SystemFamily:
         instances: int = 4
         """Independent systems in this fixed family."""
 
+        @override
+        def finalize(self) -> Self:
+            """Finalize this owner, leaving its sampled equation template pending."""
+            self._finalized = True
+            return self
+
     def __init__(self, config: Config) -> None:
+        for match in traverse(config.reference, Maker, recurse=True):
+            if getattr(match.config, "_finalized", False):
+                raise ValueError("System families require unfinalized templates.")
         low, high = config.coefficient_scale
         if not config.name or config.instances <= 0 or config.seed < 0:
             raise ValueError(

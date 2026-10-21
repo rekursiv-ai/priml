@@ -8,14 +8,31 @@ from typing import TYPE_CHECKING
 import pytest
 
 from priml.baselines.oscillator.suite_test import tiny_suite
+from priml.baselines.oscillator.summary import BenchmarkSummary
 
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_summary_averages_seeds_before_equal_weighting_families(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid", ["resamples", "confidence"])
+def test_summary_rejects_invalid_bootstrap_settings(invalid: str) -> None:
+    cfg = BenchmarkSummary.Config()
+    if invalid == "resamples":
+        cfg.resamples = 0
+    else:
+        cfg.confidence = 1
+    with pytest.raises(ValueError, match="Bootstrap"):
+        cfg.make()
+
+
+@pytest.mark.parametrize("baseline", ["dlinear", "zero"])
+def test_summary_averages_seeds_before_equal_weighting_families(
+    tmp_path: Path,
+    baseline: str,
+) -> None:
     cfg = tiny_suite()
+    cfg.baseline = baseline
     suite = cfg.make()
     records, _ = suite.run(tmp_path / "run", phase="audit")
     for record in records:
@@ -33,8 +50,11 @@ def test_summary_averages_seeds_before_equal_weighting_families(tmp_path: Path) 
     assert base["attempted_runs"] == 6
     assert base["scaled_mse_interval"] == [5.0, 5.0]
     assert other["scaled_mse"] == 4.0
-    assert other["paired_difference_from_dlinear"] == -1.0
-    assert other["paired_difference_interval"] == [-1.0, -1.0]
+    assert all(row["baseline"] == baseline for row in summary)
+    difference = -1.0 if baseline == "dlinear" else 0.0
+    assert other["paired_difference"] == difference
+    assert other["paired_difference_interval"] == [difference, difference]
+    assert base["paired_difference"] == (0.0 if baseline == "dlinear" else 1.0)
     assert base["worst_system_scaled_mse"] == 8.0
     assert suite.summarize(records, phase="audit") == summary
 
@@ -99,10 +119,13 @@ def test_a_failed_model_gets_no_finite_average(tmp_path: Path) -> None:
     summary = suite.summarize(records, phase="audit")
     assert summary[0]["failed_runs"] == 1
     assert summary[0]["scaled_mse"] is None
-    assert summary[1]["paired_difference_from_dlinear"] is None
+    assert summary[1]["paired_difference"] is None
 
 
-@pytest.mark.parametrize("bad", ["controls", "split", "budget", "geometry", "elapsed"])
+@pytest.mark.parametrize(
+    "bad",
+    ["controls", "missing_control", "split", "budget", "geometry", "elapsed"],
+)
 def test_summary_rejects_unpaired_controls_and_inconsistent_accounting(
     tmp_path: Path,
     bad: str,
@@ -114,6 +137,8 @@ def test_summary_rejects_unpaired_controls_and_inconsistent_accounting(
     assert row["result"] is not None
     if bad == "controls":
         row["result"]["scores"]["familiar"]["cheap_simulator"]["mse"] += 1
+    elif bad == "missing_control":
+        row["result"]["scores"]["familiar"].pop("last_value")
     elif bad == "split":
         row["result"]["scores"].pop("shifted")
     elif bad == "budget":
@@ -124,3 +149,9 @@ def test_summary_rejects_unpaired_controls_and_inconsistent_accounting(
         row["elapsed_seconds"] = float("nan")
     with pytest.raises(ValueError, match=r"controls|splits|budget|geometry|Elapsed"):
         suite.summarize(records, phase="audit")
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

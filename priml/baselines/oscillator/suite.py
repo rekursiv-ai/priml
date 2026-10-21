@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Literal, TypedDict, cast, override
+from itertools import pairwise
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Self, TypedDict, cast, override
 
 import hashlib
 import json
@@ -12,8 +14,9 @@ import math
 import re
 import time
 
-from configgle import Fig, Makes
+from configgle import Fig, Maker, Makes, traverse
 from torch import Tensor
+from treekle import from_plain, json_loads, to_plain
 
 import torch
 
@@ -31,7 +34,6 @@ from priml.paths import validated_output_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 class BudgetStudy(ForecastStudy):
@@ -99,7 +101,16 @@ class BenchmarkRecipe:
         access: Literal["adapted", "zero-shot"] = "adapted"
         """Reporting label describing use of reference targets."""
 
+        @override
+        def finalize(self) -> Self:
+            """Finalize this owner while its task-specific study remains pending."""
+            self._finalized = True
+            return self
+
     def __init__(self, config: Config) -> None:
+        for match in traverse(config.study, Maker, recurse=True):
+            if getattr(match.config, "_finalized", False):
+                raise ValueError("Benchmark recipes require unfinalized templates.")
         if (
             not config.name
             or not config.seeds
@@ -127,6 +138,12 @@ class BenchmarkSuite:
     class Config(Fig["BenchmarkSuite"]):
         version: str = "0.1.0"
         """Protocol identity; a revised audit claim needs a new version."""
+
+        working_dir: Path = Path("/opt/scratch/artifacts/oscillator/exp040")
+        """New output directory for the native experiment launch."""
+
+        phase: Literal["development", "audit"] = "audit"
+        """Family collection evaluated by the native experiment launch."""
 
         data: ForecastData.Config = field(default_factory=ForecastData.Config)
         """Common geometry, initial-condition ranges, and split counts."""
@@ -165,7 +182,21 @@ class BenchmarkSuite:
         integration_error_limit: float = 1e-3
         """Largest allowed training-scaled discrepancy from the finer grid."""
 
+        @override
+        def finalize(self) -> Self:
+            """Finalize concrete owners while their task templates remain pending."""
+            self.budgets = [budget.finalized() for budget in self.budgets]
+            self.summary = self.summary.finalized()
+            self.recipes = [recipe.finalized() for recipe in self.recipes]
+            self.development = [family.finalized() for family in self.development]
+            self.audit = [family.finalized() for family in self.audit]
+            self._finalized = True
+            return self
+
     def __init__(self, config: Config) -> None:
+        for match in traverse(config.data, Maker, recurse=True):
+            if getattr(match.config, "_finalized", False):
+                raise ValueError("Benchmark suites require unfinalized templates.")
         names = [recipe.name for recipe in config.recipes]
         budget_names = [budget.name for budget in config.budgets]
         families = [*config.development, *config.audit]
@@ -183,6 +214,15 @@ class BenchmarkSuite:
             )
         if not budget_names or len(set(budget_names)) != len(budget_names):
             raise ValueError("Budget labels must be distinct.")
+        budgets = sorted(
+            config.budgets,
+            key=lambda budget: budget.train + budget.validation,
+        )
+        if any(
+            small.train > large.train or small.validation > large.validation
+            for small, large in pairwise(budgets)
+        ):
+            raise ValueError("Reference budgets must be nested in both splits.")
         if (
             not config.development
             or not config.audit
@@ -215,7 +255,9 @@ class BenchmarkSuite:
             )
         if (
             config.integration_refinement < 2
-            or not 0 < config.integration_error_limit < math.inf
+            or math.isnan(config.integration_error_limit)
+            or config.integration_error_limit <= 0
+            or math.isinf(config.integration_error_limit)
         ):
             raise ValueError(
                 "Integration checks need a finer grid and a finite positive tolerance.",
@@ -286,9 +328,10 @@ class BenchmarkSuite:
     ) -> TaskDiagnostics:
         """Check split isolation, continuous rollout targets, and integration error."""
         source = data.make()
+        cfg = source.config
         splits = [
             source.windows(stream, simulator=source.reference)
-            for stream in (data.train, data.validation, data.test, data.shifted)
+            for stream in (cfg.train, cfg.validation, cfg.test, cfg.shifted)
         ]
         states = torch.cat([split.media[:, 0] for split in splits])
         if torch.unique(states, dim=0).shape != states.shape:
@@ -298,29 +341,32 @@ class BenchmarkSuite:
         count = min(item.train for item in self.config.budgets)
         prefix = Windows(media=splits[0].media[:count], label=splits[0].label[:count])
         _, scale = prefix.channel_stats()
-        fine = data.reference.copy_tree()
-        fine.substeps *= self.config.integration_refinement
-        finer = fine.make()
         oracle_error = fine_error = 0.0
         for split in splits[2:]:
-            oracle = source.reference.forecast_history(split.media, steps=data.pred_len)
+            oracle = source.reference.forecast_history(split.media, steps=cfg.pred_len)
             if not torch.equal(oracle, split.label):
                 raise ValueError(
                     "The target does not continue the observed reference trajectory.",
                 )
-            oracle_error = max(
-                oracle_error,
-                forecast_scores(oracle, target=split.label, scale=scale)["scaled_mse"],
+            score = forecast_scores(oracle, target=split.label, scale=scale)[
+                "scaled_mse"
+            ]
+            if not math.isfinite(score):
+                raise ValueError("Reference diagnostic scores must be finite.")
+            oracle_error = max(oracle_error, score)
+            refined = source.reference.forecast_history(
+                split.media,
+                steps=cfg.pred_len,
+                substeps=source.reference.config.substeps
+                * self.config.integration_refinement,
             )
-            refined = finer.forecast_history(split.media, steps=data.pred_len)
-            fine_error = max(
-                fine_error,
-                forecast_scores(refined, target=split.label, scale=scale)["scaled_mse"],
-            )
-        if (
-            not math.isfinite(fine_error)
-            or fine_error > self.config.integration_error_limit
-        ):
+            score = forecast_scores(refined, target=split.label, scale=scale)[
+                "scaled_mse"
+            ]
+            if not math.isfinite(score):
+                raise ValueError("Reference diagnostic scores must be finite.")
+            fine_error = max(fine_error, score)
+        if fine_error > self.config.integration_error_limit:
             raise ValueError(
                 "The reference integration discrepancy exceeds the declared tolerance.",
             )
@@ -362,28 +408,47 @@ class BenchmarkSuite:
 
     def run(
         self,
-        directory: Path,
+        directory: Path | None = None,
         *,
-        phase: Literal["development", "audit"],
+        phase: Literal["development", "audit"] | None = None,
         resume: bool = False,
         provenance: dict[str, object] | None = None,
     ) -> tuple[list[BenchmarkRun], list[TaskDiagnostics]]:
-        """Retain every attempt and resume only an identical declared run."""
-        directory = validated_output_path(directory)
+        """Retain every attempt and write the scientific report.
+
+        With no directory argument, use the configured output location and
+        raise after writing the report if any method failed. Explicit directory
+        calls retain failed records in their return value without raising.
+        Resuming requires an identical declared run.
+        """
+        if directory is not None and not isinstance(directory, Path):
+            raise TypeError("The output directory must be a Path or None.")
+        native = directory is None
+        directory = validated_output_path(
+            self.config.working_dir if directory is None else directory,
+        )
+        phase = self.config.phase if phase is None else phase
         manifest = {
             "config_sha256": suite_digest(self.config),
+            "torch_default_dtype": str(torch.get_default_dtype()),
             "phase": phase,
             "provenance": provenance,
         }
         if resume:
-            if json.loads((directory / "run-manifest.json").read_text()) != manifest:
+            if (
+                json_loads(
+                    (directory / "run-manifest.json").read_text(),
+                    dict[str, object],
+                )
+                != manifest
+            ):
                 raise ValueError(
                     "Cannot resume a different protocol, source, or environment.",
                 )
         else:
             directory.mkdir(parents=True, exist_ok=False)
             (directory / "run-manifest.json").write_text(
-                json.dumps(manifest, indent=2, allow_nan=False) + "\n",
+                json.dumps(to_plain(manifest), indent=2, allow_nan=False) + "\n",
             )
         records: list[BenchmarkRun] = []
         diagnostics: dict[tuple[str, str], TaskDiagnostics] = {}
@@ -397,7 +462,10 @@ class BenchmarkSuite:
                 diagnostics[key] = self.diagnose(system_id, cfg.data, budget=budget)
             destination = directory / f"{run_id}.json"
             if resume and destination.exists():
-                records.append(cast(BenchmarkRun, json.loads(destination.read_text())))
+                raw = json_loads(destination.read_text(), dict[str, object])
+                from_plain(raw, BenchmarkRun)
+                # Keep opaque fit extensions after validating the common run schema.
+                records.append(cast(BenchmarkRun, raw))
                 logging.getLogger(__name__).info("%s retained %s", len(records), run_id)
                 continue
             (directory / f"{run_id}.txt").write_text(
@@ -408,7 +476,8 @@ class BenchmarkSuite:
             error: str | None = None
             try:
                 result = _run_study(cfg)
-            except (ValueError, RuntimeError, ArithmeticError) as exc:
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Method failed: %s", run_id)
                 error = f"{type(exc).__name__}: {exc}"
                 result = None
             record: BenchmarkRun = {
@@ -425,7 +494,9 @@ class BenchmarkSuite:
                 "result": result,
             }
             temporary = destination.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n")
+            temporary.write_text(
+                json.dumps(to_plain(record), indent=2, allow_nan=False) + "\n",
+            )
             temporary.replace(destination)
             records.append(record)
             logging.getLogger(__name__).info(
@@ -434,11 +505,34 @@ class BenchmarkSuite:
                 record["status"],
                 run_id,
             )
+        report = {
+            "version": self.config.version,
+            "phase": phase,
+            "diagnostics": list(diagnostics.values()),
+            "summary": self.summarize(records, phase=phase),
+            "runs": records,
+        }
+        (directory / "protocol.txt").write_text(
+            self.config.pformat(
+                hide_default_values=False,
+                mask_memory_addresses=True,
+            )
+            + "\n",
+        )
+        destination = directory / "results.json"
+        destination.write_text(
+            json.dumps(to_plain(report), indent=2, allow_nan=False) + "\n",
+        )
+        logging.getLogger(__name__).info("Results: %s", destination)
+        if native and any(record["status"] != "complete" for record in records):
+            raise RuntimeError(
+                f"Benchmark methods failed; records saved to {destination}",
+            )
         return records, list(diagnostics.values())
 
 
 def suite_digest(config: BenchmarkSuite.Config) -> str:
-    """Hash the complete finalized protocol, including all recipes and seeds."""
+    """Hash the complete declared protocol, including all recipes and seeds."""
     return hashlib.sha256(
         config.pformat(hide_default_values=False, mask_memory_addresses=True).encode(),
     ).hexdigest()

@@ -43,6 +43,37 @@ def test_rollouts_continue_from_last_observation() -> None:
     assert torch.equal(full, torch.cat((prefix, suffix), dim=1))
 
 
+def test_substep_override_uses_the_same_kernel_without_mutating_config() -> None:
+    cfg = Oscillator.Config()
+    simulator = cfg.make()
+    before = simulator.config.copy_tree()
+    states = torch.tensor([[0.2, -0.1], [0.4, 0.3], [-0.8, 0.2]])
+    ordinary = simulator.forecast(states, steps=5)
+    assert torch.equal(ordinary, simulator.forecast(states, steps=5, substeps=None))
+    assert torch.equal(ordinary, simulator.forecast(states, steps=5, substeps=4))
+    refined = cfg.copy_tree()
+    refined.substeps = 16
+    expected = refined.make().forecast(states, steps=5)
+    assert torch.equal(expected, simulator.forecast(states, steps=5, substeps=16))
+    assert not torch.equal(ordinary, expected)
+    history = simulator.forecast(states, steps=4)
+    assert torch.equal(
+        simulator.forecast_history(history, steps=5, substeps=16),
+        refined.make().forecast(history[:, -1], steps=5),
+    )
+    assert simulator.config == before
+
+
+@pytest.mark.parametrize("substeps", [0, -1])
+def test_substep_override_requires_a_positive_count(substeps: int) -> None:
+    simulator = Oscillator.Config().make()
+    states = torch.zeros(3, 2)
+    with pytest.raises(ValueError, match="substeps"):
+        simulator.forecast(states, steps=5, substeps=substeps)
+    with pytest.raises(ValueError, match="substeps"):
+        simulator.forecast_history(states[:, None], steps=5, substeps=substeps)
+
+
 def test_sampling_is_repeatable_and_does_not_consume_global_rng() -> None:
     cfg = InitialStates.Config()
     cfg.count = 4

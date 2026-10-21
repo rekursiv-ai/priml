@@ -43,12 +43,18 @@ def test_unseeded_run_records_the_seed_it_drew() -> None:
     assert cfg.make().run()["seed"] == drawn
 
 
-def test_study_seed_leaves_gpu_generators_alone() -> None:
+@pytest.mark.parametrize("nested_seed", [None, 19])
+def test_study_seed_leaves_gpu_generators_alone(nested_seed: int | None) -> None:
     cfg = exp_smoke()
-    cfg.method = RidgeCorrection.Config()
+    assert isinstance(cfg.method, DLinearForecast.Config)
+    cfg.method.step.seed = nested_seed
     cfg.seed = 7
     with mock.patch.object(torch.cuda, "manual_seed_all") as seed_all:
-        cfg.make().run()
+        if nested_seed is None:
+            cfg.make().run()
+        else:
+            with pytest.raises(ValueError, match="seed"):
+                cfg.make().run()
     seed_all.assert_not_called()
 
 

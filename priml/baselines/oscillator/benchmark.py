@@ -77,6 +77,7 @@ class ForecastStudy:
 
         @override
         def finalize(self) -> Self:
+            self.data = self.data.finalized()
             propagate_attr(
                 self.method,
                 "seq_len",

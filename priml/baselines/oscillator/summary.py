@@ -46,7 +46,12 @@ class BenchmarkSummary:
         """Central bootstrap interval mass."""
 
     def __init__(self, config: Config) -> None:
-        if config.resamples <= 0 or not 0 < config.confidence < 1:
+        if (
+            config.resamples <= 0
+            or math.isnan(config.confidence)
+            or config.confidence <= 0
+            or config.confidence >= 1
+        ):
             raise ValueError("Bootstrap count and confidence must be valid.")
         self.config = config
 
@@ -178,6 +183,7 @@ class BenchmarkSummary:
                         "reference_budget": reference_budget,
                         "split": split,
                         "method": method,
+                        "baseline": baseline,
                         "access": access,
                         "attempted_runs": len(group),
                         "failed_runs": failures,
@@ -186,7 +192,7 @@ class BenchmarkSummary:
                         ),
                         "scaled_mse": None,
                         "scaled_mse_interval": None,
-                        "paired_difference_from_dlinear": None,
+                        "paired_difference": None,
                         "paired_difference_interval": None,
                         "family_scaled_mse": None,
                         "worst_system_scaled_mse": None,
@@ -211,7 +217,7 @@ class BenchmarkSummary:
                             }
                             paired, paired_interval, _ = self._bootstrap(differences)
                             aggregate.update(
-                                paired_difference_from_dlinear=paired,
+                                paired_difference=paired,
                                 paired_difference_interval=paired_interval,
                             )
                     rows.append(aggregate)

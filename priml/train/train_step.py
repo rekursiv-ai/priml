@@ -150,7 +150,7 @@ class TrainStep:
         carry -- leaves this at its default and never calls it."""
 
         accumulate_grad_batches: int = 1
-        """Micro-batches accumulated before one optimizer update."""
+        """Micro-batches accumulated before one optimizer attempt."""
 
         drop_partial_accumulation_on_epoch_end: bool = True
         """Discard a partial gradient accumulation at each epoch boundary.
@@ -164,7 +164,7 @@ class TrainStep:
         """
 
         train_budget_steps: float = math.inf
-        """Optimizer steps the schedule anneals over; infinite leaves it out.
+        """Optimizer attempts the schedule anneals over; infinite leaves it out.
 
         A HORIZON, not a stop condition: the loop's ``max_steps`` ends the run,
         and this is what the learning rate is annealed against. They are
@@ -328,7 +328,7 @@ class TrainStep:
 
         self.skip_step_on_nonfinite_grad = config.skip_step_on_nonfinite_grad
         self.skipped_steps = 0
-        """Updates skipped for a non-finite gradient norm; checkpointed."""
+        """Updates skipped for nonfinite gradients or declined by the optimizer."""
 
         self.timer_forward = CheckpointableStepTimer()
         """Training forward passes: how many, and how long they took."""
@@ -337,7 +337,7 @@ class TrainStep:
         """Evaluation forward passes: how many, and how long they took."""
 
         self.timer_step = CheckpointableStepTimer()
-        """Optimizer updates: how many, and how long they took.
+        """Optimizer attempts, including skips: how many and how long they took.
 
         What both progress properties read, so what this timer wraps IS what
         the budget bounds -- compilation before the first update and
@@ -434,7 +434,7 @@ class TrainStep:
 
     @property
     def global_step(self) -> int:
-        """Optimizer updates across the whole run, resumes included.
+        """Optimizer attempts, including skips, across the whole run and resumes.
 
         The step timer's count under the name the loop, the cadences, and
         every logged metric already use for it.
@@ -443,7 +443,7 @@ class TrainStep:
 
     @property
     def local_step(self) -> int:
-        """Optimizer updates since this process started.
+        """Optimizer attempts, including skips, since this process started.
 
         The step timer's session count. What a warmup exclusion or a
         first-step branch reads, since after a resume those are questions
@@ -642,6 +642,8 @@ class TrainStep:
             self.optimizer.zero_grad(set_to_none=True)
             if updated:
                 self.ema(self.model)
+            else:
+                self.skipped_steps += 1
 
     def optimizer_step(
         self,

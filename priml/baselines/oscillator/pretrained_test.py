@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from pkgutil import resolve_name
-from typing import cast
 
 import hashlib
 import json
 
 from configgle import Fig, InlineConfig
 from torch import Tensor
+from treekle import json_loads, to_plain
 
 import pytest
 import torch
@@ -30,7 +30,7 @@ def test_staged_model_files_are_pinned_and_checked(tmp_path: Path, bad: str) -> 
     cfg = _assets(tmp_path)
     assert cfg.make().directory == tmp_path
     path = tmp_path / "source.json"
-    record = cast(AssetManifest, json.loads(path.read_text()))
+    record = json_loads(path.read_text(), AssetManifest)
     if bad == "identity":
         record["model_id"] = "other/model"
     elif bad == "revision":
@@ -39,7 +39,7 @@ def test_staged_model_files_are_pinned_and_checked(tmp_path: Path, bad: str) -> 
         record["files"]["../outside"] = "bad"
     else:
         (tmp_path / "model.safetensors").write_text("changed")
-    path.write_text(json.dumps(record))
+    path.write_text(json.dumps(to_plain(record)))
     with pytest.raises(ValueError, match=r"identity|manifest|digest"):
         cfg.make()
 
@@ -49,6 +49,15 @@ def test_lazy_pipeline_factory_resolves_instead_of_returning_a_partial() -> None
         assert isinstance(cfg.factory, InlineConfig)
     lazy = InlineConfig(resolve_name, f"{__name__}:_Factory")
     assert lazy.make() is _Factory
+
+
+def test_pretrained_assets_default_to_the_shared_download_cache() -> None:
+    assert ModelFiles.Config().directory == Path(
+        "/opt/scratch/caches/chronos/chronos-bolt-tiny",
+    )
+    assert Chronos2Pipeline.Config().files.directory == Path(
+        "/opt/scratch/caches/chronos/chronos-2",
+    )
 
 
 @pytest.mark.parametrize("multivariate", [False, True])
@@ -117,8 +126,7 @@ def test_zero_shot_fit_ignores_target_values_and_rejects_bad_forecasts() -> None
         synthetic=train,
         simulator=Oscillator.Config().make(),
     )
-    with pytest.raises(ValueError, match="finite"):
-        bad.predict(media)
+    assert torch.isnan(bad.predict(media)).all()
     cfg.pipeline = _PointForecast.Config(wrong_shape=True)
     bad = cfg.make()
     bad.fit(
@@ -145,13 +153,14 @@ def _assets(path: Path) -> ModelFiles.Config:
             for name, content in files.items()
         },
     }
-    (path / "source.json").write_text(json.dumps(record))
+    (path / "source.json").write_text(json.dumps(to_plain(record)))
     return cfg
 
 
 class _Factory:
     class Config(Fig["_Factory"]):
         multivariate: bool = False
+        """Return per-trajectory groups instead of a batched point tensor."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -185,7 +194,10 @@ class _Factory:
 class _PointForecast:
     class Config(Fig["_PointForecast"]):
         nonfinite: bool = False
+        """Return nonfinite point forecasts to exercise evaluator failure handling."""
+
         wrong_shape: bool = False
+        """Return the observed geometry instead of the requested forecast geometry."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -195,3 +207,9 @@ class _PointForecast:
             return media
         result = media[:, -1:].expand(len(media), horizon, 2)
         return result * float("nan") if self.config.nonfinite else result
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

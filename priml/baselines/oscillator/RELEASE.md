@@ -44,7 +44,13 @@ seeds and individual forecast cells are not counted as independent systems.
 
 ## Local audit results
 
-The local audit completed all 544 planned fits without a model failure. It ran
+The following results and verification counts are author-reported. This record
+does not link an immutable raw run bundle. Independent review has not verified
+the audit scores, replay matches, or release-machine validation logs against
+that evidence.
+
+The author reports that the local audit completed all 544 planned fits without
+a model failure. It ran
 on an Apple M4 with 16 GiB memory, using CPU execution and one Torch thread.
 Python was 3.12.3, Torch 2.11.0,
 and Chronos forecasting 2.3.2.
@@ -134,14 +140,21 @@ hashes are isolated in `pretrained-requirements.txt`; the project's dependency
 files are unchanged. Ordinary tests need neither pretrained weights nor network
 access.
 
-The runner records the full configuration, source hashes, installed package
-versions, and model digests before a run. Audit requires an unchanged local lock.
-Completed attempts are saved atomically, and resuming requires matching
-provenance. A failed method has no finite aggregate score. This is a local
-protocol freeze, not an independently timestamped preregistration.
+The current reproduction path launches `exp040` through PRIML's standard
+experiment entry point. The job writes the declared template configuration,
+each attempt's actual finalized configuration, integration diagnostics, and
+paired summaries. Completed attempts are
+saved atomically. The Python API permits resuming with matching configuration,
+default tensor dtype, and supplied provenance. A failed method has no finite
+aggregate score; the native job writes the report before raising on failures.
 
-Full run records and generated artifacts stay outside Git. The release evidence
-contains the audit lock, per-run configurations, and every attempted fit.
+The source and asset lock checks reported above describe the author's historical
+release workflow. The bespoke freeze-and-run executable has been removed; the
+current experiment does not enforce a source lock or collect installed versions.
+
+Full run records and generated artifacts stay outside Git. The author reports
+that the release evidence contains the audit lock, per-run configurations, and
+every attempted fit; no immutable location for that bundle is linked here.
 The benchmark's test suite checks budget nesting, training-only score scales,
 target isolation, and pairing across methods. It also rejects incomplete results
 and inconsistent control scores. Existing oscillator and ETTh1 numerical
@@ -150,8 +163,10 @@ regression records are retained.
 ## Limits and next validation
 
 These are noiseless, fully observed, two-variable systems with known linear
-physics. Neural models use float32 arithmetic; simulation and direct solves use
-float64. The force library has a useful prior on the compositional holdout and
+physics. With Torch's default dtype, initial states, generated trajectories, and
+neural models use float32. Calibration losses and direct solves use float64;
+the simulator retains the dtype of its input states. The force library has a
+useful prior on the compositional holdout and
 shares the evaluator's integration scheme. A small integration-grid discrepancy
 does not make the discrete targets exact continuous-time physics.
 
@@ -181,6 +196,9 @@ checks also passed, as did the new release executable when invoked from another
 directory. Scoped pre-commit checks passed,
 including the changed-source 98% coverage gate. Repository-wide ty and basedpyright
 checks passed without diagnostics, and the package wheel built successfully.
+
+These are the author's historical validation counts. The release executable
+mentioned here has since been removed in favor of the native experiment launch.
 
 A repository-wide test attempt did not pass on this laptop. All 58 observed
 failures reproduced on unchanged base revision `631a0c11`, as did four collection

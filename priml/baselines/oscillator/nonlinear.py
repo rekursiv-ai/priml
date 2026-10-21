@@ -250,6 +250,19 @@ class HistoryNetwork(nn.Module):
         return output.reshape(len(media), self.config.pred_len, STATE_CHANNELS)
 
 
+class NeuralFitReport(FitReport):
+    """Successful updates and attempt counts before restoring the selected checkpoint."""
+
+    attempted_updates: int
+    """Optimizer attempts before restoring the selected checkpoint."""
+
+    skipped_updates: int
+    """Attempts that performed no optimizer update."""
+
+    best_attempt: int
+    """Attempt index of the checkpoint; best_update counts successful updates."""
+
+
 class NeuralForecast:
     """Train a nonlinear control through PRIML's shared training lifecycle."""
 
@@ -269,7 +282,7 @@ class NeuralForecast:
         """Reference trajectories drawn per microbatch."""
 
         validation_every: int = 25
-        """Optimizer updates between validation checks."""
+        """Optimizer attempts between validation checks."""
 
         sample_seed: int = 606
         """Independent random stream for sampling training trajectories."""
@@ -294,7 +307,7 @@ class NeuralForecast:
 
         @property
         def updates(self) -> int:
-            """Optimizer update budget and schedule horizon."""
+            """Optimizer-attempt budget and schedule horizon."""
             return int(self.step.train_budget_steps)
 
         @updates.setter
@@ -309,7 +322,7 @@ class NeuralForecast:
             )
         if min(config.batch_size, config.validation_every) <= 0:
             raise ValueError("Batch size and validation interval must be positive.")
-        # ``fit`` counts updates itself, so time and epoch budgets would be
+        # ``fit`` counts attempts itself, so time and epoch budgets would be
         # ignored; bf16 autocast fails in this float32 loss's backward pass.
         unsupported = {
             "dtype_autocast": config.step.dtype_autocast is not None,
@@ -331,7 +344,7 @@ class NeuralForecast:
         validation: Windows,
         synthetic: Windows,
         simulator: Oscillator,
-    ) -> FitReport:
+    ) -> NeuralFitReport:
         """Fit on reference data and choose a full training state using validation.
 
         Args:
@@ -341,7 +354,7 @@ class NeuralForecast:
           simulator: Unused; the network sees only observed windows.
 
         Returns:
-          report: Actual optimizer updates, selected update, and validation loss.
+          report: Successful updates, attempts, selected checkpoint, and validation loss.
 
         Raises:
           RuntimeError: The method was already fitted.
@@ -360,7 +373,7 @@ class NeuralForecast:
                 raise ValueError("Data does not match the history network geometry.")
         self.mean, self.scale = train.channel_stats()
         generator = torch.Generator().manual_seed(cfg.sample_seed)
-        best_loss, best_update = math.inf, 0
+        best_loss, best_update, best_attempt = math.inf, 0, 0
         best_state: TrainStep.StateDict | None = None
         for _ in range(cfg.updates * cfg.step.accumulate_grad_batches):
             indices = torch.randint(
@@ -386,15 +399,20 @@ class NeuralForecast:
                     .mean(),
                 )
                 if math.isfinite(loss) and loss < best_loss:
-                    best_loss, best_update = loss, update
+                    best_loss = loss
+                    best_update = update - self.step.skipped_steps
+                    best_attempt = update
                     best_state = deepcopy(self.step.state_dict())
         if best_state is None:
             self.mean = self.scale = None
             raise ValueError("No finite validation checkpoint was found.")
-        updates = self.step.global_step
+        attempts, skipped = self.step.global_step, self.step.skipped_steps
         self.step.load_state_dict(best_state)
         return {
-            "updates": updates,
+            "updates": attempts - skipped,
+            "attempted_updates": attempts,
+            "skipped_updates": skipped,
+            "best_attempt": best_attempt,
             "best_update": best_update,
             "pretrain_updates": 0,
             "validation_scaled_mse": best_loss,

@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import field
 from pathlib import Path
 from pkgutil import resolve_name
-from typing import TYPE_CHECKING, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 import hashlib
-import json
 
 from configgle import Fig, InlineConfig, Makeable
 from torch import Tensor
+from treekle import json_loads
 
 import torch
 
@@ -66,7 +66,7 @@ class ModelFiles:
     """Verify the staged model identity and every recorded file digest."""
 
     class Config(Fig["ModelFiles"]):
-        directory: Path = Path("/opt/scratch/models/chronos-bolt-tiny")
+        directory: Path = Path("/opt/scratch/caches/chronos/chronos-bolt-tiny")
         """Local files; staging is a separate command."""
 
         model_id: str = "amazon/chronos-bolt-tiny"
@@ -78,9 +78,9 @@ class ModelFiles:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.directory = config.directory.expanduser().resolve()
-        record = cast(
+        record = json_loads(
+            (self.directory / "source.json").read_text(),
             AssetManifest,
-            json.loads((self.directory / "source.json").read_text()),
         )
         if (
             record["model_id"] != config.model_id
@@ -154,7 +154,7 @@ class Chronos2Pipeline:
     class Config(Fig["Chronos2Pipeline"]):
         files: ModelFiles.Config = field(
             default_factory=lambda: ModelFiles.Config(
-                directory=Path("/opt/scratch/models/chronos-2"),
+                directory=Path("/opt/scratch/caches/chronos/chronos-2"),
                 model_id="amazon/chronos-2",
                 revision="29ec3766d36d6f73f0696f85560a422f50e8498c",
             ),
@@ -244,8 +244,8 @@ class PretrainedForecast:
             raise RuntimeError("Set the forecast geometry before predicting.")
         result = self.pipeline(media, horizon=self.horizon)
         expected = (len(media), self.horizon, STATE_CHANNELS)
-        if result.shape != expected or not torch.isfinite(result).all():
+        if result.shape != expected:
             raise ValueError(
-                "The pretrained forecast must be finite and match the target geometry.",
+                "The pretrained forecast must match the target geometry.",
             )
         return result

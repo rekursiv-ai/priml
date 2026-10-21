@@ -189,18 +189,25 @@ def test_history_rollout_uses_predictions_after_the_observed_delays() -> None:
     assert torch.equal(full[:, 2:], tail)
 
 
-def test_constant_prehistory_is_explicit_and_gain_zero_matches_base() -> None:
+@pytest.mark.parametrize("substeps", [None, 1, 8])
+def test_constant_prehistory_is_explicit_and_gain_zero_matches_base(
+    substeps: int | None,
+) -> None:
     cfg = DelayedOscillator.Config(lags=[4, 3])
     states = torch.tensor([[0.3, -0.2], [-0.8, 0.5], [1.1, 0.4]])
     assert torch.equal(
-        cfg.make().forecast(states, steps=5),
-        cfg.make().forecast_history(states[:, None].expand(-1, 4, -1), steps=5),
+        cfg.make().forecast(states, steps=5, substeps=substeps),
+        cfg.make().forecast_history(
+            states[:, None].expand(-1, 4, -1),
+            steps=5,
+            substeps=substeps,
+        ),
     )
     cfg.gain = 0
     base = Oscillator.Config()
     assert torch.equal(
-        cfg.make().forecast(states, steps=5),
-        base.make().forecast(states, steps=5),
+        cfg.make().forecast(states, steps=5, substeps=substeps),
+        base.make().forecast(states, steps=5, substeps=substeps),
     )
     with pytest.raises(ValueError, match="position/velocity"):
         cfg.make().forecast(torch.zeros(3, 4, 2), steps=3)
@@ -215,6 +222,14 @@ def test_invalid_delay_settings_are_rejected(bad: str) -> None:
         cfg.gain = float("inf")
     with pytest.raises(ValueError, match=r"lags|gain"):
         cfg.make()
+
+
+@pytest.mark.parametrize("substeps", [0, -1])
+def test_delayed_substep_override_requires_a_positive_count(substeps: int) -> None:
+    simulator = DelayedOscillator.Config().make()
+    states = torch.zeros(3, 2)
+    with pytest.raises(ValueError, match="substeps"):
+        simulator.forecast(states, steps=5, substeps=substeps)
 
 
 @pytest.mark.parametrize(

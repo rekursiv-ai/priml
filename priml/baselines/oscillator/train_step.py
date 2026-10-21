@@ -137,6 +137,10 @@ class DLinearForecast:
             self.step.train_budget_steps = value
 
     def __init__(self, config: Config) -> None:
+        if config.step.seed is not None:
+            raise ValueError(
+                "Set the study seed; the nested DLinear step seed must be None.",
+            )
         budget = config.step.train_budget_steps
         if not math.isfinite(budget) or budget != int(budget):
             raise ValueError("The step budget must be a finite whole update count.")

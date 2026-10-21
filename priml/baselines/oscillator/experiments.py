@@ -831,17 +831,16 @@ def exp035() -> BudgetStudy.Config:
     assert isinstance(parent, DLinearForecast.Config)
     method = cfg.method = NeuralForecast.Config()
     method.updates = parent.updates
-    method.step.model.block = Sequential.Config(
-        elements=[
-            SwiGLU.Config(
-                channels_hidden=64,
-                channels_out=64,
-                bias=True,
-                init_weight_out=unit_fan_in_uniform,
-            ),
-            SwiGLU.Config(channels_hidden=64, bias=True),
-        ],
-    )
+    block = method.step.model.block = Sequential.Config()
+    first = SwiGLU.Config()
+    first.channels_hidden = 64
+    first.channels_out = 64
+    first.bias = True
+    first.init_weight_out = unit_fan_in_uniform
+    second = SwiGLU.Config()
+    second.channels_hidden = 64
+    second.bias = True
+    block.elements = [first, second]
     return cfg
 
 
@@ -962,34 +961,42 @@ def exp040() -> BenchmarkSuite.Config:
     drag.name = "quadratic_drag"
     drag.seed = 13001
     drag.instances = 1
-    drag.reference.corrections = [
-        WeightedForce.Config(term=PowerForce.Config(axis=1, power=2), coefficient=0.35),
-    ]
+    drag_force = WeightedForce.Config()
+    drag_term = drag_force.term = PowerForce.Config()
+    drag_term.axis = 1
+    drag_term.power = 2
+    drag_force.coefficient = 0.35
+    drag.reference.corrections = [drag_force]
     cfg.development = [matched, cubic, drag]
 
     mixed = SystemFamily.Config()
     mixed.name = "combined"
     mixed.seed = 21001
     mixed.reference = cubic.reference.copy_tree()
-    mixed.reference.corrections = drag.reference.corrections.copy()
+    mixed.reference.corrections = [
+        correction.copy_tree() for correction in drag.reference.corrections
+    ]
     bounded = SystemFamily.Config()
     bounded.name = "saturating"
     bounded.seed = 22001
-    bounded.reference.corrections = [
-        WeightedForce.Config(term=SaturatingForce.Config(), coefficient=1.2),
-    ]
+    bounded_force = WeightedForce.Config()
+    bounded_force.term = SaturatingForce.Config()
+    bounded_force.coefficient = 1.2
+    bounded.reference.corrections = [bounded_force]
     sine = SystemFamily.Config()
     sine.name = "sine"
     sine.seed = 23001
-    sine.reference.corrections = [
-        WeightedForce.Config(term=SineForce.Config(), coefficient=0.8),
-    ]
+    sine_force = WeightedForce.Config()
+    sine_force.term = SineForce.Config()
+    sine_force.coefficient = 0.8
+    sine.reference.corrections = [sine_force]
     coupled = SystemFamily.Config()
     coupled.name = "coupled_drag"
     coupled.seed = 24001
-    coupled.reference.corrections = [
-        WeightedForce.Config(term=CoupledDrag.Config(), coefficient=0.45),
-    ]
+    coupled_force = WeightedForce.Config()
+    coupled_force.term = CoupledDrag.Config()
+    coupled_force.coefficient = 0.45
+    coupled.reference.corrections = [coupled_force]
     cfg.audit = [mixed, bounded, sine, coupled]
 
     dlinear = BenchmarkRecipe.Config()

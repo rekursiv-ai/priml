@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from typing import Self, override
 
+import math
+
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
@@ -233,7 +235,11 @@ class RbfKernel:
         """Distance scale after training-only feature standardization."""
 
     def __init__(self, config: Config) -> None:
-        if not 0 < config.length_scale < float("inf"):
+        if (
+            math.isnan(config.length_scale)
+            or config.length_scale <= 0
+            or config.length_scale >= math.inf
+        ):
             raise ValueError("The kernel length scale must be finite and positive.")
         self.config = config
 

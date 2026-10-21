@@ -242,12 +242,19 @@ class DelayedOscillator(Oscillator):
         self.delay = config
 
     @override
-    def forecast(self, state: Tensor, *, steps: int) -> Tensor:
+    def forecast(
+        self,
+        state: Tensor,
+        *,
+        steps: int,
+        substeps: int | None = None,
+    ) -> Tensor:
         """Forecast with constant prehistory when only a state is supplied.
 
         Args:
           state: Position/velocity pairs shaped (trajectories, 2).
           steps: Future observations to produce.
+          substeps: Integration steps per observation; None uses the config.
 
         Returns:
           prediction: Forecasts assuming the supplied state filled every delay.
@@ -256,15 +263,26 @@ class DelayedOscillator(Oscillator):
         if state.ndim != 2 or state.shape[-1] != STATE_CHANNELS:
             raise ValueError("Expected position/velocity pairs.")
         length = max(self.delay.lags)
-        return self.forecast_history(state[:, None].expand(-1, length, -1), steps=steps)
+        return self.forecast_history(
+            state[:, None].expand(-1, length, -1),
+            steps=steps,
+            substeps=substeps,
+        )
 
     @override
-    def forecast_history(self, media: Tensor, *, steps: int) -> Tensor:
+    def forecast_history(
+        self,
+        media: Tensor,
+        *,
+        steps: int,
+        substeps: int | None = None,
+    ) -> Tensor:
         """Roll out using observed history, then previously predicted states.
 
         Args:
           media: Floating histories shaped (trajectories, history, 2).
           steps: Future observations to produce.
+          substeps: Integration steps per observation; None uses the config.
 
         Returns:
           prediction: States shaped (trajectories, steps, 2). The delayed force
@@ -272,7 +290,7 @@ class DelayedOscillator(Oscillator):
             histories propagate into the forecast.
 
         Raises:
-          ValueError: Shapes, horizon, dtype, or available history are invalid.
+          ValueError: Shapes, horizon, dtype, available history, or substeps are invalid.
 
         """
         if (
@@ -284,16 +302,19 @@ class DelayedOscillator(Oscillator):
             or steps <= 0
         ):
             raise ValueError("Expected floating histories covering all feedback lags.")
+        substeps = self.config.substeps if substeps is None else substeps
+        if substeps <= 0:
+            raise ValueError("Integration substeps must be positive.")
         history = list(media.unbind(dim=1))
         position, velocity = history[-1].unbind(dim=-1)
-        delta = self.config.step_size / self.config.substeps
+        delta = self.config.step_size / substeps
         frames: list[Tensor] = []
         for _ in range(steps):
             product = torch.ones_like(position)
             for lag in self.delay.lags:
                 product = product * history[-lag][:, 0]
             force = self.delay.gain * product.tanh()
-            for _ in range(self.config.substeps):
+            for _ in range(substeps):
                 acceleration = self.acceleration(position, velocity=velocity) + force
                 velocity = velocity + delta * acceleration
                 position = position + delta * velocity

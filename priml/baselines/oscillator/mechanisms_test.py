@@ -99,3 +99,16 @@ def test_invalid_family_settings_are_rejected(bad: str) -> None:
         cfg.coefficient_scale = (1.0, float("nan"))
     with pytest.raises(ValueError, match=r"Families|Coefficient"):
         cfg.make()
+
+
+def test_system_families_require_raw_templates() -> None:
+    cfg = SystemFamily.Config()
+    cfg.reference.finalize()
+    with pytest.raises(ValueError, match="unfinalized"):
+        cfg.make()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

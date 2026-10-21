@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import TYPE_CHECKING, override
 from unittest import mock
 
-from configgle import Makes
+from configgle import Makes, PartialConfig
 from torch import Tensor
 
 import pytest
@@ -31,6 +31,7 @@ from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
+    from priml.loss.custom_types import LossOutput
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -171,6 +172,36 @@ def test_network_uses_common_updates_and_restores_the_selected_full_state(
             synthetic=train,
             simulator=Oscillator.Config().make(),
         )
+
+
+def test_skipped_network_attempts_report_zero_actual_optimizer_updates() -> None:
+    cfg = _neural_config()
+    cfg.updates = 2
+    cfg.step.skip_step_on_nonfinite_grad = True
+    cfg.step.loss = PartialConfig(_finite_loss_nan_gradient)
+    method = cfg.make()
+    before = [parameter.clone() for parameter in method.step.model.parameters()]
+    train = _windows()
+    report = method.fit(
+        train,
+        validation=train,
+        synthetic=train,
+        simulator=Oscillator.Config().make(),
+    )
+    assert report["updates"] == 0
+    assert report["best_update"] == 0
+    assert report.get("attempted_updates") == 2
+    assert report.get("skipped_updates") == 2
+    assert report.get("best_attempt") == 1
+    assert method.step.global_step == method.step.skipped_steps == 1
+    assert all(
+        torch.equal(parameter, original)
+        for parameter, original in zip(
+            method.step.model.parameters(),
+            before,
+            strict=True,
+        )
+    )
 
 
 @pytest.mark.parametrize("bad", ["budget", "batch", "interval"])
@@ -482,6 +513,18 @@ def _neural_config() -> NeuralForecast.Config:
     assert isinstance(cfg.step.model.block, SwiGLU.Config)
     cfg.step.model.block.channels_hidden = 4
     return cfg
+
+
+def _finite_loss_nan_gradient(output: object, **kwargs: object) -> LossOutput:
+    del kwargs
+    assert isinstance(output, Tensor)
+    return {
+        "loss": torch.where(
+            torch.ones_like(output, dtype=torch.bool),
+            output.square(),
+            output * float("nan"),
+        ),
+    }
 
 
 if __name__ == "__main__":

@@ -46,39 +46,55 @@ class Oscillator:
             raise ValueError("Damping and cubic force must be nonnegative.")
         self.config = config
 
-    def forecast(self, state: Tensor, *, steps: int) -> Tensor:
+    def forecast(
+        self,
+        state: Tensor,
+        *,
+        steps: int,
+        substeps: int | None = None,
+    ) -> Tensor:
         """Advance position and velocity, excluding the supplied initial state.
 
         Args:
           state: Floating-point position/velocity pairs shaped (trajectories, 2).
           steps: Observations to produce after ``state``.
+          substeps: Integration steps per observation; None uses the config.
 
         Returns:
           values: States shaped (trajectories, steps, 2).
 
         Raises:
           ValueError: ``state`` is not floating-point position/velocity pairs, or
-            ``steps`` is not positive.
+            ``steps`` or the effective ``substeps`` is not positive.
 
         """
         if state.ndim != 2 or state.shape[-1] != STATE_CHANNELS or steps <= 0:
             raise ValueError("Expected position/velocity pairs and positive steps.")
         if not state.is_floating_point():
             raise ValueError("Initial states must be floating-point values.")
+        substeps = self.config.substeps if substeps is None else substeps
+        if substeps <= 0:
+            raise ValueError("Integration substeps must be positive.")
         position, velocity = state.unbind(dim=-1)
-        delta = self.config.step_size / self.config.substeps
+        delta = self.config.step_size / substeps
         frames: list[Tensor] = []
         for _ in range(steps):
-            for _ in range(self.config.substeps):
+            for _ in range(substeps):
                 acceleration = self.acceleration(position, velocity=velocity)
                 velocity = velocity + delta * acceleration
                 position = position + delta * velocity
             frames.append(torch.stack((position, velocity), dim=-1))
         return torch.stack(frames, dim=1)
 
-    def forecast_history(self, media: Tensor, *, steps: int) -> Tensor:
+    def forecast_history(
+        self,
+        media: Tensor,
+        *,
+        steps: int,
+        substeps: int | None = None,
+    ) -> Tensor:
         """Forecast from observed histories; these dynamics need only the last state."""
-        return self.forecast(media[:, -1], steps=steps)
+        return self.forecast(media[:, -1], steps=steps, substeps=substeps)
 
     def acceleration(self, position: Tensor, *, velocity: Tensor) -> Tensor:
         """Evaluate the force at the current state.
