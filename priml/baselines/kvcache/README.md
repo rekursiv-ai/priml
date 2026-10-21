@@ -29,18 +29,21 @@ for factory in (exp000, exp001, exp002):
     cfg.seed = 20261021
     report = cfg.make().measure()
     reports[factory.__name__] = report
-    control = reports["exp000"].tokens[:, cfg.prompt_len:]
-    candidate = report.tokens[:, cfg.prompt_len:]
-    print(factory.__name__, {
-        "seed": report.seed,
-        "tokens_per_sec": report.tokens_per_sec,
-        "step_ms_p99": report.step_ms_p99,
-        "step_ms_max": report.step_ms_max,
-        "prefill_ms_median": report.prefill_ms_median,
-        "kv_bytes": report.kv_bytes,
-        "kv_bytes_per_token": report.kv_bytes_per_token,
-        "generated_token_agreement": token_agreement(control, candidate),
-    })
+    control = reports["exp000"].tokens[:, cfg.prompt_len :]
+    candidate = report.tokens[:, cfg.prompt_len :]
+    print(
+        factory.__name__,
+        {
+            "seed": report.seed,
+            "tokens_per_sec": report.tokens_per_sec,
+            "step_ms_p99": report.step_ms_p99,
+            "step_ms_max": report.step_ms_max,
+            "prefill_ms_median": report.prefill_ms_median,
+            "kv_bytes": report.kv_bytes,
+            "kv_bytes_per_token": report.kv_bytes_per_token,
+            "generated_token_agreement": token_agreement(control, candidate),
+        },
+    )
     print("prefill_sec", report.prefill_sec)
     print("step_sec", report.step_sec)
 ```
