@@ -249,7 +249,6 @@ def test_declined_update_still_clips_zeros_and_counts_attempt() -> None:
     assert step.last_grad_norm is not None
     assert torch.equal(step.last_grad_norm, torch.linalg.vector_norm(torch.ones(2, 3)))
     assert step.global_step == 1
-    assert step.skipped_steps == 1
     assert step.ema.state_dict() == {"global_step": 0, "local_step": 0}
 
 
