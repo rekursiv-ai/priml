@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.2.0",
+    "treekle>=0.3.0",
     # torch
     "torch==2.11.0",
     "torchao==0.17.0",
@@ -75,7 +75,7 @@ dependencies = [
     "einshape",
     # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports,
     # and 1.4.2 the pformat layout every baseline's config golden is minted in
-    "configgle>=1.4.2",
+    "configgle>=1.4.3",
     # containers
     "wrapt",
     # misc
@@ -112,8 +112,8 @@ typecheck = [
     "pyrefly>=1.4.0",
     "ty>=0.0.84",
     # Extra.
-    "rekursiv-ai-typeshed",
-    "rekursiv-ai-typings",
+    "rekursiv-ai-typeshed>=0.1.6",
+    "rekursiv-ai-typings>=0.1.6",
     "safetensors",
 ]
 "pre-commit" = [
