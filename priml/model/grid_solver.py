@@ -1172,7 +1172,7 @@ class SingleLatentGridSolver(GridSolver):
         if self.prefix is not None:
             prefix = cast(Tensor, self.prefix(tokens.shape[0], **prefix_kwargs))
             embedded = torch.cat([prefix.to(embedded.dtype), embedded], dim=1)
-        return self.config.channels_in**0.5 * embedded
+        return float(self.config.channels_in**0.5) * embedded
 
 
 def _validate_grid_solver_config(config: GridSolver.Config) -> None:

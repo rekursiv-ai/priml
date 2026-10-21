@@ -391,7 +391,7 @@ class LatentRecursion(nn.Module):
         c = config.channels_in
         # Embedding rescale trick: init tables with std=1/sqrt(C), multiply
         # by sqrt(C) at runtime.
-        self.embed_scale = c**0.5
+        self.embed_scale = float(c**0.5)
 
         # NOTE: construction order below is a checkpoint-parity contract --
         # every global-RNG draw must happen in exactly this order so that a

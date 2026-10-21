@@ -24,8 +24,8 @@ else:
 
 # Brent's machine epsilon as the reference fminbound spells it, not float64's
 # exact epsilon; only this value reproduces its iterates bit for bit.
-_SQRT_EPS: Final = 2.2e-16**0.5
-_GOLDEN: Final = 0.5 * (3 - 5**0.5)
+_SQRT_EPS: Final = float(2.2e-16**0.5)
+_GOLDEN: Final = 0.5 * (3 - float(5**0.5))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

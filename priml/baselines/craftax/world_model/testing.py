@@ -508,7 +508,7 @@ class NaiveVarlen(SdpaVarlen):
         groups = q.shape[-2] // k.shape[-2]
         keys, values = (t.repeat_interleave(groups, dim=-2) for t in (k, v))
         q, keys, values = (t.movedim(-3, -2) for t in (q, keys, values))
-        logits = q @ keys.transpose(-1, -2) * q.shape[-1] ** -0.5
+        logits = q @ keys.transpose(-1, -2) * float(q.shape[-1] ** -0.5)
         masked = logits.masked_fill(~mask.view(*lead, 1, length, length), -math.inf)
         return (masked.softmax(dim=-1) @ values).movedim(-2, -3)
 

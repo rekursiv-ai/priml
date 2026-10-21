@@ -523,7 +523,9 @@ class GridEmbedding(nn.Module):
             raise ValueError("GridEmbedding requires grid_shape from the dataset.")
         self.config = config
         self.embed_scale = (
-            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
+            float(config.channels_out**0.5)
+            if config.embed_scale < 0
+            else config.embed_scale
         )
         self.embed_tokens = (config.token_table or _token_table(config)).make()
         if config.token_table is None:

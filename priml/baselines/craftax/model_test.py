@@ -277,7 +277,7 @@ def _pufferlib_cdf(name: str, weight: Tensor) -> Callable[[Tensor], Tensor]:
     # weight's last axis (``ocean/craftax/craftax.cu``, ``src/algo.cu``).
     if name == "embedding.weight":
         return torch.special.ndtr
-    bound = weight.shape[-1] ** -0.5
+    bound = float(weight.shape[-1] ** -0.5)
     return lambda x: ((x / bound + 1) / 2).clamp(0, 1)
 
 

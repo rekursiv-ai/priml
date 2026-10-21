@@ -45,5 +45,5 @@ def multistep(
     lr = base_lr
     for milestone, count in sorted(Counter(milestones).items()):
         if epoch >= milestone:
-            lr = lr * gamma**count
+            lr = lr * float(gamma**count)
     return lr

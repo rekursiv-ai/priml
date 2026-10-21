@@ -264,7 +264,7 @@ class YarnScaling:
             if self.mscale_all_dim == 0:
                 return None
             mscale = _yarn_mscale(self.factor, self.mscale_all_dim)
-            return channels_head**-0.5 * mscale * mscale
+            return float(channels_head**-0.5) * mscale * mscale
 
         @classmethod
         def from_hf(cls, config: Mapping[str, object]) -> Self | None:

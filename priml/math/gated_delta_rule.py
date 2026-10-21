@@ -57,7 +57,7 @@ def chunk_gated_delta_rule(
     ]
     if use_qk_l2norm_in_kernel:
         query, key = l2norm(query), l2norm(key)
-    query = query * query.shape[-1] ** -0.5
+    query = query * float(query.shape[-1] ** -0.5)
     padding = (chunk_size - sequence % chunk_size) % chunk_size
     query, key, value = (
         functional.pad(tensor, (0, 0, 0, padding)) for tensor in (query, key, value)
@@ -160,7 +160,7 @@ def recurrent_gated_delta_rule(
     ]
     if use_qk_l2norm_in_kernel:
         query, key = l2norm(query), l2norm(key)
-    query = query / query.shape[-1] ** 0.5
+    query = query / float(query.shape[-1] ** 0.5)
     state = (
         torch.zeros(
             (batch, heads, key_width, value_width),

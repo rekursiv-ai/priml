@@ -147,7 +147,9 @@ class RegisterTokens(nn.Module):
             )
         self.config = config
         self.embed_scale = (
-            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
+            float(config.channels_out**0.5)
+            if config.embed_scale < 0
+            else config.embed_scale
         )
         tokens = torch.empty(config.num_tokens, config.channels_out)
         call_init(config.init_weight, tokens)
@@ -308,7 +310,9 @@ class SparsePuzzleEmbedding(nn.Module):
             )
         self.config = config
         self.embed_scale = (
-            config.channels_token**0.5 if config.embed_scale < 0 else config.embed_scale
+            float(config.channels_token**0.5)
+            if config.embed_scale < 0
+            else config.embed_scale
         )
         table = torch.zeros(config.num_puzzles, config.channels_out)
         # A buffer, not a Parameter: autograd must not build a dense gradient
