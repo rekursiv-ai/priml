@@ -31,7 +31,10 @@ from priml.baselines.oscillator.nonlinear import (
     NeuralForecast,
     PolynomialKernel,
 )
-from priml.baselines.oscillator.pretrained import Chronos2Pipeline, PretrainedForecast
+from priml.baselines.oscillator.pretrained import (
+    Chronos2Pipeline,
+    PretrainedForecast,
+)
 from priml.baselines.oscillator.sequence import (
     PatchSequence,
     RbfKernel,
