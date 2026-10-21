@@ -9,11 +9,15 @@ import math
 
 from configgle import Fig
 
-import torch
-
 
 if TYPE_CHECKING:
+    import torch
+
     from priml.baselines.oscillator.benchmark import BenchmarkRun, ForecastScores
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")
 
 
 class RunSpec(TypedDict):
@@ -39,7 +43,7 @@ class BenchmarkSummary:
         resamples: int = 2000
         """Stratified paired bootstrap draws."""
 
-        seed: int = 90210
+        seed: int = 90_210
         """Independent reporting RNG, never used to generate or fit data."""
 
         confidence: float = 0.95

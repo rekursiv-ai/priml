@@ -196,7 +196,18 @@ class RecurrentSequence(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Delegate the full recurrent invocation to its owned stack."""
+            """Delegate the full recurrent invocation to its owned stack.
+
+            Args:
+              seq_len: Tokens processed per trajectory.
+              batch_size: Independent trajectories.
+              dtype: Activation dtype; None uses torch's default.
+              **kwargs: Forwarded to the recurrent stack's cost calculation.
+
+            Returns:
+              cost: Full recurrent invocation, counting its parameters once.
+
+            """
             return cost(
                 self.block,
                 seq_len=seq_len,

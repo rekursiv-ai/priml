@@ -954,12 +954,12 @@ def exp040() -> BenchmarkSuite.Config:
     matched.instances = 1
     cubic = SystemFamily.Config()
     cubic.name = "cubic"
-    cubic.seed = 12001
+    cubic.seed = 12_001
     cubic.instances = 1
     cubic.reference.cubic = 0.4
     drag = SystemFamily.Config()
     drag.name = "quadratic_drag"
-    drag.seed = 13001
+    drag.seed = 13_001
     drag.instances = 1
     drag_force = WeightedForce.Config()
     drag_term = drag_force.term = PowerForce.Config()
@@ -971,28 +971,28 @@ def exp040() -> BenchmarkSuite.Config:
 
     mixed = SystemFamily.Config()
     mixed.name = "combined"
-    mixed.seed = 21001
+    mixed.seed = 21_001
     mixed.reference = cubic.reference.copy_tree()
     mixed.reference.corrections = [
         correction.copy_tree() for correction in drag.reference.corrections
     ]
     bounded = SystemFamily.Config()
     bounded.name = "saturating"
-    bounded.seed = 22001
+    bounded.seed = 22_001
     bounded_force = WeightedForce.Config()
     bounded_force.term = SaturatingForce.Config()
     bounded_force.coefficient = 1.2
     bounded.reference.corrections = [bounded_force]
     sine = SystemFamily.Config()
     sine.name = "sine"
-    sine.seed = 23001
+    sine.seed = 23_001
     sine_force = WeightedForce.Config()
     sine_force.term = SineForce.Config()
     sine_force.coefficient = 0.8
     sine.reference.corrections = [sine_force]
     coupled = SystemFamily.Config()
     coupled.name = "coupled_drag"
-    coupled.seed = 24001
+    coupled.seed = 24_001
     coupled_force = WeightedForce.Config()
     coupled_force.term = CoupledDrag.Config()
     coupled_force.coefficient = 0.45

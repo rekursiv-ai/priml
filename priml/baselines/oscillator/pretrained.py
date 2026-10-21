@@ -227,7 +227,18 @@ class PretrainedForecast:
         synthetic: Windows,
         simulator: Oscillator,
     ) -> PretrainedFitReport:
-        """Read the forecast geometry without using any reference target values."""
+        """Read the forecast geometry without using any reference target values.
+
+        Args:
+          train: Windows supplying the forecast horizon through their label shape.
+          validation: Unused reference validation windows.
+          synthetic: Unused cheap-simulator windows.
+          simulator: Unused cheap simulator.
+
+        Returns:
+          report: Zero optimizer updates and zero reference trajectories consumed.
+
+        """
         del validation, synthetic, simulator
         self.horizon = train.label.shape[1]
         return {
@@ -239,7 +250,15 @@ class PretrainedForecast:
         }
 
     def predict(self, media: Tensor) -> Tensor:
-        """Forecast from the visible context, never another trajectory's future."""
+        """Forecast from the visible context, never another trajectory's future.
+
+        Args:
+          media: Observations shaped (trajectories, context timesteps, channels).
+
+        Returns:
+          forecast: Predictions shaped (trajectories, horizon, channels).
+
+        """
         if self.horizon <= 0:
             raise RuntimeError("Set the forecast geometry before predicting.")
         result = self.pipeline(media, horizon=self.horizon)

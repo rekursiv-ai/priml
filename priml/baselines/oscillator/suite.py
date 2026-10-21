@@ -303,7 +303,18 @@ class BenchmarkSuite:
         self,
         phase: Literal["development", "audit"],
     ) -> Iterator[tuple[BenchmarkRecipe.Config, str, str, BudgetStudy.Config]]:
-        """Yield each recipe on exactly the same task and reference budget."""
+        """Yield each recipe on exactly the same task and reference budget.
+
+        Args:
+          phase: The development or held-out family collection.
+
+        Yields:
+          recipe: Named forecasting recipe and model seeds.
+          system_id: Sampled system identity.
+          run_id: Identity combining the system, budget, recipe, and seed.
+          config: Pending study with its task, budget, and seed assigned.
+
+        """
         for system_id, data in self.tasks(phase):
             for budget in self.config.budgets:
                 for recipe in self.config.recipes:
@@ -326,7 +337,17 @@ class BenchmarkSuite:
         *,
         budget: str,
     ) -> TaskDiagnostics:
-        """Check split isolation, continuous rollout targets, and integration error."""
+        """Check split isolation, continuous rollout targets, and integration error.
+
+        Args:
+          system_id: Sampled system identity recorded with the diagnostics.
+          data: Pending task data config to construct for these checks.
+          budget: Reference-budget label recorded with the diagnostics.
+
+        Returns:
+          diagnostics: Unique-state count and scaled oracle and refinement errors.
+
+        """
         source = data.make()
         cfg = source.config
         splits = [
@@ -384,7 +405,16 @@ class BenchmarkSuite:
         *,
         phase: Literal["development", "audit"],
     ) -> list[dict[str, object]]:
-        """Build the expected run identities before reducing completed results."""
+        """Build the expected run identities before reducing completed results.
+
+        Args:
+          records: Attempt records, including failed methods.
+          phase: Family collection defining the expected run identities.
+
+        Returns:
+          summary: Paired system-level comparisons and completion counts.
+
+        """
         expected: dict[str, RunSpec] = {}
         for recipe, system_id, run_id, cfg in self.plan(phase):
             expected[run_id] = {
@@ -420,6 +450,17 @@ class BenchmarkSuite:
         raise after writing the report if any method failed. Explicit directory
         calls retain failed records in their return value without raising.
         Resuming requires an identical declared run.
+
+        Args:
+          directory: New output directory; None uses the configured working_dir.
+          phase: Family collection; None uses the configured phase.
+          resume: Retain stored attempts after checking the run manifest.
+          provenance: Optional caller-supplied identity checked when resuming.
+
+        Returns:
+          records: Every planned attempt, including failed methods.
+          diagnostics: Integration and split-isolation checks by system and budget.
+
         """
         if directory is not None and not isinstance(directory, Path):
             raise TypeError("The output directory must be a Path or None.")

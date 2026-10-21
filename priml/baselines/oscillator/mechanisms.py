@@ -112,7 +112,7 @@ class SystemFamily:
         coefficient_scale: tuple[float, float] = (0.6, 1.4)
         """Independent multiplier range for each nonzero extra coefficient."""
 
-        seed: int = 11001
+        seed: int = 11_001
         """First system seed; successive instances add one."""
 
         instances: int = 4

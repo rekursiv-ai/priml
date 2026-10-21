@@ -27,7 +27,15 @@ except ImportError as error:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Prepare each distinct declared model location; return zero on success."""
+    """Prepare each distinct declared model location.
+
+    Args:
+      argv: Command arguments; None reads the process arguments.
+
+    Returns:
+      status: Zero after all declared model locations have been prepared.
+
+    """
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     parser.parse_args(argv)
     prepared: set[tuple[str, str, Path]] = set()
@@ -41,7 +49,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def prepare_model(config: ModelFiles.Config) -> None:
-    """Download a pinned model atomically, or verify its existing local files."""
+    """Download a pinned model atomically, or verify its existing local files.
+
+    Args:
+      config: Pinned model identity, revision, and local destination.
+
+    """
     directory = config.directory.expanduser().resolve()
     if directory.exists():
         config.make()

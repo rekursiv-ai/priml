@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Final
 
 import hashlib
 import runpy
@@ -17,6 +18,10 @@ from priml.baselines.oscillator.nonlinear import HistoryAblation
 from priml.baselines.oscillator.pretrained import AssetManifest, ModelFiles
 from priml.baselines.oscillator.pretrained_test import _assets
 from priml.baselines.oscillator.scripts import asset_preparation
+
+
+_THIS: Final = Path(__file__).resolve()
+_CWD: Final = _THIS.parent
 
 
 def test_existing_assets_are_verified_without_a_download(tmp_path: Path) -> None:
@@ -122,7 +127,7 @@ def test_missing_hub_extra_explains_the_preparation_dependency(
 
 
 def test_asset_preparation_entry_exposes_help(monkeypatch: pytest.MonkeyPatch) -> None:
-    script = Path(__file__).with_name("prepare_assets.py")
+    script = _CWD / "prepare_assets.py"
     monkeypatch.setattr(sys, "argv", [str(script), "--help"])
     with pytest.raises(SystemExit) as status:
         runpy.run_path(str(script), run_name="__main__")
