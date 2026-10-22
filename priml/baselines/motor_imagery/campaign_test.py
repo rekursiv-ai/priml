@@ -848,14 +848,16 @@ def test_result_publication_cannot_escape_the_campaign_budget(
     cfg.folds = FixedCohort.Config()
     assert isinstance(cfg.folds, FixedCohort.Config)
     cfg.folds.subjects = ["S001"]
-    cfg.budget.seconds = 0.5
+    # interruptible() arms a real SIGALRM for the budget, so a short one fires on a
+    # slow runner before the fake clock moves and the receipt reads 0.0.
+    cfg.budget.seconds = 3600.0
     clock = _ReceiptClock()
     cfg.budget.clock = clock.perf_counter
     original_replace = Path.replace
 
     def delayed_replace(path: Path, target: Path | str) -> Path:
         if Path(target).name == "result.json" and clock.elapsed == 0:
-            clock.elapsed = 0.6
+            clock.elapsed = 3601.0
         return original_replace(path, target)
 
     monkeypatch.setattr(Path, name="replace", value=delayed_replace)
@@ -867,7 +869,7 @@ def test_result_publication_cannot_escape_the_campaign_budget(
     )
     assert result["status"] == "failed"
     assert result["error"] == "TimeoutError: Outer wall budget exceeded."
-    assert result["elapsed_seconds"] == 0.6
+    assert result["elapsed_seconds"] == 3601.0
 
 
 def test_campaign_requires_both_loops_to_share_one_runtime() -> None:

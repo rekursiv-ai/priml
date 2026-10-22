@@ -242,12 +242,14 @@ def test_result_publication_counts_toward_budget(
 
     def delayed_replace(path: Path, target: str | Path) -> Path:
         replaced = original_replace(path, target=target)
-        clock.elapsed += 2 * (Path(target).name == "result.json")
+        clock.elapsed += 3601 * (Path(target).name == "result.json")
         return replaced
 
     monkeypatch.setattr(Path, name="replace", value=delayed_replace)
     wiring_config.budget.clock = clock
-    wiring_config.budget.seconds = 1.0
+    # interruptible() arms a real SIGALRM for the budget, so a short one fires on a
+    # slow runner before the fake clock moves and the receipt reads 0.0.
+    wiring_config.budget.seconds = 3600.0
     with pytest.raises(TimeoutError, match="exceeded"):
         _WiringBenchmark(wiring_config.finalized()).run()
     result = json_loads(
@@ -255,7 +257,7 @@ def test_result_publication_counts_toward_budget(
         target=dict[str, object],
     )
     assert result["status"] == "failed"
-    assert result["elapsed_seconds"] == 2
+    assert result["elapsed_seconds"] == 3601
     assert "TimeoutError" in str(result["error"])
 
 
