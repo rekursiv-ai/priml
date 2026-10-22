@@ -92,10 +92,20 @@ if TYPE_CHECKING:
 FLOOR_MOB_TYPES: Final = cast(
     "Array2[int]",
     np.array(
-        [[0, 0, 0], [2, 2, 2], [1, 1, 1], [2, 3, 3], [2, 4, 4], [1, 5, 5], [1, 6, 6], [1, 7, 7], [0, 0, 0]],
+        [
+            [0, 0, 0],
+            [2, 2, 2],
+            [1, 1, 1],
+            [2, 3, 3],
+            [2, 4, 4],
+            [1, 5, 5],
+            [1, 6, 6],
+            [1, 7, 7],
+            [0, 0, 0],
+        ],
         dtype=np.int64,
     ),
-)  # fmt: skip
+)
 """``[level, mob_class]``: the species each floor spawns."""
 
 SPAWN_CHANCES: Final = cast(
@@ -287,9 +297,15 @@ def spawn_mobs_numba(state: EnvState, rng: Array1[np.uint32]) -> int:
                 chosen,
             )
             spawn_into_slot_numba(
-                state, level, state.passive_mobs[level], passive_slot, MobType.PASSIVE,
-                passive_type, row, col,
-            )  # fmt: skip
+                state,
+                level,
+                state.passive_mobs[level],
+                passive_slot,
+                MobType.PASSIVE,
+                passive_type,
+                row,
+                col,
+            )
     if try_melee:
         n = count_spawn_cells_numba(state, level, hostile_ring, boss, False)
         if n > 0:
@@ -306,9 +322,15 @@ def spawn_mobs_numba(state: EnvState, rng: Array1[np.uint32]) -> int:
                 chosen,
             )
             spawn_into_slot_numba(
-                state, level, state.melee_mobs[level], melee_slot, MobType.MELEE,
-                melee_type, row, col,
-            )  # fmt: skip
+                state,
+                level,
+                state.melee_mobs[level],
+                melee_slot,
+                MobType.MELEE,
+                melee_type,
+                row,
+                col,
+            )
     if try_ranged:
         water = ranged_type == 5
         n = count_spawn_cells_numba(state, level, hostile_ring, boss, water)
@@ -326,9 +348,15 @@ def spawn_mobs_numba(state: EnvState, rng: Array1[np.uint32]) -> int:
                 chosen,
             )
             spawn_into_slot_numba(
-                state, level, state.ranged_mobs[level], ranged_slot, MobType.RANGED,
-                ranged_type, row, col,
-            )  # fmt: skip
+                state,
+                level,
+                state.ranged_mobs[level],
+                ranged_slot,
+                MobType.RANGED,
+                ranged_type,
+                row,
+                col,
+            )
     return undefined
 
 
@@ -667,8 +695,15 @@ def move_melee_slot_numba(
         state.is_resting = 0
     new_cooldown = 5 if attacking else cooldown - 1
     valid = valid_typed_mob_position_numba(
-        state, level, MobType.MELEE, type_id, proposed_row, proposed_col, old_row, old_col,
-    )  # fmt: skip
+        state,
+        level,
+        MobType.MELEE,
+        type_id,
+        proposed_row,
+        proposed_col,
+        old_row,
+        old_col,
+    )
     new_row = proposed_row if valid else old_row
     new_col = proposed_col if valid else old_col
     keep = alive and (dist < MOB_DESPAWN_DISTANCE or fighting_boss_numba(state))
@@ -704,8 +739,15 @@ def move_passive_slot_numba(
     proposed_row = old_row + dr
     proposed_col = old_col + dc
     valid = valid_typed_mob_position_numba(
-        state, level, MobType.PASSIVE, type_id, proposed_row, proposed_col, old_row, old_col,
-    )  # fmt: skip
+        state,
+        level,
+        MobType.PASSIVE,
+        type_id,
+        proposed_row,
+        proposed_col,
+        old_row,
+        old_col,
+    )
     new_row = proposed_row if valid else old_row
     new_col = proposed_col if valid else old_col
     dist = abs(state.player_position[0] - old_row) + abs(
@@ -763,21 +805,41 @@ def move_ranged_slot_numba(
         proposed_row = old_row + random_dr
         proposed_col = old_col + random_dc
     valid = valid_typed_mob_position_numba(
-        state, level, MobType.RANGED, type_id, proposed_row, proposed_col, old_row, old_col,
-    )  # fmt: skip
+        state,
+        level,
+        MobType.RANGED,
+        type_id,
+        proposed_row,
+        proposed_col,
+        old_row,
+        old_col,
+    )
     attacking = (
         ((4 <= dist <= 5) or (dist <= 3 and not valid)) and cooldown <= 0 and alive
     )
     if attacking:
         spawn_projectile_numba(
-            state, False, RANGED_PROJECTILES[clampi_numba(type_id, 0, 7)], old_row, old_col, player_dr, player_dc,
-        )  # fmt: skip
+            state,
+            False,
+            RANGED_PROJECTILES[clampi_numba(type_id, 0, 7)],
+            old_row,
+            old_col,
+            player_dr,
+            player_dc,
+        )
         proposed_row = old_row
         proposed_col = old_col
     new_cooldown = 4 if attacking else cooldown - 1
     valid = valid_typed_mob_position_numba(
-        state, level, MobType.RANGED, type_id, proposed_row, proposed_col, old_row, old_col,
-    )  # fmt: skip
+        state,
+        level,
+        MobType.RANGED,
+        type_id,
+        proposed_row,
+        proposed_col,
+        old_row,
+        old_col,
+    )
     new_row = proposed_row if valid else old_row
     new_col = proposed_col if valid else old_col
     keep = alive and (dist < MOB_DESPAWN_DISTANCE or fighting_boss_numba(state))
@@ -841,10 +903,20 @@ def _fly_player_projectile_numba(state: EnvState, level: int, i: int) -> None:
     if mob_slot >= 0:
         target = mobs_for_class_numba(state, level, mob_class)
         hit_old = damage_mob_at_numba(
-            state, level, old_row, old_col,
-            damage_to_mob_numba(physical, fire, ice, target.type_id[mob_slot], mob_class),
-            False, True,
-        )  # fmt: skip
+            state,
+            level,
+            old_row,
+            old_col,
+            damage_to_mob_numba(
+                physical,
+                fire,
+                ice,
+                target.type_id[mob_slot],
+                mob_class,
+            ),
+            False,
+            True,
+        )
 
     second_physical = np.float32(0.0) if hit_old else physical
     second_fire = np.float32(0.0) if hit_old else fire
@@ -854,10 +926,20 @@ def _fly_player_projectile_numba(state: EnvState, level: int, i: int) -> None:
     if mob_slot >= 0:
         target = mobs_for_class_numba(state, level, mob_class)
         hit_new = damage_mob_at_numba(
-            state, level, proposed_row, proposed_col,
-            damage_to_mob_numba(second_physical, second_fire, second_ice, target.type_id[mob_slot], mob_class),
-            False, True,
-        )  # fmt: skip
+            state,
+            level,
+            proposed_row,
+            proposed_col,
+            damage_to_mob_numba(
+                second_physical,
+                second_fire,
+                second_ice,
+                target.type_id[mob_slot],
+                mob_class,
+            ),
+            False,
+            True,
+        )
 
     proposed_in_bounds = 0 <= proposed_row < MAP_SIZE and 0 <= proposed_col < MAP_SIZE
     proposed_block = (

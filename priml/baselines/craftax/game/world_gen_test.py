@@ -107,18 +107,28 @@ def _reference_fractal(
             np.float32(row - grad_row * cell_rows) / np.float32(cell_rows),
         )
         interp_row = np.float32(
-            local_row * local_row * local_row
-            * (local_row * (local_row * np.float32(6.0) - np.float32(15.0)) + np.float32(10.0)),
-        )  # fmt: skip
+            local_row
+            * local_row
+            * local_row
+            * (
+                local_row * (local_row * np.float32(6.0) - np.float32(15.0))
+                + np.float32(10.0)
+            ),
+        )
         for col in range(cols):
             grad_col = col // cell_cols
             local_col = np.float32(
                 np.float32(col - grad_col * cell_cols) / np.float32(cell_cols),
             )
             interp_col = np.float32(
-                local_col * local_col * local_col
-                * (local_col * (local_col * np.float32(6.0) - np.float32(15.0)) + np.float32(10.0)),
-            )  # fmt: skip
+                local_col
+                * local_col
+                * local_col
+                * (
+                    local_col * (local_col * np.float32(6.0) - np.float32(15.0))
+                    + np.float32(10.0)
+                ),
+            )
             gx: dict[tuple[int, int], np.float32] = {}
             gy: dict[tuple[int, int], np.float32] = {}
             for dr in range(2):

@@ -129,8 +129,9 @@ def test_the_symbolic_view_is_jaxs_one_hot_and_the_scalars_match_the_packed_ones
     map_size = symbolic.size - INVENTORY_OBS_SIZE
     np.testing.assert_array_equal(symbolic[:map_size], _reference_map(state))
     np.testing.assert_array_equal(
-        symbolic[map_size:], packed[-INVENTORY_OBS_SIZE :],
-    )  # fmt: skip
+        symbolic[map_size:],
+        packed[-INVENTORY_OBS_SIZE:],
+    )
     np.testing.assert_array_equal(symbolic_mask, packed_mask)
     tiles = symbolic[:map_size].reshape(OBS_ROWS * OBS_COLS, -1)
     # Lit tiles, dark ones, and live creatures in view: the cases the view tells apart.

@@ -267,9 +267,19 @@ def test_a_structured_argument_reaches_the_kernel_as_records() -> None:
         actions = np.array([Action.LEFT.value], np.uint8)
         hashes = np.array([replay.fnv1a_numba(states.view(np.uint8)), 0], np.uint64)
         status, _ = replay._run_numba(
-            states, states.view(np.uint8), rng, new_stats(1), actions, hashes,
-            0, 1, True, False, *replay._arrays(replay._empty_frames(0)), Rules(),
-        )  # fmt: skip
+            states,
+            states.view(np.uint8),
+            rng,
+            new_stats(1),
+            actions,
+            hashes,
+            0,
+            1,
+            True,
+            False,
+            *replay._arrays(replay._empty_frames(0)),
+            Rules(),
+        )
     assert status == len(hashes)
     assert env_state(states, 0).player_direction == Action.LEFT.value
 

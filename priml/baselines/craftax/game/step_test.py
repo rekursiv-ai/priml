@@ -805,8 +805,15 @@ def _score(
 ) -> np.float32:
     """Score a step of ``Rules()`` that left health at 9 and armour at 0."""
     return step.score_numba(
-        state, stats, low, high, 0, np.float32(9.0), False, step.Rules(),
-    )  # fmt: skip
+        state,
+        stats,
+        low,
+        high,
+        0,
+        np.float32(9.0),
+        False,
+        step.Rules(),
+    )
 
 
 if __name__ == "__main__":

@@ -466,8 +466,12 @@ def test_run_buffer_matches_preparing_and_stepping_from_python(
         calls = np.zeros(1, dtype=np.int64)
         for _ in range(2):
             _pick_actions(
-                looped.action_mask.numpy(), looped.actions.numpy(), start, stop, calls,
-            )  # fmt: skip
+                looped.action_mask.numpy(),
+                looped.actions.numpy(),
+                start,
+                stop,
+                calls,
+            )
             looped.step_buffer(buffer)
         calls = np.zeros(1, dtype=np.int64)
         ran.run_buffer(

@@ -254,9 +254,18 @@ def extract(
     copy = _Copy(states=states.copy(), rng=rng.copy(), stats=stats.copy())
     while first < len(actions):
         first = _trace_numba(
-            states, raw, rng, stats, actions, (Rules(), Rules(collapse_sleep=False)),
-            trace, copy, first, stride, win,
-        )  # fmt: skip
+            states,
+            raw,
+            rng,
+            stats,
+            actions,
+            (Rules(), Rules(collapse_sleep=False)),
+            trace,
+            copy,
+            first,
+            stride,
+            win,
+        )
         if first < 0:
             raise ValueError(_FAULTS[first])
         if first < len(actions):
@@ -691,13 +700,21 @@ def _sleep_sample_numba(state: EnvState, trace: _TraceView, k: int, level: int) 
         2,
     )
     at = _sample_projectiles_numba(
-        trace.sleep_creatures, at, state.mob_projectiles[level], MAX_MOB_PROJECTILES, 3,
+        trace.sleep_creatures,
+        at,
+        state.mob_projectiles[level],
+        MAX_MOB_PROJECTILES,
+        3,
         state.mob_projectile_dirs[level],
-    )  # fmt: skip
+    )
     at = _sample_projectiles_numba(
-        trace.sleep_creatures, at, state.player_projectiles[level], MAX_PLAYER_PROJECTILES, 4,
+        trace.sleep_creatures,
+        at,
+        state.player_projectiles[level],
+        MAX_PLAYER_PROJECTILES,
+        4,
         state.player_projectile_directions[level],
-    )  # fmt: skip
+    )
     if at < 0:
         return False
     trace.sleep_creatures[start] = (at - start - 1) // CREATURE_BYTES
@@ -952,13 +969,21 @@ def _sample_numba(state: EnvState, trace: _TraceView, k: int) -> bool:
         2,
     )
     at = _sample_projectiles_numba(
-        trace.creatures, at, state.mob_projectiles[level], MAX_MOB_PROJECTILES, 3,
+        trace.creatures,
+        at,
+        state.mob_projectiles[level],
+        MAX_MOB_PROJECTILES,
+        3,
         state.mob_projectile_dirs[level],
-    )  # fmt: skip
+    )
     at = _sample_projectiles_numba(
-        trace.creatures, at, state.player_projectiles[level], MAX_PLAYER_PROJECTILES, 4,
+        trace.creatures,
+        at,
+        state.player_projectiles[level],
+        MAX_PLAYER_PROJECTILES,
+        4,
         state.player_projectile_directions[level],
-    )  # fmt: skip
+    )
     if at < 0:
         return False
     trace.creatures[start] = (at - start - 1) // CREATURE_BYTES

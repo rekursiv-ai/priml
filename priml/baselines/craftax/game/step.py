@@ -446,11 +446,22 @@ def play_numba(
         rules.stall_limit,
     )
     reward = score_numba(
-        state, stats, initial_low, initial_high, initial_armour, initial_health, done, rules,
-    )  # fmt: skip
+        state,
+        stats,
+        initial_low,
+        initial_high,
+        initial_armour,
+        initial_health,
+        done,
+        rules,
+    )
     reward = _boss_fight_numba(
-        state, reward, initial_hits, initial_kills, rules.boss_fight_reward,
-    )  # fmt: skip
+        state,
+        reward,
+        initial_hits,
+        initial_kills,
+        rules.boss_fight_reward,
+    )
     return reward, done
 
 
@@ -677,8 +688,13 @@ def step_range_numba(
     """
     rules = batch.rules
     _step_layout_numba(
-        batch, pool, start, stop, rules.symbolic_observation, rules.previous_action,
-    )  # fmt: skip
+        batch,
+        pool,
+        start,
+        stop,
+        rules.symbolic_observation,
+        rules.previous_action,
+    )
 
 
 @jit
@@ -706,8 +722,14 @@ def reset_range_numba(
     """
     rules = batch.rules
     _reset_layout_numba(
-        batch, pool, seed, start, stop, rules.symbolic_observation, rules.previous_action,
-    )  # fmt: skip
+        batch,
+        pool,
+        seed,
+        start,
+        stop,
+        rules.symbolic_observation,
+        rules.previous_action,
+    )
 
 
 @jit
@@ -976,16 +998,28 @@ def _step_layout_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only 
     """:func:`step_range_numba` over the observation rows viewed in the layout the options name."""
     if symbolic is not None and symbolic:
         _step_rows_numba(
-            batch, pool, start, stop, batch.observations.view(SYMBOLIC_OBSERVATION_RECORD),
-        )  # fmt: skip
+            batch,
+            pool,
+            start,
+            stop,
+            batch.observations.view(SYMBOLIC_OBSERVATION_RECORD),
+        )
     elif previous_action is not None and previous_action:
         _step_rows_numba(
-            batch, pool, start, stop, batch.observations.view(ACTION_OBSERVATION_RECORD),
-        )  # fmt: skip
+            batch,
+            pool,
+            start,
+            stop,
+            batch.observations.view(ACTION_OBSERVATION_RECORD),
+        )
     else:
         _step_rows_numba(
-            batch, pool, start, stop, batch.observations.view(OBSERVATION_RECORD),
-        )  # fmt: skip
+            batch,
+            pool,
+            start,
+            stop,
+            batch.observations.view(OBSERVATION_RECORD),
+        )
 
 
 @jit
@@ -1001,16 +1035,31 @@ def _reset_layout_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only
     """:func:`reset_range_numba` over the observation rows viewed in the layout the options name."""
     if symbolic is not None and symbolic:
         _reset_rows_numba(
-            batch, pool, seed, start, stop, batch.observations.view(SYMBOLIC_OBSERVATION_RECORD),
-        )  # fmt: skip
+            batch,
+            pool,
+            seed,
+            start,
+            stop,
+            batch.observations.view(SYMBOLIC_OBSERVATION_RECORD),
+        )
     elif previous_action is not None and previous_action:
         _reset_rows_numba(
-            batch, pool, seed, start, stop, batch.observations.view(ACTION_OBSERVATION_RECORD),
-        )  # fmt: skip
+            batch,
+            pool,
+            seed,
+            start,
+            stop,
+            batch.observations.view(ACTION_OBSERVATION_RECORD),
+        )
     else:
         _reset_rows_numba(
-            batch, pool, seed, start, stop, batch.observations.view(OBSERVATION_RECORD),
-        )  # fmt: skip
+            batch,
+            pool,
+            seed,
+            start,
+            stop,
+            batch.observations.view(OBSERVATION_RECORD),
+        )
 
 
 # A Rules typed by the options is another Numba type, so play, the bulk of the step,

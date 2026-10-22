@@ -1026,9 +1026,16 @@ def remove_parallel_cols(s: Core, cols: IBuf) -> None:
 def reduced_arrays(
     s: Core,
 ) -> tuple[
-    IBuf, IBuf, FBuf, FBuf, FBuf,
-    FBuf, FBuf, FBuf, float,
-]:  # fmt: skip
+    IBuf,
+    IBuf,
+    FBuf,
+    FBuf,
+    FBuf,
+    FBuf,
+    FBuf,
+    FBuf,
+    float,
+]:
     """Return the cleaned program (populate_presolved_problem).
 
     Views into the state, not copies: nothing mutates it after problem_clean,

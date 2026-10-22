@@ -44,10 +44,27 @@ def two_decisions() -> Stream:
     """Return a stream whose second decision ends the episode."""
     cells = torch.randint(0, 2, (3, 99, 8), generator=torch.Generator().manual_seed(0))
     first = aux_row(
-        wood=5, health=180, strength=2, mana=4, facing_down=1, floor=1, food=3,
-        drink=4, energy=5, sapling=2, pickaxe=2, armour_2=1, potion_cyan=7, books=2,
-        learned_iceball=1, sword_enchantment=2, sapphire=3, ruby=6, bow=1, arrows=9,
-    )  # fmt: skip
+        wood=5,
+        health=180,
+        strength=2,
+        mana=4,
+        facing_down=1,
+        floor=1,
+        food=3,
+        drink=4,
+        energy=5,
+        sapling=2,
+        pickaxe=2,
+        armour_2=1,
+        potion_cyan=7,
+        books=2,
+        learned_iceball=1,
+        sword_enchantment=2,
+        sapphire=3,
+        ruby=6,
+        bow=1,
+        arrows=9,
+    )
     second = aux_row(health=160, mana=3, floor=2, facing_left=1, sleeping=1)
     return Stream(
         starts_episode=True,

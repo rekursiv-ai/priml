@@ -915,12 +915,17 @@ def test_choose_windows_places_deaths_inside_the_continuation(tmp_path: Path) ->
     assert len({w.name.split("@")[0] for w in windows}) == 4
     # The death lands uniformly on every continuation decision.
     lengths = {
-        len(dream_eval.choose_windows(
-            sources, count=4, prefix=2, decisions=4,
-            generator=torch.Generator().manual_seed(seed),
-        )[0].real.actions)
+        len(
+            dream_eval.choose_windows(
+                sources,
+                count=4,
+                prefix=2,
+                decisions=4,
+                generator=torch.Generator().manual_seed(seed),
+            )[0].real.actions,
+        )
         for seed in range(24)
-    }  # fmt: skip
+    }
     assert lengths == {1, 2, 3, 4}
 
 

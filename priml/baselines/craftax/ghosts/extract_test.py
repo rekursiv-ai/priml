@@ -403,9 +403,18 @@ def test_a_change_on_an_untracked_floor_fails_the_extraction() -> None:
             stats=stats.copy(),
         )
         status = extract_module._trace_numba(
-            states, states.view(np.uint8), rng, stats, actions,
-            (Rules(), Rules(collapse_sleep=False)), trace, copy, 0, 4, 49,
-        )  # fmt: skip
+            states,
+            states.view(np.uint8),
+            rng,
+            stats,
+            actions,
+            (Rules(), Rules(collapse_sleep=False)),
+            trace,
+            copy,
+            0,
+            4,
+            49,
+        )
     assert status == extract_module._UNTRACKED
 
 
@@ -443,9 +452,18 @@ def test_a_sleep_whose_ticks_end_elsewhere_fails_the_extraction() -> None:
         )
         # Ticks played by the capture's own rules collapse the sleep into one.
         status = extract_module._trace_numba(
-            states, states.view(np.uint8), rng, stats, actions, (Rules(), Rules()),
-            trace, copy, 0, 4, 49,
-        )  # fmt: skip
+            states,
+            states.view(np.uint8),
+            rng,
+            stats,
+            actions,
+            (Rules(), Rules()),
+            trace,
+            copy,
+            0,
+            4,
+            49,
+        )
     assert status == extract_module._SLEPT_ELSEWHERE
 
 
