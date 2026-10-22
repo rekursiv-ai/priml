@@ -135,6 +135,11 @@ async function launch(binary) {
   let exited = null;
   proc.on('exit', (code, signal) => { exited = signal ?? code; });
   proc.on('error', error => { exited = error.message; });
+  // A signal skips main's finally, and a Chrome left running is the user's own
+  // Chrome app to macOS: it receives the links they open. Kill it on the way out.
+  const kill = () => { if (exited === null) proc.kill(); };
+  process.on('exit', kill);
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { kill(); process.exit(128 + os.constants.signals[signal]); });
   let target;
   while (!target) {
     if (exited !== null) throw Error(`Chrome exited (${exited}) before opening a debugging target.`);

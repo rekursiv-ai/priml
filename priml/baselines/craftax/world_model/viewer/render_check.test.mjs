@@ -1,11 +1,13 @@
 // Drives headless Chrome at render_check.mjs's default path, one launch per test.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
@@ -75,4 +77,24 @@ test('a page with no games to check is a failure', () => {
   const result = check('empty', '<p id="status">Loaded</p><select id="game-picker"></select>');
   assert.equal(result.status, 1);
   assert.deepEqual([result.opened, result.games, result.errors], [true, 0, []]);
+});
+
+// A Chrome left running is the user's own Chrome app to macOS: it receives the
+// links they open. The check's Chrome is the one whose profile is under `tmp`.
+test('a check stopped by a signal stops its Chrome', async () => {
+  const tmp = fs.mkdtempSync(path.join(root, 'tmp-')), page = path.join(root, 'loading.html');
+  fs.writeFileSync(page, '<p id="status">Loading</p>');
+  const child = spawn(process.execPath, [path.join(here, 'render_check.mjs'), path.join(root, 'signalled'), page], { env: { ...process.env, TMPDIR: tmp }, stdio: 'ignore' });
+  const chrome = () => spawnSync('pgrep', ['-f', tmp], { encoding: 'utf8' }).stdout.trim();
+  try {
+    for (const t0 = Date.now(); !chrome() && Date.now() - t0 < 60_000;) await sleep(200);
+    assert.ok(chrome(), 'Chrome never started');
+    child.kill('SIGTERM');
+    const [code] = await once(child, 'exit');
+    for (const t0 = Date.now(); chrome() && Date.now() - t0 < 5_000;) await sleep(100);
+    assert.deepEqual([code, chrome()], [143, '']);
+  } finally {
+    child.kill('SIGKILL');
+    spawnSync('pkill', ['-f', tmp]);
+  }
 });
