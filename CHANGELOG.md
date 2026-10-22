@@ -8,8 +8,8 @@ All notable priml changes are documented here. This project follows
 ### Removed
 
 - `priml.lib.worker_count` is no longer part of the package. It moved, with the
-  pre-commit gates that use it, to `tools/precommit/` at the repository root,
-  which the wheel does not ship.
+  pre-commit gates that use it, to `tools/gate/` at the repository root, which
+  the wheel does not ship.
 
 ## 0.1.7 - 2026-10-21
 
