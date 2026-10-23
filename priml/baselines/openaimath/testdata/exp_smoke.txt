@@ -1,0 +1,244 @@
+OpenMathTrainLoop(
+        study_name='openaimath',
+        experiment_name='exp_smoke',
+        base_dir='/opt/scratch',
+        working_dir=PosixPath('/opt/scratch/runs/openaimath/exp_smoke'),
+        doc='',
+        step=TMaxDPPOTrainStep.Config(
+        │   model=Qwen35.Config(
+        │   │   channels_in=16,
+        │   │   channels_out=248_576,
+        │   │   num_layers=2,
+        │   │   proj_in=Embedding.Config(
+        │   │       channels_in=248_576,
+        │   │       channels_out=16,
+        │   │       padding_idx=None,
+        │   │       device=None,
+        │   │       dtype=None,
+        │   │       lookup_dtype=None,
+        │   │       shard=None,
+        │   │       depth_index=(),
+        │   │       init_weight=functools.partial(torch.nn.init.normal_, std=0.02)
+        │   │   ),
+        │   │   block=[
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=16,
+        │   │   │       channels_out=16,
+        │   │   │       attn=Qwen35GatedDeltaNet.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           num_heads_k=1,
+        │   │   │           num_heads_v=2,
+        │   │   │           channels_k_head=4,
+        │   │   │           channels_v_head=4,
+        │   │   │           conv_kernel_size=4,
+        │   │   │           norm=Qwen35RMSNormGated.Config(channels_in=4, eps=1e-06),
+        │   │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │   │           init_conv_weight=priml.model.init.kaiming_uniform,
+        │   │   │           init_decay=priml.model.attention.qwen3_5_delta._init_decay,
+        │   │   │           depth_index=((0, 2),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLU.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           channels_hidden=24,
+        │   │   │           expansion=2.6666666666666665,
+        │   │   │           round_to=256,
+        │   │   │           gate=True,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=True,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.silu,
+        │   │   │           depth_index=((0, 2),),
+        │   │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │   │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=CenteredRMSNorm.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           eps=1e-06
+        │   │   │       ),
+        │   │   │       norm2=CenteredRMSNorm.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           eps=1e-06
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((0, 2),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=16,
+        │   │   │       channels_out=16,
+        │   │   │       attn=GatedAttention.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           num_heads=2,
+        │   │   │           num_heads_kv=1,
+        │   │   │           channels_head=8,
+        │   │   │           bias=False,
+        │   │   │           dropout=0.0,
+        │   │   │           norm_qk=CenteredRMSNorm.Config(
+        │   │   │               channels_in=8,
+        │   │   │               channels_out=8,
+        │   │   │               eps=1e-06
+        │   │   │           ),
+        │   │   │           rope=RoPE.Config(
+        │   │   │               channels_head=4,
+        │   │   │               reduction_mode='cat',
+        │   │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
+        │   │   │               dtype=torch.float32
+        │   │   │           ),
+        │   │   │           attn_kernel=SdpaNaive.Config(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │   │           depth_index=((1, 2),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLU.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           channels_hidden=24,
+        │   │   │           expansion=2.6666666666666665,
+        │   │   │           round_to=256,
+        │   │   │           gate=True,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=True,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.silu,
+        │   │   │           depth_index=((1, 2),),
+        │   │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │   │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=CenteredRMSNorm.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           eps=1e-06
+        │   │   │       ),
+        │   │   │       norm2=CenteredRMSNorm.Config(
+        │   │   │           channels_in=16,
+        │   │   │           channels_out=16,
+        │   │   │           eps=1e-06
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((1, 2),)
+        │   │   │   )
+        │   │   ],
+        │   │   proj_out=ScoringLinear.Config(
+        │   │       channels_in=16,
+        │   │       channels_out=248_576,
+        │   │       bias=False,
+        │   │       depth_index=(),
+        │   │       device=None,
+        │   │       dtype=None,
+        │   │       init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
+        │   │       shard=None
+        │   │   ),
+        │   │   norm=CenteredRMSNorm.Config(
+        │   │       channels_in=16,
+        │   │       channels_out=16,
+        │   │       eps=1e-06
+        │   │   )
+        │   ),
+        │   optimizer=PartialConfig(
+        │       <class 'torch.optim.adamw.AdamW'>,
+        │       lr=1e-06,
+        │       betas=(0.9, 0.999),
+        │       weight_decay=0.0
+        │   ),
+        │   loss=SimpleLoss.Config(
+        │       loss_fn=priml.loss.simple_loss.bce_with_logits,
+        │       target_key='label',
+        │       kwargs={'reduction': 'none'},
+        │       channels_out=-1
+        │   ),
+        │   accumulate_grad_batches=1,
+        │   drop_partial_accumulation_on_epoch_end=True,
+        │   train_budget_steps=1,
+        │   train_budget_sec=inf,
+        │   train_budget_epochs=inf,
+        │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │   parallelism=NoParallel.Config(device=None),
+        │   model_quantization=NoModelQuantization.Config(),
+        │   activation_memoization=DefaultActivationStorage.Config(),
+        │   compile=None,
+        │   ema=NoEMA.Config(),
+        │   gradient_clip_norm=1.0,
+        │   skip_step_on_nonfinite_grad=False,
+        │   device_init='eager',
+        │   dtype_autocast=None,
+        │   autocast_cache_enabled=False,
+        │   model_path=None,
+        │   base_dir=PosixPath('/opt/scratch/runs/openaimath/exp_smoke'),
+        │   working_dir=PosixPath('/opt/scratch/runs/openaimath/exp_smoke'),
+        │   export_dir=None,
+        │   divergence_fn=priml.baselines.tmax.objective.binary_total_variation,
+        │   divergence_threshold=0.1,
+        │   temperature=1.0,
+        │   head_chunk_size=None,
+        │   fp32_head=False,
+        │   pad_token_id=0
+        ),
+        dataset=OpenMathRolloutData.Config(
+            base_dir=PosixPath('<fixture>'),
+            working_dir=PosixPath('<fixture>/smoke_rollout.jsonl'),
+            tool_mask_path=None,
+            records_per_update=2,
+            num_samples_per_prompt=2,
+            advantage_fn=priml.baselines.tmax.rollouts.centered_advantages,
+            pack_length=81_920,
+            pad_token_id=0,
+            mask_tool_use=False,
+            filter_zero_std_samples=True,
+            active_sampling=True,
+            min_num_batches=1,
+            eval_records=0
+        ),
+        metrics_train={},
+        metrics_eval={},
+        checkpointer=None,
+        profiler=None,
+        phase_timer=PhaseTimer.Config(
+            enabled=False,
+            torch_profile=False,
+            base_dir=PosixPath('/opt/scratch/runs/openaimath/exp_smoke'),
+            working_dir=PosixPath('/opt/scratch/runs/openaimath/exp_smoke/profiling'),
+            heartbeat_interval_sec=20.0,
+            fault_dump_interval_sec=40.0,
+            cuda_events=False
+        ),
+        tracker=None,
+        max_steps=1,
+        max_epochs=1,
+        max_time=inf,
+        max_time_kind='wall',
+        max_eval_time=inf,
+        eval_stop_on_time_limit=False,
+        num_steps_eval=0,
+        num_steps_log=10,
+        early_train_log_steps=100,
+        eval_every_epoch=False,
+        eval_extras_every_eval=False,
+        eval_warmup_batches=0,
+        eval_only=False,
+        restore_rng_state=True,
+        seed=0,
+        model_torch_seed=None,
+        num_steps_garbage_collect=inf,
+        mesh_dim_model_seed='pp',
+        mesh_dim_data_seed='dp',
+        runtime=SingleProcess.Config(
+            device=None,
+            deterministic=False,
+            float32_matmul_precision=None
+        )
+    )
