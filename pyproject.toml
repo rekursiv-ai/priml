@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.3.0",
+    "treekle>=0.3.1",
     # torch
     "torch==2.11.0",
     "torchao==0.17.0",
@@ -75,7 +75,7 @@ dependencies = [
     "einshape",
     # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports,
     # and 1.4.2 the pformat layout every baseline's config golden is minted in
-    "configgle>=1.4.3",
+    "configgle>=1.4.4",
     # containers
     "wrapt",
     # misc
@@ -805,7 +805,6 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
 # Pin at cu128 for providers that don't keep their drivers up-to-date.
 # To test that it installed correctly,
@@ -814,4 +813,3 @@ rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch =
 # torchao = [{index = "pytorch-cu128", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'"}]
 # torchvision = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 # torchaudio = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
-configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
