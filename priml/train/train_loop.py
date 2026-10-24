@@ -310,11 +310,11 @@ class TrainLoop:
             are used directly; their configured factories are not called.
 
         Raises:
-          ValueError: If a limit or cadence is NaN, or if ``config`` is a
-            training run (not ``eval_only``) with no finite stop condition --
-            ``max_steps``, ``max_epochs``, and ``max_time`` all infinite --
-            which would loop forever. Checked before any expensive build so the
-            failure is immediate.
+          ValueError: If a limit or cadence is NaN, if ``num_steps_log`` is
+            below 1, or if ``config`` is a training run (not ``eval_only``)
+            with no finite stop condition -- ``max_steps``, ``max_epochs``,
+            and ``max_time`` all infinite -- which would loop forever. Checked
+            before any expensive build so the failure is immediate.
 
         """
         for name, limit in (
@@ -329,6 +329,11 @@ class TrainLoop:
             # stop the loop or fire its cadence, and nothing downstream objects.
             if math.isnan(limit):
                 raise ValueError(f"{name} must not be NaN.")
+        # A zero log cadence would divide by zero mid-run, not here.
+        if config.num_steps_log < 1:
+            raise ValueError(
+                f"num_steps_log must be at least 1, got {config.num_steps_log}.",
+            )
         if (
             not config.eval_only
             and config.max_steps == math.inf

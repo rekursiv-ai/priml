@@ -66,6 +66,14 @@ def test_topk_state_round_trips_and_reset_clears_it() -> None:
     assert metric.state_dict() == {"correct": {1: 0, 2: 0}, "total": 0}
 
 
+def test_topk_state_dict_is_a_snapshot() -> None:
+    metric = TopK(TopK.Config(k_values=[1]))
+    metric.update(torch.tensor([[1.0, 0.0]]), label=torch.tensor([0]))
+    state = metric.state_dict()
+    metric.update(torch.tensor([[1.0, 0.0]]), label=torch.tensor([0]))
+    assert state == {"correct": {1: 1}, "total": 1}
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

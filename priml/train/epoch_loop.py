@@ -48,17 +48,17 @@ _DataT_co = TypeVar(
 class EvalEpochs(Protocol):
     """Says whether the eval split is evaluated after a completed epoch."""
 
-    def __call__(self, epoch: int, /, *, total_epochs: int) -> bool:
+    def __call__(self, epoch: int, /, *, total_epochs: float) -> bool:
         """Return whether to evaluate after ``epoch``, counted from 1."""
         raise NotImplementedError
 
 
-def first_periodic_and_last(epoch: int, /, *, total_epochs: int, every: int) -> bool:
+def first_periodic_and_last(epoch: int, /, *, total_epochs: float, every: int) -> bool:
     """Evaluate after the first epoch, every ``every``-th and the last.
 
     Args:
       epoch: Completed epochs, from 1.
-      total_epochs: Epochs of the run.
+      total_epochs: Epochs of the run; ``math.inf`` has no last epoch.
       every: Period of the evaluations between the first and the last.
 
     Returns:
@@ -68,7 +68,7 @@ def first_periodic_and_last(epoch: int, /, *, total_epochs: int, every: int) -> 
     return epoch == 1 or epoch % every == 0 or epoch == total_epochs
 
 
-def every_epoch(epoch: int, /, *, total_epochs: int) -> bool:
+def every_epoch(epoch: int, /, *, total_epochs: float) -> bool:
     """Evaluate after every epoch."""
     del epoch, total_epochs
     return True
@@ -193,7 +193,7 @@ class EpochTrainLoop(TrainLoop):
         evaluate = self.eval_every_epoch
         self.eval_every_epoch = evaluate and self.eval_epochs(
             self.current_epoch,
-            total_epochs=int(self.max_epochs),
+            total_epochs=self.max_epochs,
         )
         try:
             super()._on_epoch_boundary()

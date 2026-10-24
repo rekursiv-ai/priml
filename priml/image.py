@@ -438,10 +438,9 @@ def resized_dims(size: tuple[int, int], max_dim: int) -> tuple[int, int]:
     longest = max(width, height)
     if max_dim <= 0 or longest <= max_dim:
         return size
-    scale = max_dim / longest
-    # Floor, but never to zero: a 1x6001 image under a 6000px cap keeps its
-    # one-pixel axis rather than handing PIL a zero-width resize.
-    return max(1, int(width * scale)), max(1, int(height * scale))
+    # Floor in integers (a float scale can land at 223.99 for 224), never to
+    # zero: a 1x6001 image under a 6000px cap keeps its one-pixel axis.
+    return max(1, width * max_dim // longest), max(1, height * max_dim // longest)
 
 
 def _is_svg(data: bytes) -> bool:

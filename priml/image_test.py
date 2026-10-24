@@ -1504,6 +1504,7 @@ class TestResizeImage:
             ((4, 3), 6, (4, 3)),
             ((4, 3), 0, (4, 3)),
             ((1, 6001), 6000, (1, 6000)),
+            ((277, 139), 224, (224, 112)),
         ],
     )
     def test_resized_dims_is_the_size_resize_produces(
