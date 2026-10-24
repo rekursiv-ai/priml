@@ -279,7 +279,7 @@ class QuantizedActivationStorage:
             with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                 return original_forward(*args, **kwargs)
 
-        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.  # pyrefly: ignore[read-only] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.
+        model.forward = wrapped_forward
 
         logger.info(
             "Applied QuantizedActivationStorage: dtype_storage=%s, dtype_compute=%s, min_size=%s",

@@ -498,7 +498,7 @@ def compile_forward(
 
     """
     compiled = torch.compile(model.forward, fullgraph=fullgraph, backend=backend)
-    model.forward = patch(optimize_ddp=False)(compiled)  # ty: ignore[invalid-assignment] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.  # pyrefly: ignore[read-only] -- Instance patch of forward; the stub types it read-only so subclasses may narrow it.
+    model.forward = patch(optimize_ddp=False)(compiled)
     return model
 
 
