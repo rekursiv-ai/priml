@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import TYPE_CHECKING
 
+import os
+import re
 import signal
 import subprocess
 import sys
@@ -13,9 +16,14 @@ import pytest
 from priml.lib.testing import checks
 from priml.lib.testing.checks import (
     assert_help_without_docstring,
+    bash_path,
     default_signals,
     smuggle,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.cli_python_subprocess
@@ -100,6 +108,51 @@ def test_help_that_fails_without_a_docstring_is_reported(
 def test_smuggle_returns_the_value_itself() -> None:
     value = object()
     assert smuggle(value, int) is value
+
+
+@pytest.mark.cli_bash
+def test_the_bash_found_runs_what_bash_3_2_cannot() -> None:
+    script = (
+        "set -u; declare -A seen=([a]=1); empty=(); mapfile -t <<<x; echo ${empty[@]}"
+    )
+    ran = subprocess.run(  # noqa: S603 -- The bash under test, a fixed script.
+        [bash_path(), "-c", script],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert (ran.returncode, ran.stderr) == (0, "")
+
+
+def test_an_older_bash_earlier_on_path_is_passed_over(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    old, new = _bash_in(tmp_path / "old", exits=1), _bash_in(tmp_path / "new", exits=0)
+    monkeypatch.setenv("PATH", f"{old.parent}{os.pathsep}{new.parent}")
+    assert bash_path() == str(new)
+
+
+def test_no_new_enough_bash_on_path_fails_naming_the_fix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    old = _bash_in(tmp_path / "old", exits=1)
+    monkeypatch.setenv("PATH", str(old.parent))
+    with pytest.raises(
+        pytest.fail.Exception,
+        match=f"has {re.escape(str(old))}: brew install bash$",
+    ):
+        _ = bash_path()
+
+
+def _bash_in(directory: Path, *, exits: int) -> Path:
+    """Write a stand-in bash whose version probe exits ``exits``."""
+    directory.mkdir()
+    bash = directory / "bash"
+    _ = bash.write_text(f"#!/bin/sh\nexit {exits}\n")
+    bash.chmod(0o755)
+    return bash
 
 
 if __name__ == "__main__":
