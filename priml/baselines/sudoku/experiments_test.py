@@ -14,6 +14,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
+import re
+
 from configgle import PartialConfig
 
 import pytest
@@ -566,7 +568,8 @@ def assert_rung_delta(
 
 def _field_path(path: str) -> str:
     """Collapse a serialized leaf path to its config field path."""
-    return path.split(".py/", maxsplit=1)[0]
+    nested = re.search(r"\.py/|\[", path)
+    return path if nested is None else path[: nested.start()]
 
 
 def _flatten(tree: _Tree, prefix: str = "") -> dict[str, object]:
