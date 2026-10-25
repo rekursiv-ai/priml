@@ -10,7 +10,7 @@ Prepare the data once, then launch a task's ``exp000``::
 
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
 
-The recipe is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The recipe is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``cv-classification-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 

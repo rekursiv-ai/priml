@@ -24,7 +24,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.initialization.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -96,7 +96,7 @@ def exp001() -> VisionTrainLoop:
         Performance on ImageNet Classification."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``kaiming_normal`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -127,7 +127,7 @@ def exp002() -> VisionTrainLoop:
         Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``fixup`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -156,7 +156,7 @@ def exp003() -> VisionTrainLoop:
         learning in deep linear neural networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``orthogonal`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -188,7 +188,7 @@ def exp004() -> VisionTrainLoop:
         Large-Scale Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -215,7 +215,7 @@ def exp005() -> VisionTrainLoop:
         Performance on ImageNet Classification."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``kaiming_normal`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -247,7 +247,7 @@ def exp006() -> VisionTrainLoop:
         Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``fixup`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -274,7 +274,7 @@ def exp007() -> VisionTrainLoop:
         learning in deep linear neural networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``orthogonal`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -306,7 +306,7 @@ def exp008() -> VisionTrainLoop:
         Bottlenecks."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist`` of ``dl-weight-initialization`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -333,7 +333,7 @@ def exp009() -> VisionTrainLoop:
         Performance on ImageNet Classification."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``kaiming_normal`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -366,7 +366,7 @@ def exp010() -> VisionTrainLoop:
         Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``fixup`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -394,7 +394,7 @@ def exp011() -> VisionTrainLoop:
         learning in deep linear neural networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``orthogonal`` of ``dl-weight-initialization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

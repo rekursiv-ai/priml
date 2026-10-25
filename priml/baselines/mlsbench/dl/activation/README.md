@@ -7,7 +7,7 @@ for the stem and one per block, which applies it twice, as the script does.
 The task has no `resnet56-cifar100` setting, so `exp000` is its first ResNet
 setting, `resnet20-cifar10`: the `cv-classification-loss` recipe at depth
 `(3, 3, 3)`, 10 classes and CIFAR-10's channel statistics. Pinned to
-MLS-Bench commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+MLS-Bench commit `b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  ReLU

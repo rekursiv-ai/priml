@@ -23,7 +23,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.activation.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.activation.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 
@@ -83,7 +83,7 @@ def exp001() -> VisionTrainLoop:
         Hendrycks and Gimpel 2016, "Gaussian Error Linear Units (GELUs)."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gelu`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -109,7 +109,7 @@ def exp002() -> VisionTrainLoop:
         Ramachandran et al. 2017, "Searching for Activation Functions."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``silu`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -136,7 +136,7 @@ def exp003() -> VisionTrainLoop:
         Function."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``mish`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -166,7 +166,7 @@ def exp004() -> VisionTrainLoop:
         Large-Scale Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -188,7 +188,7 @@ def exp005() -> VisionTrainLoop:
         Hendrycks and Gimpel 2016, "Gaussian Error Linear Units (GELUs)."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gelu`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -212,7 +212,7 @@ def exp006() -> VisionTrainLoop:
         Ramachandran et al. 2017, "Searching for Activation Functions."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``silu`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -237,7 +237,7 @@ def exp007() -> VisionTrainLoop:
         Function."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``mish`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -267,7 +267,7 @@ def exp008() -> VisionTrainLoop:
         Bottlenecks."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -292,7 +292,7 @@ def exp009() -> VisionTrainLoop:
         Hendrycks and Gimpel 2016, "Gaussian Error Linear Units (GELUs)."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gelu`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -317,7 +317,7 @@ def exp010() -> VisionTrainLoop:
         Ramachandran et al. 2017, "Searching for Activation Functions."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``silu`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -342,7 +342,7 @@ def exp011() -> VisionTrainLoop:
         Function."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``mish`` of ``dl-activation-function`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

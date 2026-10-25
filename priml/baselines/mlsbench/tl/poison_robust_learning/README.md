@@ -5,7 +5,7 @@ the slot `step.loss`. A seeded fraction of the training labels is moved to the
 next class; after 100 epochs the network is scored on the clean test split and
 on how often it predicts the flipped labels of the flipped images, through the
 training pipeline. Pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  resnet20-cifar10-labelflip, cross-entropy

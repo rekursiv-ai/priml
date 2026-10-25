@@ -24,7 +24,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.residual.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 
@@ -87,7 +87,7 @@ def exp001() -> VisionTrainLoop:
         He et al. 2016, "Identity Mappings in Deep Residual Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``pre_activation`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -114,7 +114,7 @@ def exp002() -> VisionTrainLoop:
         Large Depth."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gated_residual`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -145,7 +145,7 @@ def exp003() -> VisionTrainLoop:
         Huang et al. 2016, "Deep Networks with Stochastic Depth."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``stochastic_depth`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -171,7 +171,7 @@ def exp004() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``resnet20-cifar10`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -193,7 +193,7 @@ def exp005() -> VisionTrainLoop:
         He et al. 2016, "Identity Mappings in Deep Residual Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``pre_activation`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -219,7 +219,7 @@ def exp006() -> VisionTrainLoop:
         Large Depth."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gated_residual`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -248,7 +248,7 @@ def exp007() -> VisionTrainLoop:
         Huang et al. 2016, "Deep Networks with Stochastic Depth."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``stochastic_depth`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -274,7 +274,7 @@ def exp008() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Hidden setting ``resnet110-cifar100`` of ``dl-residual-connection`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 
@@ -298,7 +298,7 @@ def exp009() -> VisionTrainLoop:
         He et al. 2016, "Identity Mappings in Deep Residual Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``pre_activation`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -324,7 +324,7 @@ def exp010() -> VisionTrainLoop:
         Large Depth."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gated_residual`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -352,7 +352,7 @@ def exp011() -> VisionTrainLoop:
         Huang et al. 2016, "Deep Networks with Stochastic Depth."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``stochastic_depth`` of ``dl-residual-connection`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

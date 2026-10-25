@@ -3,7 +3,7 @@
 The task's editable `Compressor` -- applied to every parameter's gradient
 between the backward pass and the optimizer step -- becomes the slot
 `step.compressor`. Pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  ResNet-20, CIFAR-10, no compression        (resnet20-cifar10)

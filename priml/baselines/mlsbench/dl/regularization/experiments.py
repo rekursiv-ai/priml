@@ -25,7 +25,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.regularization.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -105,7 +105,7 @@ def exp001() -> VisionTrainLoop:
         convolutional networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``dropblock`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -134,7 +134,7 @@ def exp002() -> VisionTrainLoop:
         Confident Output Distributions."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``confidence_penalty`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -164,7 +164,7 @@ def exp003() -> VisionTrainLoop:
         Adversarial Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``orthogonal_reg`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -198,7 +198,7 @@ def exp004() -> VisionTrainLoop:
         Large-Scale Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -224,7 +224,7 @@ def exp005() -> VisionTrainLoop:
         convolutional networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``dropblock`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -252,7 +252,7 @@ def exp006() -> VisionTrainLoop:
         Confident Output Distributions."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``confidence_penalty`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -285,7 +285,7 @@ def exp007() -> VisionTrainLoop:
         Adversarial Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``orthogonal_reg`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -313,7 +313,7 @@ def exp008() -> VisionTrainLoop:
         Bottlenecks."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -337,7 +337,7 @@ def exp009() -> VisionTrainLoop:
         convolutional networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``dropblock`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -365,7 +365,7 @@ def exp010() -> VisionTrainLoop:
         Confident Output Distributions."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``confidence_penalty`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -394,7 +394,7 @@ def exp011() -> VisionTrainLoop:
         Adversarial Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``orthogonal_reg`` of ``dl-regularization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

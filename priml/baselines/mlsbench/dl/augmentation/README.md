@@ -2,7 +2,7 @@
 
 The task's editable `build_train_transform` becomes the slot
 `dataset.augment` (`Cifar100Data.Config.augment`). All three settings are
-ported, pinned to MLS-Bench commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+ported, pinned to MLS-Bench commit `b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  ResNet-56, CIFAR-100, pad, crop and mirror   resnet56-cifar100

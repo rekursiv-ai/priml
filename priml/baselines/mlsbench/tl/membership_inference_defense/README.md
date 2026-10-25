@@ -5,7 +5,7 @@ becomes the slot `step.loss`. The training split is shuffled with Python's
 generator seeded 42 and halved: the network trains on the members, and after
 300 epochs a confidence-threshold attack scores how well its largest softmax
 probability separates members from non-members. Pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  resnet20-cifar10, cross-entropy

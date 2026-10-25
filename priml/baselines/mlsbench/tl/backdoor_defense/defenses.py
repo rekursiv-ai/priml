@@ -127,7 +127,7 @@ class ConfidenceZScore:
         References:
           https://github.com/Imbernoulli/MLS-Bench
             Baseline ``confidence_filter`` of ``security-backdoor-defense`` at
-            commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+            commit b873944969c53b01e4ee6e843c77767b8c702485.
 
         """
         del features
@@ -362,7 +362,7 @@ class FeatureZScore:
         References:
           https://github.com/Imbernoulli/MLS-Bench
             Baseline ``zscore_outlier`` of ``security-backdoor-defense`` at
-            commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+            commit b873944969c53b01e4ee6e843c77767b8c702485.
 
         """
         x = features.astype(np.float64)

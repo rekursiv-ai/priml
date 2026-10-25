@@ -4,7 +4,7 @@ The task's editable `compute_regularization(model, inputs, outputs, targets,
 config)` returns a scalar added to cross-entropy every step. Here it is the
 `step.regularization` slot of `RegularizedTrainStep`, a subclass of the
 vision step; its default, `zero`, adds nothing. Setting `resnet56-cifar100`,
-pinned to MLS-Bench commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+pinned to MLS-Bench commit `b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  no regularization (the pristine body raises; its docstring names zero)

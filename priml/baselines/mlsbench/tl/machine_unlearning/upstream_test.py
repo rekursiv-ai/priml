@@ -6,7 +6,7 @@ the method file as the real edits do. ``write_clone`` is shared with the
 capture's tests.
 
 The harness it stands in for, whose repository publishes no license:
-https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__security-machine-unlearning/tests/meta/pristine/pytorch-vision/bench/unlearning/run_unlearning.py
+https://github.com/Imbernoulli/MLS-Bench/blob/b873944969c53b01e4ee6e843c77767b8c702485/harbor/tasks-docker/mls-bench__security-machine-unlearning/tests/meta/pristine/pytorch-vision/bench/unlearning/run_unlearning.py
 """
 
 from __future__ import annotations

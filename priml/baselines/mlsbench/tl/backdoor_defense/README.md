@@ -3,7 +3,7 @@
 The task's editable `BackdoorDefense` -- a scorer fit on the victim's
 penultimate features that flags poisoned training images -- becomes the slot
 `defense` of `BackdoorTrainLoop`. Pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  max softmax confidence                     resnet20-cifar10-badnets, 5%

@@ -3,7 +3,7 @@
 The task's editable `CustomPool` -- the global pool between the last stage and
 the classifier -- becomes the slot `step.model.pool`. Ported at the
 `resnet56-cifar100` setting, pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`. The pristine script is the
+`b873944969c53b01e4ee6e843c77767b8c702485`. The pristine script is the
 `cv-classification-loss` script with the pool made a module, so `exp000` is
 [`vision`](../vision/README.md)'s `exp000` under a new name.
 
