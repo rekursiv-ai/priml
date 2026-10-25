@@ -30,7 +30,11 @@ from priml.baselines.oscillator.regimes import (
     RegimeData,
     RegimeDynamics,
 )
+from priml.cost import cost
+from priml.model.sequential import Sequential
 from priml.model.special import Identity
+from priml.model.swiglu import SwiGLU
+from priml.testing.cost import assert_cost_matches_torch
 from priml.train.ema import EMA
 
 
@@ -64,6 +68,92 @@ def test_nonlinear_block_receives_all_observed_geometry() -> None:
     assert model(torch.ones(5, 7, 2), label=None).shape == (5, 3, 2)
     with pytest.raises(ValueError, match="positive"):
         ObservedHistory.Config(channels=0).make()
+
+
+@pytest.mark.parametrize("channels", [1, 4])
+def test_dlinear_cost_preserves_child_work_and_inactive_decoder(channels: int) -> None:
+    cfg = ObservedDLinear.Config()
+    cfg.seq_len, cfg.pred_len, cfg.channels = 7, 5, channels
+    # PositionObservation forces a single visible coordinate in the masked task.
+    counted = assert_cost_matches_torch(
+        cfg,
+        build_input=lambda: torch.randn(3, 7, channels, requires_grad=True),
+        seq_len=7,
+        batch_size=3,
+        dtype=torch.float32,
+    )
+    assert counted == cost(
+        cfg.model.finalized(),
+        seq_len=7,
+        batch_size=3,
+        dtype=torch.float32,
+    )
+    assert counted.params > counted.params_active > 0
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("composed", [False, True])
+def test_history_cost_counts_one_flattened_invocation(
+    channels: int,
+    composed: bool,
+) -> None:
+    cfg = ObservedHistory.Config(seq_len=7, pred_len=5, channels=channels)
+    if composed:
+        cfg.block = Sequential.Config(
+            elements=[
+                SwiGLU.Config(channels_hidden=11, channels_out=13, bias=True),
+                SwiGLU.Config(channels_hidden=17, bias=True),
+            ],
+        )
+    else:
+        assert isinstance(cfg.block, SwiGLU.Config)
+        cfg.block.channels_hidden = 11
+    # PositionObservation forces one channel; the full physical state has two.
+    counted = assert_cost_matches_torch(
+        cfg,
+        build_input=lambda: torch.randn(3, 7, channels, requires_grad=True),
+        seq_len=7,
+        batch_size=3,
+        dtype=torch.float32,
+    )
+    finalized = cfg.finalized()
+    assert counted == cost(
+        finalized.block,
+        seq_len=1,
+        batch_size=3,
+        dtype=torch.float32,
+    )
+    smaller = cost(finalized, seq_len=7, batch_size=2, dtype=torch.float32)
+    assert counted.params == smaller.params > 0
+    assert (
+        2 * counted["primal", "flops", "matmul"].sum()
+        == 3 * smaller["primal", "flops", "matmul"].sum()
+    )
+
+
+@pytest.mark.parametrize("dtype", [None, torch.float32, torch.float64])
+def test_observed_costs_forward_dtype_and_reject_inconsistent_history(
+    dtype: torch.dtype | None,
+) -> None:
+    dlinear = ObservedDLinear.Config()
+    dlinear.seq_len, dlinear.pred_len, dlinear.channels = 7, 5, 2
+    dlinear = dlinear.finalized()
+    history = ObservedHistory.Config(seq_len=7, pred_len=5, channels=2).finalized()
+    assert cost(dlinear, seq_len=7, batch_size=3, dtype=dtype) == cost(
+        dlinear.model,
+        seq_len=7,
+        batch_size=3,
+        dtype=dtype,
+    )
+    assert cost(history, seq_len=7, batch_size=3, dtype=dtype) == cost(
+        history.block,
+        seq_len=1,
+        batch_size=3,
+        dtype=dtype,
+    )
+    for cfg in (dlinear, history):
+        with pytest.raises(ValueError, match="history"):
+            cost(cfg, seq_len=11, batch_size=3, dtype=dtype)
 
 
 def test_pooled_ridge_learns_affine_history_mapping_without_validation_targets() -> (

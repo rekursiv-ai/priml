@@ -14,6 +14,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.etth1.model import DLinear
+from priml.cost import Cost, cost
 from priml.loss.simple_loss import SimpleLoss, mse
 from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
 from priml.model.swiglu import SwiGLU
@@ -86,6 +87,34 @@ class ObservedDLinear(nn.Module):
         def channels(self, value: int) -> None:
             self.model.channels = value
 
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Delegate the complete invocation to the original DLinear config.
+
+            Args:
+              seq_len: Observed timesteps; must match the child model's history.
+              batch_size: Trajectories per batch.
+              dtype: Activation dtype; ``None`` uses torch's default.
+              **kwargs: Forwarded to DLinear's cost.
+
+            Returns:
+              cost: DLinear operations and all owned parameters.
+
+            """
+            return cost(
+                self.model,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.model = config.model.make()
@@ -130,6 +159,39 @@ class ObservedHistory(nn.Module):
                 protocol=ChannelsOut,
             )
             return super().finalize()
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost one flattened observed history through the configured block.
+
+            Args:
+              seq_len: Observed timesteps; must match the model's history.
+              batch_size: Trajectories per batch.
+              dtype: Activation dtype; ``None`` uses torch's default.
+              **kwargs: Forwarded to the block's cost.
+
+            Returns:
+              cost: Block operations and parameters; the reshapes are views.
+
+            Raises:
+              ValueError: The supplied history length differs from the model.
+
+            """
+            if seq_len != self.seq_len:
+                raise ValueError("Cost history length must match the model geometry.")
+            return cost(
+                self.block,
+                seq_len=1,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
