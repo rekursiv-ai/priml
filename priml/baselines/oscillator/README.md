@@ -1,5 +1,9 @@
 # Forecasting with an imperfect simulator
 
+[Part two](PART_TWO.md) adds episode-specific dynamics, hidden velocity, and
+changes inside the observed history. It includes matched observation controls
+and larger-data and longer-training checks in `exp041` through `exp048`.
+
 This is a preliminary comparison for the proposed forecasting benchmark. It
 establishes ordinary forecasting controls before adding an agent that chooses
 experiments. It is not a finished benchmark or a claim of a new forecasting method.
