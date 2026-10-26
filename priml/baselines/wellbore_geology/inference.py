@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -28,7 +29,7 @@ from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     from pyarrow import parquet
 
@@ -336,14 +337,16 @@ def read_table(path: Path) -> PredictionTable:
             elif values.dtype == np.float64:
                 diagnostics[name] = cast("NDArray[np.float64]", values.copy())
             elif values.dtype.kind == "O":
-                strings[name] = tuple(cast("list[str]", table.column(name).to_pylist()))
+                strings[name] = tuple(
+                    cast(Sequence[str], table.column(name).to_pylist()),
+                )
             else:
                 raise ValueError(
                     f"Diagnostic must have float32 or float64 precision: {name}.",
                 )
     return PredictionTable(
         rows=PredictionRows(
-            well_ids=tuple(cast("list[str]", table.column("well_id").to_pylist())),
+            well_ids=tuple(cast(Sequence[str], table.column("well_id").to_pylist())),
             submit_indices=arrays["submit_index"].astype(np.int64),
             tvt=arrays["TVT_pred"].astype(np.float32),
             z=arrays["Z"].astype(np.float32),
@@ -921,7 +924,11 @@ def _savgol(
     half = window // 2
     offsets = np.arange(-half, half + 1, dtype=np.float64)
     vandermonde = offsets ** np.arange(polyorder + 1, dtype=np.float64)[:, None]
-    weights = np.linalg.lstsq(vandermonde, np.eye(polyorder + 1)[0], rcond=None)[0]
+    weights = np.linalg.lstsq(
+        vandermonde,
+        np.eye(polyorder + 1, 1).ravel(),
+        rcond=None,
+    )[0]
     smoothed = np.empty_like(values)
     smoothed[half : len(values) - half] = np.correlate(values, weights, mode="valid")
     position = np.arange(window, dtype=np.float64)

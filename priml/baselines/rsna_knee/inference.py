@@ -15,7 +15,7 @@ import time
 from configgle import Fig, Makeable
 from numpy.typing import NDArray
 from torch import Tensor, nn
-from treekle import MutablePlainTree, from_plain, json_dumps, json_loads, to_plain
+from treekle import MutablePlainTree, json_dumps, json_loads, to_plain
 
 import numpy as np
 import torch
@@ -630,17 +630,14 @@ class ReleasedState:
             state: All model parameters and buffers without shape filtering.
 
         """
-        loaded = cast(
-            object,
-            torch.load(
-                self.config.file.make().path(),
-                map_location="cpu",
-                weights_only=self.config.weights_only,
-            ),
+        loaded = torch.load(
+            self.config.file.make().path(),
+            map_location="cpu",
+            weights_only=self.config.weights_only,
         )
         if self.config.key is not None:
-            loaded = from_plain(loaded, dict[str, object])[self.config.key]
-        return from_plain(loaded, dict[str, torch.Tensor])
+            loaded = cast(dict[str, object], loaded)[self.config.key]
+        return cast(dict[str, torch.Tensor], loaded)
 
 
 class FoldModel(Protocol):

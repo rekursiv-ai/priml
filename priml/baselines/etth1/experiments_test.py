@@ -244,10 +244,7 @@ def test_mid_epoch_resume_replays_exact_next_update(tmp_path: Path) -> None:
     resumed = cfg.make()
     try:
         resumed.load_state_dict(
-            from_plain(
-                cast(object, torch.load(checkpoint, weights_only=True)),
-                dict[str, object],
-            ),
+            cast(dict[str, object], torch.load(checkpoint, weights_only=True)),
         )
         actual_batch = resumed._get_next_batch()
         assert not mismatches(
@@ -365,15 +362,9 @@ def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) 
         dict[str, object],
     )
     assert selector["step"] == 5
-    saved = from_plain(
-        cast(
-            object,
-            torch.load(
-                tmp_path / "checkpoints" / "step_00000005.pt",
-                weights_only=True,
-            ),
-        ),
+    saved = cast(
         dict[str, object],
+        torch.load(tmp_path / "checkpoints" / "step_00000005.pt", weights_only=True),
     )
     assert saved["validation_losses"] == loop.validation_losses
     assert saved["pending_epoch_completion"] is False

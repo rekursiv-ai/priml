@@ -105,12 +105,13 @@ class FingerprintFineTune(TrainStep):
                     "Fingerprint mean-backward recipe does not support closure optimizers.",
                 )
         if config.pretrained is not None:
-            payload = cast(
-                object,
-                torch.load(config.pretrained, map_location="cpu", weights_only=True),
+            payload = torch.load(
+                config.pretrained,
+                map_location="cpu",
+                weights_only=True,
             )
-            checkpoint = from_plain(payload, dict[str, object])
-            state = from_plain(checkpoint["model"], dict[str, Tensor])
+            checkpoint = cast(dict[str, object], payload)
+            state = cast(dict[str, Tensor], checkpoint["model"])
             model = self.model
             assert isinstance(model, FPNet)
             model.load_released_state(state)
@@ -163,10 +164,7 @@ class FpnetExport:
         with step.ema.apply_to(step.model):
             torch.save(
                 {
-                    "model": from_plain(
-                        step.model.state_dict(),
-                        dict[str, torch.Tensor],
-                    ),
+                    "model": step.model.state_dict(),
                     "config": to_plain(model),
                     "step": step.global_step,
                     "nbits": model.channels_out,

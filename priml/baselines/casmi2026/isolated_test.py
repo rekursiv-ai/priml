@@ -39,6 +39,7 @@ from priml.baselines.casmi2026.isolated import (
     molecular_record,
     neutral_mass,
     normalize_request,
+    polarity_sign,
     precursor_mass,
     reaction_key,
     reaction_rules,
@@ -206,6 +207,15 @@ def test_main_engine_fragment_carriers_follow_polarity_and_adduct_markers() -> N
     )
     for label in ("[M+CH2O2-H]-", "[M+HCOO]-"):
         assert main_ion_deltas(label) == (deprotonated, hcoo)
+
+
+def test_polarity_sign_is_positive_only_for_the_positive_mode_spellings() -> None:
+    assert [polarity_sign(mode) for mode in (1, "positive", 0, "negative")] == [
+        1,
+        1,
+        -1,
+        -1,
+    ]
 
 
 def test_formula_vectors_retain_repeated_tokens_charges_and_invalid_rows() -> None:

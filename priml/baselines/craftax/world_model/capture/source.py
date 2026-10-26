@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 import hashlib
 
 from configgle import Fig, Makeable
-from treekle import from_plain
 
 import numpy as np
 import torch
@@ -163,21 +162,18 @@ class PolicySource:
         # ``weights_only`` admits only tensors and plain containers, which is all
         # ``TrainLoop.state_dict`` holds; ``mmap`` leaves the rest of the
         # pipeline's state, most of the file, unread.
-        state = from_plain(
-            cast(
-                "object",
-                torch.load(
-                    config.checkpoint,
-                    map_location="cpu",
-                    weights_only=True,
-                    mmap=True,
-                ),
-            ),
+        state = cast(
             dict[str, object],
+            torch.load(
+                config.checkpoint,
+                map_location="cpu",
+                weights_only=True,
+                mmap=True,
+            ),
         )
-        step = from_plain(state["step"], dict[str, object])
+        step = cast(dict[str, object], state["step"])
         self.policy.load_state_dict(
-            from_plain(step.get("model"), dict[str, torch.Tensor]),
+            cast(dict[str, torch.Tensor], step.get("model")),
         )
         self.seed = 0
         self.env: CaptureEnv | None = None

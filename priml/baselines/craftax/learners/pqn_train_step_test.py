@@ -19,7 +19,6 @@ import math
 import re
 
 from configgle import Fig
-from treekle import from_plain
 
 import pytest
 import torch
@@ -524,10 +523,7 @@ def test_a_checkpoint_resumes_where_the_run_left_off() -> None:
     with _step(seed=1) as resumed:
         buffer.seek(0)
         resumed.load_state_dict(
-            from_plain(
-                cast("object", torch.load(buffer, weights_only=True)),
-                dict[str, object],
-            ),
+            cast(dict[str, object], torch.load(buffer, weights_only=True)),
         )
         assert resumed.global_step == 1
         rollout = resumed.collect()

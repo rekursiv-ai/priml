@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self, TypedDict, cast, override
@@ -66,8 +67,8 @@ def build_spectral_cache(
     destination = validated_output_path(output, protected=(training, structures))
     destination.mkdir(parents=True, exist_ok=True)
     mapping = parquet.read_table(structures, columns=["inchikey14", "sid"])
-    keys = from_plain(cast(object, mapping.column("inchikey14").to_pylist()), list[str])
-    sids = from_plain(cast(object, mapping.column("sid").to_pylist()), list[int])
+    keys = cast(Sequence[str], mapping.column("inchikey14").to_pylist())
+    sids = cast(Sequence[int], mapping.column("sid").to_pylist())
     key_to_sid = dict(zip(keys, sids, strict=True))
     source = parquet.ParquetFile(training)
     offsets: list[NDArray[np.int64]] = [np.zeros(1, np.int64)]
@@ -77,22 +78,16 @@ def build_spectral_cache(
     total = 0
     for group in range(source.num_row_groups):
         table = source.read_row_group(group)
-        raw_mz = from_plain(
-            cast(object, table.column("ms2_mzs").to_pylist()),
-            list[list[float]],
-        )
-        raw_it = from_plain(
-            cast(object, table.column("ms2_normalized_intensities").to_pylist()),
-            list[list[float]],
+        raw_mz = cast(Sequence[Sequence[float]], table.column("ms2_mzs").to_pylist())
+        raw_it = cast(
+            Sequence[Sequence[float]],
+            table.column("ms2_normalized_intensities").to_pylist(),
         )
         boundaries = np.concatenate(
             [[0], np.cumsum([len(peaks) for peaks in raw_mz])],
         ).astype(np.int64)
         precursor = np.asarray(
-            from_plain(
-                cast(object, table.column("precursor_mz").to_pylist()),
-                list[float],
-            ),
+            cast(Sequence[float], table.column("precursor_mz").to_pylist()),
             dtype=np.float64,
         )
         cleaned = clean_block(
@@ -145,7 +140,7 @@ def _metadata(
     key_to_sid: dict[str, int],
 ) -> dict[str, list[object]]:
     columns = {
-        name: from_plain(cast(object, table.column(name).to_pylist()), list[object])
+        name: table.column(name).to_pylist()
         for name in (
             "adduct",
             "precursor_mz",
@@ -155,9 +150,9 @@ def _metadata(
             "num_peaks",
         )
     }
-    energies = from_plain(
-        cast(object, table.column("collision_energy_ev").to_pylist()),
-        list[list[float | None] | None],
+    energies = cast(
+        Sequence[Sequence[float | None] | None],
+        table.column("collision_energy_ev").to_pylist(),
     )
     for name, reduction in (("mean", np.mean), ("min", np.min), ("max", np.max)):
         values = [
@@ -170,7 +165,7 @@ def _metadata(
             None if math.isnan(value) else value for value in values
         ]
     columns["ce_n"] = [len(energy) if energy is not None else 0 for energy in energies]
-    keys = from_plain(cast(object, table.column("inchikey14").to_pylist()), list[str])
+    keys = cast(Sequence[str], table.column("inchikey14").to_pylist())
     columns["sid"] = [key_to_sid.get(key, -1) for key in keys]
     libraries = (
         "enveda-180",
@@ -187,27 +182,15 @@ def _metadata(
     )
     columns["lib"] = [
         libraries.index(name)
-        for name in from_plain(
-            cast(object, table.column("ingest_lib").to_pylist()),
-            list[str],
-        )
+        for name in cast(Sequence[str], table.column("ingest_lib").to_pylist())
     ]
     columns["instr"] = [
         instrument_family(value)
-        for value in from_plain(
-            cast(object, table.column("instrument_type").to_pylist()),
-            list[object],
-        )
+        for value in table.column("instrument_type").to_pylist()
     ]
-    adducts = from_plain(
-        cast(object, table.column("adduct").to_pylist()),
-        list[str | None],
-    )
+    adducts = cast(Sequence[str | None], table.column("adduct").to_pylist())
     columns["adduct_ix"] = [adduct_index(name) for name in adducts]
-    modes = from_plain(
-        cast(object, table.column("ionization_mode").to_pylist()),
-        list[str | None],
-    )
+    modes = cast(Sequence[str | None], table.column("ionization_mode").to_pylist())
     columns["mode"] = [1 if mode == "positive" else -1 for mode in modes]
     masses = neutral_mass(
         np.asarray(columns["precursor_mz"], dtype=np.float64),
@@ -277,51 +260,33 @@ class SpectrumData:
         structures = parquet.read_table(root / "train_metric_structs.parquet")
         keys = dict(
             zip(
-                from_plain(
-                    cast(object, structures.column("sid").to_pylist()),
-                    list[int],
-                ),
-                from_plain(
-                    cast(object, structures.column("metric_identity").to_pylist()),
-                    list[str],
-                ),
+                cast(Sequence[int], structures.column("sid").to_pylist()),
+                cast(Sequence[str], structures.column("metric_identity").to_pylist()),
                 strict=True,
             ),
         )
         self.precursors = np.asarray(
-            from_plain(
-                cast(object, metadata.column("precursor_mz").to_pylist()),
-                list[float],
-            ),
+            cast(Sequence[float], metadata.column("precursor_mz").to_pylist()),
             dtype=np.float64,
         )
         self.collision_energies = np.asarray(
-            from_plain(
-                cast(object, metadata.column("ce_mean").to_pylist()),
-                list[float | None],
-            ),
+            cast(Sequence[float | None], metadata.column("ce_mean").to_pylist()),
             dtype=np.float32,
         )
         self.adducts = np.asarray(
-            from_plain(
-                cast(object, metadata.column("adduct_ix").to_pylist()),
-                list[int],
-            ),
+            cast(Sequence[int], metadata.column("adduct_ix").to_pylist()),
             dtype=np.int64,
         )
         self.merged_counts = np.asarray(
-            from_plain(cast(object, metadata.column("ce_n").to_pylist()), list[int]),
+            cast(Sequence[int], metadata.column("ce_n").to_pylist()),
             dtype=np.float32,
         )
         self.modes = np.asarray(
-            from_plain(cast(object, metadata.column("mode").to_pylist()), list[int]),
+            cast(Sequence[int], metadata.column("mode").to_pylist()),
             dtype=np.float32,
         )
         self.neutral_masses = np.asarray(
-            from_plain(
-                cast(object, metadata.column("nm").to_pylist()),
-                list[float | None],
-            ),
+            cast(Sequence[float | None], metadata.column("nm").to_pylist()),
             dtype=np.float64,
         )
         self.fingerprints = torch.from_numpy(
@@ -331,7 +296,7 @@ class SpectrumData:
             ],
         ).float()
         self.sids = np.asarray(
-            from_plain(cast(object, metadata.column("sid").to_pylist()), list[int]),
+            cast(Sequence[int], metadata.column("sid").to_pylist()),
             dtype=np.int64,
         )
         valid = self.sids >= 0
@@ -555,12 +520,9 @@ class TrainingPreparation:
         for name in _LINKED:
             (work / name).symlink_to((config.pool / name).resolve())
         identities = config.identities.make()
-        records = from_plain(
-            parquet.read_table(config.pool / "train_structs.parquet").to_pylist(),
-            list[dict[str, object]],
-        )
+        records = parquet.read_table(config.pool / "train_structs.parquet").to_pylist()
         for row in records:
-            smiles = from_plain(row["smiles"], str)
+            smiles = cast(str, row["smiles"])
             identity = identities.identity(smiles)
             if identity is None:
                 raise ValueError(f"Invalid prepared training identity: {smiles}")

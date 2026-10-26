@@ -165,10 +165,7 @@ def prepare(
             if field_name is None:
                 raise ValueError("A SMILES column is required.")
             values = from_plain(
-                cast(
-                    "object",
-                    source.read(columns=[field_name]).column(field_name).to_pylist(),
-                ),
+                source.read(columns=[field_name]).column(field_name).to_pylist(),
                 list[str | None],
             )
         requested.update((value, None) for value in values if value is not None)

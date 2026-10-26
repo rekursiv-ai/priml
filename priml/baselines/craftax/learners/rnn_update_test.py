@@ -9,7 +9,6 @@ import io
 import math
 
 from configgle import PartialConfig
-from treekle import from_plain
 
 import pytest
 import torch
@@ -389,12 +388,9 @@ def test_a_step_learning_from_shuffled_trajectories_resumes_exactly() -> None:
     resumed = _make(config)
     try:
         resumed.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
+            cast(
                 dict[str, object],
+                torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
             ),
         )
         actual = [resumed.train_step()["model"]]
@@ -426,12 +422,9 @@ def test_captured_epochs_resume_exactly_on_the_gpu() -> None:
     resumed = _make(config)
     try:
         resumed.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
+            cast(
                 dict[str, object],
+                torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
             ),
         )
         actual = [resumed.train_step()["model"] for _ in range(3)]

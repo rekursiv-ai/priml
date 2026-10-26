@@ -99,7 +99,7 @@ def test_three_steps_match_every_state_tensor() -> None:
         for name, value in model.state_dict().items():
             actual[f"final/{name}"] = value.detach().clone()
         optimizer = step.optimizer.state_dict()
-        state = from_plain(optimizer["state"], dict[int, dict[str, Tensor]])
+        state = cast(dict[int, dict[str, Tensor]], optimizer["state"])
         names = [name for name, _ in model.named_parameters()]
         for index, values in state.items():
             for name, value in values.items():
@@ -413,13 +413,9 @@ def test_export_reconstructs_nondefault_geometry_and_evaluated_ema(
     assert isinstance(native.step, FingerprintFineTune)
     with patch.object(type(config.loop), "make", return_value=native):
         config.make().run()
-    payload = from_plain(
-        cast(
-            object,
-            torch.load(Path(config.loop.working_dir) / "fpnet.pt", weights_only=True),
-        ),
+    payload = cast(
         dict[str, object],
-        allow_imports=True,
+        torch.load(Path(config.loop.working_dir) / "fpnet.pt", weights_only=True),
     )
     assert payload["step"] == 3
     assert payload["d"] == 8
@@ -429,13 +425,13 @@ def test_export_reconstructs_nondefault_geometry_and_evaluated_ema(
     assert isinstance(model.block.attn, PeakAttention.Config)
     assert payload["heads"] == model.block.attn.attention.num_heads
     assert payload["note"] == "New training recipe; not public-best training parity."
-    assert from_plain(payload["model"], dict[str, torch.Tensor])
+    assert cast(dict[str, torch.Tensor], payload["model"])
     restored_config = from_plain(payload["config"], FPNet.Config, allow_imports=True)
     assert restored_config.pformat(hide_default_values=False) == model.pformat(
         hide_default_values=False,
     )
     restored = restored_config.make().eval()
-    _ = restored.load_state_dict(from_plain(payload["model"], dict[str, torch.Tensor]))
+    _ = restored.load_state_dict(cast(dict[str, torch.Tensor], payload["model"]))
     expected = from_plain(native.step.call_eval(**batch()), tuple[Tensor, Tensor])[0]
     with torch.inference_mode():
         assert torch.equal(restored.forward(*inputs())[0], expected)

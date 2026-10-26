@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import math
 import re
@@ -53,10 +53,7 @@ def prepare_second_library(input_path: Path, *, pool: Path, output: Path) -> Non
     destination = validated_output_path(output, protected=[input_path, pool])
     destination.mkdir(parents=True)
     keys = from_plain(
-        cast(
-            "object",
-            parquet.read_table(pool, columns=["key"]).column("key").to_pylist(),
-        ),
+        parquet.read_table(pool, columns=["key"]).column("key").to_pylist(),
         list[str | None],
     )
     positions: dict[str | None, int] = {}
@@ -69,11 +66,11 @@ def prepare_second_library(input_path: Path, *, pool: Path, output: Path) -> Non
         columns=["ms2_mzs", "ms2_normalized_intensities"],
     ):
         masses = from_plain(
-            cast(object, batch.column(0).to_pylist()),
+            batch.column(0).to_pylist(),
             list[list[float] | None],
         )
         intensities = from_plain(
-            cast(object, batch.column(1).to_pylist()),
+            batch.column(1).to_pylist(),
             list[list[float] | None],
         )
         for row, mz in enumerate(masses):
@@ -119,14 +116,14 @@ def prepare_second_library(input_path: Path, *, pool: Path, output: Path) -> Non
             rows = slice(row_offset, row_offset + table.num_rows)
             precursor[rows] = np.array(
                 from_plain(
-                    cast(object, table.column("precursor_mz").to_pylist()),
+                    table.column("precursor_mz").to_pylist(),
                     list[float | None],
                 ),
             )
             fallback = second_neutral_mass(
                 precursor[rows],
                 from_plain(
-                    cast(object, table.column("adduct").to_pylist()),
+                    table.column("adduct").to_pylist(),
                     list[str | None],
                 ),
             )
@@ -134,7 +131,7 @@ def prepare_second_library(input_path: Path, *, pool: Path, output: Path) -> Non
                 [
                     formula_mass(value)
                     for value in from_plain(
-                        cast(object, table.column("molecular_formula").to_pylist()),
+                        table.column("molecular_formula").to_pylist(),
                         list[str | None],
                     )
                 ],
@@ -143,7 +140,7 @@ def prepare_second_library(input_path: Path, *, pool: Path, output: Path) -> Non
             polarity[rows] = [
                 1 if value == "positive" else -1
                 for value in from_plain(
-                    cast(object, table.column("ionization_mode").to_pylist()),
+                    table.column("ionization_mode").to_pylist(),
                     list[str | None],
                 )
             ]
@@ -151,23 +148,23 @@ def prepare_second_library(input_path: Path, *, pool: Path, output: Path) -> Non
                 value is not None
                 and value.lower().replace("-", "").replace(" ", "") == "timstof"
                 for value in from_plain(
-                    cast(object, table.column("instrument_type").to_pylist()),
+                    table.column("instrument_type").to_pylist(),
                     list[str | None],
                 )
             ]
             pool_rows[rows] = [
                 positions.get(value, -1)
                 for value in from_plain(
-                    cast(object, table.column("inchikey14").to_pylist()),
+                    table.column("inchikey14").to_pylist(),
                     list[str | None],
                 )
             ]
             masses = from_plain(
-                cast(object, table.column("ms2_mzs").to_pylist()),
+                table.column("ms2_mzs").to_pylist(),
                 list[list[float] | None],
             )
             weights = from_plain(
-                cast(object, table.column("ms2_normalized_intensities").to_pylist()),
+                table.column("ms2_normalized_intensities").to_pylist(),
                 list[list[float] | None],
             )
             for row, mass in enumerate(masses):

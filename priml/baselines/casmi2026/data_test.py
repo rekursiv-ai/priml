@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -117,7 +118,7 @@ from priml.baselines.casmi2026.testing import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator
 
     from numpy.typing import NDArray
     from pyarrow import RecordBatch
@@ -456,7 +457,7 @@ def test_native_cold_cache_and_every_verified_output_without_rdkit(
         assert before.column(name).to_pylist() == after.column(name).to_pylist()
     assert after.column("metric_identity").to_pylist() == [
         json_dumps(identities.identity(smiles), dialect="python", separators=(",", ":"))
-        for smiles in from_plain(before.column("smiles").to_pylist(), list[str])
+        for smiles in cast(Sequence[str], before.column("smiles").to_pylist())
     ]
     receipt = json_loads(
         (config.working_dir / "cache_receipt.json").read_text(),
@@ -3640,7 +3641,7 @@ def test_complete_primitive_records_and_independent_sdk_failures(
     assert key == "QEMXHQIAXOOASZ"
     assert np.flatnonzero(partial).tolist() == [511]
     assert np.flatnonzero(full).tolist() == [511, 1023, 1279, 1535, 1791, 2047]
-    assert set(full[full > 0].tolist()) == {1}
+    np.testing.assert_array_equal(np.unique(full[full > 0]), [1])
     for value, expected in (
         ("invalid", (False, False, None)),
         ("", (True, True, None)),
@@ -4351,9 +4352,7 @@ def test_four_block_boundaries_invalid_rows_and_fingerprint_admission(
     ]
     assert table.column("valid").to_pylist() == [True, False, False, False, True]
     np.testing.assert_array_equal(
-        np.array(
-            from_plain(cast(object, table.column("mass").to_pylist()), list[float]),
-        ),
+        np.array(cast(Sequence[float], table.column("mass").to_pylist())),
         [42.125, float("nan"), float("nan"), float("nan"), 42.125],
     )
     values = cast(

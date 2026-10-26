@@ -609,7 +609,7 @@ def stale_post_states(paths: Iterable[Path]) -> list[Path]:
     """
     stale: list[Path] = []
     for path in paths:
-        loaded = cast(object, torch.load(path, weights_only=False))
+        loaded = torch.load(path, weights_only=False)
         if not isinstance(loaded, dict):
             continue
         typed_loaded = cast(dict[str, object], loaded)

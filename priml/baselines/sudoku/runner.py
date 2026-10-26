@@ -86,9 +86,9 @@ def checkpoint_payload(path: Path, device: torch.device | str) -> _Weights:
       weights: The ``model`` state and, when present, the EMA shadow as ``ema``.
 
     """
-    state = from_plain(
-        cast("object", torch.load(path, map_location=device, weights_only=True)),
+    state = cast(
         dict[str, object],
+        torch.load(path, map_location=device, weights_only=True),
     )
     nested = state.get("step")
     payload = from_plain(nested, dict[str, object]) if nested is not None else state

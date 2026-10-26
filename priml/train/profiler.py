@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Self, cast, override
+from typing import TYPE_CHECKING, Self, override
 
 import contextlib
 import logging
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
     import torch
+
+    from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
 else:
     from wrapt import lazy_import
 
@@ -25,7 +27,6 @@ from configgle import Fig
 
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
-from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
 
 
 logger = logging.getLogger(__name__)
@@ -420,8 +421,8 @@ class PhaseTimer:
             yield
             return
         path = f"{self._stack[-1].path}/{name}" if self._stack else name
-        start = cast(CudaEventProtocol, torch.cuda.Event(enable_timing=True))
-        end = cast(CudaEventProtocol, torch.cuda.Event(enable_timing=True))
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         start.record()
         try:
             yield

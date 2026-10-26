@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import logging
-
-from treekle import from_plain
 
 import numpy as np
 
@@ -177,7 +176,7 @@ def prepare_pubchem(
     index = 0
     with parquet.ParquetWriter(destination / "molecules.parquet", schema) as writer:
         for batch in source.iter_batches(batch_size=batch_rows, columns=[column]):
-            strings = from_plain(cast(object, batch.column(0).to_pylist()), list[str])
+            strings = cast(Sequence[str], batch.column(0).to_pylist())
             metadata: list[dict[str, object]] = []
             for value in strings:
                 parsed, partial, valid, full, key = chemistry.record(value)

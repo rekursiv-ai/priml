@@ -75,7 +75,7 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import field
 from pathlib import Path
 from typing import (
@@ -522,7 +522,7 @@ def _documents(
         shard = parquet.ParquetFile(path)
         for group in range(shard.num_row_groups):
             column = cast(
-                list[str],
+                Sequence[str],
                 shard.read_row_group(group).column("text").to_pylist(),
             )
             for document in column:
@@ -1172,12 +1172,12 @@ def pack_row(
     return position + best_length
 
 
-def _document_batches(config: RowPreparation.Config) -> Iterator[list[str]]:
+def _document_batches(config: RowPreparation.Config) -> Iterator[Sequence[str]]:
     for shard in config.train_shard_indices:
         source = parquet.ParquetFile(shard_path(config.raw_dir, shard=shard))
         for group in range(source.num_row_groups):
             texts = cast(
-                list[str],
+                Sequence[str],
                 source.read_row_group(group).column("text").to_pylist(),
             )
             for start in range(0, len(texts), config.documents_per_refill):

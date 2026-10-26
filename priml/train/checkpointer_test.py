@@ -22,7 +22,6 @@ from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import Shard, distribute_tensor
-from treekle import from_plain
 
 import pytest
 import torch
@@ -1513,7 +1512,7 @@ def test_plain_read_preserves_cpu_rng_state(
         ),
     }
 
-    rng_state = from_plain(loaded["rng"], dict[str, object])
+    rng_state = cast(dict[str, object], loaded["rng"])
     restored = rng_state["torch"]
     assert isinstance(restored, Tensor)
     assert restored.device.type == "cpu", (

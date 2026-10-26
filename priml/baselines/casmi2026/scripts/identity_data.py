@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import logging
 
@@ -226,7 +226,7 @@ def prepare_identity(
         for batch in source.iter_batches(batch_size=batch_rows, columns=["smiles"]):
             rows: list[dict[str, object]] = []
             for value in from_plain(
-                cast(object, batch.column(0).to_pylist()),
+                batch.column(0).to_pylist(),
                 list[str],
             ):
                 row, fingerprint = chemistry.record(value)

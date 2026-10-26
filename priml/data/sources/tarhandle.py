@@ -5,12 +5,16 @@ from __future__ import annotations
 from contextlib import ExitStack, suppress
 from io import BytesIO
 from pathlib import Path
-from typing import IO, Protocol, Self, override
+from typing import IO, TYPE_CHECKING, Protocol, Self, override
 
 import mmap
 import os
 import tarfile
 import threading
+
+
+if TYPE_CHECKING:
+    from _typeshed import StrOrBytesPath
 
 
 __all__ = ["TarFileHandle", "TarFileProtocol"]
@@ -28,8 +32,12 @@ class TarFileProtocol(Protocol):
     # protocol claims conformance to it; ``TarFileHandle`` mirrors the spelling
     # rather than the reverse. None is reachable -- a TarFile opened from a file
     # object has no path -- so a caller reopening the archive to seek by offset
-    # must handle its absence.
-    name: str | None
+    # must handle its absence. Read-only and as wide as typeshed's
+    # ``TarFile.name``: a mutable ``str | None`` member rejected every TarFile.
+    @property
+    def name(self) -> StrOrBytesPath | None:
+        """The archive's filesystem path, or None."""
+        ...
 
     def getmember(self, name: str) -> tarfile.TarInfo:
         """Get member info by name.

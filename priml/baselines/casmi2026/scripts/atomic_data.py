@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import math
 
@@ -77,7 +77,7 @@ def prepare_graphs(
     context = MolecularContext(version)
     source = parquet.read_table(input_path)
     values = from_plain(
-        cast(object, source.column("smiles").to_pylist()),
+        source.column("smiles").to_pylist(),
         list[str | None],
     )
     destination = validated_output_path(output, protected=[input_path])

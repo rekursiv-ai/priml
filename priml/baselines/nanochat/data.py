@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -820,9 +821,11 @@ def _pass_batches(paths: list[Path]) -> Iterator[list[str]]:
     for path in paths:
         shard = parquet.ParquetFile(path)
         for group in range(shard.num_row_groups):
-            texts = cast(
-                list[str],
-                shard.read_row_group(group).column("text").to_pylist(),
+            texts = list(
+                cast(
+                    Sequence[str],
+                    shard.read_row_group(group).column("text").to_pylist(),
+                ),
             )
             for start in range(0, len(texts), DOCUMENTS_PER_REFILL):
                 yield texts[start : start + DOCUMENTS_PER_REFILL]

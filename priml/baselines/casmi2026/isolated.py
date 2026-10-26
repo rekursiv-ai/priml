@@ -450,7 +450,7 @@ def main_ion_deltas(adduct: str) -> tuple[float, ...]:
 
 def neutral_mass(
     mz: NDArray[np.float64],
-    adducts: list[str | None],
+    adducts: Sequence[str | None],
 ) -> NDArray[np.float64]:
     """Convert measured precursor m/z, retaining NaN for unknown adducts.
 
@@ -499,7 +499,7 @@ def second_adduct_parameters(name: str) -> tuple[int, int, float]:
 
 def second_neutral_mass(
     mz: NDArray[np.float64],
-    adducts: list[str | None],
+    adducts: Sequence[str | None],
 ) -> NDArray[np.float64]:
     """Convert the second engine's precursors with its complete distinct mass table.
 
@@ -960,12 +960,9 @@ class IntrinsicTable:
         """
         smiles = tuple(
             from_plain(
-                cast(
-                    object,
-                    parquet.read_table(directory / "molecules.parquet")
-                    .column("smiles")
-                    .to_pylist(),
-                ),
+                parquet.read_table(directory / "molecules.parquet")
+                .column("smiles")
+                .to_pylist(),
                 list[str],
             ),
         )

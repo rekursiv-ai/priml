@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import logging
-
-from treekle import from_plain
 
 from priml.baselines.casmi2026.isolated import IDENTITY_RDKIT
 from priml.baselines.casmi2026.scripts.manifest import (
@@ -97,7 +96,7 @@ def prepare_engine_identity(
             batch_size=batch_rows,
             columns=["smiles"],
         ):
-            strings = from_plain(cast(object, batch.column(0).to_pylist()), list[str])
+            strings = cast(Sequence[str], batch.column(0).to_pylist())
             writer.write_table(
                 Table.from_pylist(
                     [

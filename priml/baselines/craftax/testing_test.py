@@ -11,7 +11,7 @@ import hashlib
 import threading
 
 from configgle import InlineConfig
-from treekle import from_plain
+from torch import Tensor
 
 import numpy as np
 import pytest
@@ -342,10 +342,7 @@ def test_a_portable_checkpoint_holds_the_filled_policys_weights_as_fp32_masters(
     config = testing.tiny_policy()
     path = tmp_path / "masters.pt"
     assert testing.portable_checkpoint(config, path, seed=5) == path
-    masters = from_plain(
-        cast("object", torch.load(path, weights_only=True)),
-        dict[str, torch.Tensor],
-    )
+    masters = cast(dict[str, Tensor], torch.load(path, weights_only=True))
     filled = config.make()
     testing.fill_portable(filled, seed=5)
     expected = dict(filled.named_parameters())
@@ -355,10 +352,7 @@ def test_a_portable_checkpoint_holds_the_filled_policys_weights_as_fp32_masters(
         assert torch.equal(masters[name], weight.detach().float()), name
     other = testing.portable_checkpoint(config, tmp_path / "other.pt", seed=6)
     assert not torch.equal(
-        from_plain(
-            cast("object", torch.load(other, weights_only=True)),
-            dict[str, torch.Tensor],
-        )["proj_in.weight"],
+        cast(dict[str, Tensor], torch.load(other, weights_only=True))["proj_in.weight"],
         masters["proj_in.weight"],
     )
 

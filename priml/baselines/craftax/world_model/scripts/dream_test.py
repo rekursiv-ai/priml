@@ -120,9 +120,9 @@ def test_main_writes_a_report_and_viewer_bundles(
     )
     assert manifest["actions"] == 3
     assert not (output / "bundles" / "generated-1").exists()
-    samples = from_plain(
-        cast("object", torch.load(output / "samples.pt", weights_only=True)),
+    samples = cast(
         dict[str, dict[str, torch.Tensor]],
+        torch.load(output / "samples.pt", weights_only=True),
     )
     cells = samples["generated"]["cells"]
     assert cells.shape == (1, 3, 99, 8)

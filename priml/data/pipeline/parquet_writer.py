@@ -228,7 +228,7 @@ class ParquetMergeWriter:
         self.cleanup_stale_temp_files(parquet_path.parent)
 
         table = pq.read_table(parquet_path)
-        raw_keys = cast(list[object], table.column(self.key_field).to_pylist())
+        raw_keys = table.column(self.key_field).to_pylist()
         keys = [key for key in raw_keys if isinstance(key, str)]
         if len(keys) != len(raw_keys):
             raise TypeError(

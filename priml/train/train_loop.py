@@ -1123,15 +1123,12 @@ class TrainLoop:
 
     def _cuda_event_pair(self) -> tuple[CudaEventProtocol, CudaEventProtocol] | None:
         """Start a CUDA event pair when event timing is enabled."""
-        if (
-            not getattr(self.phase_timer, "cuda_events_enabled", False)
-            or not torch.cuda.is_available()
-        ):
+        if not self.phase_timer.cuda_events_enabled or not torch.cuda.is_available():
             return None
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        return cast(CudaEventProtocol, start), cast(CudaEventProtocol, end)
+        return start, end
 
     def _record_cuda_timing(
         self,

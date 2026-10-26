@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import cast
 
-from treekle import from_plain, json_loads
+from treekle import json_loads
 
 import pytest
 import torch
@@ -106,14 +106,9 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert loop.current_epoch == 1
         assert len(loop.validation_losses) == 1
         checkpoint = tmp_path / "runs/etth1/exp_smoke/checkpoints/step_00000005.pt"
-        state = from_plain(
-            cast(object, torch.load(checkpoint, weights_only=True)),
-            dict[str, object],
-        )
-        dataset = from_plain(state["dataset"], dict[str, object])
-        assert (
-            from_plain(dataset["timer_epoch"], dict[str, object])["global_count"] == 1
-        )
+        state = cast(dict[str, object], torch.load(checkpoint, weights_only=True))
+        dataset = cast(dict[str, object], state["dataset"])
+        assert cast(dict[str, object], dataset["timer_epoch"])["global_count"] == 1
         assert len(cast(list[float], state["validation_losses"])) == 1
         loop._do_train_step(next_batch)
         assert isinstance(loop.step, Etth1TrainStep)
@@ -130,8 +125,8 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert len(resumed.validation_losses) == 1
         actual_batch = resumed._get_next_batch()
         assert not mismatches(
-            from_plain(next_batch, dict[str, torch.Tensor]),
-            from_plain(actual_batch, dict[str, torch.Tensor]),
+            cast(dict[str, torch.Tensor], next_batch),
+            cast(dict[str, torch.Tensor], actual_batch),
         )
         resumed._do_train_step(actual_batch)
         assert isinstance(resumed.step, Etth1TrainStep)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from functools import partial, partialmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, override
 
 import csv
 import hashlib
@@ -505,10 +505,7 @@ def test_released_deserialization_places_every_tensor_on_cpu_with_declared_polic
 
     def load(path: Path, *, map_location: str, weights_only: bool) -> object:
         calls.append((map_location, weights_only))
-        return cast(
-            object,
-            original(path, map_location=map_location, weights_only=weights_only),
-        )
+        return original(path, map_location=map_location, weights_only=weights_only)
 
     monkeypatch.setattr(torch, "load", load)
     assert torch.equal(asset.state()["value"], torch.arange(3))

@@ -2036,9 +2036,20 @@ class HistogramBoosting:
         return np.stack(output)
 
     def predict_proba(self, data: PredictionMatrix) -> NDArray[np.float64]:
-        """Return negative/positive class probabilities in that order."""
+        """Return negative/positive class probabilities in that order.
+
+        Args:
+          data: Numeric prediction rows.
+
+        Returns:
+          probabilities: One row per input, negative then positive class.
+
+        """
         probability = np.array(
-            [_sigmoid(value) for value in self.stages(data)[-1, :].tolist()],
+            [
+                _sigmoid(value)
+                for value in cast(list[float], self.stages(data)[-1, :].tolist())
+            ],
             dtype=np.float64,
         )
         return np.column_stack([1 - probability, probability])
@@ -2270,16 +2281,16 @@ class SecondBank:
 
     def _load(self, pinned: LocalFile.Config) -> SecondFPNet:
         path = pinned.make().path()
-        checkpoint = from_plain(
-            cast(object, torch.load(path, map_location="cpu", weights_only=True)),
+        checkpoint = cast(
             dict[str, object],
+            torch.load(path, map_location="cpu", weights_only=True),
         )
-        state = from_plain(checkpoint["model"], dict[str, torch.Tensor])
+        state = cast(dict[str, torch.Tensor], checkpoint["model"])
         template = self.config.model
         if (
-            from_plain(checkpoint["nbits"], int) != template.channels_out
-            or from_plain(checkpoint["d"], int) != template.channels_hidden
-            or from_plain(checkpoint["layers"], int) != template.num_layers
+            cast(int, checkpoint["nbits"]) != template.channels_out
+            or cast(int, checkpoint["d"]) != template.channels_hidden
+            or cast(int, checkpoint["layers"]) != template.num_layers
         ):
             raise ValueError(
                 f"Checkpoint {path.name} widths differ from the declared model.",

@@ -10,7 +10,6 @@ from configgle import Makes2
 from configgle.custom_types import Makeable
 from numpy._core.multiarray import _reconstruct
 from torch import Tensor
-from treekle import from_plain
 
 import numpy as np
 import torch
@@ -37,7 +36,7 @@ class CheckpointActTrainStep(PooledActTrainStep):
         state = read_step_state(checkpoint_path, model=self.net, ema=self.ema)
         self.load_state_dict(state, load_optimizer=False)
         if "ema" in state:
-            self.ema.load_state_dict(from_plain(state["ema"], dict[str, object]))
+            self.ema.load_state_dict(cast(dict[str, object], state["ema"]))
 
 
 def read_step_state(
@@ -76,33 +75,27 @@ def read_step_state(
             if allowed not in existing
         ],
     ):
-        state = from_plain(
-            cast(
-                "object",
-                torch.load(path, map_location="cpu", weights_only=True, mmap=True),
-            ),
+        state = cast(
             dict[str, object],
+            torch.load(path, map_location="cpu", weights_only=True, mmap=True),
         )
     payload = (
         state
         if "model" in state or "model_state_dict" in state
-        else from_plain(state["step"], dict[str, object])
+        else cast(dict[str, object], state["step"])
     )
     released = "model_state_dict" in payload
-    live = from_plain(
-        payload["model_state_dict" if released else "model"],
-        dict[str, Tensor],
-    )
+    live = cast(dict[str, Tensor], payload["model_state_dict" if released else "model"])
     mapped = _map_state(live, expected=model.state_dict(), label="model")
-    shadow = from_plain(
-        payload.get("ema_state" if released else "ema", {}),
+    shadow = cast(
         dict[str, object],
+        payload.get("ema_state" if released else "ema", {}),
     )
-    progress = from_plain(
+    progress = cast(
+        int,
         payload["step"]
         if released
         else payload.get("global_step", shadow.get("global_step", 0)),
-        int,
     )
     result: dict[str, object] = {
         "model": mapped,
@@ -113,20 +106,20 @@ def read_step_state(
     }
     if "shadow_model" in shadow:
         shadow["shadow_model"] = _map_state(
-            from_plain(shadow["shadow_model"], dict[str, Tensor]),
+            cast(dict[str, Tensor], shadow["shadow_model"]),
             expected=model.state_dict(),
             label="EMA",
         )
     elif "shadow_params" in shadow:
         shadow["shadow_params"] = _map_state(
-            from_plain(shadow["shadow_params"], dict[str, Tensor]),
+            cast(dict[str, Tensor], shadow["shadow_params"]),
             expected=dict(model.named_parameters()),
             label="EMA",
             complete=False,
         )
     elif released or any(isinstance(value, Tensor) for value in shadow.values()):
         parameters = _map_state(
-            from_plain(shadow, dict[str, Tensor]),
+            cast(Mapping[str, Tensor], shadow),
             expected=dict(model.named_parameters()),
             label="EMA",
         )

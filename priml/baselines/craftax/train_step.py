@@ -31,7 +31,7 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field, replace
@@ -98,7 +98,7 @@ from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from typing_extensions import TypeIs
 
     from torch.optim.optimizer import StateDict as OptimizerState
@@ -835,17 +835,14 @@ def load_masters(
             "masters (MasterWeights)",
         )
     # ``mmap`` leaves a run's environments and rollouts, most of its file, unread.
-    saved = from_plain(
-        cast(
-            "object",
-            torch.load(path, weights_only=True, map_location="cpu", mmap=True),
-        ),
+    saved = cast(
         dict[str, object],
+        torch.load(path, weights_only=True, map_location="cpu", mmap=True),
     )
     masters = (
-        _trained_masters(model, from_plain(saved["step"], dict[str, object]))
+        _trained_masters(model, cast(dict[str, object], saved["step"]))
         if "step" in saved
-        else from_plain(saved, dict[str, Tensor])
+        else cast(Mapping[str, Tensor], saved)
     )
     model.load_state_dict(masters)
     names = {id(weight): name for name, weight in model.named_parameters()}
@@ -873,12 +870,12 @@ def load_masters(
 
 def _trained_masters(model: Policy, step: dict[str, object]) -> dict[str, Tensor]:
     """Return the fp32 masters a run's optimizer saved, under the policy's names."""
-    optimizer = from_plain(step["optimizer"], dict[str, object])
-    state = from_plain(optimizer["state"], dict[int, dict[str, Tensor]])
-    groups = from_plain(optimizer["param_groups"], list[dict[str, object]])
+    optimizer = cast(dict[str, object], step["optimizer"])
+    state = cast(dict[int, dict[str, Tensor]], optimizer["state"])
+    groups = cast(list[dict[str, object]], optimizer["param_groups"])
     # The step built its optimizer from the policy's parameters first, in their
     # order, so the saved ids start with theirs; a trained world model's follow.
-    ids = [i for group in groups for i in from_plain(group["params"], list[int])]
+    ids = [i for group in groups for i in cast(list[int], group["params"])]
     names = [name for name, _ in model.named_parameters()]
     return {
         name: state[i]["master_weight"] for name, i in zip(names, ids, strict=False)

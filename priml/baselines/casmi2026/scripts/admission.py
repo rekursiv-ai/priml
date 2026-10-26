@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import hashlib
 
@@ -76,7 +76,7 @@ def prepare_admission(
             batch_size=batch_rows,
         ):
             values = from_plain(
-                cast(object, batch.column("smiles").to_pylist()),
+                batch.column("smiles").to_pylist(),
                 list[str],
             )
             rows = [chemistry.row(value) for value in values]

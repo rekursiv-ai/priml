@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -21,8 +22,6 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from numpy.typing import NDArray
     from pyarrow import Table, parquet
     from rdkit.Chem.Descriptors import ExactMolWt
@@ -73,10 +72,7 @@ def prepare_second_fingerprints(
     column = "smiles" if "smiles" in source.schema_arrow.names else "normalized_smiles"
     requested: dict[str, None] = {}
     for batch in source.iter_batches(batch_size=256, columns=[column]):
-        for value in from_plain(
-            cast(object, batch.column(0).to_pylist()),
-            list[str | None],
-        ):
+        for value in cast(Sequence[str | None], batch.column(0).to_pylist()):
             if value is not None:
                 requested[value] = None
     destination = validated_output_path(output, protected=[input_path, bits])
@@ -174,12 +170,10 @@ def prepare_second_pool(
         np.load(fingerprints / "fp_bits.npy"),
     )
     cache = parquet.read_table(fingerprints / "fingerprints.parquet")
-    strings = from_plain(cast(object, cache.column("smiles").to_pylist()), list[str])
+    strings = cast(Sequence[str], cache.column("smiles").to_pylist())
     positions = {value: row for row, value in enumerate(strings)}
-    valid = from_plain(cast(object, cache.column("valid").to_pylist()), list[bool])
-    cached_mass = np.array(
-        from_plain(cast(object, cache.column("mass").to_pylist()), list[float]),
-    )
+    valid = cast(Sequence[bool], cache.column("valid").to_pylist())
+    cached_mass = np.array(cast(Sequence[float], cache.column("mass").to_pylist()))
     cached_fp = cast(
         "NDArray[np.uint8]",
         np.load(fingerprints / "fingerprints.npy", mmap_mode="r"),
@@ -236,14 +230,8 @@ def prepare_second_pool(
         batch_size=256,
         columns=["inchikey14", "normalized_smiles"],
     ):
-        key_rows = from_plain(
-            cast(object, batch.column(0).to_pylist()),
-            list[str | None],
-        )
-        smile_rows = from_plain(
-            cast(object, batch.column(1).to_pylist()),
-            list[str | None],
-        )
+        key_rows = cast(Sequence[str | None], batch.column(0).to_pylist())
+        smile_rows = cast(Sequence[str | None], batch.column(1).to_pylist())
         for row, key in enumerate(key_rows):
             value = smile_rows[row]
             if key is None or value is None or key in seen:

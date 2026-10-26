@@ -140,7 +140,7 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
         )
     path = tmp_path / "delta.pt"
     torch.save(cache, path)
-    reloaded = cast(object, torch.load(path, weights_only=True))
+    reloaded = torch.load(path, weights_only=True)
     assert isinstance(reloaded, dict)
     raw_cache = cast(dict[object, object], reloaded)
     assert all(

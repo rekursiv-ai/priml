@@ -5,8 +5,6 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from treekle import from_plain
-
 import pytest
 import torch
 
@@ -71,7 +69,7 @@ def test_the_declared_model_keeps_the_experiments_flash4_kernels(
     assert _kernels(model) == {Flash4Varlen}
     saved = model_state(checkpoint)
     for name, tensor in model.state_dict().items():
-        assert torch.equal(tensor, from_plain(saved[name], torch.Tensor)), name
+        assert torch.equal(tensor, cast(torch.Tensor, saved[name])), name
 
 
 @pytest.mark.filterwarnings("ignore:CUDA is not available:UserWarning")
@@ -122,12 +120,9 @@ def test_on_cuda_the_experiments_flash4_kernels_and_autocast_are_kept(
     assert initialized.call_count == 1
     assert _kernels(model) == {Flash4Varlen}
     assert {p.device.type for p in model.parameters()} == {"cuda"}
-    state = from_plain(
-        cast("object", torch.load(checkpoint, weights_only=True)),
-        dict[str, object],
-    )
-    step = from_plain(state["step"], dict[str, object])
-    saved = from_plain(step["model"], dict[str, torch.Tensor])
+    state = cast(dict[str, object], torch.load(checkpoint, weights_only=True))
+    step = cast(dict[str, object], state["step"])
+    saved = cast(dict[str, torch.Tensor], step["model"])
     for name, tensor in model.state_dict().items():
         assert torch.equal(tensor.cpu(), saved[name]), name
     with autocast(config, device):

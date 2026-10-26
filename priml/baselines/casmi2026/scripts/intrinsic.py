@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import hashlib
 
@@ -81,7 +81,7 @@ def prepare_intrinsic(input_path: Path, *, output: Path, version: str) -> None:
     """
     chemistry = IntrinsicChemistry(version)
     values = from_plain(
-        cast(object, parquet.read_table(input_path).column("smiles").to_pylist()),
+        parquet.read_table(input_path).column("smiles").to_pylist(),
         list[str | None],
     )
     smiles = [value for value in dict.fromkeys(values) if value is not None]

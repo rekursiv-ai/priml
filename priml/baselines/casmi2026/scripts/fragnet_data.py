@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import tempfile
-
-from treekle import from_plain
 
 from priml.baselines.casmi2026.isolated import (
     ELEMENT_MASSES,
@@ -107,7 +106,7 @@ def prepare_fragnet(
             parquet.ParquetWriter(destination / "molecules.parquet", schema),
         )
         for batch in source.iter_batches(batch_size=batch_rows, columns=["smiles"]):
-            values = from_plain(cast(object, batch.column(0).to_pylist()), list[str])
+            values = cast(Sequence[str], batch.column(0).to_pylist())
             metadata: list[dict[str, object]] = []
             for value in values:
                 atoms = chemistry.atoms(value)

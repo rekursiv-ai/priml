@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -332,9 +332,11 @@ def load_sample(directory: Path) -> list[str]:
       texts: Exact fitting texts in the original order.
 
     """
-    return cast(
-        list[str],
-        parquet.read_table(directory / "sample.parquet").column("text").to_pylist(),
+    return list(
+        cast(
+            Sequence[str],
+            parquet.read_table(directory / "sample.parquet").column("text").to_pylist(),
+        ),
     )
 
 
@@ -456,7 +458,7 @@ class ByteLevelTokenizer:
 
     def encode_batch(
         self,
-        texts: list[str],
+        texts: Sequence[str],
         *,
         num_threads: int = DEFAULT_ENCODE_THREADS,
     ) -> list[list[int]]:
@@ -502,7 +504,7 @@ def _document_texts(path: Path) -> Iterator[str]:
         batch_size=1_024,
         columns=["text"],
     ):
-        yield from cast(list[str], batch.column(0).to_pylist())
+        yield from cast(Sequence[str], batch.column(0).to_pylist())
 
 
 def _pruned_piece_indices(scores: list[float], *, ordinary: int) -> list[int]:

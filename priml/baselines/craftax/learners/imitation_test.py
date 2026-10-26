@@ -22,7 +22,6 @@ import math
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
-from treekle import from_plain
 
 import pytest
 import torch
@@ -364,12 +363,9 @@ def test_a_resumed_run_with_imitation_equals_an_uninterrupted_one() -> None:
             name: value.clone() for name, value in step.learner.state_dict().items()
         }
         step.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
+            cast(
                 dict[str, object],
+                torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
             ),
         )
         actual = [_train(step)]

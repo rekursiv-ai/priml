@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from priml.baselines.sudoku.train_loop import SudokuTrainLoop
+    from priml.train.train_loop import TrainLoop
 
 
 RECIPES: Final = (
@@ -191,7 +192,7 @@ def test_dedicated_generators_survive_a_checkpoint_round_trip(tmp_path: Path) ->
     config = port_config("exp006", tmp_path)
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     step.train_step(**loop._get_next_batch())
     state = step.state_dict()
     halting, carry = step.pool.halting, step.pool.carry
@@ -207,7 +208,7 @@ def test_dedicated_generators_survive_a_checkpoint_round_trip(tmp_path: Path) ->
         torch.rand(4, generator=carry.generator),
     )
     loop.close()
-    restored = cast(RoutedActTrainStep, config.make().step)
+    restored = _routed(config.make())
     restored.load_state_dict(state)
     restored_halting, restored_carry = restored.pool.halting, restored.pool.carry
     assert restored_halting is not None
@@ -222,7 +223,7 @@ def test_without_halt_training_the_head_is_frozen_and_unscored(tmp_path: Path) -
     config.step.pool.halting = None
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     assert all(not p.requires_grad for p in step.net.q_head.parameters())
     metrics = step.train_step(**loop._get_next_batch()).get("metrics", {})
     assert "q_halt_loss" not in metrics
@@ -235,7 +236,7 @@ def test_without_an_ema_there_is_no_shadow(tmp_path: Path) -> None:
     config.step.ema = NoEMA.Config()
     write_dataset(tmp_path / "data")
     loop = config.make()
-    assert cast(RoutedActTrainStep, loop.step).ema_shadow is None
+    assert _routed(loop).ema_shadow is None
     loop.close()
 
 
@@ -256,7 +257,7 @@ def test_evaluation_runs_eager_without_precision_cast_emulation(
     config.step.emulate_precision_casts = False
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     # The guard reads only the flag, so it is raised after an eager build: a
     # compiled build would charge this test torch.compile's first import.
     step.net.config.compile = True
@@ -285,7 +286,7 @@ def test_release_keeps_each_rows_first_confident_step(tmp_path: Path) -> None:
     config = port_config("exp004", tmp_path)
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     batch = loop._get_next_batch()
     capped = step.eval_loss(**batch).get("metrics", {})
     step.release = HaltRelease(HaltRelease.Config(threshold=-1e9))
@@ -313,7 +314,7 @@ def test_a_release_no_row_clears_keeps_every_row_in_place(
     config = port_config("exp004", tmp_path)
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     batch = loop._get_next_batch()
     capped = step.eval_loss(**batch)
     step.release = HaltRelease(HaltRelease.Config(threshold=1e9))
@@ -345,7 +346,7 @@ def test_release_drops_rows_one_at_a_time(tmp_path: Path) -> None:
     config = port_config("exp004", tmp_path)
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     batch = loop._get_next_batch()
     step.release = _ReleaseFirstRow(HaltRelease.Config())
     staggered = step.eval_loss(**batch)
@@ -364,7 +365,7 @@ def test_a_zero_depth_rollout_is_refused(tmp_path: Path) -> None:
     config = port_config("exp000", tmp_path)
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     step.pool.config.max_steps = 0
     with pytest.raises(ValueError, match="final_logits"):
         step.eval_loss(**loop._get_next_batch())
@@ -378,7 +379,7 @@ def test_cardinality_waits_out_its_warmup(tmp_path: Path) -> None:
     cardinality.warmup_steps = 2
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     metrics = [
         step.train_step(**loop._get_next_batch()).get("metrics", {}) for _ in range(3)
     ]
@@ -392,7 +393,7 @@ def test_without_a_puzzle_table_there_is_no_sparse_step(tmp_path: Path) -> None:
     config.step.model.num_puzzle_identifiers = 0
     write_dataset(tmp_path / "data")
     loop = config.make()
-    step = cast(RoutedActTrainStep, loop.step)
+    step = _routed(loop)
     assert step.net.puzzle_emb is None
     assert step.sparse_optimizer is None
     before = [p.detach().clone() for p in step._body_params]
@@ -419,11 +420,18 @@ def test_a_configured_corruption_drives_the_carry(tmp_path: Path) -> None:
     corruption.rate = 0.25
     write_dataset(tmp_path / "data")
     loop = config.make()
-    carry = cast(RoutedActTrainStep, loop.step).pool.carry
+    carry = _routed(loop).pool.carry
     assert carry is not None
     assert isinstance(carry.corruption, CellCorruption)
     assert carry.corruption.config.rate == 0.25
     loop.close()
+
+
+def _routed(loop: TrainLoop) -> RoutedActTrainStep:
+    """Return the loop's step, which every recipe here builds as the routed one."""
+    step = loop.step
+    assert isinstance(step, RoutedActTrainStep)
+    return step
 
 
 if __name__ == "__main__":

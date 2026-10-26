@@ -138,7 +138,7 @@ def test_lora_adapter_only_roundtrip(tmp_path: Path) -> None:
     restored = config.copy_tree().finalize().step.make().model
     assert isinstance(restored, Qwen35)
     restored.load_state_dict(initial)
-    serialized = cast(object, torch.load(path, weights_only=True))
+    serialized = torch.load(path, weights_only=True)
     incompatible = restored.load_state_dict(
         _tensor_state_dict(serialized),
         strict=False,

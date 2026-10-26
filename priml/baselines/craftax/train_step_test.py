@@ -513,9 +513,9 @@ def _slot(step: CraftaxTrainStep, slot: int) -> list[Tensor]:
 
 def _read(saved: io.BytesIO) -> dict[str, object]:
     """Read back a step's state as the checkpointer's plain ``torch.save`` wrote it."""
-    return from_plain(
-        cast("object", torch.load(io.BytesIO(saved.getvalue()), weights_only=True)),
+    return cast(
         dict[str, object],
+        torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
     )
 
 
@@ -2152,10 +2152,7 @@ def _train_out(step: CraftaxTrainStep, *, checkpoint: Path | None = None) -> lis
     try:
         if checkpoint is not None:
             step.load_state_dict(
-                from_plain(
-                    cast("object", torch.load(checkpoint, weights_only=True)),
-                    dict[str, object],
-                ),
+                cast(dict[str, object], torch.load(checkpoint, weights_only=True)),
             )
         return _epochs(step)
     finally:
@@ -2171,10 +2168,7 @@ def _reloaded_epochs(step: CraftaxTrainStep, checkpoint: Path) -> list[str]:
         while step.global_step < step.total_steps:
             step.train_step()
         step.load_state_dict(
-            from_plain(
-                cast("object", torch.load(checkpoint, weights_only=True)),
-                dict[str, object],
-            ),
+            cast(dict[str, object], torch.load(checkpoint, weights_only=True)),
         )
         return _epochs(step)
     finally:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, TypedDict, cast, override
@@ -66,25 +66,16 @@ class MoleculeMRR:
         root = Path(config.working_dir)
         pool = parquet.read_table(root / "pool_meta.parquet")
         self.mass = np.asarray(
-            from_plain(cast(object, pool.column("mass").to_pylist()), list[float]),
+            cast(Sequence[float], pool.column("mass").to_pylist()),
             dtype=np.float64,
         )
-        self.smiles = from_plain(
-            cast(object, pool.column("smiles").to_pylist()),
-            list[str],
-        )
+        self.smiles = list(cast(Sequence[str], pool.column("smiles").to_pylist()))
         self.packed = load_array(root / "pool_fp.npy", np.uint8, mmap=True)
         structures = parquet.read_table(root / "train_metric_structs.parquet")
         self.truth = dict(
             zip(
-                from_plain(
-                    cast(object, structures.column("sid").to_pylist()),
-                    list[int],
-                ),
-                from_plain(
-                    cast(object, structures.column("smiles").to_pylist()),
-                    list[str],
-                ),
+                cast(Sequence[int], structures.column("sid").to_pylist()),
+                cast(Sequence[str], structures.column("smiles").to_pylist()),
                 strict=True,
             ),
         )
@@ -93,10 +84,7 @@ class MoleculeMRR:
             sid: representatives.setdefault(key, sid)
             for sid, key in zip(
                 self.truth,
-                from_plain(
-                    cast(object, structures.column("metric_identity").to_pylist()),
-                    list[str],
-                ),
+                cast(Sequence[str], structures.column("metric_identity").to_pylist()),
                 strict=True,
             )
         }

@@ -139,11 +139,11 @@ def load_released_checkpoint(model: ReleasedModel, path: Path) -> None:
       path: Checkpoint saved with a ``state_dict`` entry of plain tensors.
 
     """
-    checkpoint = from_plain(
-        cast(object, torch.load(path, map_location="cpu", weights_only=True)),
+    checkpoint = cast(
         dict[str, object],
+        torch.load(path, map_location="cpu", weights_only=True),
     )
-    model.load_released_state(from_plain(checkpoint["state_dict"], dict[str, Tensor]))
+    model.load_released_state(cast(dict[str, Tensor], checkpoint["state_dict"]))
 
 
 RESIDENT_GROUPS: Final = 16
@@ -293,12 +293,9 @@ class AtomicGraphTable:
         self._source = parquet.ParquetFile(directory / "graphs.parquet")
         self.smiles = tuple(
             from_plain(
-                cast(
-                    object,
-                    self._source.read(columns=["input_smiles"])
-                    .column("input_smiles")
-                    .to_pylist(),
-                ),
+                self._source.read(columns=["input_smiles"])
+                .column("input_smiles")
+                .to_pylist(),
                 list[str],
             ),
         )
@@ -1371,12 +1368,9 @@ class IceGraphTable:
         self._source = parquet.ParquetFile(directory / "ice.parquet")
         self.smiles = tuple(
             from_plain(
-                cast(
-                    object,
-                    self._source.read(columns=["input_smiles"])
-                    .column("input_smiles")
-                    .to_pylist(),
-                ),
+                self._source.read(columns=["input_smiles"])
+                .column("input_smiles")
+                .to_pylist(),
                 list[str],
             ),
         )

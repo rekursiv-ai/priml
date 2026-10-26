@@ -612,15 +612,12 @@ def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
             assert isinstance(step.ema, EMA)
             assert step.ema.global_step == step.global_step == 2
             assert step.ema.local_step == 2
-        state = from_plain(
-            cast(
-                object,
-                torch.load(
-                    Path(cfg.working_dir) / f"ensemble-{index}.pt",
-                    weights_only=True,
-                ),
-            ),
+        state = cast(
             dict[str, Tensor],
+            torch.load(
+                Path(cfg.working_dir) / f"ensemble-{index}.pt",
+                weights_only=True,
+            ),
         )
         with step.ema.apply_to(step.model):
             expected = step.model.state_dict()

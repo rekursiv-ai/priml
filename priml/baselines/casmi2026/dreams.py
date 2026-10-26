@@ -12,7 +12,6 @@ import math
 from configgle import Fig, Makeable
 from numpy.typing import NDArray
 from torch import Tensor
-from treekle import from_plain
 
 import numpy as np
 import torch
@@ -169,23 +168,20 @@ class BankCheckpoint:
         if not config.sha256:
             raise ValueError("A bank checkpoint requires its SHA256 pin.")
         verify_sha256(Path(config.path), config.sha256)
-        checkpoint = from_plain(
-            cast(
-                object,
-                torch.load(Path(config.path), map_location="cpu", weights_only=True),
-            ),
+        checkpoint = cast(
             dict[str, object],
+            torch.load(Path(config.path), map_location="cpu", weights_only=True),
         )
-        state = from_plain(checkpoint["model"], dict[str, Tensor])
-        architecture = from_plain(checkpoint.get("arch", "fpnet"), str)
+        state = cast(dict[str, Tensor], checkpoint["model"])
+        architecture = cast(str, checkpoint.get("arch", "fpnet"))
         declared = config.model
         if isinstance(declared, FPNet.Config) and architecture == "fpnet":
             assert isinstance(declared.block.attn, PeakAttention.Config)
             recorded = (
-                from_plain(checkpoint["nbits"], int),
-                from_plain(checkpoint["d"], int),
-                from_plain(checkpoint["layers"], int),
-                from_plain(checkpoint.get("heads", 8), int),
+                cast(int, checkpoint["nbits"]),
+                cast(int, checkpoint["d"]),
+                cast(int, checkpoint["layers"]),
+                cast(int, checkpoint.get("heads", 8)),
             )
             if recorded != (
                 declared.channels_out,
@@ -692,8 +688,8 @@ def _verify_dreams(
     dtype: torch.dtype,
 ) -> None:
     """Require the declared DreamsFP to share the checkpoint's non-shape settings."""
-    fcfg = from_plain(checkpoint["fcfg"], dict[str, object])
-    bcfg = from_plain(checkpoint["bcfg"], dict[str, object])
+    fcfg = cast(dict[str, object], checkpoint["fcfg"])
+    bcfg = cast(dict[str, object], checkpoint["bcfg"])
     if fcfg.get("cond_target", "prec") != "prec":
         raise ValueError("The released DreamsFP requires precursor conditioning.")
     if (
@@ -711,14 +707,14 @@ def _verify_dreams(
     attention = block.attn
     assert isinstance(attention, DreamAttention.Config)
     recorded = (
-        from_plain(fcfg["nbits"], int),
-        from_plain(fcfg["n_elem"], int),
-        from_plain(fcfg["n_peaks"], int),
+        cast(int, fcfg["nbits"]),
+        cast(int, fcfg["n_elem"]),
+        cast(int, fcfg["n_peaks"]),
         2 * 1.007276467 if fcfg["neg_shift"] else 0.0,
-        from_plain(bcfg["n_heads"], int),
+        cast(int, bcfg["n_heads"]),
         dreams_attention_fp32(
             dtype,
-            trained=from_plain(bcfg.get("attn_fp32", True), bool),
+            trained=cast(bool, bcfg.get("attn_fp32", True)),
         ),
     )
     if recorded != (

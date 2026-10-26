@@ -21,7 +21,6 @@ import traceback
 
 from torch import Tensor, nn
 from torch.optim import Optimizer
-from treekle import from_plain
 
 import numpy as np
 import pytest
@@ -320,11 +319,8 @@ def run_distributed(
         if failure.is_file():
             out.append(failure.read_text())
             continue
-        loaded = cast(
-            object,
-            torch.load(root / f"record_{rank}.pt", weights_only=True),
-        )
-        out.append(from_plain(loaded, dict[str, Tensor]))
+        loaded = torch.load(root / f"record_{rank}.pt", weights_only=True)
+        out.append(cast(dict[str, Tensor], loaded))
     return out
 
 

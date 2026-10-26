@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -23,8 +24,6 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from numpy.typing import NDArray
     from pyarrow import Table, parquet
 
@@ -73,7 +72,7 @@ def prepare_main_fragments(input_path: Path, *, output: Path, version: str) -> N
         parquet.ParquetWriter(destination / "molecules.parquet", schema) as writer,
     ):
         for batch in source.iter_batches(batch_size=256, columns=["smiles"]):
-            strings = from_plain(cast(object, batch.column(0).to_pylist()), list[str])
+            strings = cast(Sequence[str], batch.column(0).to_pylist())
             rows: list[FragmentMassRow] = []
             for smiles in strings:
                 graph = chemistry.graph(smiles)

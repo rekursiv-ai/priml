@@ -1852,7 +1852,7 @@ def test_convolution_adds_bias_after_accumulating_products(
         "output_padding": [0] * dimensions,
         "groups": 1,
     }
-    op = cast("OpOverload[..., object]", torch.ops.aten.convolution.default)
+    op = torch.ops.aten.convolution.default
     wide = cast(Tensor, op(x.double(), w.double(), None, **options))
     # Unit axes keep _unfused_convolution's bias independent of batch and location.
     expected = (wide + bias.double().reshape(1, 3, *((1,) * dimensions))).float()
@@ -4558,10 +4558,7 @@ def test_non_aten_run_forwards_keyword_arguments() -> None:
     with torch.library._scoped_library("bfb_run_unfused_probe", "FRAGMENT") as library:
         library.define("scale(Tensor value, float factor) -> Tensor")
         library.impl("scale", _scale_tensor, "CompositeExplicitAutograd")
-        op = cast(
-            "OpOverload[..., object]",
-            torch.ops.bfb_run_unfused_probe.scale.default,
-        )
+        op = torch.ops.bfb_run_unfused_probe.scale.default
         value = torch.tensor([2.0, 3.0])
         result = _run_unfused(op, (value,), {"factor": 4.0})
     assert isinstance(result, Tensor)
@@ -4810,10 +4807,7 @@ def test_convolution_backward_preserves_native_requests_and_other_outputs(
     keyword_mask: bool,
     mask: tuple[bool, bool, bool],
 ) -> None:
-    operation = cast(
-        "OpOverload[..., object]",
-        torch.ops.aten.convolution_backward.default,
-    )
+    operation = torch.ops.aten.convolution_backward.default
     weight = torch.ones(5, 3, 2, 4, dtype=torch.float64)
     arguments: tuple[object, ...] = (
         torch.ones(2, 5, 3, 4, dtype=torch.float64),
@@ -4877,7 +4871,7 @@ def test_convolution_backward_replaces_only_the_2d_weight_reduction(
         [0] * dimensions,
         1,
     )
-    operation = cast("OpOverload[..., object]", torch.ops.aten.convolution.default)
+    operation = torch.ops.aten.convolution.default
     with BackwardRequests() as requests, host_agnostic_numerics():
         output = operation(*arguments)
         assert isinstance(output, Tensor)
@@ -4911,10 +4905,7 @@ def test_empty_convolution_batch_retains_zero_weight_gradients() -> None:
 
 
 def test_convolution_weight_gradient_rejects_equal_area_wrong_spatial_axes() -> None:
-    operation = cast(
-        "OpOverload[..., object]",
-        torch.ops.aten.convolution_backward.default,
-    )
+    operation = torch.ops.aten.convolution_backward.default
     with host_agnostic_numerics(), pytest.raises(RuntimeError, match="size"):
         _ = operation(
             torch.ones(8, 5, 2, 6, dtype=torch.float64),
@@ -4935,10 +4926,7 @@ def test_convolution_weight_gradient_rejects_equal_area_wrong_spatial_axes() -> 
 def test_convolution_backward_expands_singleton_spatial_arguments(
     singleton: int,
 ) -> None:
-    operation = cast(
-        "OpOverload[..., object]",
-        torch.ops.aten.convolution_backward.default,
-    )
+    operation = torch.ops.aten.convolution_backward.default
     # Native convolution_backward expands one spatial value across both axes.
     weight = torch.ones(6, 3, 2, 4, dtype=torch.float64)
     arguments: list[object] = [
@@ -4964,7 +4952,7 @@ def test_convolution_backward_expands_singleton_spatial_arguments(
 
 
 def test_convolution_backward_out_preserves_complete_gradients_and_buffers() -> None:
-    operation = cast("OpOverload[..., object]", torch.ops.aten.convolution_backward.out)
+    operation = torch.ops.aten.convolution_backward.out
     media = torch.ones(2, 3, 4, 7, dtype=torch.float64)
     weight = torch.ones(6, 3, 2, 4, dtype=torch.float64)
     inputs: tuple[object, ...] = (

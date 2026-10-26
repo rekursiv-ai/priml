@@ -13,7 +13,6 @@ import re
 from configgle import Fig, Makeable, Makes, traverse
 from torch import Tensor, nn
 from torch.nn import functional
-from treekle import from_plain
 
 import torch
 
@@ -1604,9 +1603,9 @@ class ImageNetEncoder(nn.Module):
 
     def _read_checkpoint(self) -> dict[str, Tensor]:
         path = self.config.checkpoint.make().path()
-        return from_plain(
-            cast(object, torch.load(path, map_location="cpu", weights_only=True)),
+        return cast(
             dict[str, Tensor],
+            torch.load(path, map_location="cpu", weights_only=True),
         )
 
 

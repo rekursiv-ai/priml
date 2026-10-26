@@ -315,10 +315,7 @@ class Cifar10TrainStep(TrainStep):
         configured = self.config.whiten_cache_path
         cache = Path(configured) if configured else None
         if cache is not None and cache.is_file():
-            weight = cast(
-                object,
-                torch.load(cache, map_location=self.device, weights_only=True),
-            )
+            weight = torch.load(cache, map_location=self.device, weights_only=True)
             assert isinstance(weight, Tensor)
             model.whiten.weight.data.copy_(weight)
         else:

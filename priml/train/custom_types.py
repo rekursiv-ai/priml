@@ -7,6 +7,7 @@ from typing import (
     Any,
     NotRequired,
     Protocol,
+    Self,
     TypedDict,
     overload,
     runtime_checkable,
@@ -370,7 +371,7 @@ class CudaEventProtocol(Protocol):
         """Synchronize."""
         ...
 
-    def elapsed_time(self, end_event: CudaEventProtocol) -> float:
+    def elapsed_time(self, end_event: Self) -> float:
         """Elapsed time."""
         ...
 

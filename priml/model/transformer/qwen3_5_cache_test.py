@@ -1,7 +1,7 @@
 """Qwen3.5 mixed attention-cache persistence checks."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeGuard, cast
+from typing import TYPE_CHECKING, TypeGuard
 
 import re
 
@@ -81,7 +81,7 @@ def test_mixed_cache_weights_only_roundtrip_resumes_exactly(
     model.forward(torch.tensor([[7]]), cache=cache)
     path = tmp_path / "cache.pt"
     torch.save(state, path)
-    restored_state = cast(object, torch.load(path, weights_only=True))
+    restored_state = torch.load(path, weights_only=True)
     restored = cache_from_state_dict(restored_state)
     corrupted = None
     if not split_gate_projection:

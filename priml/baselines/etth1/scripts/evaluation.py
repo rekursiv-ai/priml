@@ -99,16 +99,16 @@ def main() -> int:
         if flags.output is not None
         else None
     )
-    state = from_plain(
-        cast(object, torch.load(checkpoint, map_location="cpu", weights_only=True)),
+    state = cast(
         dict[str, object],
+        torch.load(checkpoint, map_location="cpu", weights_only=True),
     )
-    step = from_plain(state["step"], dict[str, object])
+    step = cast(dict[str, object], state["step"])
     cfg.dataset.base_dir = None
     cfg.dataset.working_dir = directory
     dataset = cfg.dataset.make()
     model = cfg.step.model.make()
-    model.load_state_dict(from_plain(step["model"], dict[str, Tensor]))
+    model.load_state_dict(cast(dict[str, Tensor], step["model"]))
     torch.set_num_threads(1)
     metrics = evaluate(model, batches=dataset.test_dataloader())
     result: dict[str, object] = {
@@ -120,7 +120,7 @@ def main() -> int:
         ).hexdigest(),
         "torch": str(torch.__version__),
         "numpy": np.__version__,
-        "step": from_plain(step["timer_step"], dict[str, object])["global_count"],
+        "step": cast(dict[str, object], step["timer_step"])["global_count"],
         **metrics,
     }
     rendered = json_dumps(result, indent=2) + "\n"

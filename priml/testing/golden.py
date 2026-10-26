@@ -395,7 +395,7 @@ def read_tensors(path: Path) -> dict[str, Tensor]:
       TypeError: The file is not an index and its per-dtype tensors.
 
     """
-    raw = cast(object, torch.load(path, weights_only=True))
+    raw = torch.load(path, weights_only=True)
     try:
         return unpack(raw)
     except TypeError as error:

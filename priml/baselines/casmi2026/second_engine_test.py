@@ -1860,10 +1860,7 @@ def test_checkpoint_is_read_as_cpu_tensors_before_target_device_transfer(
         assert map_location == "cpu"
         assert weights_only is True
         calls.append(path)
-        return cast(
-            object,
-            original(path, map_location=map_location, weights_only=weights_only),
-        )
+        return original(path, map_location=map_location, weights_only=weights_only)
 
     monkeypatch.setattr(torch, "load", tensor_load)
     with torch.random.fork_rng(devices=[]):

@@ -5666,7 +5666,7 @@ def _assert_checkpoint_matches_interrupted_state(
 
 def _load_loop_checkpoint(path: Path) -> TrainLoop.StateDict:
     """Read a checkpoint the loop wrote; its schema is the loop's."""
-    saved = cast(object, torch.load(path, weights_only=True))
+    saved = torch.load(path, weights_only=True)
     assert isinstance(saved, dict)
     return cast(TrainLoop.StateDict, saved)
 

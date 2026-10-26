@@ -374,9 +374,9 @@ def load_tensors(path: Path) -> dict[str, Tensor]:
     """
     return {
         key: value
-        for key, value in from_plain(
-            cast("object", torch.load(path, weights_only=True)),
+        for key, value in cast(
             dict[str, object],
+            torch.load(path, weights_only=True),
         ).items()
         if isinstance(value, Tensor)
     }

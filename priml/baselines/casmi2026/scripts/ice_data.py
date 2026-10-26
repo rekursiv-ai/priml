@@ -83,7 +83,7 @@ def prepare_ice_graphs(
     chemistry = IceChemistry(version, directory=destination)
     source = parquet.read_table(input_path)
     values = from_plain(
-        cast(object, source.column("smiles").to_pylist()),
+        source.column("smiles").to_pylist(),
         list[str | None],
     )
     schema = pa.schema(

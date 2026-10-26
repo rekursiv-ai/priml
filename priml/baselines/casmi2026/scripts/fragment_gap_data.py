@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -77,7 +78,7 @@ def prepare_fragment_gap(
             batch_size=batch_rows,
             columns=["smiles"],
         ):
-            strings = from_plain(cast(object, batch.column(0).to_pylist()), list[str])
+            strings = cast(Sequence[str], batch.column(0).to_pylist())
             rows: list[GapGraphRow] = []
             for smiles in strings:
                 graph = chemistry.graph(smiles)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast, override
@@ -25,8 +26,6 @@ from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from pyarrow import Table, parquet
 
     from priml.baselines.casmi2026.custom_types import FloatArray
@@ -70,9 +69,7 @@ class ChemicalTable:
         """
         metadata = parquet.read_table(directory / "structures.parquet")
         columns = {
-            name: tuple(
-                from_plain(cast(object, metadata.column(name).to_pylist()), list[str]),
-            )
+            name: tuple(cast(Sequence[str], metadata.column(name).to_pylist()))
             for name in (
                 "input_smiles",
                 "smiles",
@@ -93,24 +90,13 @@ class ChemicalTable:
             input_smiles=columns["input_smiles"],
             smiles=columns["smiles"],
             valid=np.asarray(
-                from_plain(
-                    cast(object, metadata.column("valid").to_pylist()),
-                    list[bool],
-                ),
+                cast(Sequence[bool], metadata.column("valid").to_pylist()),
                 dtype=np.bool_,
             ),
             formula=columns["formula"],
-            mass=np.asarray(
-                from_plain(
-                    cast(object, metadata.column("mass").to_pylist()),
-                    list[float],
-                ),
-            ),
+            mass=np.asarray(cast(Sequence[float], metadata.column("mass").to_pylist())),
             heavy_atoms=np.asarray(
-                from_plain(
-                    cast(object, metadata.column("heavy_atoms").to_pylist()),
-                    list[int],
-                ),
+                cast(Sequence[int], metadata.column("heavy_atoms").to_pylist()),
                 dtype=np.int32,
             ),
             keys=columns["key"],
@@ -270,9 +256,9 @@ class IdentityTable:
                 f"Identity data requires format 1, RDKit {IDENTITY_RDKIT} and 16551 bits.",
             )
         self.metadata = tuple(
-            from_plain(
+            cast(
+                Sequence[IdentityRow],
                 parquet.read_table(root / "molecules.parquet").to_pylist(),
-                list[IdentityRow],
             ),
         )
         self.packed = load_array(root / "fingerprints.npy", np.uint8, mmap=True)
@@ -1102,7 +1088,9 @@ def _selected(values: FloatArray, *, floor: float, maximum: int) -> NDArray[np.i
 def _entropy64(weights: NDArray[np.float64]) -> float:
     positive = weights[weights > 0]
     # `fsum` rounds once; `ndarray.sum()` misses the exact entropy by up to 4.2 ulp.
-    return -math.fsum(value * math.log(value) for value in positive.tolist())
+    return -math.fsum(
+        value * math.log(value) for value in cast(list[float], positive.tolist())
+    )
 
 
 def _entropy32(weights: NDArray[np.float32]) -> float:
@@ -1200,12 +1188,9 @@ class _Header(PreparationHeader):
 
 
 def _numeric[S: np.generic](table: Table, name: str, dtype: type[S]) -> NDArray[S]:
-    values = from_plain(
-        cast(object, table.column(name).to_pylist()),
-        list[float | int | None],
-    )
+    values = cast(Sequence[float | int | None], table.column(name).to_pylist())
     return np.asarray(values, dtype=dtype)
 
 
 def _strings(table: Table, name: str) -> tuple[str, ...]:
-    return tuple(from_plain(cast(object, table.column(name).to_pylist()), list[str]))
+    return tuple(cast(Sequence[str], table.column(name).to_pylist()))

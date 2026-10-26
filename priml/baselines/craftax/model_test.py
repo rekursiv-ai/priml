@@ -19,7 +19,6 @@ from typing import (
 
 from torch import Tensor, nn
 from torch.nn import functional
-from treekle import from_plain
 
 import numpy as np
 import pytest
@@ -250,15 +249,12 @@ def test_pufferlibs_own_seed_73_init_fits_the_reference() -> None:
     are all it has. The parity suite's ``scripts/pufferlib_init.py --pools``
     builds the init from PufferLib's source at the pin and writes this file.
     """
-    pools = from_plain(
-        cast(
-            "object",
-            torch.load(
-                _CWD / "testdata" / "pufferlib_init_seed73_pools.pt",
-                weights_only=True,
-            ),
-        ),
+    pools = cast(
         dict[str, torch.Tensor],
+        torch.load(
+            _CWD / "testdata" / "pufferlib_init_seed73_pools.pt",
+            weights_only=True,
+        ),
     )
     assert {name: tuple(pool.shape) for name, pool in pools.items()} == {
         "embedding.weight": (154, 16),

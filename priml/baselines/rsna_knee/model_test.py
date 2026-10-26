@@ -1285,10 +1285,7 @@ def test_encoder_reads_its_checkpoint_on_cpu_as_plain_tensors(
 
     def spy(path: Path, *, map_location: str, weights_only: bool) -> object:
         seen.append({"map_location": map_location, "weights_only": weights_only})
-        return cast(
-            object,
-            real(path, map_location=map_location, weights_only=weights_only),
-        )
+        return real(path, map_location=map_location, weights_only=weights_only)
 
     monkeypatch.setattr(torch, "load", spy)
     _ = _sequence_encoder(tmp_path / "initializer.pt")

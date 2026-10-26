@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -29,8 +30,6 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from pyarrow import Table, parquet
     from rdkit import Chem
 
@@ -110,11 +109,8 @@ def prepare_analog(input_path: Path, *, output: Path, version: str) -> None:
             parquet.ParquetWriter(destination / "molecules.parquet", schema),
         )
         for batch in source.iter_batches(batch_size=256, columns=["smiles", "formula"]):
-            smiles = from_plain(cast(object, batch.column(0).to_pylist()), list[str])
-            formulas = from_plain(
-                cast(object, batch.column(1).to_pylist()),
-                list[str | None],
-            )
+            smiles = cast(Sequence[str], batch.column(0).to_pylist())
+            formulas = cast(Sequence[str | None], batch.column(1).to_pylist())
             metadata: list[AnalogMetadata] = []
             for index, value in enumerate(smiles):
                 row = chemistry.record(value, formula=formulas[index])

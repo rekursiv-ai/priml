@@ -7,7 +7,6 @@ from typing import cast
 from configgle import Makeable, traverse
 from configgle.cli_override import apply_overrides
 from configgle.launch import resolve_config
-from treekle import from_plain
 
 import torch
 
@@ -92,14 +91,8 @@ def model_state(checkpoint: Path) -> dict[str, object]:
     """
     # ``weights_only`` admits only tensors and plain containers, which is all
     # ``TrainLoop.state_dict`` holds; ``mmap`` leaves the optimizer state unread.
-    state = from_plain(
-        cast(
-            "object",
-            torch.load(checkpoint, map_location="cpu", weights_only=True, mmap=True),
-        ),
+    state = cast(
         dict[str, object],
+        torch.load(checkpoint, map_location="cpu", weights_only=True, mmap=True),
     )
-    return from_plain(
-        from_plain(state["step"], dict[str, object])["model"],
-        dict[str, object],
-    )
+    return cast(dict[str, object], cast(dict[str, object], state["step"])["model"])
