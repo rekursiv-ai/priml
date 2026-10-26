@@ -7,13 +7,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self, TypedDict, cast, override
 
 import hashlib
-import json
 import math
 import tempfile
 
 from configgle import Fig
 from torch import Tensor
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import numpy as np
 import torch
@@ -550,7 +549,9 @@ class TrainingPreparation:
             output.rename(preserved / "previous")
         work = output / "work"
         work.mkdir(parents=True)
-        (output / ".preparation.json").write_text(json.dumps(to_plain(owner)) + "\n")
+        (output / ".preparation.json").write_text(
+            json_dumps(owner, target=_Owner) + "\n",
+        )
         for name in _LINKED:
             (work / name).symlink_to((config.pool / name).resolve())
         identities = config.identities.make()
@@ -563,8 +564,9 @@ class TrainingPreparation:
             identity = identities.identity(smiles)
             if identity is None:
                 raise ValueError(f"Invalid prepared training identity: {smiles}")
-            row["metric_identity"] = json.dumps(
-                to_plain(identity, dialect="python"),
+            row["metric_identity"] = json_dumps(
+                identity,
+                dialect="python",
                 separators=(",", ":"),
             )
         parquet.write_table(
@@ -590,7 +592,7 @@ class TrainingPreparation:
             },
         }
         (output / "cache_receipt.json").write_text(
-            json.dumps(to_plain(receipt), indent=2) + "\n",
+            json_dumps(receipt, target=_Receipt, indent=2) + "\n",
         )
 
     def cache_ready(self) -> bool:

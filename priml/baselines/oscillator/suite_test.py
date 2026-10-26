@@ -6,12 +6,11 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self, override
 
-import json
 import sys
 
 from configgle import Fig, LateBound, Makes, Makes2
 from torch import Tensor
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import pytest
 import torch
@@ -404,7 +403,7 @@ def test_resume_retains_attempts_and_rejects_changed_provenance(
             resume=True,
             provenance={"source": "first"},
         )
-    (directory / "foreign--run.json").write_text(json.dumps(to_plain(records[0])))
+    (directory / "foreign--run.json").write_text(json_dumps(records[0]))
     with pytest.raises(ValueError, match="unplanned"):
         suite.run(directory, phase="audit", resume=True, provenance={"source": "first"})
 
@@ -435,7 +434,7 @@ def test_resume_validates_core_fields_without_discarding_fit_extensions(
     else:
         result["scores"] = {"familiar": {"method": {"mse": "wrong"}}}
     raw["result"] = result
-    path.write_text(json.dumps(to_plain(raw)))
+    path.write_text(json_dumps(raw))
     with pytest.raises(ReadError):
         suite.run(directory, phase="audit", resume=True)
 

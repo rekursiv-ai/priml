@@ -33,7 +33,7 @@ Examples:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast
 from urllib import request
@@ -41,14 +41,13 @@ from urllib import request
 import argparse
 import csv
 import hashlib
-import json
 import logging
 import math
 import os
 import shutil
 import tempfile
 
-from treekle import json_loads, mutable
+from treekle import json_dumps, json_loads
 
 import numpy as np
 
@@ -226,7 +225,7 @@ def _build_split(
             np.array(bounds, dtype=np.int32),
         )
         # Written last: its presence is what marks the split complete.
-        marker.write_text(json.dumps(mutable(asdict(build))))
+        marker.write_text(json_dumps(build, target=_Build, sort=False))
     finally:
         if downloaded is not None:
             downloaded.unlink(missing_ok=True)
@@ -240,12 +239,11 @@ def _build_split(
 
 def _check_existing(marker: Path, *, build: _Build) -> None:
     """Refuse a split whose recorded build parameters differ from ``build``."""
-    recorded = json_loads(marker.read_text(), dict[str, object])
-    expected = mutable(asdict(build))
-    if recorded != expected:
+    recorded = json_loads(marker.read_text(), _Build)
+    if recorded != build:
         raise ValueError(
             f"{marker.parent} was built with {recorded}, not the requested "
-            f"{expected}; delete it to rebuild.",
+            f"{build}; delete it to rebuild.",
         )
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final, override
 from urllib import request
 
-import datetime
+import datetime as dt
 import fcntl
 import functools
 import hashlib
@@ -608,23 +608,23 @@ def test_archive_name_and_corrupt_archive_log(
 ):
     target = tmp_path / "dataset"
     _write(target / "payload", b"bad")
-    real_datetime = datetime.datetime
-    zones: list[datetime.tzinfo | None] = []
+    real_datetime = dt.datetime
+    zones: list[dt.tzinfo | None] = []
 
     class DateTimeSpy:
         @classmethod
-        def now(cls, tz: datetime.tzinfo | None = None) -> datetime.datetime:
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
             zones.append(tz)
             return real_datetime.now(tz)
 
     monkeypatch.setattr(
-        "priml.data.ensure.datetime.datetime",
+        "priml.data.ensure.dt.datetime",
         DateTimeSpy,
     )
     ensure._archive_dir(target)
 
     archives = list(tmp_path.glob("dataset.corrupt.*"))
-    assert zones == [datetime.UTC]
+    assert zones == [dt.UTC]
     assert len(archives) == 1
     assert archives[0].name.startswith("dataset.corrupt.20")
     assert archives[0].name.endswith("Z")
@@ -648,23 +648,23 @@ def test_marker_has_utc_timestamp_line(
     monkeypatch: pytest.MonkeyPatch,
 ):
     marker_dir = tmp_path / "nested" / "dataset"
-    real_datetime = datetime.datetime
-    zones: list[datetime.tzinfo | None] = []
+    real_datetime = dt.datetime
+    zones: list[dt.tzinfo | None] = []
 
     class DateTimeSpy:
         @classmethod
-        def now(cls, tz: datetime.tzinfo | None = None) -> datetime.datetime:
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
             zones.append(tz)
             return real_datetime.now(tz)
 
     monkeypatch.setattr(
-        "priml.data.ensure.datetime.datetime",
+        "priml.data.ensure.dt.datetime",
         DateTimeSpy,
     )
     ensure._write_marker(marker_dir)
 
     marker = marker_dir / _MARKER
-    assert zones == [datetime.UTC]
+    assert zones == [dt.UTC]
     assert marker.read_text().count("\n") == 1
     assert len(marker.read_text().strip()) == 22
     assert marker.read_text().endswith("Z\n")

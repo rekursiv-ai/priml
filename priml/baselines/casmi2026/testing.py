@@ -5,9 +5,7 @@ from __future__ import annotations
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
-import json
-
-from treekle import to_plain
+from treekle import json_dumps
 
 import numpy as np
 
@@ -166,11 +164,7 @@ def write_identity(directory: Path) -> None:
     )
     np.save(directory / "fingerprints.npy", identity_fingerprints())
     (directory / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {"format_version": 1, "rdkit": IDENTITY_RDKIT, "raw_bits": 16_551},
-            ),
-        ),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT, "raw_bits": 16_551}),
     )
 
 
@@ -283,4 +277,4 @@ def _identity_row(
 
 
 def _metric(key: str, composition: tuple[tuple[str, int], ...]) -> str:
-    return json.dumps(to_plain((key, composition)), separators=(",", ":"))
+    return json_dumps((key, composition), separators=(",", ":"))

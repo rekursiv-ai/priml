@@ -15,12 +15,11 @@ from typing import TYPE_CHECKING, Final, Literal, override
 
 import csv
 import hashlib
-import json
 import zlib
 
 from configgle import Fig, Makes, Makes2
 from torch import Tensor, nn
-from treekle import to_plain
+from treekle import json_dumps
 
 import numpy as np
 import pytest
@@ -370,58 +369,54 @@ def postprocess_assets(directory: Path) -> R7Postprocess.Config:
     config.spec_file.path = directory / "spec.json"
     config.fluid_file.path = directory / "fluid.json"
     config.state_file.path = directory / "state.json"
-    Path(config.spec_file.path).write_text(json.dumps(to_plain(spec)))
+    Path(config.spec_file.path).write_text(json_dumps(spec))
     feature: dict[str, object] = {
         "weights": [1.0],
         "lines": [{}],
         "combine": "logit",
     }
     Path(config.fluid_file.path).write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "feature": feature,
-                    "classes": {
-                        "Effusion": dict(
-                            zip(
-                                ("b0", "b_z", "b_lv", "b_miss"),
-                                FLUID_COEFFICIENTS,
-                                strict=True,
-                            ),
-                            adopt=True,
-                            volume_column="eff_sag_p99_open",
-                            view_id=4,
+        json_dumps(
+            {
+                "feature": feature,
+                "classes": {
+                    "Effusion": dict(
+                        zip(
+                            ("b0", "b_z", "b_lv", "b_miss"),
+                            FLUID_COEFFICIENTS,
+                            strict=True,
                         ),
-                    },
+                        adopt=True,
+                        volume_column="eff_sag_p99_open",
+                        view_id=4,
+                    ),
                 },
-            ),
+            },
         ),
     )
     Path(config.state_file.path).write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "kind": "state_stacker_v1",
-                    "feature": feature,
-                    "state_spec_md5": hashlib.md5(
-                        Path(config.spec_file.path).read_bytes(),
-                        usedforsecurity=False,
-                    ).hexdigest(),
-                    "layout": {"columns": columns, "width": start},
-                    "classes": {
-                        "Baker's": {
-                            "adopt": True,
-                            "features": [
-                                "z",
-                                *["state:" + name for name in categories["Baker's"]],
-                            ],
-                            "b0": STATE_COEFFICIENTS[0],
-                            "coef": list(STATE_COEFFICIENTS[1:]),
-                            "volume_column": None,
-                        },
+        json_dumps(
+            {
+                "kind": "state_stacker_v1",
+                "feature": feature,
+                "state_spec_md5": hashlib.md5(
+                    Path(config.spec_file.path).read_bytes(),
+                    usedforsecurity=False,
+                ).hexdigest(),
+                "layout": {"columns": columns, "width": start},
+                "classes": {
+                    "Baker's": {
+                        "adopt": True,
+                        "features": [
+                            "z",
+                            *["state:" + name for name in categories["Baker's"]],
+                        ],
+                        "b0": STATE_COEFFICIENTS[0],
+                        "coef": list(STATE_COEFFICIENTS[1:]),
+                        "volume_column": None,
                     },
                 },
-            ),
+            },
         ),
     )
     return config

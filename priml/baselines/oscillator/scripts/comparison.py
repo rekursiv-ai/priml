@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import argparse
 import hashlib
-import json
 import platform
 import shutil
 import subprocess
@@ -16,7 +15,7 @@ import sys
 import time
 
 from configgle.launch import resolve_config
-from treekle import to_plain
+from treekle import json_dumps
 
 from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.benchmark import ForecastStudy, StudyRecord
@@ -227,4 +226,4 @@ def _imported_sources(package: str) -> set[Path]:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(to_plain(value), indent=2) + "\n")
+    path.write_text(json_dumps(value, indent=2) + "\n")

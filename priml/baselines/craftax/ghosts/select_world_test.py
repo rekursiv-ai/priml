@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import json
 import sys
 
-from treekle import from_plain, json_loads
+from treekle import json_loads
 
 import pytest
 import torch
@@ -134,12 +134,9 @@ def test_main_writes_the_tables_and_the_chosen_world(
         ],
     )
     assert select_world.main() == 0
-    written = json_loads(output.read_text(), dict[str, object])
-    assert written["world"] == 7
-    tiers = from_plain(written["tiers"], dict[str, dict[str, object]])
-    assert from_plain(tiers["high"]["worlds"], dict[str, dict[str, object]])["7"][
-        "distance"
-    ] == pytest.approx(0.0)
+    written = json_loads(output.read_text(), select_world.Choice)
+    assert written.world == 7
+    assert written.tiers["high"].worlds["7"].distance == pytest.approx(0.0)
 
 
 def test_a_tier_spec_without_an_arm_is_a_usage_error(

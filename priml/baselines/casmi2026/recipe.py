@@ -27,7 +27,7 @@ import time
 
 from configgle import Fig, Makeable, traverse
 from numpy.typing import NDArray
-from treekle import from_plain, to_plain
+from treekle import from_plain, json_dumps, to_plain
 
 import numpy as np
 
@@ -2649,5 +2649,5 @@ def _simulate(
 
 def _write(value: object, *, path: Path) -> None:
     pending = path.with_suffix(path.suffix + ".pending")
-    pending.write_text(json.dumps(to_plain(value, dialect="python")))
+    pending.write_text(json_dumps(value, dialect="python"))
     pending.replace(path)

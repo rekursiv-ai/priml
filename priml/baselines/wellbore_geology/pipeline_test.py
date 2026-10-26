@@ -13,7 +13,7 @@ import platform
 import sys
 
 from configgle import Fig, PartialConfig
-from treekle import json_loads, to_plain
+from treekle import json_dumps, json_loads, to_plain
 
 import numpy as np
 import pytest
@@ -438,7 +438,7 @@ def test_inference_main_deserializes_the_complete_native_family(
     config = tmp_path / "family.json"
     family = tiny_family(particle=False)
     family.dataset_directory = tmp_path / "data"
-    config.write_text(json.dumps(to_plain(family)))
+    config.write_text(json_dumps(family))
     directory = tmp_path / "trained"
     directory.mkdir()
     (directory / "checkpoints.json").write_text("[]")
@@ -459,7 +459,7 @@ def test_fresh_main_deserializes_and_forwards_every_declared_path(
 ) -> None:
     family_config = tiny_family(particle=True)
     configuration = tmp_path / "family.json"
-    configuration.write_text(json.dumps(to_plain(family_config)))
+    configuration.write_text(json_dumps(family_config))
     calls: list[tuple[Family.Config, dict[str, object]]] = []
 
     def record(family: Family.Config, **paths: object) -> Path:

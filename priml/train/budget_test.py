@@ -16,7 +16,7 @@ import time
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 import pytest
 import torch
@@ -69,7 +69,7 @@ def test_config_is_printable_serializable_and_does_no_io(tmp_path: Path) -> None
     config = WallBudget.Config()
     config.receipt_path = tmp_path / "literal-{experiment_name}.json"
     restored = json_loads(
-        json.dumps(to_plain(config)),
+        json_dumps(config),
         WallBudget.Config,
         allow_imports=True,
     )

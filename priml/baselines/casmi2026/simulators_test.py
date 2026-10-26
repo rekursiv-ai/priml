@@ -6,7 +6,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Final, cast, override
 from unittest import mock
 
-import json
 import math
 import sys
 import warnings
@@ -14,7 +13,7 @@ import warnings
 from configgle import traverse
 from pyarrow import Table, parquet
 from torch import Tensor, nn
-from treekle import from_plain, to_plain
+from treekle import from_plain, json_dumps
 
 import numpy as np
 import pyarrow as pa
@@ -189,7 +188,7 @@ def test_admission_reader_rejects_inconsistent_versions_and_decisions(
         {"format_version": 1, "rdkit": IDENTITY_RDKIT},
     ):
         _write(tmp_path, rows)
-        _ = (tmp_path / "manifest.json").write_text(json.dumps(to_plain(header)))
+        _ = (tmp_path / "manifest.json").write_text(json_dumps(header))
         with pytest.raises(ValueError, match=r"format 1 and RDKit 2025\.03\.6"):
             _ = SimulatorAdmissionTable(tmp_path)
 
@@ -235,7 +234,7 @@ def admission_rows() -> list[SimulatorAdmissionRow]:
 
 def _write(directory: Path, rows: list[SimulatorAdmissionRow]) -> None:
     _ = (directory / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": SIMULATOR_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": SIMULATOR_RDKIT}),
     )
     schema = pa.schema(
         [
@@ -540,9 +539,7 @@ def test_atomic_table_retains_complete_rows_with_bounded_graph_storage(
         row_group_size=1,
     )
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            to_plain({"format_version": 1, "rdkit": SIMULATOR_RDKIT, "raw": False}),
-        ),
+        json_dumps({"format_version": 1, "rdkit": SIMULATOR_RDKIT, "raw": False}),
     )
     monkeypatch.setitem(sys.modules, "rdkit", None)
     table = AtomicGraphTable(tmp_path)
@@ -580,9 +577,7 @@ def test_atomic_table_requires_canonical_exact_version_data(
     raw: bool,
 ) -> None:
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            to_plain({"format_version": format_version, "rdkit": version, "raw": raw}),
-        ),
+        json_dumps({"format_version": format_version, "rdkit": version, "raw": raw}),
     )
     with pytest.raises(ValueError, match="Canonical graph data requires"):
         _ = AtomicGraphTable(tmp_path)
@@ -880,14 +875,12 @@ def _manifest(
     format_version: int = 1,
 ) -> None:
     _ = (directory / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "rdkit": version,
-                    "format_version": format_version,
-                    "raw": False,
-                },
-            ),
+        json_dumps(
+            {
+                "rdkit": version,
+                "format_version": format_version,
+                "raw": False,
+            },
         ),
     )
 
@@ -1360,7 +1353,7 @@ def test_indexed_root_rows_preserve_full_data_and_bound_cached_graph_groups(
     tmp_path: Path,
 ) -> None:
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"rdkit": SIMULATOR_RDKIT, "format_version": 1})),
+        json_dumps({"rdkit": SIMULATOR_RDKIT, "format_version": 1}),
     )
     np.save(tmp_path / "element_masses.npy", np.arange(18, dtype=np.float64)[:, None])
     features = torch.zeros((2, 32))
@@ -1424,7 +1417,7 @@ def test_root_reader_rejects_incompatible_chemistry_and_schema(
     format_version: int,
 ) -> None:
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"rdkit": version, "format_version": format_version})),
+        json_dumps({"rdkit": version, "format_version": format_version}),
     )
     with pytest.raises(ValueError, match="ICE root data requires"):
         _ = IceGraphTable(tmp_path)
@@ -1436,7 +1429,7 @@ def test_root_reader_requires_complete_double_precision_element_masses(
     shape: tuple[int, ...],
 ) -> None:
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"rdkit": SIMULATOR_RDKIT, "format_version": 1})),
+        json_dumps({"rdkit": SIMULATOR_RDKIT, "format_version": 1}),
     )
     np.save(
         tmp_path / "element_masses.npy",
@@ -1780,7 +1773,7 @@ def _prepared_roots(directory: Path) -> None:
         np.array([[ELEMENT_MASSES[symbol]] for symbol in SIMULATOR_SYMBOLS]),
     )
     _ = (directory / "manifest.json").write_text(
-        json.dumps(to_plain({"rdkit": SIMULATOR_RDKIT, "format_version": 1})),
+        json_dumps({"rdkit": SIMULATOR_RDKIT, "format_version": 1}),
     )
 
 

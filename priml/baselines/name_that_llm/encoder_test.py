@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
-import json
 import math
 
 from tokenizers import Tokenizer
@@ -13,7 +12,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 from torch import Tensor
-from treekle import json_loads, to_plain
+from treekle import json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -72,7 +71,7 @@ def tiny_checkpoint(tmp_path: Path) -> FrozenQwen.Config:
         "vocab_size": 17,
         "torch_dtype": "float32",
     }
-    (tmp_path / "config.json").write_text(json.dumps(to_plain(model_config)))
+    (tmp_path / "config.json").write_text(json_dumps(model_config))
     # ``pytorch_model.bin`` loads with torch alone; safetensors is the hub extra.
     torch.save(_checkpoint_state(), tmp_path / "pytorch_model.bin")
     config = FrozenQwen.Config()

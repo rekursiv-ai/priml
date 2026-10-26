@@ -67,7 +67,7 @@ import struct
 import sys
 import zlib
 
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads, to_plain
 
 import torch
 
@@ -566,7 +566,7 @@ def write_corpus(path: Path, *, entries: Sequence[tuple[Path, ManifestLine]]) ->
 
     """
     shards = [
-        {"directory": str(directory), "line": to_plain(line)}
+        {"directory": str(directory), "line": to_plain(line, target=ManifestLine)}
         for directory, line in entries
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -652,7 +652,7 @@ def _publish(
         provenance=dict(provenance),
         snapshot_stride=snapshot_stride,
     )
-    _append_line(directory / "MANIFEST.jsonl", json.dumps(to_plain(line)))
+    _append_line(directory / "MANIFEST.jsonl", json_dumps(line, target=ManifestLine))
     return line
 
 
@@ -690,7 +690,7 @@ def _frame_bytes(episode: Episode) -> bytes:
 def _meta_line(episode: Episode, *, record: Span, frames: Span) -> str:
     """Serialize one frame-shard summary line."""
     line = {
-        "receipt": to_plain(episode.receipt),
+        "receipt": to_plain(episode.receipt, target=Receipt),
         "decisions": len(episode.actions),
         "bin": _span_json(record),
         "frames": _span_json(frames),
@@ -710,7 +710,7 @@ def _replay_meta_line(
     if episode.snapshots and episode.frames:
         raise ValueError("Expected not (episode.snapshots and episode.frames).")
     line = {
-        "receipt": to_plain(episode.receipt),
+        "receipt": to_plain(episode.receipt, target=Receipt),
         "decisions": len(episode.actions),
         "bin": _span_json(record),
         **(

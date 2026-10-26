@@ -11,13 +11,12 @@ from zipfile import ZipInfo
 
 import csv
 import hashlib
-import json
 import logging
 import shutil
 import subprocess
 
 from configgle import Fig
-from treekle import to_plain
+from treekle import json_dumps, to_plain
 
 from priml.baselines.rsna_knee.imaging import (
     dicom_files,
@@ -120,7 +119,7 @@ class Acquisition:
         }
         working_dir.mkdir(parents=True, exist_ok=True)
         receipt = manifests[RECEIPT]
-        receipt.write_text(json.dumps(to_plain({"complete": False})) + "\n")
+        receipt.write_text(json_dumps({"complete": False}) + "\n")
         url = _archive_url()
         members, archive_size = index_archive(url, working_dir=working_dir)
         selected = select_members(
@@ -197,24 +196,22 @@ class Acquisition:
             writer.writerow(["series", "files"])
             writer.writerows(sorted(series_counts.items()))
         receipt.write_text(
-            json.dumps(
-                to_plain(
-                    {
-                        "complete": True,
-                        "input_dir": str(config.input_dir.resolve()),
-                        "inventory_sha256": hashlib.sha256(
-                            manifests[SELECTED_FILES].read_bytes(),
-                        ).hexdigest(),
-                        "verified_sha256": hashlib.sha256(
-                            manifests[VERIFIED_FILES].read_bytes(),
-                        ).hexdigest(),
-                        "files": count,
-                        "bytes": total_bytes,
-                        "series": len(series_counts),
-                        "archive_bytes": archive_size,
-                        "verification": "Complete central directory; every selected file length and CRC32 verified; SHA256 recorded for subsequent inventory verification.",
-                    },
-                ),
+            json_dumps(
+                {
+                    "complete": True,
+                    "input_dir": str(config.input_dir.resolve()),
+                    "inventory_sha256": hashlib.sha256(
+                        manifests[SELECTED_FILES].read_bytes(),
+                    ).hexdigest(),
+                    "verified_sha256": hashlib.sha256(
+                        manifests[VERIFIED_FILES].read_bytes(),
+                    ).hexdigest(),
+                    "files": count,
+                    "bytes": total_bytes,
+                    "series": len(series_counts),
+                    "archive_bytes": archive_size,
+                    "verification": "Complete central directory; every selected file length and CRC32 verified; SHA256 recorded for subsequent inventory verification.",
+                },
                 indent=2,
             )
             + "\n",

@@ -27,7 +27,6 @@ from pathlib import Path
 from string import Formatter
 from typing import TYPE_CHECKING, Literal, Protocol, Self, cast, override
 
-import json
 import logging
 import math
 import re
@@ -66,7 +65,7 @@ else:
     dcp = lazy_import("torch.distributed.checkpoint")  # ~1050 ms; async saves need it.
 
 from configgle import Fig, Makeable
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
@@ -947,7 +946,7 @@ class Checkpointer:
             "value": self.best_value,
         }
         temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(to_plain(payload)))
+        temp_path.write_text(json_dumps(payload))
         temp_path.replace(path)
 
     # A record naming a checkpoint no longer in the inventory protects nothing

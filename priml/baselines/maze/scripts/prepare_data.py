@@ -29,18 +29,17 @@ Examples:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, Self, cast
 
 import argparse
 import csv
 import hashlib
-import json
 import logging
 
 from huggingface_hub import hf_hub_download
-from treekle import json_loads, mutable
+from treekle import json_dumps, json_loads
 
 import numpy as np
 
@@ -199,18 +198,19 @@ def _write_split(
     np.save(destination / "all__labels.npy", labels)
     np.save(destination / "all__group_indices.npy", groups)
     # Written last: its presence is what marks the split complete.
-    marker = {"seq_len": inputs.shape[-1], **mutable(asdict(build))}
-    (destination / "dataset.json").write_text(json.dumps(marker))
+    marker = _Marker.of(build, seq_len=inputs.shape[-1])
+    (destination / "dataset.json").write_text(
+        json_dumps(marker, target=_Marker, sort=False),
+    )
 
 
 def _check_existing(marker: Path, *, build: _Build) -> None:
     """Refuse a split whose recorded build differs from ``build``."""
-    recorded = json_loads(marker.read_text(), dict[str, object])
-    expected = mutable(asdict(build))
-    if {key: recorded.get(key) for key in expected} != expected:
+    recorded = json_loads(marker.read_text(), _Marker)
+    if recorded != _Marker.of(build, seq_len=recorded.seq_len):
         raise ValueError(
             f"{marker.parent} was built with {recorded}, not the requested "
-            f"{expected}; delete it to rebuild.",
+            f"{build}; delete it to rebuild.",
         )
 
 
@@ -263,6 +263,33 @@ class _Build:
     revision: str
     views: int
     canonical: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Marker(_Build):
+    """A split's ``dataset.json``: its build, and the length of its rows."""
+
+    seq_len: int
+
+    @classmethod
+    def of(cls, build: _Build, *, seq_len: int) -> Self:
+        """Return the marker of a split built as ``build`` with rows of ``seq_len``.
+
+        Args:
+          build: What the split was built from.
+          seq_len: The length of each of its rows.
+
+        Returns:
+          marker: The split's ``dataset.json``.
+
+        """
+        return cls(
+            vocab_size=build.vocab_size,
+            revision=build.revision,
+            views=build.views,
+            canonical=build.canonical,
+            seq_len=seq_len,
+        )
 
 
 if __name__ == "__main__":

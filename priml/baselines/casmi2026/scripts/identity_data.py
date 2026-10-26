@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-import json
 import logging
 
-from treekle import from_plain, to_plain
+from treekle import from_plain, json_dumps
 
 import numpy as np
 
@@ -83,17 +82,12 @@ class IdentityChemistry:
             "standardized": standardized,
             "key": self.raw.score_key(smiles),
             "formula": self.formula(smiles),
-            "metric": json.dumps(
-                to_plain(self.identity(smiles)),
-                separators=(",", ":"),
-            ),
+            "metric": json_dumps(self.identity(smiles), separators=(",", ":")),
             "standard_key": self.raw.score_key(standardized)
             if standardized is not None
             else None,
-            "standard_metric": json.dumps(
-                to_plain(
-                    self.identity(standardized) if standardized is not None else None,
-                ),
+            "standard_metric": json_dumps(
+                self.identity(standardized) if standardized is not None else None,
                 separators=(",", ":"),
             ),
             "standard_formula_lookup": self.formula(standardized)

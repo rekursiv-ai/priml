@@ -37,10 +37,9 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import dataclasses
-import json
 import operator
 
-from treekle import from_plain, json_loads
+from treekle import from_plain, json_dumps, json_loads
 
 from priml.baselines.craftax.game.state import Achievement
 from priml.baselines.craftax.metric import FLOOR_NAMES
@@ -79,28 +78,28 @@ def main() -> int:
     print("| world | distance |\n| ---: | ---: |")
     print("\n".join(f"| {seed} | {total:.4f} |" for seed, total in ranking))
     print(f"\nWorld {ranking[0][0]}. Written to {output}.")
-    record = {
-        "root": str(flags.root),
-        "world": ranking[0][0],
-        "ranking": [{"world": seed, "distance": total} for seed, total in ranking],
-        "tiers": {
-            name: {
-                "arm": arm,
-                "metrics": str(path),
-                "evaluation": dataclasses.asdict(evaluations[name]),
-                "worlds": {
-                    str(seed): {
-                        **dataclasses.asdict(world),
-                        "distance": distance(world, evaluations[name]),
-                    }
+    choice = Choice(
+        root=flags.root,
+        world=ranking[0][0],
+        ranking=tuple(Ranked(world=seed, distance=total) for seed, total in ranking),
+        tiers={
+            name: TierChoice(
+                arm=arm,
+                metrics=path,
+                evaluation=evaluations[name],
+                worlds={
+                    str(seed): Played(
+                        outcomes=world,
+                        distance=distance(world, evaluations[name]),
+                    )
                     for seed, world in played[name].items()
                 },
-            }
+            )
             for name, arm, path in tiers
         },
-    }
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(record, indent=1) + "\n")
+    output.write_text(json_dumps(choice, target=Choice, sort=False, indent=1) + "\n")
     return 0
 
 
@@ -140,6 +139,42 @@ class Evaluation:
 
     mean_return: float
     reach: tuple[float, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Played:
+    """A tier's outcomes on one world, and that world's distance from its evaluation."""
+
+    outcomes: Outcomes
+    distance: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class TierChoice:
+    """One tier as the choice records it: its arm, its evaluation, each world it played."""
+
+    arm: int
+    metrics: Path
+    evaluation: Evaluation
+    worlds: dict[str, Played]
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Ranked:
+    """One world's distance summed over the tiers."""
+
+    world: int
+    distance: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Choice:
+    """What ``--output`` holds: the chosen world, the ranking and every tier's view."""
+
+    root: Path
+    world: int
+    ranking: tuple[Ranked, ...]
+    tiers: dict[str, TierChoice]
 
 
 def outcomes(root: Path, *, arm: int) -> dict[int, Outcomes]:

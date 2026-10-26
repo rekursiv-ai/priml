@@ -8,7 +8,6 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Final, Literal, TypedDict, Unpack, cast
 
 import hashlib
-import json
 import math
 import pickle
 import sys
@@ -18,7 +17,7 @@ import weakref
 from configgle import Fig, InlineConfig, traverse
 from pyarrow import Table, parquet
 from torch import Tensor
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -375,7 +374,7 @@ def test_disabled_popularity_keeps_generated_formulas_and_raw_scores() -> None:
 
 def _text(value: object) -> Tensor:
     return torch.tensor(
-        list(json.dumps(to_plain(value), separators=(",", ":")).encode()),
+        list(json_dumps(value, separators=(",", ":")).encode()),
         dtype=torch.uint8,
     )
 
@@ -2557,15 +2556,13 @@ def _pubchem_assets(directory: Path) -> PubChemAssets.Config:
         directory / "molecules.parquet",
     )
     (directory / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "format_version": 1,
-                    "rdkit": IDENTITY_RDKIT,
-                    "raw_bits": 16_551,
-                    "ecfp4_bits": 4096,
-                },
-            ),
+        json_dumps(
+            {
+                "format_version": 1,
+                "rdkit": IDENTITY_RDKIT,
+                "raw_bits": 16_551,
+                "ecfp4_bits": 4096,
+            },
         ),
     )
     config.bank = save_bank(directory, [0, 1])
@@ -2584,7 +2581,7 @@ def _main_assets(directory: Path) -> MainAssets.Config:
     config.pool_dir = config.library_dir = config.popularity_dir = directory
     manifest = directory / "release.json"
     manifest.write_text(
-        json.dumps(to_plain({"fixture": "complete tiny resource release"})),
+        json_dumps({"fixture": "complete tiny resource release"}),
     )
     config.manifest.path = manifest
     config.manifest.sha256 = _seal(manifest)
@@ -2693,7 +2690,7 @@ def _main_assets(directory: Path) -> MainAssets.Config:
     config.derivation_dir = derivation_dir
     derivation_dir.mkdir()
     (derivation_dir / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
     parquet.write_table(
         Table.from_pydict(
@@ -3600,10 +3597,8 @@ def test_every_product_path_alias_empty_header_and_stripped_identity_is_retained
         tmp_path / "rules.parquet",
     )
     (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {"format_version": 1, "rdkit": IDENTITY_RDKIT, "default_products": 60},
-            ),
+        json_dumps(
+            {"format_version": 1, "rdkit": IDENTITY_RDKIT, "default_products": 60},
         ),
     )
     table = ReactionTable(tmp_path)
@@ -3830,10 +3825,8 @@ def test_every_raw_proposal_and_final_request_including_empty_tables(
         source / "rules.parquet",
     )
     (source / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {"format_version": 1, "rdkit": IDENTITY_RDKIT, "default_products": 60},
-            ),
+        json_dumps(
+            {"format_version": 1, "rdkit": IDENTITY_RDKIT, "default_products": 60},
         ),
     )
     inputs = sorted(source.iterdir())
@@ -4266,10 +4259,8 @@ def _reactions(root: Path) -> tuple[Path, str]:
         source / "rules.parquet",
     )
     (source / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {"format_version": 1, "rdkit": IDENTITY_RDKIT, "default_products": 60},
-            ),
+        json_dumps(
+            {"format_version": 1, "rdkit": IDENTITY_RDKIT, "default_products": 60},
         ),
     )
     return source, raw

@@ -54,7 +54,7 @@ import json
 import re
 
 from numpy.typing import NDArray
-from treekle import MutablePlainTree, from_plain, json_loads, mutable
+from treekle import MutablePlainTree, from_plain, json_loads, to_plain
 
 import numpy as np
 
@@ -216,9 +216,10 @@ def manifest_json(manifest: DataclassInstance) -> str:
       text: The file's contents.
 
     """
-    # ``mutable`` checks each leaf is plain: ``from_plain`` would try every member
-    # of the tree's union at every node, 5 ms a model bundle's manifest.
-    renamed = _renamed(mutable(dataclasses.asdict(manifest)), _wire_name)
+    renamed = _renamed(
+        to_plain(manifest, target=type(manifest), sort=False),
+        _wire_name,
+    )
     return json.dumps(renamed, indent=2, ensure_ascii=False) + "\n"
 
 

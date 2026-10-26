@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self, TypedDict, cast, override
 
 import csv
-import json
 import pickle
 import re
 
 from numpy.typing import NDArray
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 import numpy as np
 
@@ -1205,7 +1204,7 @@ def reaction_key(request: ReactionHeader) -> str:
     fields: dict[str, object] = dict(request)
     fields["delta"] = float(request["delta"]).hex()
     fields["tolerance"] = float(request["tolerance"]).hex()
-    return json.dumps(to_plain(fields), sort_keys=True, separators=(",", ":"))
+    return json_dumps(fields, sort_keys=True, separators=(",", ":"))
 
 
 class ReactionTable:

@@ -536,7 +536,12 @@ class BenchmarkSuite:
             }
             temporary = destination.with_suffix(".json.tmp")
             temporary.write_text(
-                json.dumps(to_plain(record), indent=2, allow_nan=False) + "\n",
+                json.dumps(
+                    to_plain(record, target=BenchmarkRun),
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n",
             )
             temporary.replace(destination)
             records.append(record)

@@ -5,9 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import hashlib
-import json
 
-from treekle import to_plain
+from treekle import json_dumps
 
 
 if TYPE_CHECKING:
@@ -63,5 +62,5 @@ def write_manifest(destination: Path, manifest: Mapping[str, object]) -> None:
       manifest: Plain header fields, including input and generator digests.
 
     """
-    text = json.dumps(to_plain(manifest), indent=2) + "\n"
+    text = json_dumps(manifest, indent=2) + "\n"
     _ = (destination / "manifest.json").write_text(text)

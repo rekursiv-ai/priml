@@ -18,7 +18,7 @@ from typing import (
     override,
 )
 
-import datetime
+import datetime as dt
 import logging
 import sys
 import time
@@ -149,11 +149,11 @@ class CustomFormatter(logging.Formatter):
 
     @override
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        dt = datetime.datetime.fromtimestamp(
+        stamp = dt.datetime.fromtimestamp(
             record.created,
-            tz=datetime.UTC,
+            tz=dt.UTC,
         ).astimezone()
-        return dt.strftime(datefmt or self.datefmt or "")
+        return stamp.strftime(datefmt or self.datefmt or "")
 
 
 def setup_logging(level: str) -> None:

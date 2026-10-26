@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 import hashlib
-import json
 import math
 import pickle
 import sys
@@ -15,7 +14,7 @@ import sys
 from numpy.typing import NDArray
 from pyarrow import Table, parquet
 from torch import Tensor
-from treekle import ReadError, from_plain, to_plain
+from treekle import ReadError, from_plain, json_dumps
 
 import numpy as np
 import pytest
@@ -1148,7 +1147,7 @@ def test_complete_paths_keep_invalids_multiplicity_zero_pairs_and_missing_errors
 ) -> None:
     monkeypatch.setitem(sys.modules, "rdkit", None)
     header = {"format_version": 1, "rdkit": IDENTITY_RDKIT}
-    _ = (tmp_path / "manifest.json").write_text(json.dumps(to_plain(header)))
+    _ = (tmp_path / "manifest.json").write_text(json_dumps(header))
     requests: list[dict[str, object]] = [
         {
             "parent_smiles": "parent",
@@ -1254,7 +1253,7 @@ def test_complete_paths_keep_invalids_multiplicity_zero_pairs_and_missing_errors
         {"format_version": 1, "rdkit": SIMULATOR_RDKIT},
     ):
         _ = (tmp_path / "manifest.json").write_text(
-            json.dumps(to_plain(altered_header)),
+            json_dumps(altered_header),
         )
         with pytest.raises(
             ValueError,
@@ -1262,7 +1261,7 @@ def test_complete_paths_keep_invalids_multiplicity_zero_pairs_and_missing_errors
         ):
             _ = DerivationTable(tmp_path)
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": True, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": True, "rdkit": IDENTITY_RDKIT}),
     )
     with pytest.raises(ValueError, match="cannot read True as int"):
         _ = DerivationTable(tmp_path)
@@ -1915,12 +1914,12 @@ def test_depth_pair_reader_rejects_wrong_types_offsets_and_provenance(
         np.save(path, correct, allow_pickle=False)
     for version, release in ((2, IDENTITY_RDKIT), (1, SIMULATOR_RDKIT)):
         _ = (tmp_path / "manifest.json").write_text(
-            json.dumps(to_plain({"format_version": version, "rdkit": release})),
+            json_dumps({"format_version": version, "rdkit": release}),
         )
         with pytest.raises(ValueError, match="Main fragment"):
             _ = MainFragmentTable(tmp_path)
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": True, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": True, "rdkit": IDENTITY_RDKIT}),
     )
     with pytest.raises(ReadError):
         _ = MainFragmentTable(tmp_path)
@@ -1968,7 +1967,7 @@ def _fragments_write(directory: Path) -> None:
     ):
         np.save(directory / f"{name}.npy", values, allow_pickle=False)
     _ = (directory / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
 
 
@@ -2356,7 +2355,7 @@ def _fragnet(directory: Path) -> FragnetTable:
 
 def _header(directory: Path) -> None:
     _ = (directory / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
 
 

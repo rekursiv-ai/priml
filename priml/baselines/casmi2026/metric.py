@@ -7,11 +7,9 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
-import json
-
 from configgle import Fig, Makeable
 from torch import Tensor
-from treekle import from_plain, to_plain
+from treekle import from_plain, json_dumps
 
 import numpy as np
 
@@ -174,7 +172,7 @@ class MoleculeMRR:
                 range(len(candidates)),
                 key=lambda index: (
                     -scores[index],
-                    json.dumps(to_plain(candidates[index]), sort_keys=True),
+                    json_dumps(candidates[index], sort_keys=True),
                 ),
             )
             for index in ordered:

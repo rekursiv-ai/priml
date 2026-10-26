@@ -6,11 +6,10 @@ from dataclasses import field
 from pathlib import Path
 from typing import Self, override
 
-import json
 import shutil
 
 from configgle import Fig
-from treekle import to_plain
+from treekle import json_dumps
 
 from priml.baselines.name_that_llm.data import CompetitionData
 from priml.paths import resolve_working_dir, validated_output_path
@@ -70,7 +69,7 @@ class Preparation:
             "ids": data.ids,
         }
         (directory / "manifest.json").write_text(
-            json.dumps(to_plain(manifest), indent=2) + "\n",
+            json_dumps(manifest, indent=2) + "\n",
         )
 
 

@@ -155,10 +155,10 @@ def test_resume_rejects_invalid_persisted_totals(key: str, invalid: object) -> N
         CheckpointableStepTimer().load_state_dict(state)
 
 
-def test_resume_reads_an_integral_seconds_total_as_a_float() -> None:
+def test_resume_keeps_an_integral_seconds_total_as_written() -> None:
     timer = CheckpointableStepTimer()
     timer.load_state_dict({"global_count": 1, "global_sec": 2})
-    assert type(timer.global_sec) is float
+    assert (timer.global_sec, type(timer.global_sec)) == (2, int)
 
 
 if __name__ == "__main__":

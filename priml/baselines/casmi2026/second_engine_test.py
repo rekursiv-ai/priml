@@ -8,14 +8,13 @@ from typing import TYPE_CHECKING, cast
 
 import hashlib
 import heapq
-import json
 import math
 import re
 import sys
 
 from pyarrow import Table, parquet
 from torch import Tensor
-from treekle import to_plain
+from treekle import json_dumps
 
 import numpy as np
 import pytest
@@ -1736,14 +1735,12 @@ def test_every_staged_engine_key_and_first_duplicate_without_rdkit(
         tmp_path / "keys.parquet",
     )
     (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "format_version": 1,
-                    "rdkit": IDENTITY_RDKIT,
-                    "rows": len(rows) + 1,
-                },
-            ),
+        json_dumps(
+            {
+                "format_version": 1,
+                "rdkit": IDENTITY_RDKIT,
+                "rows": len(rows) + 1,
+            },
         ),
     )
     table = EngineIdentityTable(tmp_path)
@@ -1758,7 +1755,7 @@ def test_every_staged_engine_key_and_first_duplicate_without_rdkit(
         {"format_version": 1, "rdkit": "different", "rows": len(rows) + 1},
         {"format_version": 1, "rdkit": IDENTITY_RDKIT, "rows": len(rows)},
     ):
-        (tmp_path / "manifest.json").write_text(json.dumps(to_plain(header)))
+        (tmp_path / "manifest.json").write_text(json_dumps(header))
         with pytest.raises(
             ValueError,
             match=(
@@ -2144,7 +2141,7 @@ def second_config(root: Path) -> SecondAssets.Config:
         identities / "keys.parquet",
     )
     (identities / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT, "rows": 2})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT, "rows": 2}),
     )
     rows, _ = _simulation()
     config.own_training = root / "own.npz"

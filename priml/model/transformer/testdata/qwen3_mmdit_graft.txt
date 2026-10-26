@@ -30,7 +30,7 @@ Qwen3MMDiTGraft.Config(
         │   │           rope=RoPE.Config(
         │   │               channels_head=6,
         │   │               reduction_mode='cat',
-        │   │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │   │               frequencies=HuggingFaceFrequencies.Config(base=1000000),
         │   │               dtype=torch.float32
         │   │           ),
         │   │           rotate=None,
@@ -204,7 +204,7 @@ Qwen3MMDiTGraft.Config(
         │       │   │       rope=RoPE.Config(
         │       │   │           channels_head=6,
         │       │   │           reduction_mode='cat',
-        │       │   │           frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │       │   │           frequencies=HuggingFaceFrequencies.Config(base=1000000),
         │       │   │           dtype=torch.float32
         │       │   │       ),
         │       │   │       rotate=None,
@@ -274,7 +274,7 @@ Qwen3MMDiTGraft.Config(
         │       │           rope=RoPE.Config(
         │       │               channels_head=6,
         │       │               reduction_mode='cat',
-        │       │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │       │               frequencies=HuggingFaceFrequencies.Config(base=1000000),
         │       │               dtype=torch.float32
         │       │           ),
         │       │           rotate=None,

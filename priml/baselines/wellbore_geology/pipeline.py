@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Final, Protocol, Self, cast, override
 
 import argparse
 import gc
-import json
 import logging
 import math
 import platform
@@ -16,7 +15,7 @@ import subprocess
 import sys
 
 from configgle import Fig, Makeable
-from treekle import json_loads, to_plain
+from treekle import json_dumps, json_loads
 
 import numpy as np
 
@@ -217,10 +216,10 @@ def train_family(
     path = output_directory / "oof_df.pqt"
     write_table(path, oof)
     (output_directory / "checkpoints.json").write_text(
-        json.dumps(to_plain(checkpoints)),
+        json_dumps(checkpoints),
     )
     (output_directory / "folds.json").write_text(
-        json.dumps(to_plain(summaries), indent=2),
+        json_dumps(summaries, indent=2),
     )
     return TrainedFamily(checkpoints=tuple(checkpoints), oof=path)
 
@@ -556,7 +555,7 @@ class NativeFamilyRunner:
             raise ValueError("A native family requires its dataset directory.")
         output_directory.mkdir(parents=True, exist_ok=False)
         configuration = output_directory / "family.json"
-        configuration.write_text(json.dumps(to_plain(family), indent=2))
+        configuration.write_text(json_dumps(family, indent=2))
         trained = train_family(
             family,
             raw=load_split(family.dataset_directory / "train"),

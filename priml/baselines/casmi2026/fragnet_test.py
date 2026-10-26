@@ -7,13 +7,12 @@ from zipfile import ZipFile
 
 import hashlib
 import io
-import json
 import pickle
 import sys
 import types
 
 from pyarrow import Table, parquet
-from treekle import ReadError, to_plain
+from treekle import ReadError, json_dumps
 
 import numpy as np
 import pytest
@@ -147,7 +146,7 @@ def test_reader_refuses_malformed_ragged_arrays_and_scientific_versions(
         np.save(path, correct)
     for version, release in ((2, IDENTITY_RDKIT), (1, SIMULATOR_RDKIT)):
         _ = (tmp_path / "manifest.json").write_text(
-            json.dumps(to_plain({"format_version": version, "rdkit": release})),
+            json_dumps({"format_version": version, "rdkit": release}),
         )
         with pytest.raises(
             ValueError,
@@ -155,7 +154,7 @@ def test_reader_refuses_malformed_ragged_arrays_and_scientific_versions(
         ):
             _ = FragnetTable(tmp_path)
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": True, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": True, "rdkit": IDENTITY_RDKIT}),
     )
     with pytest.raises(ReadError):
         _ = FragnetTable(tmp_path)
@@ -186,7 +185,7 @@ def _write(directory: Path) -> None:
     ):
         np.save(directory / f"{name}.npy", values)
     _ = (directory / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
 
 

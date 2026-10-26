@@ -3,7 +3,13 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.1.8 - 2026-10-26
+
+### Changed
+
+- Requires treekle 0.3.3. Experiments, baselines and training write their JSON
+  through treekle's typed `to_plain` and `json_dumps`, so typed containers are
+  plain JSON arrays and objects.
 
 ### Removed
 

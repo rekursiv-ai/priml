@@ -50,7 +50,7 @@ import itertools
 import json
 import subprocess
 
-from treekle import from_plain
+from treekle import from_plain, json_dumps
 
 from priml.baselines.craftax.game import jit
 from priml.baselines.craftax.game.jit import package_digest, platform_key
@@ -404,7 +404,7 @@ def write_site(
         sizes={path: len(data) for path, data in files.items()},
     )
     (out / "manifest.json").write_text(
-        json.dumps(dataclasses.asdict(manifest), indent=1) + "\n",
+        json_dumps(manifest, target=Manifest, sort=False, indent=1) + "\n",
     )
     return manifest
 
@@ -725,7 +725,7 @@ def _write_group(
     """Add one group's files, with its time maps when ``keeps`` has them, to ``files``."""
     windows = -(-max(ghost.decisions for ghost in ghosts) // layout.window)
     files[f"{path}/episodes.json"] = (
-        json.dumps(dataclasses.asdict(group), separators=(",", ":")) + "\n"
+        json_dumps(group, target=GroupFile, sort=False, separators=(",", ":")) + "\n"
     ).encode()
     files[f"{path}/players.bin.gz"] = _gzip(b"".join(g.players for g in ghosts))
     files[f"{path}/events.bin.gz"] = _gzip(

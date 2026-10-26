@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import hashlib
-import json
 
 from configgle.launch import resolve_config
 from torch import Tensor, nn
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 import numpy as np
 import torch
@@ -124,7 +123,7 @@ def main() -> int:
         "step": from_plain(step["timer_step"], dict[str, object])["global_count"],
         **metrics,
     }
-    rendered = json.dumps(to_plain(result), indent=2) + "\n"
+    rendered = json_dumps(result, indent=2) + "\n"
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(rendered)

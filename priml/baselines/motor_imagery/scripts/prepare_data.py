@@ -19,12 +19,11 @@ from typing import Protocol, cast
 
 import argparse
 import hashlib
-import json
 import shutil
 import subprocess
 import zipfile
 
-from treekle import to_plain
+from treekle import json_dumps
 
 from priml.baselines.motor_imagery.experiments import exp000
 from priml.paths import validated_output_path
@@ -118,7 +117,7 @@ def stage_archive(archive: Path, *, directory: Path) -> None:
                 "sha256",
             ).hexdigest()
     (destination / "manifest.json").write_text(
-        json.dumps(to_plain(manifest), indent=2) + "\n",
+        json_dumps(manifest, indent=2) + "\n",
     )
 
 

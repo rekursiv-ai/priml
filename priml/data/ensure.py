@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from urllib import request
 
 import contextlib
-import datetime
+import datetime as dt
 import enum
 import fcntl
 import hashlib
@@ -279,7 +279,7 @@ def _archive_dir(target_dir: Path) -> None:
     """Move a corrupt target aside to ``<dir>.corrupt.<utc_ts>``."""
     if not target_dir.exists():
         return
-    stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
     archived = target_dir.with_name(f"{target_dir.name}.corrupt.{stamp}")
     logger.warning("ensure_data: archiving corrupt %s -> %s", target_dir, archived)
     shutil.move(str(target_dir), str(archived))
@@ -363,7 +363,7 @@ def _write_marker(target_dir: Path) -> None:
     """Stamp the completion marker after the manifest has fully verified."""
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / _SETTINGS.marker_name).write_text(
-        datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S%fZ") + "\n",
+        dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ") + "\n",
     )
 
 

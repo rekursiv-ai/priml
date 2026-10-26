@@ -82,7 +82,12 @@ def prepare_model(config: ModelFiles.Config) -> None:
             "files": digests,
         }
         (staged / "source.json").write_text(
-            json.dumps(to_plain(record), indent=2, allow_nan=False) + "\n",
+            json.dumps(
+                to_plain(record, target=AssetManifest),
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n",
         )
         staged.rename(directory)
     config.make()

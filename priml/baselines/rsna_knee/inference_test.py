@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING, cast, override
 
 import csv
 import hashlib
-import json
 import math
 import os
 import re
 import shutil
 
 from torch import Tensor, nn
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -962,7 +961,7 @@ def _change(path: Path, keys: tuple[str, ...], value: object) -> None:
         parents[-1][key] = child
         parents.append(child)
     parents[-1][keys[-1]] = value
-    path.write_text(json.dumps(to_plain(data)))
+    path.write_text(json_dumps(data))
 
 
 @pytest.mark.parametrize(
@@ -1135,7 +1134,7 @@ def test_inactive_rows_do_not_skip_later_adopted_rows_and_baker_volume_is_valid(
         asset = json_loads(path.read_text(), dict[str, object])
         classes = from_plain(asset["classes"], dict[str, dict[str, object]])
         asset["classes"] = {"inactive": dict(classes[name], adopt=False), **classes}
-        path.write_text(json.dumps(to_plain(asset)))
+        path.write_text(json_dumps(asset))
     _change(
         _path(config.fluid_file),
         ("classes", "Effusion", "volume_column"),

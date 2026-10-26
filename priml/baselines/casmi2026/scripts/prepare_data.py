@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, TypedDict, cast
 
 import argparse
-import json
 
-from treekle import from_plain, to_plain
+from treekle import from_plain, json_dumps
 
 from priml.baselines.casmi2026.isolated import (
     ADMISSION_DIR,
@@ -217,9 +216,7 @@ def prepare(
             "key": record.key if record is not None else "",
             "raw_key": record.raw_key if record is not None else "",
             "metric_key": record.metric_key if record is not None else "",
-            "composition": json.dumps(
-                to_plain(record.composition if record is not None else ()),
-            ),
+            "composition": json_dumps(record.composition if record is not None else ()),
         }
         for name, item in row.items():
             columns[name].append(item)

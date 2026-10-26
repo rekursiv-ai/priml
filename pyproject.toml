@@ -3,7 +3,7 @@
 
 [project]
 name = "priml"
-version = "0.1.7"
+version = "0.1.8"
 description = "Malleable ML building blocks for training experiments."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,7 +23,8 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.3.1",
+    # 0.3.3 adds `to_plain(target=...)` and `json_dumps(target=...)`.
+    "treekle>=0.3.3",
     # torch
     "torch==2.11.0",
     "torchao==0.17.0",

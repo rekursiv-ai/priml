@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-import json
 import math
 import sys
 
 from pyarrow import Table, parquet
-from treekle import ReadError, to_plain
+from treekle import ReadError, json_dumps
 
 import numpy as np
 import pytest
@@ -894,7 +893,7 @@ def test_complete_prepared_rows_keep_first_duplicate_and_need_no_rdkit(
         tmp_path / "graphs.parquet",
     )
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
     table = GapGraphTable.Config(working_dir=tmp_path).make()
     first = table.for_smiles("mixture")
@@ -923,7 +922,7 @@ def test_complete_prepared_rows_keep_first_duplicate_and_need_no_rdkit(
         with pytest.raises(IndexError, match=f"^{index}$"):
             _ = table.row(index)
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 2, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 2, "rdkit": IDENTITY_RDKIT}),
     )
     with pytest.raises(
         ValueError,
@@ -931,7 +930,7 @@ def test_complete_prepared_rows_keep_first_duplicate_and_need_no_rdkit(
     ):
         _ = GapGraphTable.Config(working_dir=tmp_path).make()
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": SIMULATOR_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": SIMULATOR_RDKIT}),
     )
     with pytest.raises(
         ValueError,
@@ -939,7 +938,7 @@ def test_complete_prepared_rows_keep_first_duplicate_and_need_no_rdkit(
     ):
         _ = GapGraphTable.Config(working_dir=tmp_path).make()
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": 20_260_303})),
+        json_dumps({"format_version": 1, "rdkit": 20_260_303}),
     )
     with pytest.raises(ReadError):
         _ = GapGraphTable.Config(working_dir=tmp_path).make()
@@ -974,7 +973,7 @@ def test_gap_reader_rejects_inconsistent_declared_graphs(
         tmp_path / "graphs.parquet",
     )
     _ = (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
     with pytest.raises(ValueError, match=r"^Inconsistent prepared gap graph\.$"):
         _ = GapGraphTable.Config(working_dir=tmp_path).make()

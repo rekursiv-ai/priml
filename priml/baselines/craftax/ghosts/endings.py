@@ -33,7 +33,7 @@ import argparse
 import dataclasses
 import json
 
-from treekle import from_plain
+from treekle import from_plain, to_plain
 
 from priml.baselines.craftax.game.state import (
     NUM_LEVELS,
@@ -86,7 +86,7 @@ def main() -> int:
                     "tier": name,
                     "root": str(root),
                     **counts,
-                    "episodes": [dataclasses.asdict(end) for end in ends],
+                    "episodes": to_plain(ends, target=list[Ending], sort=False),
                 },
             )
     output.parent.mkdir(parents=True, exist_ok=True)

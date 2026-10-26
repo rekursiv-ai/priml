@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING, NotRequired, Protocol, Self, TypedDict, cast, 
 
 import csv
 import hashlib
-import json
 import math
 import time
 
 from configgle import Fig, Makeable
 from numpy.typing import NDArray
 from torch import Tensor, nn
-from treekle import MutablePlainTree, from_plain, json_loads, to_plain
+from treekle import MutablePlainTree, from_plain, json_dumps, json_loads, to_plain
 
 import numpy as np
 import torch
@@ -1807,7 +1806,7 @@ def _correlations(
 
 
 def _json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(to_plain(value), indent=2) + "\n")
+    path.write_text(json_dumps(value, indent=2) + "\n")
 
 
 def _validate_predictions(predictions: NDArray[np.float32]) -> None:

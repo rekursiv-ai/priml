@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Self, override
 
 import dataclasses
 import hashlib
-import json
 import logging
 import math
 import struct
@@ -42,7 +41,7 @@ import time
 import zlib
 
 from configgle import Fig
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
@@ -328,7 +327,7 @@ class ReplayVerifier:
                 halt(cfg.root, shard=name, reason=verdict.mismatch)
                 raise ReplayMismatchError(f"{name}: {verdict.mismatch}")
             with self.log.open("a") as log:
-                log.write(json.dumps(to_plain(verdict)) + "\n")
+                log.write(json_dumps(verdict) + "\n")
             self.verified.add(name)
             verdicts.append(verdict)
             logger.info(

@@ -3,10 +3,9 @@
 from collections.abc import Sequence
 from pathlib import Path
 
-import json
 import sys
 
-from treekle import to_plain
+from treekle import json_dumps
 
 import pytest
 
@@ -390,7 +389,7 @@ def _publish(
                 sha256={},
                 provenance={"rollout_seed": rollout_seed} if rollout_seed else {},
             )
-            manifest.write(json.dumps(to_plain(line)) + "\n")
+            manifest.write(json_dumps(line) + "\n")
 
 
 def _names(root: Path, entries: Sequence[tuple[Path, ManifestLine]]) -> list[str]:

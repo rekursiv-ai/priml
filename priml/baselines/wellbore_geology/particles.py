@@ -8,13 +8,12 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
-import json
 import logging
 import math
 
 from configgle import Fig
 from numpy.typing import NDArray
-from treekle import to_plain
+from treekle import json_dumps
 from wrapt import lazy_import
 
 import numpy as np
@@ -1378,4 +1377,4 @@ def read_particle_cache(path: Path) -> dict[str, NDArray[np.generic]]:
 
 
 def _manifest_text(config: ParticlePrior.Config) -> str:
-    return json.dumps(to_plain(config), sort_keys=True)
+    return json_dumps(config, sort_keys=True)

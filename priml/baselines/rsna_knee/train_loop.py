@@ -8,14 +8,13 @@ from typing import TYPE_CHECKING, Final, Self, TypedDict, override
 
 import csv
 import hashlib
-import json
 import math
 import zlib
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 from torch.nn import functional
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 import torch
 
@@ -817,14 +816,12 @@ def export_run(
         for uid, prediction in zip(validation, predictions, strict=True):
             writer.writerow([uid, *(float(value) for value in prediction)])
     (output / "split.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "patient_ids_complete": prepared.patient_ids_complete,
-                    "groups": prepared.groups,
-                    "validation": validation,
-                },
-            ),
+        json_dumps(
+            {
+                "patient_ids_complete": prepared.patient_ids_complete,
+                "groups": prepared.groups,
+                "validation": validation,
+            },
             indent=2,
         )
         + "\n",

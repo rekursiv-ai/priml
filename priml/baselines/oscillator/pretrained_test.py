@@ -6,11 +6,10 @@ from pathlib import Path
 from pkgutil import resolve_name
 
 import hashlib
-import json
 
 from configgle import Fig, InlineConfig
 from torch import Tensor
-from treekle import json_loads, to_plain
+from treekle import json_dumps, json_loads
 
 import pytest
 import torch
@@ -39,7 +38,7 @@ def test_staged_model_files_are_pinned_and_checked(tmp_path: Path, bad: str) -> 
         record["files"]["../outside"] = "bad"
     else:
         (tmp_path / "model.safetensors").write_text("changed")
-    path.write_text(json.dumps(to_plain(record)))
+    path.write_text(json_dumps(record))
     with pytest.raises(ValueError, match=r"identity|manifest|digest"):
         cfg.make()
 
@@ -153,7 +152,7 @@ def _assets(path: Path) -> ModelFiles.Config:
             for name, content in files.items()
         },
     }
-    (path / "source.json").write_text(json.dumps(to_plain(record)))
+    (path / "source.json").write_text(json_dumps(record))
     return cfg
 
 

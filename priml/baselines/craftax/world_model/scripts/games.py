@@ -43,9 +43,8 @@ from typing import Protocol, cast
 
 import argparse
 import dataclasses
-import json
 
-from treekle import from_plain
+from treekle import from_plain, json_dumps
 
 from priml.baselines.craftax.world_model.archive import (
     Record,
@@ -108,7 +107,7 @@ def main() -> int:
     archive = flags.archive.absolute()
     ranking = rank(archive)
     if flags.command == "rank":
-        print(json.dumps(dataclasses.asdict(ranking), indent=2))
+        print(json_dumps(ranking, target=Ranking, sort=False, indent=2))
         return 0
     episode = flags.episode or ranking.best.episode
     record = read_episode(archive, episode)

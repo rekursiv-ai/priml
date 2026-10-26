@@ -6,10 +6,9 @@ from pathlib import Path
 
 import csv
 import hashlib
-import json
 import zlib
 
-from treekle import json_loads, to_plain
+from treekle import json_dumps, json_loads
 
 import pytest
 
@@ -90,7 +89,7 @@ def test_transfer_requires_complete_original_evidence_and_all_pixels(
             (config.source_dir / VERIFIED_FILES).read_bytes(),
         ).hexdigest(),
     }
-    original = json.dumps(to_plain(receipt)).encode()
+    original = json_dumps(receipt).encode()
     (config.source_dir / RECEIPT).write_bytes(original)
     unrelated_test = config.input_dir / "test_images/other/series/c.dcm"
     if fault == "missing":

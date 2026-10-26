@@ -5,14 +5,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
-import json
 import math
 import re
 import sys
 
 from pyarrow import Table, parquet
 from torch import Tensor
-from treekle import ReadError, from_plain, to_plain
+from treekle import ReadError, from_plain, json_dumps
 
 import numpy as np
 import pytest
@@ -479,7 +478,7 @@ def test_prepared_rows_require_every_field_and_preserve_first_duplicate(
     }
     for name, value in (("raw_bits", 16_552), ("ecfp4_bits", 4095)):
         (tmp_path / "manifest.json").write_text(
-            json.dumps(to_plain(header | {name: value})),
+            json_dumps(header | {name: value}),
         )
         with pytest.raises(
             ValueError,
@@ -491,9 +490,7 @@ def test_prepared_rows_require_every_field_and_preserve_first_duplicate(
         )
     for version, release in ((2, IDENTITY_RDKIT), (1, SIMULATOR_RDKIT)):
         (tmp_path / "manifest.json").write_text(
-            json.dumps(
-                to_plain(header | {"format_version": version, "rdkit": release}),
-            ),
+            json_dumps(header | {"format_version": version, "rdkit": release}),
         )
         with pytest.raises(ValueError, match=r"^PubChem data requires format") as error:
             PubChemTable(tmp_path)
@@ -501,7 +498,7 @@ def test_prepared_rows_require_every_field_and_preserve_first_duplicate(
             f"PubChem data requires format 1 and RDKit {IDENTITY_RDKIT}.",
         )
     (tmp_path / "manifest.json").write_text(
-        json.dumps(to_plain(header | {"format_version": True})),
+        json_dumps(header | {"format_version": True}),
     )
     with pytest.raises(ReadError):
         PubChemTable(tmp_path)
@@ -986,15 +983,13 @@ def write_pubchem_table(
     np.save(directory / "ecfp4.npy", np.packbits(raw[:, :4096], axis=1))
     np.save(directory / "raw_fp.npy", np.packbits(raw, axis=1))
     (directory / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "format_version": 1,
-                    "rdkit": IDENTITY_RDKIT,
-                    "raw_bits": 16_551,
-                    "ecfp4_bits": 4096,
-                },
-            ),
+        json_dumps(
+            {
+                "format_version": 1,
+                "rdkit": IDENTITY_RDKIT,
+                "raw_bits": 16_551,
+                "ecfp4_bits": 4096,
+            },
         ),
     )
     return smiles
@@ -1097,15 +1092,13 @@ def test_pubchem_constructor_keeps_every_store_row_model_state_and_strict_chemis
         np.arange(4138, dtype=np.uint8).reshape(2, 2069),
     )
     (chemistry_dir / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "format_version": 1,
-                    "rdkit": IDENTITY_RDKIT,
-                    "raw_bits": 16_551,
-                    "ecfp4_bits": 4096,
-                },
-            ),
+        json_dumps(
+            {
+                "format_version": 1,
+                "rdkit": IDENTITY_RDKIT,
+                "raw_bits": 16_551,
+                "ecfp4_bits": 4096,
+            },
         ),
     )
     config.bank = save_bank(tmp_path, [0, 1])

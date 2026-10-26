@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypedDict, cast, get_type_hints
 
-import json
 import math
 import pickle
 import sys
 
 from numpy.typing import NDArray
 from pyarrow import Table, parquet
-from treekle import ReadError, from_plain, to_plain
+from treekle import ReadError, from_plain, json_dumps
 
 import numpy as np
 import pytest
@@ -317,7 +316,7 @@ def test_complete_reader_and_malformed_graph_boundaries(
         np.save(path, correct)
     for version, release in ((2, IDENTITY_RDKIT), (1, SIMULATOR_RDKIT)):
         _ = (directory / "manifest.json").write_text(
-            json.dumps(to_plain({"format_version": version, "rdkit": release})),
+            json_dumps({"format_version": version, "rdkit": release}),
         )
         with pytest.raises(ValueError, match="Analog data requires format 1"):
             _ = AnalogTable(directory)
@@ -353,7 +352,7 @@ def _write_graphs(directory: Path) -> None:
     ):
         np.save(directory / f"{name}.npy", values)
     _ = (directory / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
 
 
@@ -911,7 +910,7 @@ def _reaction_data_write(
         Table.from_pydict({"name": ["a", "b"]}),
         directory / "rules.parquet",
     )
-    (directory / "manifest.json").write_text(json.dumps(to_plain(manifest)))
+    (directory / "manifest.json").write_text(json_dumps(manifest))
 
 
 class _Staged(TypedDict):
@@ -1004,14 +1003,12 @@ def test_complete_proposals_have_explicit_empty_headers_and_no_runtime_sdk(
         tmp_path / "rules.parquet",
     )
     (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "format_version": 1,
-                    "rdkit": IDENTITY_RDKIT,
-                    "default_products": 60,
-                },
-            ),
+        json_dumps(
+            {
+                "format_version": 1,
+                "rdkit": IDENTITY_RDKIT,
+                "default_products": 60,
+            },
         ),
     )
     table = ReactionTable(tmp_path)

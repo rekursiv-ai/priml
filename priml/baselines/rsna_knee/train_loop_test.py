@@ -8,13 +8,12 @@ from typing import cast
 
 import csv
 import hashlib
-import json
 import os
 import zlib
 
 from configgle import InlineConfig, traverse
 from torch import Tensor, nn
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -116,7 +115,7 @@ def test_consumer_requires_exact_verified_selected_inventory(
             (evidence / VERIFIED_FILES).read_bytes(),
         ).hexdigest(),
     }
-    (evidence / RECEIPT).write_text(json.dumps(to_plain(receipt)))
+    (evidence / RECEIPT).write_text(json_dumps(receipt))
     if fault == "extra":
         (raw / "train_images/study/series/extra.dcm").write_bytes(b"extra")
     elif fault == "digest":
@@ -533,20 +532,18 @@ def _publish_inventory(
             expected.writerow(row)
             actual.writerow([*row, hashlib.sha256(payload).hexdigest()])
     (acquisition_dir / RECEIPT).write_text(
-        json.dumps(
-            to_plain(
-                {
-                    "complete": complete,
-                    "input_dir": str(input_dir.resolve()),
-                    "files": len(paths),
-                    "inventory_sha256": hashlib.sha256(
-                        (acquisition_dir / SELECTED_FILES).read_bytes(),
-                    ).hexdigest(),
-                    "verified_sha256": hashlib.sha256(
-                        (acquisition_dir / VERIFIED_FILES).read_bytes(),
-                    ).hexdigest(),
-                },
-            ),
+        json_dumps(
+            {
+                "complete": complete,
+                "input_dir": str(input_dir.resolve()),
+                "files": len(paths),
+                "inventory_sha256": hashlib.sha256(
+                    (acquisition_dir / SELECTED_FILES).read_bytes(),
+                ).hexdigest(),
+                "verified_sha256": hashlib.sha256(
+                    (acquisition_dir / VERIFIED_FILES).read_bytes(),
+                ).hexdigest(),
+            },
         ),
     )
 

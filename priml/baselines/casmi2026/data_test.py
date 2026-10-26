@@ -18,7 +18,7 @@ import tempfile
 import types
 
 from pyarrow import Table, parquet
-from treekle import from_plain, json_loads, to_plain
+from treekle import from_plain, json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -417,7 +417,7 @@ def test_native_cold_cache_and_every_verified_output_without_rdkit(
     config = _config(tmp_path)
     preparation = config.make()
     assert not preparation.cache_ready()
-    with patch.object(data_module, "to_plain", wraps=to_plain) as plain:
+    with patch.object(data_module, "json_dumps", wraps=json_dumps) as plain:
         preparation.run()
     assert preparation.cache_ready()
     assert any(call.kwargs.get("dialect") == "python" for call in plain.call_args_list)
@@ -455,10 +455,7 @@ def test_native_cold_cache_and_every_verified_output_without_rdkit(
     for name in before.column_names:
         assert before.column(name).to_pylist() == after.column(name).to_pylist()
     assert after.column("metric_identity").to_pylist() == [
-        json.dumps(
-            to_plain(identities.identity(smiles), dialect="python"),
-            separators=(",", ":"),
-        )
+        json_dumps(identities.identity(smiles), dialect="python", separators=(",", ":"))
         for smiles in from_plain(before.column("smiles").to_pylist(), list[str])
     ]
     receipt = json_loads(
@@ -4462,7 +4459,7 @@ def test_pool_refuses_missing_chemistry_and_misaligned_provided_assets(
     # prepare_second_pool requires the same one-byte packed cache width.
     np.save(fingerprint_dir / "fingerprints.npy", np.zeros((2, 1), dtype=np.uint8))
     metadata = {"format_version": 1, "rdkit": IDENTITY_RDKIT}
-    _ = (fingerprint_dir / "manifest.json").write_text(json.dumps(to_plain(metadata)))
+    _ = (fingerprint_dir / "manifest.json").write_text(json_dumps(metadata))
     with pytest.raises(KeyError, match="unprepared"):
         prepare_second_pool(
             training,
@@ -4505,7 +4502,7 @@ def test_pool_refuses_missing_chemistry_and_misaligned_provided_assets(
             )
         np.save(path, correct)
     metadata["format_version"] = 2
-    _ = (fingerprint_dir / "manifest.json").write_text(json.dumps(to_plain(metadata)))
+    _ = (fingerprint_dir / "manifest.json").write_text(json_dumps(metadata))
     with pytest.raises(
         ValueError,
         match=r"^Fingerprint cache requires format 1 and RDKit 2026\.03\.3\.$",
@@ -4522,7 +4519,7 @@ def test_pool_refuses_missing_chemistry_and_misaligned_provided_assets(
         training,
     )
     metadata["format_version"] = True
-    _ = (fingerprint_dir / "manifest.json").write_text(json.dumps(to_plain(metadata)))
+    _ = (fingerprint_dir / "manifest.json").write_text(json_dumps(metadata))
     with pytest.raises(ValueError, match="cannot read True as int"):
         prepare_second_pool(
             training,
@@ -4574,7 +4571,7 @@ def test_pool_stable_ties_readonly_fingerprints_and_bounded_projection(
         fingerprints / "fingerprints.parquet",
     )
     _ = (fingerprints / "manifest.json").write_text(
-        json.dumps(to_plain({"format_version": 1, "rdkit": IDENTITY_RDKIT})),
+        json_dumps({"format_version": 1, "rdkit": IDENTITY_RDKIT}),
     )
     parquet.write_table(
         Table.from_pydict(

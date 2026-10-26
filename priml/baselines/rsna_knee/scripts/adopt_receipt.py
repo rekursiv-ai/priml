@@ -6,11 +6,10 @@ from pathlib import Path
 from typing import Self, override
 
 import hashlib
-import json
 import shutil
 
 from configgle import Fig
-from treekle import from_plain, to_plain
+from treekle import from_plain, json_dumps
 
 from priml.baselines.rsna_knee.train_loop import (
     ORIGINAL_RECEIPT,
@@ -90,12 +89,12 @@ class ReceiptAdoption:
             shutil.copyfile(config.source_dir / name, output / name)
         (output / ORIGINAL_RECEIPT).write_bytes(original)
         (output / TRANSFER).write_text(
-            json.dumps(to_plain(provenance), indent=2) + "\n",
+            json_dumps(provenance, indent=2) + "\n",
         )
         receipt["input_dir"] = str(config.input_dir.resolve())
         receipt["transfer_source_receipt_sha256"] = source_digest
         (output / RECEIPT).write_text(
-            json.dumps(to_plain(receipt), indent=2) + "\n",
+            json_dumps(receipt, indent=2) + "\n",
         )
 
 

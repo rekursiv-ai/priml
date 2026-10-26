@@ -10,13 +10,12 @@ from unittest.mock import patch
 
 import hashlib
 import importlib
-import json
 import math
 import sys
 import types
 
 from pyarrow import Table, parquet
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -278,7 +277,7 @@ def observe_identity(table: IdentityTable) -> list[tuple[object, ...]]:
                 table.key(value),
                 row["standard_key"],
                 table.formula(value),
-                json.dumps(to_plain(table.identity(value)), separators=(",", ":")),
+                json_dumps(table.identity(value), separators=(",", ":")),
                 row["standard_metric"],
                 table.properties(standardized) if standardized is not None else None,
                 None if fingerprint is None else fingerprint.tolist(),
@@ -325,10 +324,7 @@ def test_complete_identity_and_product_table_without_rdkit(
             assert table.key(standardized) == row["standard_key"]
             assert table.formula(standardized) == row["standard_formula"]
             assert (
-                json.dumps(
-                    to_plain(table.identity(standardized)),
-                    separators=(",", ":"),
-                )
+                json_dumps(table.identity(standardized), separators=(",", ":"))
                 == row["standard_metric"]
             )
     assert table.key("*C") is None
@@ -382,7 +378,7 @@ def test_identity_rows_preserve_first_duplicate_and_reject_malformed_layouts(
         {"format_version": 1, "rdkit": SIMULATOR_RDKIT, "raw_bits": 16_551},
         {"format_version": 1, "rdkit": IDENTITY_RDKIT, "raw_bits": 16_552},
     ):
-        (tmp_path / "manifest.json").write_text(json.dumps(to_plain(header)))
+        (tmp_path / "manifest.json").write_text(json_dumps(header))
         with pytest.raises(
             ValueError,
             match=r"^Identity data requires format 1, RDKit 2026\.03\.3 and 16551 bits\.$",
@@ -401,7 +397,7 @@ def test_identity_types_partial_failures_and_restricted_numpy_loading(
     for field in ("metric", "standard_metric"):
         write_identity(tmp_path)
         rows = [dict(row) for row in identity_rows()]
-        rows[0][field] = json.dumps(to_plain((123, ())))
+        rows[0][field] = json_dumps((123, ()))
         parquet.write_table(Table.from_pylist(rows), tmp_path / "molecules.parquet")
         with pytest.raises(ReadError):
             IdentityTable.Config(working_dir=tmp_path).make()
@@ -614,9 +610,7 @@ def test_runtime_reads_all_staged_identities_without_rdkit(tmp_path: Path) -> No
                 "key": [row[3] if row else "" for row in prepared],
                 "raw_key": [row[3] if row else "" for row in prepared],
                 "metric_key": [row[3] if row else "" for row in prepared],
-                "composition": [
-                    json.dumps(to_plain(row[4] if row else ())) for row in prepared
-                ],
+                "composition": [json_dumps(row[4] if row else ()) for row in prepared],
             },
         ),
         tmp_path / "structures.parquet",
