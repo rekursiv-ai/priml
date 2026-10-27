@@ -25,6 +25,7 @@ from priml.baselines.oscillator.adaptation import (
     ObservedGeometry,
     ObservedNeuralForecast,
 )
+from priml.baselines.oscillator.hidden import HiddenData, HiddenDomain
 from priml.baselines.oscillator.regimes import DynamicsDomain, RegimeData
 from priml.model.custom_types import propagate_attr
 from priml.paths import validated_output_path
@@ -68,7 +69,9 @@ class RegimeFamily:
         name: str = "in_domain"
         """Result label, not an implementation selector."""
 
-        domain: DynamicsDomain.Config = field(default_factory=DynamicsDomain.Config)
+        domain: DynamicsDomain.Config | HiddenDomain.Config = field(
+            default_factory=DynamicsDomain.Config,
+        )
         """Coefficients sampled after the observed change."""
 
         seed: int = 3301
@@ -128,7 +131,9 @@ class RegimeBenchmark:
         phase: Literal["development", "audit"] = "development"
         """Evaluation collection; audit uses independently reserved streams."""
 
-        data: RegimeData.Config = field(default_factory=RegimeData.Config)
+        data: RegimeData.Config | HiddenData.Config = field(
+            default_factory=RegimeData.Config,
+        )
         """Motion, schedule, and variables exposed to a method."""
 
         train_episodes: int = 256
@@ -379,7 +384,7 @@ class RegimeBenchmark:
         self,
         method: ObservedForecaster,
         *,
-        data: RegimeData,
+        data: RegimeData | HiddenData,
         scale: Tensor,
     ) -> tuple[dict[str, EpisodeScores], dict[str, float]]:
         """Keep evaluator-only parameters outside the forecaster's input."""
@@ -391,9 +396,10 @@ class RegimeBenchmark:
             episode = data.sample(
                 count=family.episodes,
                 seed=family.seed,
-                domain=family.domain,
+                domain=family.domain,  # pyright: ignore[reportArgumentType]
             )
-            target = episode.windows.label[..., 0]
+            # Clean position: observations may carry sensor noise, scores never do.
+            target = episode.states[:, cfg.data.seq_len :, 0]
             prediction = method.predict(episode.windows.media)
             if (
                 prediction.shape != episode.windows.label.shape

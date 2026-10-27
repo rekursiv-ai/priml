@@ -3,6 +3,8 @@
 [Part two](PART_TWO.md) adds episode-specific dynamics, hidden velocity, and
 changes inside the observed history. It includes matched observation controls
 and larger-data and longer-training checks in `exp041` through `exp048`.
+[Part three](PART_THREE.md) hides a coupled second mass, adds sensor noise and
+unannounced changes, and reserves new mechanisms for audit in `exp049`–`exp050`.
 
 This is a preliminary comparison for the proposed forecasting benchmark. It
 establishes ordinary forecasting controls before adding an agent that chooses

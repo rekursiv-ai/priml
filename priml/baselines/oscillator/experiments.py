@@ -27,6 +27,7 @@ from priml.baselines.oscillator.forces import (
     PowerForce,
     WeightedForce,
 )
+from priml.baselines.oscillator.hidden import HiddenData, HiddenDomain, LibraryShooting
 from priml.baselines.oscillator.mechanisms import (
     CoupledDrag,
     SaturatingForce,
@@ -1302,4 +1303,81 @@ def exp048() -> RegimeCampaign.Config:
         for recipe in study.recipes:
             if isinstance(recipe.method, ObservedNeuralForecast.Config):
                 recipe.method.step.train_budget_steps *= 4
+    return cfg
+
+
+def exp049() -> RegimeBenchmark.Config:
+    """Forecast one noisy coordinate of a mass coupled to an unobserved partner.
+
+    Hypothesis:
+      Sensor noise, a hidden coupled state and an unannounced change (or none)
+      defeat both pooled forecasters and part two's recent cubic identification,
+      while a reference fitting the declared mechanism library shows the
+      observations still determine much of the future.
+
+    References:
+      exp044 for the noiseless single-mass task this extends.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp044()
+    cfg.experiment_name = "exp049"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.data = HiddenData.Config()
+    cfg.recipes = [
+        r
+        for r in cfg.recipes
+        if r.name not in ("fixed_physics", "whole_history_physics")
+    ]
+    shooting = ObservedRecipe.Config()
+    shooting.name = "library_shooting"
+    shooting.method = LibraryShooting.Config()
+    shooting.seeds = [2021]
+    cfg.recipes.append(shooting)
+    cfg.comparisons = [(recipe.name, "dlinear") for recipe in cfg.recipes[1:]]
+    cfg.comparisons += [
+        ("library_shooting", "ridge"),
+        ("library_shooting", "history_net"),
+    ]
+    cfg.development = [RegimeFamily.Config(domain=HiddenDomain.Config())]
+
+    coupling = RegimeFamily.Config(name="strong_coupling", seed=20261101)
+    coupling.domain = HiddenDomain.Config(coupling=(0.6, 1.0))
+    friction = RegimeFamily.Config(name="dry_friction", seed=20261102)
+    friction.domain = HiddenDomain.Config(friction=(0.06, 0.12))
+    # Matched frequencies make energy slosh between the masses (beating).
+    resonant = RegimeFamily.Config(name="resonant_partner", seed=20261103)
+    resonant.domain = HiddenDomain.Config(
+        stiffness=(0.95, 1.05),
+        partner_stiffness=(0.95, 1.05),
+        coupling=(0.3, 0.5),
+        partner_damping=(0.0, 0.01),
+    )
+    hardening = RegimeFamily.Config(name="hardening", seed=20261104)
+    hardening.domain = HiddenDomain.Config(stiffness=(2.0, 3.0), cubic=(0.8, 1.5))
+    cfg.audit = [coupling, friction, resonant, hardening]
+    return cfg
+
+
+def exp050() -> RegimeBenchmark.Config:
+    """exp049 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods that only interpolate the training ranges fail on stronger
+      coupling, dry friction, resonance and hardening; an improvement counts
+      only if it holds on these families generated after fitting.
+
+    References:
+      exp049.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp049()
+    cfg.experiment_name = "exp050"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
     return cfg

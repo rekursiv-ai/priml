@@ -54,7 +54,7 @@ def test_each_experiment_names_itself_and_pins_no_seed() -> None:
     assert ForecastStudy.Config().experiment_name == ""
     assert ForecastStudy.Config().seed is None
     names = [name for name in vars(experiments) if name.startswith("exp")]
-    assert set(names) == {f"exp{index:03d}" for index in range(49)} | {"exp_smoke"}
+    assert set(names) == {f"exp{index:03d}" for index in range(51)} | {"exp_smoke"}
     for name in names:
         cfg = resolve_config(f"{experiments.__name__}.{name}")
         if isinstance(cfg, RegimeCampaign.Config):

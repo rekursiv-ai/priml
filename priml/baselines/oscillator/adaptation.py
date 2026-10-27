@@ -14,6 +14,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.etth1.model import DLinear
+from priml.baselines.oscillator.regimes import RegimeDynamics
 from priml.cost import Cost, cost
 from priml.loss.simple_loss import SimpleLoss, mse
 from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
@@ -23,7 +24,8 @@ from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
-    from priml.baselines.oscillator.regimes import ObservedWindows, RegimeDynamics
+    from priml.baselines.oscillator.hidden import HiddenDynamics
+    from priml.baselines.oscillator.regimes import ObservedWindows
 
 
 @runtime_checkable
@@ -43,7 +45,7 @@ class ObservedForecaster(Protocol):
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics,
     ) -> dict[str, int | float]:
         """Return the fitting budget and any model-selection diagnostics."""
         ...
@@ -286,7 +288,7 @@ class ObservedNeuralForecast:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics,
     ) -> dict[str, int | float]:
         """Normalize on training only and restore the best validation state."""
         del dynamics
@@ -387,7 +389,7 @@ class ObservedRidge:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics,
     ) -> dict[str, int | float]:
         """Fit without reading validation targets or any test episode."""
         del validation, dynamics
@@ -461,11 +463,17 @@ class RecentPhysics:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics,
     ) -> dict[str, int | float]:
         """Take only time geometry; the equation form is a declared prior."""
         del validation
-        self.dynamics = dynamics
+        # The prior is the cubic single-mass law, whatever generated the data.
+        self.dynamics = RegimeDynamics(
+            RegimeDynamics.Config(
+                step_size=dynamics.config.step_size,
+                substeps=dynamics.config.substeps,
+            ),
+        )
         self.pred_len = train.label.shape[1]
         return {"attempted_updates": 0}
 
@@ -597,7 +605,7 @@ class LastObservation:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics,
     ) -> dict[str, int | float]:
         """Record the output length without fitting any parameters."""
         del validation, dynamics
