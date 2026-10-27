@@ -109,6 +109,8 @@ def test_config_goldens_pin_defaults_and_hidden_velocity_propagation() -> None:
 
 def test_factories_isolate_observation_schedule_phase_and_data_budget() -> None:
     base, position, change, combined = exp041(), exp042(), exp043(), exp044()
+    assert isinstance(position.data, RegimeData.Config)
+    assert isinstance(change.data, RegimeData.Config)
     assert isinstance(position.data.observation, PositionObservation.Config)
     assert isinstance(change.data.schedule, ObservedChange.Config)
     for declaration, parent, attribute in (
@@ -469,6 +471,7 @@ def test_invalid_recipe_family_and_comparison_declarations_fail() -> None:
     with pytest.raises(ValueError, match="families"):
         RegimeFamily.Config(episodes=0).make()
     cfg = _small_study()
+    assert isinstance(cfg.data, RegimeData.Config)
     cfg.data.observation = cast("Makeable[Observation]", PartialConfig(torch.clone))
     with pytest.raises(TypeError, match="declare its channels"):
         cfg.make()

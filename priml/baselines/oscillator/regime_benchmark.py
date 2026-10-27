@@ -396,7 +396,7 @@ class RegimeBenchmark:
             episode = data.sample(
                 count=family.episodes,
                 seed=family.seed,
-                domain=family.domain,  # pyright: ignore[reportArgumentType]
+                domain=family.domain,
             )
             # Clean position: observations may carry sensor noise, scores never do.
             target = episode.states[:, cfg.data.seq_len :, 0]

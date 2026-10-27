@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import math
 
-from configgle import Fig
+from configgle import Fig, Makeable
 from torch import Tensor
 
 import torch
@@ -16,6 +16,8 @@ from priml.baselines.oscillator.regimes import EvaluatorEpisodes, ObservedWindow
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from priml.baselines.oscillator.regimes import RegimeDynamics
 
 
@@ -218,7 +220,7 @@ class HiddenData:
         *,
         count: int,
         seed: int,
-        domain: HiddenDomain.Config | None = None,
+        domain: Makeable[Callable[[Tensor], Tensor]] | None = None,
     ) -> EvaluatorEpisodes:
         """Generate a pool; larger counts keep the smaller pool as a prefix.
 
@@ -358,7 +360,9 @@ class LibraryShooting:
         upper = torch.tensor(cfg.upper, dtype=torch.float64)
         generator = torch.Generator().manual_seed(cfg.seed)
         start = torch.rand(
-            batch * restarts, COEFFICIENTS + 2, generator=generator
+            batch * restarts,
+            COEFFICIENTS + 2,
+            generator=generator,
         ).double()
         # First restart of each episode starts from mid-range coefficients.
         start[::restarts] = 0.5

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import math
 
@@ -13,6 +13,10 @@ from torch import Tensor
 import torch
 
 from priml.baselines.oscillator.data import STATE_CHANNELS
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class Observation(Protocol):
@@ -274,7 +278,7 @@ class RegimeData:
         *,
         count: int,
         seed: int,
-        domain: DynamicsDomain.Config | None = None,
+        domain: Makeable[Callable[[Tensor], Tensor]] | None = None,
     ) -> EvaluatorEpisodes:
         """Generate an independent pool without exposing its latent parameters.
 

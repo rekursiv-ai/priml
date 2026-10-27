@@ -50,7 +50,11 @@ from priml.baselines.oscillator.regime_benchmark import (
     RegimeCampaign,
     RegimeFamily,
 )
-from priml.baselines.oscillator.regimes import ObservedChange, PositionObservation
+from priml.baselines.oscillator.regimes import (
+    ObservedChange,
+    PositionObservation,
+    RegimeData,
+)
 from priml.baselines.oscillator.sequence import (
     PatchSequence,
     RbfKernel,
@@ -1174,6 +1178,7 @@ def exp042() -> RegimeBenchmark.Config:
     cfg = exp041()
     cfg.experiment_name = "exp042"
     cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    assert isinstance(cfg.data, RegimeData.Config)
     cfg.data.observation = PositionObservation.Config()
     return cfg
 
@@ -1196,6 +1201,7 @@ def exp043() -> RegimeBenchmark.Config:
     cfg = exp041()
     cfg.experiment_name = "exp043"
     cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    assert isinstance(cfg.data, RegimeData.Config)
     cfg.data.schedule = ObservedChange.Config()
     return cfg
 
@@ -1217,6 +1223,7 @@ def exp044() -> RegimeBenchmark.Config:
     cfg = exp043()
     cfg.experiment_name = "exp044"
     cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    assert isinstance(cfg.data, RegimeData.Config)
     cfg.data.observation = PositionObservation.Config()
     return cfg
 

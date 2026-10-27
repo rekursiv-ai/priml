@@ -10,6 +10,7 @@ from priml.baselines.oscillator.hidden import (
     LibraryShooting,
     NoisyPosition,
 )
+from priml.baselines.oscillator.regimes import RegimeDynamics
 
 
 def test_pool_is_nested_and_streams_are_distinct() -> None:
@@ -98,7 +99,7 @@ def test_shooting_recovers_noiseless_motion_and_rejects_other_physics() -> None:
         method.fit(
             episode.windows,
             validation=episode.windows,
-            dynamics=RecentPhysics,  # pyright: ignore[reportArgumentType]
+            dynamics=RegimeDynamics(RegimeDynamics.Config()),
         )
 
 
