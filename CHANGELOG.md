@@ -17,6 +17,17 @@ All notable priml changes are documented here. This project follows
   pre-commit gates that use it, to `tools/gate/` at the repository root, which
   the wheel does not ship.
 
+### Fixed
+
+- `TopK.state_dict` returns a copy of the per-`k` counts, so a snapshot no
+  longer changes as the metric keeps updating.
+- `TrainLoop` refuses `num_steps_log < 1` at construction instead of dividing
+  by zero at the first logged step.
+- `resized_dims` floors in integers, so the capped edge reaches `max_dim`: a
+  277x139 image under a 224 cap is 224x112, not 223x112.
+- `EpochTrainLoop` runs with the default `max_epochs = inf`. Eval policies take
+  `total_epochs` as a float, and an unbounded run has no last epoch.
+
 ## 0.1.7 - 2026-10-21
 
 ### Added

@@ -891,6 +891,17 @@ def test_construction_rejects_a_nan_limit(name: str) -> None:
         config.make()
 
 
+def test_construction_rejects_a_zero_log_cadence() -> None:
+    config = TrainLoop.Config(
+        step=_eval_only_step_config(),
+        dataset=_BinaryDataset.Config(),
+    )
+    config.num_steps_log = 0
+
+    with pytest.raises(ValueError, match=r"^num_steps_log must be at least 1"):
+        config.make()
+
+
 def _resume_table_config(checkpoint_dir: Path):
     """Return a minimal trainable config writing into ``checkpoint_dir``."""
     cfg = TrainLoop.Config(
