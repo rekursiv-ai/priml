@@ -31,9 +31,17 @@ print (edge cases, cited steps, regularity).
   - [Slutsky and the delta method](delta-method-slutsky.md)
 - Change of measure and Gaussians
   - [Change of variables](change-of-variables.md)
-  - [Stein's lemma](stein-lemma.md)
   - [Gaussian conditioning](gaussian-conditioning.md)
+- Stein identities (integration by parts against a density)
+  - [Stein's lemma](stein-lemma.md)
+  - [Stein identity and score matching](stein-identity.md)
+  - [Second-order Stein and Hermite polynomials](stein-second-order.md)
+  - [Bonnet and Price](bonnet-price.md)
+  - [Gaussian Poincaré inequality](gaussian-poincare.md)
+- Gradient estimators
   - [Reparameterization vs score function](reparameterization-vs-score.md)
+  - [Antithetic and orthogonal perturbations](antithetic-orthogonal.md)
+  - [Control variates](control-variates.md)
 - Martingales
   - [Optional stopping](optional-stopping.md)
   - [Doob's maximal inequality](doob-maximal.md)
@@ -167,6 +175,7 @@ scale (geometry).
 - Stochastic approximation
   - [Robbins–Monro](robbins-monro.md)
   - [Polyak–Tsypkin: the optimal nonlinearity](polyak-tsypkin.md)
+  - [Two-timescale tracking](two-timescale-tracking.md)
 - Beyond smooth gradients
   - [Subgradient method](subgradient-method.md)
   - [Frank–Wolfe](frank-wolfe.md)
@@ -182,6 +191,7 @@ scale (geometry).
 
 - Unbiased estimation
   - [Cramér–Rao](cramer-rao.md)
+  - [A-optimal design](a-optimal-design.md)
   - [Rao–Blackwell](rao-blackwell.md)
   - [Lehmann–Scheffé](lehmann-scheffe.md)
   - [Fisher–Neyman factorization](factorization.md)
