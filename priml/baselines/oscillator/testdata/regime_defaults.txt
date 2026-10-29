@@ -1,0 +1,105 @@
+RegimeBenchmark.Config(
+        experiment_name='exp041',
+        working_dir=PosixPath('/opt/scratch/artifacts/oscillator/exp041'),
+        phase='development',
+        data=RegimeData.Config(
+            seq_len=96,
+            pred_len=64,
+            dynamics=RegimeDynamics.Config(step_size=0.05, substeps=8),
+            domain=DynamicsDomain.Config(
+                stiffness=(0.5, 2.0),
+                damping=(0.05, 0.3),
+                cubic=(0.0, 0.6)
+            ),
+            observation=StateObservation.Config(),
+            schedule=StationaryRegime.Config(),
+            amplitude=(0.3, 1.5),
+            velocity=0.5
+        ),
+        train_episodes=256,
+        validation_episodes=64,
+        scoring_episodes=256,
+        train_seed=1_101,
+        validation_seed=2_201,
+        recipes=[
+        │   ObservedRecipe.Config(
+        │       name='dlinear',
+        │       method=ObservedNeuralForecast.Config(
+        │       │   step=TrainStep.Config(
+        │       │   │   model=ObservedDLinear.Config(
+        │       │   │       model=DLinear.Config(
+        │       │   │           seq_len=96,
+        │       │   │           pred_len=64,
+        │       │   │           channels=2,
+        │       │   │           decomposition=SeriesDecomposition.Config(
+        │       │   │               moving_average=MovingAverage.Config(kernel_size=25)
+        │       │   │           ),
+        │       │   │           seasonal=MeanLinear.Config(
+        │       │   │               channels_in=96,
+        │       │   │               channels_out=64,
+        │       │   │               bias=True
+        │       │   │           ),
+        │       │   │           trend=MeanLinear.Config(
+        │       │   │               channels_in=96,
+        │       │   │               channels_out=64,
+        │       │   │               bias=True
+        │       │   │           ),
+        │       │   │           decoder=ReferenceLinear.Config(
+        │       │   │               channels_in=96,
+        │       │   │               channels_out=64,
+        │       │   │               bias=True
+        │       │   │           )
+        │       │   │       )
+        │       │   │   ),
+        │       │   │   optimizer=PartialConfig(
+        │       │   │       <class 'torch.optim.adam.Adam'>,
+        │       │   │       lr=0.001
+        │       │   │   ),
+        │       │   │   loss=SimpleLoss.Config(
+        │       │   │       loss_fn=priml.loss.simple_loss.mse,
+        │       │   │       target_key='label',
+        │       │   │       kwargs={'reduction': 'none'},
+        │       │   │       channels_out=-1
+        │       │   │   ),
+        │       │   │   accumulate_grad_batches=1,
+        │       │   │   drop_partial_accumulation_on_epoch_end=True,
+        │       │   │   train_budget_steps=1_200,
+        │       │   │   train_budget_sec=inf,
+        │       │   │   train_budget_epochs=inf,
+        │       │   │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │       │   │   parallelism=NoParallel.Config(device='cpu'),
+        │       │   │   model_quantization=NoModelQuantization.Config(),
+        │       │   │   activation_memoization=DefaultActivationStorage.Config(),
+        │       │   │   compile=None,
+        │       │   │   ema=NoEMA.Config(),
+        │       │   │   gradient_clip_norm=inf,
+        │       │   │   skip_step_on_nonfinite_grad=False,
+        │       │   │   device_init='eager',
+        │       │   │   dtype_autocast=None,
+        │       │   │   autocast_cache_enabled=False
+        │       │   ),
+        │       │   batch_size=32,
+        │       │   validation_every=50,
+        │       │   sample_seed=606
+        │       ),
+        │       seeds=[2_021, 2_022, 2_023]
+        │   )
+        ],
+        comparisons=[],
+        development=[
+            RegimeFamily.Config(
+                name='in_domain',
+                domain=DynamicsDomain.Config(
+                    stiffness=(0.5, 2.0),
+                    damping=(0.05, 0.3),
+                    cubic=(0.0, 0.6)
+                ),
+                seed=3_301,
+                episodes=32
+            )
+        ],
+        audit=[],
+        resamples=2_000,
+        bootstrap_seed=8_041,
+        threads=1
+    )

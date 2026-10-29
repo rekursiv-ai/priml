@@ -37,6 +37,7 @@ from priml.baselines.oscillator.nonlinear import (
     NeuralForecast,
     PolynomialKernel,
 )
+from priml.baselines.oscillator.regime_benchmark import RegimeBenchmark, RegimeCampaign
 from priml.baselines.oscillator.suite import BenchmarkSuite
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 from priml.model.init import unit_fan_in_uniform
@@ -53,9 +54,15 @@ def test_each_experiment_names_itself_and_pins_no_seed() -> None:
     assert ForecastStudy.Config().experiment_name == ""
     assert ForecastStudy.Config().seed is None
     names = [name for name in vars(experiments) if name.startswith("exp")]
-    assert set(names) == {f"exp{index:03d}" for index in range(41)} | {"exp_smoke"}
+    assert set(names) == {f"exp{index:03d}" for index in range(51)} | {"exp_smoke"}
     for name in names:
         cfg = resolve_config(f"{experiments.__name__}.{name}")
+        if isinstance(cfg, RegimeCampaign.Config):
+            assert name in {"exp045", "exp046", "exp047", "exp048"}
+            continue
+        if isinstance(cfg, RegimeBenchmark.Config):
+            assert cfg.experiment_name == name
+            continue
         if name == "exp040":
             assert isinstance(cfg, BenchmarkSuite.Config)
             assert all(recipe.study.seed is None for recipe in cfg.recipes)
