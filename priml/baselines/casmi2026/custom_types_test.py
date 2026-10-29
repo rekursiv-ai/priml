@@ -72,26 +72,26 @@ def test_gap_graph_is_frozen_slotted_keyword_only() -> None:
 
 def test_candidate_and_engine_result_hold_given_fields() -> None:
     candidates = CandidateSet(
-        smiles=("C",),
-        keys=("k",),
-        formulas=("CH4",),
-        pool_rows=np.array([0], np.int64),
-        generated=np.array([False]),
-        sources=("lib",),
+        smiles=("C", "CC"),
+        keys=("k1", "k2"),
+        formulas=("CH4", "C2H6"),
+        pool_rows=np.array([0, 3], np.int64),
+        generated=np.array([False, True]),
+        sources=("lib", "gen"),
     )
-    diagnostics = EngineDiagnostics(n_cand=1, lib_max=0.5, top_sim=0.25, fzmax=2.0)
+    diagnostics = EngineDiagnostics(n_cand=2, lib_max=0.5, top_sim=0.25, fzmax=2.0)
     result = EngineResult(
         candidates=candidates,
-        features=np.zeros((1, 2), np.float32),
-        feature_names=("a", "b"),
-        scores=np.array([0.1]),
+        features=np.zeros((2, 3), np.float32),
+        feature_names=("a", "b", "c"),
+        scores=np.array([0.1, 0.2]),
         diagnostics=diagnostics,
     )
     assert result.candidates is candidates
     assert result.diagnostics.n_gen == 0
-    assert result.feature_names == ("a", "b")
+    assert result.feature_names == ("a", "b", "c")
     assert diagnostics == EngineDiagnostics(
-        n_cand=1,
+        n_cand=2,
         lib_max=0.5,
         top_sim=0.25,
         fzmax=2.0,

@@ -153,7 +153,7 @@ def test_fingerprints_require_the_isolated_release(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "selected",
     [
-        np.zeros((2, 2), dtype=np.int64),
+        np.zeros((2, 3), dtype=np.int64),
         np.array([1, 2], dtype=np.int32),
         np.array([], dtype=np.int64),
         np.array([-1, 2], dtype=np.int64),
@@ -295,6 +295,7 @@ def test_pool_rejects_a_cache_of_another_format_or_release(
 @pytest.mark.parametrize(
     "packed",
     [
+        # prepare_second_pool packs the five _SELECTED bits into a width of 1 byte.
         np.zeros((3, 1), dtype=np.uint8),
         np.zeros((4, 2), dtype=np.uint8),
         np.zeros((4, 1), dtype=np.int16),
@@ -316,7 +317,7 @@ def test_pool_rejects_provided_fingerprints_whose_shape_differs(
     name: str,
 ) -> None:
     staged = _stage(tmp_path)
-    np.save(tmp_path / name / f"{name}_fp.npy", np.zeros((2, 2), dtype=np.uint8))
+    np.save(tmp_path / name / f"{name}_fp.npy", np.zeros((2, 3), dtype=np.uint8))
     with pytest.raises(ValueError, match=r"^Provided fingerprint rows or packed width"):
         _assemble(staged, tmp_path / "out")
 

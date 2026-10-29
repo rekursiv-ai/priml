@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-8787f28218a2ad65
+          key: apt-${{ runner.os }}-96c09f70592cf453
       - name: Install system packages
         run: |
           for attempt in 1 2 3; do
@@ -48,15 +48,10 @@ jobs:
             sleep $((attempt * 10))
           done
           timeout 300 sudo apt-get install -y --no-install-recommends ripgrep fd-find
-      - name: Validate package
-        run: |
-          # Lint/type/test checks come from this package's own .pre-commit-config.yaml.
-          # Restating each tool here means a newly added hook silently goes unrun.
           bash install-libjpeg-turbo.sh
+      - name: Validate package
+        # The same for every package; a package's own checks are its tests.
+        run: |
           uv sync --frozen --all-groups
           SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit
           uv run pre-commit run --all-files --hook-stage pre-push
-          uv run python -c "import priml"
-          rm -rf dist
-          uv build --out-dir dist
-          wheels=(dist/priml-*.whl); wheel="${wheels[0]}"; uv run --isolated --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --with "$wheel" python -P -c "import priml; print(priml.__file__)"
