@@ -45,6 +45,19 @@ function frameSummary(frames) {
   };
 }
 
+// manifest_json leaves out each field at its default (exact.py's and bundle.py's
+// Manifest), the schema among them; a model bundle is the one with annotations.
+const EXACT_DEFAULTS = { schema: 'craftax-exact-game/v1' };
+const MODEL_DEFAULTS = {
+  schema: 'craftax-model-game/v1', source: 'model', tick: 0, achievements: 0,
+  absent: ['tick', 'position', 'map', 'mobs', 'achievements', 'entity_health'],
+  referenceFrames: null, referenceSha256: null, referenceGzipSha256: null,
+};
+
+function withDefaults(manifest) {
+  return { ...('annotations' in manifest ? MODEL_DEFAULTS : EXACT_DEFAULTS), ...manifest };
+}
+
 function verifiedPayload(directory, name, label, rawSha, gzipSha, bytes) {
   const compressed = fs.readFileSync(path.join(directory, `${name}.bin.gz`));
   if (crypto.createHash('sha256').update(compressed).digest('hex') !== gzipSha) {
@@ -81,7 +94,7 @@ function build(flags, directories) {
     throw Error('--default-game must be first or last');
   }
   const games = directories.map(directory => {
-    const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
+    const manifest = withDefaults(JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8')));
     const model = manifest.schema === 'craftax-model-game/v1';
     if (!model && manifest.schema !== 'craftax-exact-game/v1') throw Error(`Wrong schema: ${directory}`);
     const compressed = fs.readFileSync(path.join(directory, 'frames.bin.gz'));

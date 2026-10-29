@@ -157,6 +157,32 @@ test('build a self-contained page from an exact and a model bundle', () => {
   }
 });
 
+test('build reads bundles whose manifests leave out each field at its default', () => {
+  // manifest_json leaves out each field at its default (exact.py, bundle.py), the schema too.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'craftax-defaults-test-'));
+  try {
+    const exact = path.join(root, 'exact');
+    writeExactBundle(exact, { schema: undefined });
+    const model = path.join(root, 'model');
+    const full = writeModelBundle(model, { reference: false });
+    const defaults = {
+      schema: undefined, source: undefined, tick: undefined, achievements: undefined, absent: undefined,
+      referenceFrames: undefined, referenceSha256: undefined, referenceGzipSha256: undefined,
+    };
+    fs.writeFileSync(path.join(model, 'manifest.json'), JSON.stringify({ ...full, ...defaults }));
+    const page = path.join(root, 'page.html');
+    run('build', '--output', page, exact, model);
+    const games = embeddedGames(fs.readFileSync(page, 'utf8'));
+    assert.deepEqual(games.map(game => game.kind), ['exact', 'model']);
+    assert.equal(games[1].source, 'model');
+    assert.deepEqual(games[1].absent, ['tick', 'position', 'map', 'mobs', 'achievements', 'entity_health']);
+    assert.equal(games[1].tick, 0);
+    assert.equal(games[1].referenceGzip, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('build embeds model bundles with verified token and reference payloads', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'craftax-model-test-'));
   try {

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import cast
 
 import dataclasses
-import json
 import re
 import struct
 import sys
@@ -310,8 +309,9 @@ def test_damaged_snapshots_fail_their_checksum(tmp_path: Path) -> None:
 def test_frame_shard_lines_read_as_stride_zero(tmp_path: Path) -> None:
     line = write_shard(tmp_path, index=0, episodes=[_episode(3, seed=1)], provenance={})
     text = json_loads((tmp_path / "MANIFEST.jsonl").read_text(), dict[str, object])
-    del text["snapshot_stride"]
-    (tmp_path / "MANIFEST.jsonl").write_text(json.dumps(text) + "\n")
+    # A stride at its default of 0 is left out of the line, as treekle leaves
+    # out every field at its default.
+    assert "snapshot_stride" not in text
     assert read_manifest(tmp_path) == [line]
     assert line.snapshot_stride == 0
     (summary,) = read_summaries(tmp_path, line)

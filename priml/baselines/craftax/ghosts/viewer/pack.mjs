@@ -36,10 +36,28 @@ function listFiles(dir, prefix = '') {
   });
 }
 
+// The policy-view bundle schemas the panel reads: v2 adds each frame's
+// projectile facings.
+const POLICY_SCHEMAS = ['craftax-policy-view/v1', 'craftax-policy-view/v2'];
+
+// policy_view.py's Manifest defaults: manifest_json leaves a field at its default
+// out, the schema and a bundle without sleep frames among them.
+const POLICY_DEFAULTS = {
+  schema: 'craftax-policy-view/v2', sleepStride: null, sleeps: [], sleepFrames: 0, sleepFramesSha256: null, sleepGzipSha256: null,
+};
+
+// A policy-view bundle's manifest, its left-out fields read as their defaults, and
+// its decision frames, once they are the ones it describes.
+export function readPolicy(bundle) {
+  const policy = { ...POLICY_DEFAULTS, ...JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8')) };
+  const bytes = fs.readFileSync(path.join(bundle, 'policy-view.bin.gz'));
+  if (!POLICY_SCHEMAS.includes(policy.schema) || crypto.createHash('sha256').update(bytes).digest('hex') !== policy.gzipSha256) throw Error(`${bundle} does not hold the policy-view bundle its manifest describes.`);
+  return { policy, bytes };
+}
+
 // The policy bundle's files, once it is the run a wins set pins.
 function policyFiles(data, manifest, bundle) {
-  const policy = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8')), bytes = fs.readFileSync(path.join(bundle, 'policy-view.bin.gz'));
-  if (!['craftax-policy-view/v1', 'craftax-policy-view/v2'].includes(policy.schema) || crypto.createHash('sha256').update(bytes).digest('hex') !== policy.gzipSha256) throw Error(`${bundle} does not hold the policy-view bundle its manifest describes.`);
+  const { policy, bytes } = readPolicy(bundle);
   const pinned = manifest.tiers.flatMap(t => t.sets).filter(s => s.time_map?.unbroken != null).map(s => {
     const group = s.groups.find(g => g.first <= s.time_map.unbroken && s.time_map.unbroken < g.first + g.count);
     return JSON.parse(fs.readFileSync(path.join(data, group.path, 'episodes.json'), 'utf8')).episodes[s.time_map.unbroken - group.first];

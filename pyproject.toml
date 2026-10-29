@@ -24,7 +24,8 @@ classifiers = [
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
     # 0.3.3 adds `to_plain(target=...)` and `json_dumps(target=...)`.
-    "treekle>=0.3.3",
+    # 0.4.1 leaves dataclass fields at their defaults out of trees.
+    "treekle>=0.4.1",
     # torch
     "torch==2.11.0",
     "torchao==0.17.0",
@@ -112,7 +113,7 @@ typecheck = [
     "basedpyright>=1.40.1",
     "pyrefly>=1.4.0",
     "ty>=0.0.84",
-    "rekursiv-ai-typings>=0.1.6",
+    "rekursiv-ai-typings>=0.1.11",
     "safetensors",
 ]
 "pre-commit" = [
