@@ -5,7 +5,7 @@ editable `UnlearningMethod`, and scores retained accuracy, forget accuracy and
 a membership-inference AUC. The method becomes the slot `method` of
 `MachineUnlearning.Config`; everything else is fixed by the harness and is a
 field only so it prints. Pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  retain-only finetuning, ResNet-20 on CIFAR-10   (pristine)

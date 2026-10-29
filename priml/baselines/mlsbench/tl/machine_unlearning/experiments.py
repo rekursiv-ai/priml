@@ -19,7 +19,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data --dataset cifar10
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.tl.machine_unlearning.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def exp000() -> MachineUnlearning.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``security-machine-unlearning`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 
@@ -105,7 +105,7 @@ def exp001() -> MachineUnlearning.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``retain_finetune`` of ``security-machine-unlearning`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -129,7 +129,7 @@ def exp002() -> MachineUnlearning.Config:
         Net: Selective Forgetting in Deep Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``negative_gradient`` of ``security-machine-unlearning`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -154,7 +154,7 @@ def exp003() -> MachineUnlearning.Config:
         Unlearning in Deep Networks using an Incompetent Teacher."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``bad_teacher`` of ``security-machine-unlearning`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -179,7 +179,7 @@ def exp004() -> MachineUnlearning.Config:
         Kurmanji et al. 2023, "Towards Unbounded Machine Unlearning."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``scrub`` of ``security-machine-unlearning`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -203,7 +203,7 @@ def exp005() -> MachineUnlearning.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100-class0`` of ``security-machine-unlearning``
-        at commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        at commit b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1409.1556
         Simonyan and Zisserman 2015, "Very Deep Convolutional Networks for
         Large-Scale Image Recognition."
@@ -236,7 +236,7 @@ def exp006() -> MachineUnlearning.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist-class0`` of ``security-machine-unlearning``
-        at commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        at commit b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1801.04381
         Sandler et al. 2018, "MobileNetV2: Inverted Residuals and Linear
         Bottlenecks."

@@ -5,7 +5,7 @@ holds the pristine scorer, and one baseline's edit replaces it. ``write_clone``
 is shared with the capture's tests.
 
 The driver it stands in for, whose repository publishes no license:
-https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__security-backdoor-defense/tests/meta/pristine/pytorch-vision/bench/backdoor/run_backdoor_defense.py
+https://github.com/Imbernoulli/MLS-Bench/blob/b873944969c53b01e4ee6e843c77767b8c702485/harbor/tasks-docker/mls-bench__security-backdoor-defense/tests/meta/pristine/pytorch-vision/bench/backdoor/run_backdoor_defense.py
 """
 
 from __future__ import annotations

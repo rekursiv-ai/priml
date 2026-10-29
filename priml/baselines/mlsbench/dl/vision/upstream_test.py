@@ -7,7 +7,7 @@ tests, which need the same clone, and ``SCRIPT`` with the task packages, whose
 stand-ins are edits of it.
 
 The script it stands in for, whose repository publishes no license:
-https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__cv-classification-loss/tests/meta/pristine/pytorch-vision/custom_loss.py
+https://github.com/Imbernoulli/MLS-Bench/blob/b873944969c53b01e4ee6e843c77767b8c702485/harbor/tasks-docker/mls-bench__cv-classification-loss/tests/meta/pristine/pytorch-vision/custom_loss.py
 """
 
 from __future__ import annotations

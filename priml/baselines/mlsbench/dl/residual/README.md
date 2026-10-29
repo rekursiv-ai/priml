@@ -3,7 +3,7 @@
 The task's editable `CustomBlock` becomes `step.model.block`, a slot of
 `ResNet.Config` holding one block template or one config per position. All
 three settings are ported, pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`. The recipe is the
+`b873944969c53b01e4ee6e843c77767b8c702485`. The recipe is the
 `cv-classification-loss` recipe (see `../vision/`), so `exp000` is that
 task's `exp000` under a new study name.
 

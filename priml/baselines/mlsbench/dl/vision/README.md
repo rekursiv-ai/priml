@@ -2,7 +2,7 @@
 
 The data, model, training step and recipe the
 [MLS-Bench](https://github.com/Imbernoulli/MLS-Bench) DL tasks share, pinned to
-MLS-Bench commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`. They port the
+MLS-Bench commit `b873944969c53b01e4ee6e843c77767b8c702485`. They port the
 `pytorch-vision` training script as `cv-classification-loss` ships it,
 unedited, at its `resnet56-cifar100` setting. Every DL task's script is a
 variant of that script, so each task package in `mlsbench/dl/` forks `exp000`
@@ -49,7 +49,7 @@ established at the component level below.
 
 ```bash
 git clone https://github.com/Imbernoulli/MLS-Bench.git /opt/scratch/mlsbench
-git -C /opt/scratch/mlsbench checkout 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c
+git -C /opt/scratch/mlsbench checkout b873944969c53b01e4ee6e843c77767b8c702485
 uv --quiet run --frozen python priml/baselines/mlsbench/dl/vision/scripts/capture_reference.py --root /opt/scratch/mlsbench --out priml/baselines/mlsbench/dl/vision/testdata
 ```
 

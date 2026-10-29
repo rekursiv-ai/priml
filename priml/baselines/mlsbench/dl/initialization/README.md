@@ -4,7 +4,7 @@ The task's editable `initialize_weights(model, config)` becomes slots of
 `ResNet.Config`: the per-tensor `init_conv` and `init_head`, and `init`, which
 runs on the built network afterwards for a rule that needs its structure
 (Fixup). Setting `resnet56-cifar100`, MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  normal, std 0.01 (the pristine script)
