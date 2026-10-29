@@ -842,6 +842,20 @@ var GhostDecode = (() => {
     return { j, per, index, files };
   }
 
+  // layout.py's TimeRule defaults: build.py leaves a field at its default out of
+  // manifest.json, so a rule at its defaults is written as {}.
+  const TIME_RULE = { steps: 5000, levels: [[2, 8], [2, 4], [1, 4], [1, 2], [0, 2], [0, 1], [0, 0]] };
+
+  // manifest.json with each time rule's left-out fields read as their defaults.
+  function withDefaults(manifest) {
+    const mapped = map => map && { ...map, rule: { ...TIME_RULE, ...map.rule } };
+    const tiers = manifest.tiers.map(tier => ({
+      ...tier,
+      sets: tier.sets.map(set => ({ ...set, time_map: mapped(set.time_map), sleep_map: mapped(set.sleep_map) })),
+    }));
+    return { ...manifest, tiers };
+  }
+
   // Statistics over the displayed episodes, named as the manifest's stats.
   function summary(set) {
     const reached = new Array(FLOORS).fill(0), deaths = new Array(FLOORS).fill(0), outcomes = [0, 0, 0, 0];
@@ -860,7 +874,7 @@ var GhostDecode = (() => {
   return {
     MAP, FLOORS, CELLS, TILES, KEYFRAME, TRAIL, ITEMS, MAX_CREATURES, OCCUPANCY_SHIFT, OUTCOMES,
     parseWorld, parseEvents, parseKeeps, episodeSet, decodeEpisode, precompute, Playback, pathTail, returnAt, indexWindow, summary,
-    Timeline, realTime, parseTimeline, shortestWin, embedOptions, FOLLOWS, LAYOUTS,
+    Timeline, realTime, parseTimeline, shortestWin, embedOptions, FOLLOWS, LAYOUTS, withDefaults,
     decisionAt, stepOf, rewardCurves, curveAt, winSteps, wonBy, itemSprite, parseSleep, sampleAt, lightAt, torchLit, NEVER,
   };
 })();

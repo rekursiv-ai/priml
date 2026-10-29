@@ -43,6 +43,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { readPolicy } from './pack.mjs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -73,14 +75,9 @@ export function writeData({ site, out, tier: tierName = 'boss', set: setName = '
   return { files: [...names, 'manifest.json', 'sprites.png'], followed: episodes[followedIndex(set, episodes)] ?? null };
 }
 
-// The policy-view bundle schemas the panel reads: v2 adds each frame's
-// projectile facings.
-const POLICY_SCHEMAS = ['craftax-policy-view/v1', 'craftax-policy-view/v2'];
-
 // The policy view's bundle, added to the data once it is the followed run's.
 export function addPolicy({ data, bundle }) {
-  const policy = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8')), bytes = fs.readFileSync(path.join(bundle, 'policy-view.bin.gz'));
-  if (!POLICY_SCHEMAS.includes(policy.schema) || sha(bytes) !== policy.gzipSha256) throw Error(`${bundle} does not hold the policy-view bundle its manifest describes.`);
+  const { policy, bytes } = readPolicy(bundle);
   const manifest = JSON.parse(fs.readFileSync(path.join(data, 'manifest.json'), 'utf8')), set = manifest.tiers[0].sets[0];
   const episodes = set.groups.flatMap(g => JSON.parse(fs.readFileSync(path.join(data, g.path, 'episodes.json'), 'utf8')).episodes);
   const followed = episodes[followedIndex(set, episodes)];

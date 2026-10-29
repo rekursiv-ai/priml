@@ -473,6 +473,30 @@ test('the blog data follows the shortest win and refuses a policy view of anothe
   assert.ok(fs.readFileSync(path.join(out, 'policy-view.bin.gz')).equals(bytes));
 });
 
+test('a policy view whose manifest leaves out each field at its default is read with them', () => {
+  // policy_view.py's Manifest: the schema and a bundle without sleep frames are its defaults.
+  const out = path.join(root, 'blog-defaults'), { followed } = writeData({ site: synthetic, out, tier: 'high', set: 'all', count: 3 });
+  const bundle = path.join(root, 'policy-defaults'), bytes = zlib.gzipSync(Buffer.from('frames'));
+  fs.mkdirSync(bundle);
+  fs.writeFileSync(path.join(bundle, 'policy-view.bin.gz'), bytes);
+  fs.writeFileSync(path.join(bundle, 'manifest.json'), JSON.stringify({
+    gzipSha256: crypto.createHash('sha256').update(bytes).digest('hex'), samplingSeed: followed.sampling_seed, decisions: followed.decisions,
+  }));
+  assert.equal(addPolicy({ data: out, bundle }).index, followed.index);
+});
+
+test('the site manifest\'s time rules read their defaults where it leaves them out', () => {
+  // layout.py's TimeRule: a rule at its defaults is written as {}.
+  const context = {};
+  vm.runInNewContext(fs.readFileSync(path.join(here, 'decode.js'), 'utf8'), context);
+  const manifest = { tiers: [{ sets: [{ time_map: { rule: {} }, sleep_map: { rule: { steps: 7 } } }, { time_map: null }] }] };
+  const filled = context.GhostDecode.withDefaults(manifest);
+  assert.equal(filled.tiers[0].sets[0].time_map.rule.steps, 5000);
+  assert.equal(filled.tiers[0].sets[0].time_map.rule.levels.length, 7);
+  assert.equal(filled.tiers[0].sets[0].sleep_map.rule.steps, 7);
+  assert.equal(filled.tiers[0].sets[1].time_map, null);
+});
+
 test('the blog data of a time-mapped set carries its time maps and follows its pinned run', () => {
   const out = path.join(root, 'blog-wins'), { files, followed } = writeData({ site: synthetic, out, tier: 'high', set: 'wins', count: 3 });
   assert.equal(followed.index, 0);

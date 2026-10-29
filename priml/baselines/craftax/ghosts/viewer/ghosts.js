@@ -1753,7 +1753,7 @@
     app.heatCanvas = Object.assign(document.createElement('canvas'), { width: MAP, height: FLOORS * MAP });
     app.heatImage = new ImageData(MAP, FLOORS * MAP);
     buildPanels();
-    app.manifest = await loadJson('manifest.json');
+    app.manifest = D.withDefaults(await loadJson('manifest.json'));
     if (!FORMATS.includes(app.manifest.format)) throw Error(`manifest.json is ${app.manifest.format}, not one of ${FORMATS.join(', ')}.`);
     app.world = D.parseWorld(await loadFile('world.bin.gz'));
     for (let f = 0; f < FLOORS; f++) drawBase(f);
