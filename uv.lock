@@ -327,15 +327,15 @@ wheels = [
 
 [[package]]
 name = "configgle"
-version = "1.4.5"
+version = "1.4.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "treekle" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/be/1f/e512ec69da1b251d3266942854e5b5fedc21810cadf90a868c5de88e7579/configgle-1.4.5.tar.gz", hash = "sha256:8ab94a76dcb7eeb4a2c0d895d9fb50585491486d035a618dc94bec4b1affe7ae", size = 311270, upload-time = "2026-10-26T11:18:56.733Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/1d/b6c07c1c39d35441dd9dcb62ce5b89f29fe4c0bffa9a5d45c3753561bcc5/configgle-1.4.6.tar.gz", hash = "sha256:d66bf20c14e5cedf210def16ee30320016df08fd60eb465dba25eda6a217374e", size = 312524, upload-time = "2026-10-29T06:31:28.723Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/f6/8cb78ded91755aeb53f12f506f714c9c71bba8577d77663d81215db819a2/configgle-1.4.5-py3-none-any.whl", hash = "sha256:7f44dafcb1311365bda541527c0489ff715b5a771d0b32cf4c24fd8435073c4d", size = 85347, upload-time = "2026-10-26T11:18:55.328Z" },
+    { url = "https://files.pythonhosted.org/packages/06/bf/29b076548aa76ff8ebe3ad43a42a83d5dbaf8d0582293c08477f6eb01365/configgle-1.4.6-py3-none-any.whl", hash = "sha256:9f5333cd10934481d27f2ba6e3b0cf60faeeb43739905c7004697cadbb20b2b4", size = 85931, upload-time = "2026-10-29T06:31:26.983Z" },
 ]
 
 [[package]]
