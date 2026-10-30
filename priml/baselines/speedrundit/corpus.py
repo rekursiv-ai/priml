@@ -179,18 +179,23 @@ def autoencoder_identity(
       sample: Whether the corpus stores a draw of each latent or its mode.
 
     Returns:
-      identity: Class, latent shape, draw-or-mode, and the encoding config tree.
+      identity: Class, latent shape, draw-or-mode, and the encoding config tree,
+        as finalized.
 
     Raises:
       ValueError: An encoding field holds a lambda or a closure, which print
         alike whatever they compute.
 
     """
+    # The finalized tree is what ``make`` builds; a preparer and a loader holding
+    # the same config before and after finalize would otherwise disagree on
+    # every value finalize derives.
+    finalized = config.copy_tree().finalize()
     return {
-        "class": _qualified(config),
-        "latent_shape": list(config.latent_shape()),
+        "class": _qualified(finalized),
+        "latent_shape": list(finalized.latent_shape()),
         "sample": sample,
-        "encoding": _encoding_identity(config),
+        "encoding": _encoding_identity(finalized),
     }
 
 

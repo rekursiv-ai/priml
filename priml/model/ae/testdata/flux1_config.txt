@@ -1,0 +1,41 @@
+AutoencoderKL.Config(
+        encoder=Encoder.Config(
+            channels_in=3,
+            channels_hidden=(128, 256, 512, 512),
+            blocks_per_stage=2,
+            attention=(False, False, False, False),
+            channels_latent=16,
+            num_groups=32,
+            eps=1e-06,
+            attn_kernel=SdpaFused.Config(),
+            proj_out=None,
+            checkpoint=HubFile.Config(
+                repo_id='black-forest-labs/FLUX.1-dev',
+                filename='ae.safetensors',
+                revision='3de623fc3c33e44ffbe2bad470d0f45bccf2eb21',
+                sha256='afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38'
+            ),
+            remap=priml.model.ae.kl.remap_ldm_state_dict
+        ),
+        decoder=Decoder.Config(
+            channels_out=3,
+            channels_hidden=(128, 256, 512, 512),
+            blocks_per_stage=3,
+            attention=(False, False, False, False),
+            channels_latent=16,
+            num_groups=32,
+            eps=1e-06,
+            attn_kernel=SdpaFused.Config(),
+            proj_in=None,
+            checkpoint=HubFile.Config(
+                repo_id='black-forest-labs/FLUX.1-dev',
+                filename='ae.safetensors',
+                revision='3de623fc3c33e44ffbe2bad470d0f45bccf2eb21',
+                sha256='afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38'
+            ),
+            remap=priml.model.ae.kl.remap_ldm_state_dict
+        ),
+        image_size=1_024,
+        patch_size=1,
+        latent_norm=ShiftScaleLatents.Config(shift=0.1159, scale=0.3611)
+    )

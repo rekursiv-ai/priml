@@ -30,7 +30,7 @@ from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.latent_codec import FloatCodec, ScalarTableCodec
 from priml.baselines.speedrundit.scripts import prepare_data
 from priml.model.ae.distribution import PointMass
-from priml.model.ae.invae_test import tiny
+from priml.model.ae.kl_test import tiny
 from priml.model.ae.latent_norm import LatentNormalizer, ScaleLatents
 
 

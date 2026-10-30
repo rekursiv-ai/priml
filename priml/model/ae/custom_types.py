@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from torch import Tensor
 
     import torch
@@ -51,3 +53,20 @@ class Decoder(Protocol):
 @runtime_checkable
 class Autoencoder(Encoder, Decoder, Protocol):
     """Both an encoder and a decoder."""
+
+
+class StateDictRemap(Protocol):
+    """Renames one half's published tensors to that half's ``state_dict`` names.
+
+    One per checkpoint layout, so a half reads any layout its config names.
+    """
+
+    def __call__(
+        self,
+        state: Mapping[str, Tensor],
+        /,
+        *,
+        half: str,
+    ) -> dict[str, Tensor]:
+        """Return ``half``'s tensors renamed; keys outside ``half`` are ignored."""
+        ...

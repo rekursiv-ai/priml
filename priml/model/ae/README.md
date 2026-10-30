@@ -48,6 +48,28 @@ Each header shows its default in parentheses; a blank cell = that default (the c
 | [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) |  | 24 | 8 | 32 | 128 |  | 4 | 1 | CausalConv3D | Diffusion | 319 | 417 | LTX-2.x Community |  |
 | [Cosmos CV8x8x8](https://huggingface.co/nvidia/Cosmos-0.1-Tokenizer-CV8x8x8) |  | 12 | 8 |  |  |  | 4 |  | CausalConv3D+attn | CausalConv3D+attn | 43 | 63 | NVIDIA Open Model |  |
 
+## Implemented
+
+Each factory returns a published config, weights pinned by revision and SHA-256.
+The `*_reference.pt` goldens replay each reference's own outputs bit for bit.
+
+| Model | Factory | Reference replayed |
+|---|---|---|
+| InVAE / E2E-InVAE | `kl.invae()` | |
+| SD1.x ft-mse-840000 (EMA) | `kl.sd_ft_mse()` | CompVis `ldm` @ `21f890f` |
+| SDXL-VAE | `kl.sdxl()`, `kl.sdxl_fp16_fix()` | |
+| FLUX.1 | `kl.flux1()` | BFL `flux` @ `802fb47` |
+| FLUX.2 | `kl.flux2()` | BFL `flux2` @ `50fe516` |
+| TAESD / TAESDXL | `taesd.taesd()`, `taesd.taesdxl()` | `taesd` @ `fdbae2d` |
+| Wan2.1 | `wan.wan21()`, `wan.wan21_comfy()` | Wan2.1 @ `9737cba` |
+| Wan2.2 | `wan.wan22()`, `wan.wan22_comfy()` | Wan2.2 @ `1ea34ff` |
+| Mochi 1 | `mochi.mochi()`, `mochi.mochi_comfy()` | mochi @ `15c9bad` |
+| VTP | `vtp.vtp_small()`, `vtp.vtp_base()`, `vtp.vtp_large()` | VTP @ `5ce1eb6` |
+| RAE DINOv2-B | `rae.rae_dinov2_base()` | RAE @ `a4d18c4` |
+
+SDXL's architecture is SD1.x's, computing its attention through SDPA as FLUX's
+does, so the two FLUX replays cover its arithmetic.
+
 ## Model notes
 
 ### FLUX.2

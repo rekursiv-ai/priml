@@ -1,4 +1,4 @@
-INVAE.Config(
+AutoencoderKL.Config(
         encoder=Encoder.Config(
             channels_in=3,
             channels_hidden=(128, 128, 256, 256, 512),
@@ -7,12 +7,29 @@ INVAE.Config(
             channels_latent=32,
             num_groups=32,
             eps=1e-06,
+            attn_kernel=LdmAttention.Config(),
+            proj_out=Conv2d.Config(
+                channels_in=64,
+                channels_out=64,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                dilation=1,
+                groups=1,
+                bias=True,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_
+            ),
             checkpoint=HubFile.Config(
                 repo_id='REPA-E/e2e-invae-hf',
                 filename='diffusion_pytorch_model.safetensors',
                 revision='523ddf74b061c01ed0aebb7904c6bdb2f33e06d0',
                 sha256='6b1f754e414a841893fd242ca233c5aeec4bbdb7d2eeab2f7956adf48742e500'
-            )
+            ),
+            remap=priml.model.ae.kl.remap_hf_state_dict
         ),
         decoder=Decoder.Config(
             channels_out=3,
@@ -22,13 +39,31 @@ INVAE.Config(
             channels_latent=32,
             num_groups=32,
             eps=1e-06,
+            attn_kernel=LdmAttention.Config(),
+            proj_in=Conv2d.Config(
+                channels_in=32,
+                channels_out=32,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                dilation=1,
+                groups=1,
+                bias=True,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_
+            ),
             checkpoint=HubFile.Config(
                 repo_id='REPA-E/e2e-invae-hf',
                 filename='diffusion_pytorch_model.safetensors',
                 revision='523ddf74b061c01ed0aebb7904c6bdb2f33e06d0',
                 sha256='6b1f754e414a841893fd242ca233c5aeec4bbdb7d2eeab2f7956adf48742e500'
-            )
+            ),
+            remap=priml.model.ae.kl.remap_hf_state_dict
         ),
         image_size=256,
+        patch_size=1,
         latent_norm=ScaleLatents.Config(scale=0.3099)
     )

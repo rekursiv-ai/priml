@@ -17,7 +17,7 @@ from priml.memory import convert_to_tensor
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from priml.math.custom_types import Tensorable
+    from priml.math.custom_types import Tensorable, TensorFn
 
 
 @functools.wraps(nn.functional.pad)
@@ -167,3 +167,22 @@ def as_batch_tensor(
     d = max(0, min_ndim - x.ndim)
     c = max(1 - max_ndim + x.ndim, 1 - d)
     return x.reshape(-1, *[1] * max(0, -c), *x.shape[max(0, c) :])
+
+
+def per_frame(fn: TensorFn, x: Tensor) -> Tensor:
+    """Apply an image map to every frame of a channel-first video.
+
+    Frames fold into the batch, ``[N, C, T, H, W]`` to ``[N T, C, H, W]``, and
+    back.
+
+    Args:
+      fn: Maps ``[N T, C, H, W]`` to ``[N T, C', H', W']``.
+      x: ``[N, C, T, H, W]`` video.
+
+    Returns:
+      y: ``[N, C', T, H', W']``.
+
+    """
+    b, _, t = x.shape[:3]
+    frames = fn(x.transpose(1, 2).flatten(0, 1))
+    return frames.unflatten(0, (b, t)).transpose(1, 2)

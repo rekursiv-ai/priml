@@ -156,9 +156,10 @@ storage changes the trained model is `exp004` against `exp003`.
 
 ## Autoencoders
 
-The implementations live in [`priml/model/ae`](../../model/ae): `INVAE`,
-`VTP`, and `RAE`. Each `encode` takes uint8 images and returns a distribution
-over raw latents: a Gaussian for INVAE, a point mass for VTP and RAE. The
+The implementations live in [`priml/model/ae`](../../model/ae): INVAE
+(`kl.invae()`, an `AutoencoderKL`), `VTP`, and `RAE`. Each `encode` takes
+uint8 images and returns a distribution over raw latents: a Gaussian for
+INVAE, a point mass for VTP and RAE. The
 corpus stores a draw by default, as the REG corpora do; set
 `dataset.source.sample = False` to store the mode. Each config states its
 latent shape and published normalizer.

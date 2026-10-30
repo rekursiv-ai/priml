@@ -3,6 +3,77 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- `priml.model.ae.kl`: the published SD-1.x, SDXL, FLUX.1, and FLUX.2
+  autoencoders, as configs of `AutoencoderKL` with pinned weights:
+  `sd_ft_mse()` (vae-ft-mse-840000, EMA), `sdxl()`, `sdxl_fp16_fix()`,
+  `flux1()`, and `flux2()`. `remap_ldm_state_dict` reads the latent-diffusion
+  tensor names SD, SDXL, and BFL's files use. Each half's attention is an
+  injected `attn_kernel`: `LdmAttention`, the reference's `bmm` arithmetic
+  INVAE always used, which refuses a causal mask, mask, window, scale, or
+  dropout it would not compute, or `SdpaFused`, as SDXL and FLUX compute it.
+  `AutoencoderKL.Config.patch_size` folds the latent into channels between
+  the halves, as FLUX.2 does. `testdata/kl_reference_{compvis,flux,flux2}.pt`
+  replay each reference's own outputs bit for bit.
+- `priml.model.ae.taesd`: `TAESD`, the tiny distilled stand-in for SD's VAEs,
+  with `taesd()` and `taesdxl()`. Deterministic: `encode` returns a
+  `PointMass` in SD's diffusion space (its latent scale is 1), and each half
+  loads its own published file. `testdata/taesd_reference.pt` replays the
+  reference's own outputs bit for bit, and `taesd.pt` freezes the port's
+  round trip.
+- `priml.model.ae.video`: `CausalVideoVAE`, the causal video KL autoencoder
+  around a family's halves: uint8 clips of `1 + k` times its time factor in
+  frames to a `DiagonalGaussian`, and latents back to RGB. Its `encoder` and
+  `decoder` slots take any `VideoEncoderConfig` / `VideoDecoderConfig`, as
+  `wan` and `mochi` supply them, and it refuses a stated clip it cannot
+  encode. `CausalConv3d`, configgleable and costed, is the causal
+  convolution both families build.
+- `priml.math.tensor.per_frame`: an image map applied to every frame of a
+  channel-first video.
+- `priml.model.ae.frozen_cost`: the forward-only elementwise costs and the
+  KL round trip's pixel and sampling tail every frozen autoencoder shares.
+- `priml.model.ae.wan`: Wan 2.1's and Wan 2.2's halves, with `wan21()` and
+  `wan22()` pinned to the float32 releases and `wan21_comfy()` /
+  `wan22_comfy()` to Comfy's bfloat16 / float16 repackagings. Clips are
+  `1 + 4k` frames, encoded and decoded whole: the reference's chunked caches
+  compute the same causal convolutions, and
+  `testdata/wan_reference_{21,22}.pt` replay both references bit for bit.
+  `temporal` is each stage's time factor, 1 or 2, as Mochi's is. Wan 2.2's
+  stage shortcuts are injected (`average_shortcut`, `duplicate_shortcut`).
+  Its latents normalize with the new `InverseStdLatents`. `testdata/wan21.pt`
+  and `wan22.pt` freeze the port's own round trip.
+- `priml.model.ae.mochi`: Mochi 1's asymmetric halves, with `mochi()` pinned
+  to genmo's float32 halves, each its own file, and `mochi_comfy()` to
+  Comfy's float16 repackaging. Clips are `1 + 6k` frames; the encoder reads
+  RGB with its Fourier features and attends causally along time.
+  `testdata/mochi_reference.pt` replays the reference's own outputs bit for
+  bit, and `mochi.pt` freezes the port's round trip. Its latents normalize
+  with the new `StdLatents`.
+- `priml.model.ae.latent_norm`: `ShiftScaleLatents` (FLUX.1's
+  `(z - shift) * scale`) and `BatchNormLatents` (FLUX.2's frozen batch norm,
+  read from the checkpoint).
+
+### Changed
+
+- `priml.model.ae.invae` is now `priml.model.ae.kl`: INVAE is one published
+  config, `invae()`, of the latent-diffusion `AutoencoderKL` it always was.
+  Its arithmetic is unchanged; `testdata/kl.pt` is the former `invae.pt`
+  byte for byte. Each half gains a projection slot (`Encoder.Config.proj_out`,
+  `Decoder.Config.proj_in`; diffusers' `quant_conv` and `post_quant_conv`,
+  `None` to omit) and a `remap` for its checkpoint's tensor names. `from_hf`
+  now honors `use_quant_conv` and `use_post_quant_conv`, omitting a
+  projection either sets false.
+  `INVAE.Config` becomes `AutoencoderKL.Config` (or `invae()`), and `REPO` /
+  `REVISION` become `INVAE_REPO` / `INVAE_REVISION`.
+- SpeedrunDiT: a corpus receipt names the autoencoder's finalized config, so
+  the preparer and the loader agree whichever side of finalize they hold it.
+  The INVAE config's class and fields changed, so an existing INVAE corpus
+  fails its receipt: delete its `corpus.json`, then record it again with
+  `prepare_data.py --receipt-only --source <imagenet>`. Nothing is re-encoded.
+
 ## 0.1.8 - 2026-10-26
 
 ### Changed

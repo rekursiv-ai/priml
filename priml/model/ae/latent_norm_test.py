@@ -11,10 +11,14 @@ import torch
 
 from priml.model.ae.checkpoint import LocalFile
 from priml.model.ae.latent_norm import (
+    BatchNormLatents,
     ChannelLatentStats,
     ElementwiseLatentStats,
+    InverseStdLatents,
     LatentNormalizer,
     ScaleLatents,
+    ShiftScaleLatents,
+    StdLatents,
 )
 
 
@@ -206,6 +210,117 @@ def test_statistics_files_are_required() -> None:
         _ = ElementwiseLatentStats.Config().make()
     with pytest.raises(ValueError, match="stats file"):
         _ = ChannelLatentStats.Config().make()
+
+
+def test_shift_scale_shifts_then_scales_and_back() -> None:
+    norm = ShiftScaleLatents.Config(shift=0.1159, scale=0.3611).make()
+    assert isinstance(norm, LatentNormalizer)
+    latent = _latent()
+    assert torch.equal(norm.normalize(latent), (latent - 0.1159) * 0.3611)
+    assert torch.equal(norm.denormalize(latent), latent / 0.3611 + 0.1159)
+
+
+@pytest.mark.parametrize(
+    ("shift", "scale", "match"),
+    [(0.0, 0.0, "nonzero"), (float("nan"), 1.0, "finite shift")],
+)
+def test_shift_scale_refuses_a_degenerate_pair(
+    shift: float,
+    scale: float,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _ = ShiftScaleLatents.Config(shift=shift, scale=scale).make()
+
+
+def _batch_norm_file(tmp_path: Path, **stats: Tensor) -> LocalFile.Config:
+    """Save statistics under ``bn.<name>``, as FLUX.2's checkpoint names them."""
+    path = tmp_path / "bn.pt"
+    torch.save({f"bn.{name}": value for name, value in stats.items()}, path)
+    return LocalFile.Config(path=path)
+
+
+def test_batch_norm_is_the_frozen_module_and_its_inverse(tmp_path: Path) -> None:
+    """The reference runs an eval ``BatchNorm2d``; leading dimensions pass through."""
+    generator = torch.Generator().manual_seed(1)
+    mean = torch.randn(3, generator=generator)
+    var = 0.5 + torch.rand(3, generator=generator)
+    stats = _batch_norm_file(tmp_path, running_mean=mean, running_var=var)
+    norm = BatchNormLatents.Config(stats=stats, eps=1e-4).make()
+    assert isinstance(norm, LatentNormalizer)
+    reference = torch.nn.BatchNorm2d(3, eps=1e-4, affine=False).eval()
+    assert reference.running_mean is not None
+    assert reference.running_var is not None
+    reference.running_mean.copy_(mean)
+    reference.running_var.copy_(var)
+    latent = torch.randn(2, 4, 3, 5, 6, generator=generator)
+    expected = reference(latent.flatten(0, 1)).unflatten(0, (2, 4))
+    assert torch.equal(norm.normalize(latent), expected)
+    inverse = latent * torch.sqrt(var.view(-1, 1, 1) + 1e-4) + mean.view(-1, 1, 1)
+    assert torch.equal(norm.denormalize(latent), inverse)
+
+
+def test_batch_norm_refuses_missing_or_misshapen_statistics(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="stats file"):
+        _ = BatchNormLatents.Config().make()
+    no_var = _batch_norm_file(tmp_path, running_mean=torch.zeros(3))
+    with pytest.raises(ValueError, match="running_var"):
+        _ = BatchNormLatents.Config(stats=no_var).make()
+    misshapen = _batch_norm_file(
+        tmp_path,
+        running_mean=torch.zeros(3),
+        running_var=torch.ones(4),
+    )
+    with pytest.raises(ValueError, match="shape"):
+        _ = BatchNormLatents.Config(stats=misshapen).make()
+    stats = _batch_norm_file(
+        tmp_path,
+        running_mean=torch.zeros(3),
+        running_var=torch.ones(3),
+    )
+    with pytest.raises(ValueError, match="eps"):
+        _ = BatchNormLatents.Config(stats=stats, eps=-1.0).make()
+
+
+def test_inverse_std_multiplies_by_the_reciprocal_and_divides_back() -> None:
+    """Wan's order: ``(z - mean) * (1 / std)``, and ``z / (1 / std) + mean``."""
+    mean, std = [0.5, -0.25, 1.5], [2.8184, 1.4541, 0.3523]
+    norm = InverseStdLatents.Config(mean=mean, std=std).make()
+    assert isinstance(norm, LatentNormalizer)
+    latent = torch.randn(2, 4, 3, 5, 6, 7, generator=torch.Generator().manual_seed(2))
+    shift = torch.tensor(mean).view(-1, 1, 1, 1)
+    reciprocal = (1.0 / torch.tensor(std)).view(-1, 1, 1, 1)
+    assert torch.equal(norm.normalize(latent), (latent - shift) * reciprocal)
+    assert torch.equal(norm.denormalize(latent), latent / reciprocal + shift)
+
+
+@pytest.mark.parametrize(
+    ("mean", "std", "match"),
+    [([], [], "one mean and one std"), ([0.0], [0.0], "nonzero")],
+)
+def test_inverse_std_refuses_degenerate_statistics(
+    mean: list[float],
+    std: list[float],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _ = InverseStdLatents.Config(mean=mean, std=std).make()
+
+
+def test_std_divides_and_multiplies_back() -> None:
+    """Mochi's order: ``(z - mean) / std``, and ``z * std + mean``."""
+    mean, std = [0.5, -0.25, 1.5], [0.9263, 1.3720, 0.8813]
+    norm = StdLatents.Config(mean=mean, std=std).make()
+    assert isinstance(norm, LatentNormalizer)
+    latent = torch.randn(2, 4, 3, 5, 6, 7, generator=torch.Generator().manual_seed(3))
+    shift, scale = (torch.tensor(v).view(-1, 1, 1, 1) for v in (mean, std))
+    assert torch.equal(norm.normalize(latent), (latent - shift) / scale)
+    assert torch.equal(norm.denormalize(latent), latent * scale + shift)
+
+
+def test_std_refuses_mismatched_statistics() -> None:
+    with pytest.raises(ValueError, match="one mean and one std"):
+        _ = StdLatents.Config(mean=[0.0, 1.0], std=[1.0]).make()
 
 
 if __name__ == "__main__":

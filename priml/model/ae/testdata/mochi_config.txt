@@ -1,0 +1,70 @@
+CausalVideoVAE.Config(
+        encoder=Encoder.Config(
+            channels_in=3,
+            fourier_octaves=(6, 7),
+            channels_hidden=(64, 128, 256, 384),
+            blocks_per_stage=(3, 3, 4, 6, 3),
+            attention=(False, True, True, True, True),
+            temporal=(1, 2, 3),
+            spatial=(2, 2, 2),
+            channels_latent=12,
+            channels_head=32,
+            num_groups=32,
+            attn_kernel=SdpaFused.Config(),
+            checkpoint=HubFile.Config(
+                repo_id='genmo/mochi-1-preview',
+                filename='encoder.safetensors',
+                revision='cd1d0fe89aa8382fcd9ae760bc3d7afe6183579f',
+                sha256='d3a8827a66b58a479d97420a9bf77e59078d88f538298469d8db28c37bd556ae'
+            ),
+            remap=priml.model.ae.mochi.remap_mochi_state_dict
+        ),
+        decoder=Decoder.Config(
+            channels_out=3,
+            channels_hidden=(768, 512, 256, 128),
+            blocks_per_stage=(3, 6, 4, 3, 3),
+            temporal=(3, 2, 1),
+            spatial=(2, 2, 2),
+            channels_latent=12,
+            num_groups=32,
+            checkpoint=HubFile.Config(
+                repo_id='genmo/mochi-1-preview',
+                filename='decoder.safetensors',
+                revision='cd1d0fe89aa8382fcd9ae760bc3d7afe6183579f',
+                sha256='641920faaf20e5404ddb5553ce3e295c21ed9b4bc5f6fe7c930811b84099cb14'
+            ),
+            remap=priml.model.ae.mochi.remap_mochi_state_dict
+        ),
+        num_frames=163,
+        image_size=(480, 848),
+        latent_norm=StdLatents.Config(
+            mean=[
+                -0.06730895953510081,
+                -0.038011381506090416,
+                -0.07477820912866141,
+                -0.05565264470995561,
+                0.012767231469026969,
+                -0.04703542746246419,
+                0.043896967884726704,
+                -0.09346305707025976,
+                -0.09918314763016893,
+                -0.008729793427399178,
+                -0.011931556316503654,
+                -0.0321993391887285
+            ],
+            std=[
+                0.9263795028493863,
+                0.9248894543193766,
+                0.9393059390890617,
+                0.959253732819592,
+                0.8244560132752793,
+                0.917259975397747,
+                0.9294154431013696,
+                1.3720942357788521,
+                0.881393668867029,
+                0.9168315692124348,
+                0.9185249279345552,
+                0.9274757570805041
+            ]
+        )
+    )

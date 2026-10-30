@@ -28,7 +28,7 @@ from priml.baselines.speedrundit.data import (
     SpeedrunImageNetData,
 )
 from priml.baselines.speedrundit.latent_codec import FloatCodec, ScalarTableCodec
-from priml.model.ae.invae import INVAE
+from priml.model.ae.kl import AutoencoderKL
 
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ def test_reference_names_and_tensor_values(tmp_path: Path) -> None:
     _corpus(tmp_path, config=_source(tmp_path), count=10)
     dataset = _source(tmp_path).make()
     assert len(dataset) == 10
-    # ``INVAE.Config.latent_shape`` is square: (channels_latent, side, side).
+    # ``AutoencoderKL.Config.latent_shape`` is square: (channels_latent, side, side).
     assert torch.equal(dataset[0]["latent"], torch.full((32, 2, 2), 5.0))
     assert dataset[0]["image"][0, 0, 0] == 5
     assert dataset[0]["label"] == 5
@@ -134,7 +134,7 @@ def test_an_unfinished_corpus_is_refused(tmp_path: Path) -> None:
 def test_a_corpus_from_another_autoencoder_is_refused(tmp_path: Path) -> None:
     """A receipt naming other weights fails, and the message names the field."""
     _corpus(tmp_path, config=_source(tmp_path), count=2)
-    autoencoder = INVAE.Config(image_size=32)
+    autoencoder = AutoencoderKL.Config(image_size=32)
     assert autoencoder.encoder is not None
     autoencoder.encoder.checkpoint = None
     config = _source(tmp_path, autoencoder=autoencoder)
@@ -170,7 +170,7 @@ def test_an_unlabelled_latent_is_refused(tmp_path: Path) -> None:
 
 def test_a_latent_of_the_wrong_geometry_is_refused(tmp_path: Path) -> None:
     config = _source(tmp_path)
-    config.autoencoder = INVAE.Config(image_size=64)
+    config.autoencoder = AutoencoderKL.Config(image_size=64)
     _corpus(tmp_path, config=config, count=1)
     dataset = config.make()
     with pytest.raises(ValueError, match="autoencoder produces"):
@@ -202,7 +202,7 @@ def test_a_uint8_corpus_decodes_through_its_table(tmp_path: Path) -> None:
     source = _source(tmp_path)
     source.codec = ScalarTableCodec.Config(num_fit_images=1)
     codec = source.codec.make()
-    # The loader refuses any shape but ``INVAE.Config.latent_shape``, which is square.
+    # The loader refuses any shape but ``AutoencoderKL.Config.latent_shape``, which is square.
     sample = torch.randn(4, 32, 2, 2, generator=torch.Generator().manual_seed(0))
     codec.fit(sample)
     latent_dir = tmp_path / "vae-in"
@@ -347,7 +347,7 @@ class _SamplerOptions(Protocol):
 def _source(root: Path, **fields: object) -> PairedImageLatentDataset.Config:
     """Return a source over ``root`` whose INVAE yields 2x2 latents (32px images)."""
     config = PairedImageLatentDataset.Config(working_dir=root)
-    config.autoencoder = INVAE.Config(image_size=32)
+    config.autoencoder = AutoencoderKL.Config(image_size=32)
     for name, value in fields.items():
         setattr(config, name, value)
     return config
@@ -371,7 +371,7 @@ def _prepared_pair(
     else:
         Image.new("RGB", (4, 3), color=(label, 0, 0)).save(image_path)
     # PairedImageLatentDataset.__getitem__ strips the leading axis REG corpora
-    # store, and INVAE.Config.latent_shape is square: (channels_latent, side, side).
+    # store, and AutoencoderKL.Config.latent_shape is square: (channels_latent, side, side).
     np.save(
         latent_dir / f"img-latents-{name}.npy",
         np.full((1, 32, 2, 2), label, dtype=np.float32),

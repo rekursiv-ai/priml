@@ -17,6 +17,7 @@ from priml.math.tensor import (
     as_batch_tensor,
     compiled_scale_and_shift,
     pad,
+    per_frame,
     warmup_compiled_scale_and_shift,
 )
 
@@ -368,6 +369,20 @@ def test_as_batch_tensor_max_less_than_min_preserves_values():
     # reshape(-1, *[], *x.shape[0:]) = (1, 2, 3, 4)
     assert result.shape == (1, 2, 3, 4)
     assert torch.all(result[0] == x)
+
+
+def test_per_frame_maps_each_frame_alone() -> None:
+    """Frame ``t`` of the output is the map of frame ``t`` alone, at any width."""
+    x = torch.randn(2, 3, 5, 4, 6)
+    widen = torch.randn(7, 3)
+
+    def project(frames: Tensor) -> Tensor:
+        return torch.einsum("oc,nchw->nohw", widen, frames)[..., ::2, :]
+
+    y = per_frame(project, x)
+    assert y.shape == (2, 7, 5, 2, 6)
+    for t in range(5):
+        assert torch.equal(y[:, :, t], project(x[:, :, t]))
 
 
 if __name__ == "__main__":

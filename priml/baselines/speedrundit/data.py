@@ -38,7 +38,7 @@ from priml.baselines.speedrundit.latent_codec import (
     LatentCodec,
 )
 from priml.data.sources.prepared_image_latents import read_image, read_labels
-from priml.model.ae.invae import INVAE
+from priml.model.ae.kl import invae
 from priml.paths import resolve_working_dir
 from priml.timer import CheckpointableStepTimer
 
@@ -62,7 +62,7 @@ class PairedImageLatentDataset(Dataset[dict[str, Tensor]]):
         latent_subdir: str = "vae-in"
         """This corpus's latents beside the shared images; REG's name for INVAE."""
 
-        autoencoder: AutoencoderConfig = field(default_factory=INVAE.Config)
+        autoencoder: AutoencoderConfig = field(default_factory=invae)
         """Encoded the latents. Built by the preparer; the loader only checks it."""
 
         codec: Makeable[LatentCodec] = field(default_factory=FloatCodec.Config)

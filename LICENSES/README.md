@@ -15,13 +15,19 @@ names its file here.
 | `PufferLib` | [PufferAI/PufferLib](https://github.com/PufferAI/PufferLib) @ `6ffa5b10` | MIT | `baselines/craftax`, `loss/policy_gradient*.py`, `math/advantage.py`, `model/embedding.py`, `model/min_gru.py`, `optimizers/fused_muon.py` |
 | `PyTorch` | [pytorch/pytorch](https://github.com/pytorch/pytorch) | BSD-3-Clause | `math/pooling.py` |
 | `RAE` | [bytetriper/RAE](https://github.com/bytetriper/RAE) @ `a4d18c4` | MIT | `model/ae/rae.py` |
-| `REG` | [SwayStar123/REG](https://github.com/SwayStar123/REG) @ `3c51606` | MIT | `model/ae/invae.py` |
+| `REG` | [SwayStar123/REG](https://github.com/SwayStar123/REG) @ `3c51606` | MIT | `model/ae/kl.py` |
 | `TinyRecursiveModels` | [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) | MIT | `baselines/arcagi` |
 | `VTP` | [MiniMax-AI/VTP](https://github.com/MiniMax-AI/VTP) @ `5ce1eb6` | MIT | `model/ae/vtp.py` |
+| `Wan2.1` | [Wan-Video/Wan2.1](https://github.com/Wan-Video/Wan2.1) @ `9737cba` | Apache-2.0 | `model/ae/wan.py`, `model/ae/video.py`, `model/ae/latent_norm.py` |
+| `Wan2.2` | [Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2) @ `1ea34ff` | Apache-2.0 | `model/ae/wan.py`, `model/ae/video.py` |
 | `cifar10-airbench` | [KellerJordan/cifar10-airbench](https://github.com/KellerJordan/cifar10-airbench) | MIT | `baselines/cifar10` |
 | `ffcv-imagenet` | [libffcv/ffcv-imagenet](https://github.com/libffcv/ffcv-imagenet) | Apache-2.0 | `baselines/imagenet` |
+| `flux` | [black-forest-labs/flux](https://github.com/black-forest-labs/flux) @ `802fb47` | Apache-2.0 | `model/ae/kl.py`, `model/ae/latent_norm.py` |
+| `flux2` | [black-forest-labs/flux2](https://github.com/black-forest-labs/flux2) @ `50fe516` | Apache-2.0 | `model/ae/kl.py`, `model/ae/latent_norm.py` |
 | `generative-inverse-heat-dissipation` | [AaltoML/generative-inverse-heat-dissipation](https://github.com/AaltoML/generative-inverse-heat-dissipation) | MIT | `math/frequency.py` |
+| `mochi` | [genmoai/mochi](https://github.com/genmoai/mochi) @ `15c9bad` | Apache-2.0 | `model/ae/mochi.py`, `model/ae/video.py`, `model/ae/latent_norm.py` |
 | `purejaxql` | [mttga/purejaxql](https://github.com/mttga/purejaxql) | Apache-2.0 | `baselines/craftax` (PQN) |
+| `taesd` | [madebyollin/taesd](https://github.com/madebyollin/taesd) @ `fdbae2d` | MIT | `model/ae/taesd.py` |
 | `torch-dct` | [zh217/torch-dct](https://github.com/zh217/torch-dct) | MIT | `math/frequency.py` |
 | `transformerXL_PPO_JAX` | [Reytuag/transformerXL_PPO_JAX](https://github.com/Reytuag/transformerXL_PPO_JAX) | MIT | `baselines/craftax` (GTrXL) |
 | `transformers` | [huggingface/transformers](https://github.com/huggingface/transformers) @ `v5.17.0` | Apache-2.0 | `math/gated_delta_rule.py` |

@@ -28,7 +28,7 @@ from priml.baselines.speedrundit.latent_codec import (
     FloatCodec,
     ScalarTableCodec,
 )
-from priml.model.ae.invae import INVAE
+from priml.model.ae.kl import AutoencoderKL, invae
 from priml.model.ae.latent_norm import ScaleLatents
 from priml.model.ae.rae import RAE, rae_dinov2_base
 from priml.model.ae.vtp import VTP
@@ -81,9 +81,18 @@ def test_identity_collects_only_encoding_checkpoints() -> None:
     assert identity["latent_shape"] == [768, 16, 16]
 
 
+def test_identity_is_the_finalized_trees() -> None:
+    """A preparer and a loader may hold one config either side of finalize."""
+    config = invae()
+    assert autoencoder_identity(config, sample=True) == autoencoder_identity(
+        config.copy_tree().finalize(),
+        sample=True,
+    )
+
+
 def test_draw_or_mode_is_part_of_identity() -> None:
-    assert autoencoder_identity(INVAE.Config(), sample=True) != autoencoder_identity(
-        INVAE.Config(),
+    assert autoencoder_identity(invae(), sample=True) != autoencoder_identity(
+        invae(),
         sample=False,
     )
 
@@ -128,7 +137,7 @@ def _interrupted_save(stream: BinaryIO, array: object) -> None:
 
 
 def test_a_matching_receipt_verifies(tmp_path: Path) -> None:
-    autoencoder, codec_config = INVAE.Config(), FloatCodec.Config()
+    autoencoder, codec_config = invae(), FloatCodec.Config()
     codec = codec_config.make()
     _ = write_receipt(
         tmp_path,
@@ -153,7 +162,7 @@ def test_every_mismatched_identity_is_named(tmp_path: Path) -> None:
     codec_config = FloatCodec.Config()
     _ = write_receipt(
         tmp_path,
-        autoencoder=INVAE.Config(),
+        autoencoder=invae(),
         sample=True,
         codec_config=codec_config,
         codec=codec_config.make(),
@@ -164,7 +173,7 @@ def test_every_mismatched_identity_is_named(tmp_path: Path) -> None:
     with pytest.raises(CorpusMismatchError) as caught:
         verify_receipt(
             tmp_path,
-            autoencoder=INVAE.Config(image_size=128),
+            autoencoder=AutoencoderKL.Config(image_size=128),
             sample=False,
             codec_config=other,
             codec=other.make(),
@@ -181,7 +190,7 @@ def test_a_corpus_without_a_receipt_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="receipt-only"):
         verify_receipt(
             tmp_path,
-            autoencoder=INVAE.Config(),
+            autoencoder=invae(),
             sample=True,
             codec_config=codec_config,
             codec=codec_config.make(),
@@ -209,7 +218,7 @@ def test_a_receipt_of_another_format_is_refused(tmp_path: Path) -> None:
     codec_config = FloatCodec.Config()
     path = write_receipt(
         tmp_path,
-        autoencoder=INVAE.Config(),
+        autoencoder=invae(),
         sample=True,
         codec_config=codec_config,
         codec=codec_config.make(),
@@ -221,7 +230,7 @@ def test_a_receipt_of_another_format_is_refused(tmp_path: Path) -> None:
     with pytest.raises(CorpusMismatchError, match="format 1"):
         verify_receipt(
             tmp_path,
-            autoencoder=INVAE.Config(),
+            autoencoder=invae(),
             sample=True,
             codec_config=codec_config,
             codec=codec_config.make(),
