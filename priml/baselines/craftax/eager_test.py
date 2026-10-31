@@ -124,11 +124,11 @@ def _tick(pair: _Counted, row: int) -> int:
 
 @jit.jit
 def _first_timestep(states: Records[EnvState]) -> int:
-    return _timestep_of(states[0])
+    return _state_timestep(states[0])
 
 
 @jit.jit
-def _timestep_of(state: EnvState) -> int:
+def _state_timestep(state: EnvState) -> int:
     return int(state.timestep)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
 
@@ -171,11 +171,11 @@ def test_a_kernel_reads_plain_arrays_as_records_and_writes_through() -> None:
 def test_a_stand_in_by_name_is_handed_records_not_their_views() -> None:
     held: list[type] = []
 
-    def timestep_of(state: object) -> int:
+    def state_timestep(state: object) -> int:
         held.append(type(state))
         return 7
 
-    with eager(_timestep_of=timestep_of):
+    with eager(_state_timestep=state_timestep):
         assert _first_timestep(new_states(1)) == 7
     assert held == [np.record]
 

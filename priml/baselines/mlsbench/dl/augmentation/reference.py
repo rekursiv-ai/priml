@@ -175,7 +175,7 @@ def classified(media: Tensor) -> Tensor:
             epochs=reference.EPOCHS,
         ).model
         model.eval()
-        return reference.logits_of(model, media).detach()
+        return reference.model_logits(model, media).detach()
 
 
 def pipeline_record(name: str) -> dict[str, Tensor]:

@@ -286,7 +286,7 @@ def check_prefill(checked: Checked, *, tolerance: float) -> dict[str, PlainTree]
     for step in range(len(segment.actions)):
         stepped.decide(forced_control(stepped, segment, step))
     prefilled = Engine(model, rows=1, t_max=t_max, generator=torch.Generator(device))
-    prefilled.prefill(torch.tensor([0]), prefix_of(segment))
+    prefilled.prefill(torch.tensor([0]), segment_prefix(segment))
     length_equal = bool(torch.equal(prefilled.state.length, stepped.state.length))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     frame_equal = bool(torch.equal(prefilled.state.cells, stepped.state.cells))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     same = 0
@@ -392,7 +392,7 @@ def check_gumbel(
         t_max=t_max,
         generator=torch.Generator(device).manual_seed(0),
     )
-    engine.prefill(torch.tensor([0]), prefix_of(segment))
+    engine.prefill(torch.tensor([0]), segment_prefix(segment))
     logits = engine.action_logits()[0]
     samples = gumbel_max(
         logits.expand(draws, -1),
@@ -598,7 +598,7 @@ def forced_control(engine: Engine, segment: Segment, step: int) -> Control:
     return control
 
 
-def prefix_of(segment: Segment) -> Prefix:
+def segment_prefix(segment: Segment) -> Prefix:
     """Return a one-row prefill of every decision of ``segment``.
 
     Args:

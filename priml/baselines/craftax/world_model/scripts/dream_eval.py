@@ -90,7 +90,7 @@ from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.session import Mark
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
 from priml.baselines.craftax.world_model.viewer.bundle import (
-    stream_of,
+    row_stream,
     write_bundle,
 )
 from priml.math.stats import holm, total_variation
@@ -563,7 +563,7 @@ def choose_windows(
     return chosen
 
 
-def episodes_of(
+def row_episodes(
     rollout: Rollout,
     *,
     rows: Sequence[int] | None = None,
@@ -1277,7 +1277,7 @@ def evaluate(
     free = _cpu(rollout(engine, step, decisions=decisions))
     seconds["free_running"] = time.monotonic() - clock
     real = [truncate(read_source(s), decisions=decisions) for s in chosen]
-    dreams = episodes_of(free)
+    dreams = row_episodes(free)
     real_features = [episode_features(s, horizons=horizons) for s in real]
     dream_features = [episode_features(s, horizons=horizons) for s in dreams]
     comparison = compare(
@@ -1293,9 +1293,9 @@ def evaluate(
     seconds["continuations"] = time.monotonic() - clock
     half = len(windows)
     truth = [w.real for w in windows]
-    model_rows = episodes_of(first, rows=range(half))
-    real_rows = episodes_of(first, rows=range(half, 2 * half))
-    resampled = episodes_of(second, rows=range(half, 2 * half))
+    model_rows = row_episodes(first, rows=range(half))
+    real_rows = row_episodes(first, rows=range(half, 2 * half))
+    resampled = row_episodes(second, rows=range(half, 2 * half))
     checkpoints = [k for k in (1, 8, 32, 128, 256, 512, 1024) if k <= continuation]
     measure = functools.partial(
         divergence,
@@ -2137,7 +2137,7 @@ def _write_bundles(
         stop = features[row].length
         path = directory / f"free-{name}"
         write_bundle(
-            stream_of(_slice(free, row=row, stop=stop), row=0),
+            row_stream(_slice(free, row=row, stop=stop), row=0),
             path,
             title=f"Dream: {name.replace('_', ' ')} (row {row})",
             description=f"{stop:,} decisions from a new world, model actions, temperature 1",
@@ -2157,10 +2157,10 @@ def _write_bundles(
     for name, index, rows_offset, mark in _continuation_choices(windows, firsts, half):
         w = windows[index]
         row = rows_offset + index
-        stop = len(episodes_of(first, rows=[row])[0].actions)
+        stop = len(row_episodes(first, rows=[row])[0].actions)
         path = directory / f"continuation-{name}"
         write_bundle(
-            stream_of(_slice(first, row=row, stop=stop), row=0, action_mark=mark),
+            row_stream(_slice(first, row=row, stop=stop), row=0, action_mark=mark),
             path,
             title=f"Continuation: {name.replace('_', ' ')} ({w.kind})",
             reference=w.real,
@@ -2254,7 +2254,7 @@ def _showcase(
             rows.append(row)
             continue
         index = next(i for i, w in enumerate(windows) if w.name == entry["window"])
-        chosen.append((name, "model", episodes_of(first, rows=[row])[0]))
+        chosen.append((name, "model", row_episodes(first, rows=[row])[0]))
         if not name.endswith("model_actions"):
             chosen.append((f"{name}-real", "real", windows[index].real))
     spare = [

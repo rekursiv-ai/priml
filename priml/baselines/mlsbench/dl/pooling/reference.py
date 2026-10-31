@@ -74,7 +74,7 @@ The full network of each runs its pool on that network's last features, which
 compares with the script's."""
 
 
-def pool_of(name: str) -> nn.Module:
+def named_pool(name: str) -> nn.Module:
     """Build the pool of experiment :data:`POOLS` ``[name]`` alone."""
     model = POOLS[name]().step.model
     assert isinstance(model, ResNet.Config)
@@ -90,7 +90,7 @@ def pool_record() -> dict[str, Tensor]:
     """
     record: dict[str, Tensor] = {}
     for name in POOLS:
-        record |= pooled(pool_of(name), name)
+        record |= pooled(named_pool(name), name)
     return record
 
 

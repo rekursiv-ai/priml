@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
 # layer is built, so a per-layer list and a broadcast template both answer here without
 # this function knowing which it was given.
-def _attn_of(config: Qwen3.Config, layer: int) -> Attention.Config:
+def _layer_attention(config: Qwen3.Config, layer: int) -> Attention.Config:
     """Return one layer's attention config."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
     # ``len == 1`` is the pre-finalize broadcast template, which answers for
@@ -375,7 +375,7 @@ def remap_hf_state_dict(
     h = config.channels_in
     # Every layer's geometry is resolved before any weight is read, so a config
     # the remap cannot serve fails as a config error, not as a missing key.
-    attns = [_attn_of(config, i) for i in range(config.num_layers)]
+    attns = [_layer_attention(config, i) for i in range(config.num_layers)]
     out: dict[str, Tensor] = {
         "proj_in.weight": hf_sd["model.embed_tokens.weight"],
         "proj_out.0.weight": hf_sd["model.norm.weight"],

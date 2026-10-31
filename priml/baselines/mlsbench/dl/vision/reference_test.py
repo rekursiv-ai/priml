@@ -234,7 +234,7 @@ def test_the_tiny_step_of_a_setting_ends_in_the_widths_the_reference_hardcodes(
         epochs=reference.EPOCHS,
     )
     model = step.model
-    logits = reference.logits_of(model, reference.fixed_media(0))
+    logits = reference.model_logits(model, reference.fixed_media(0))
     assert logits.shape == (reference.PROBE_SHAPE[0], reference.CLASSES)
     if isinstance(model, VGG16BN):
         convs = [m for m in model.modules() if isinstance(m, torch.nn.Conv2d)]

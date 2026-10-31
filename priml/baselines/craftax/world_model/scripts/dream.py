@@ -67,7 +67,7 @@ from priml.baselines.craftax.world_model.experiments import (
 )
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
 from priml.baselines.craftax.world_model.viewer.bundle import (
-    stream_of,
+    row_stream,
     write_bundle,
 )
 from priml.paths import validated_output_path
@@ -157,7 +157,7 @@ def main() -> int:
     )
     for row in range(min(flags.bundles, flags.rows)):
         write_bundle(
-            stream_of(rollout, row=row),
+            row_stream(rollout, row=row),
             output / "bundles" / f"generated-{row}",
             title=f"Generated row {row}",
             provenance=f"{flags.checkpoint}, seed {flags.seed}, action head sampled.",

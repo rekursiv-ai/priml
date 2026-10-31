@@ -255,8 +255,18 @@ def compare_full_size(script: upstream.Script, trace: upstream.Trace) -> list[st
             ours.train(mode == "train")
             theirs.train(mode == "train")
             report += mismatches(
-                {f"forward/{mode}": vision_reference.logits_of(theirs, media).detach()},
-                {f"forward/{mode}": vision_reference.logits_of(ours, media).detach()},
+                {
+                    f"forward/{mode}": vision_reference.model_logits(
+                        theirs,
+                        media,
+                    ).detach(),
+                },
+                {
+                    f"forward/{mode}": vision_reference.model_logits(
+                        ours,
+                        media,
+                    ).detach(),
+                },
             )
     return report
 

@@ -109,7 +109,7 @@ def assert_infers_only_unspecified_widths(configs: Sequence[Fig[object]]) -> Non
                 )
 
 
-def blocks_of[Block: Fig[object]](
+def kind_blocks[Block: Fig[object]](
     backbone: CoAtNet.Config,
     kind: type[Block],
 ) -> list[Block]:

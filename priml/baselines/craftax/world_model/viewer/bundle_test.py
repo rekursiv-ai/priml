@@ -22,7 +22,7 @@ from priml.baselines.craftax.world_model.viewer.bundle import (
     Manifest,
     annotations,
     frame_records,
-    stream_of,
+    row_stream,
     token_records,
     write_bundle,
 )
@@ -192,7 +192,7 @@ def test_stream_of_rollout_marks_a_real_first_frame_as_data() -> None:
         reward_logp=-torch.rand(2, decisions, generator=generator),
         done_logp=-torch.rand(2, decisions, generator=generator),
     )
-    stream = stream_of(rollout, row=1, action_mark=Mark.FORCED)
+    stream = row_stream(rollout, row=1, action_mark=Mark.FORCED)
     assert not stream.starts_episode
     assert torch.equal(stream.cells, rollout.cells[1])
     assert stream.frame_marks[:, 0].tolist() == [Mark.DATA, Mark.MODEL, Mark.MODEL]
@@ -200,7 +200,7 @@ def test_stream_of_rollout_marks_a_real_first_frame_as_data() -> None:
     assert bool((stream.decision_marks[:, 1:] == Mark.MODEL).all())
     assert torch.equal(stream.decision_logp[:, 2], rollout.done_logp[1])
     assert torch.equal(stream.frame_logp, rollout.frame_logp[1])
-    assert stream_of(rollout, row=0).frame_marks[0, 0] == Mark.MODEL
+    assert row_stream(rollout, row=0).frame_marks[0, 0] == Mark.MODEL
 
 
 def test_token_records_hold_cells_then_little_endian_aux() -> None:

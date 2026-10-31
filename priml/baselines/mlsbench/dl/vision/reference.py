@@ -362,7 +362,7 @@ Its ``--arch`` has no ``resnet110``; that setting is proven by the captures of
 the tasks whose scripts run it, against those scripts."""
 
 
-def logits_of(model: nn.Module, media: Tensor) -> Tensor:
+def model_logits(model: nn.Module, media: Tensor) -> Tensor:
     """Run ``model`` on ``media``, typed as the images-to-logits map it is.
 
     Args:
@@ -516,9 +516,9 @@ def network_record() -> dict[str, Tensor]:
         draws = rng_fingerprint()
         media = fixed_media(STEPS)
         model.train()
-        train = logits_of(model, media)
+        train = model_logits(model, media)
         model.eval()
-        evaluated = logits_of(model, media)
+        evaluated = model_logits(model, media)
     return {
         "network/draws": draws,
         "network/train": train.detach(),
@@ -682,7 +682,7 @@ def setting_forward(model: nn.Module, key: str) -> dict[str, Tensor]:
     for mode in ("train", "eval"):
         model.train(mode == "train")
         with seeded(SEED), host_agnostic_numerics():
-            record[f"settings/{key}/{mode}"] = logits_of(model, media).detach()
+            record[f"settings/{key}/{mode}"] = model_logits(model, media).detach()
     return record
 
 

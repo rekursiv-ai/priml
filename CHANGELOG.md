@@ -3,6 +3,23 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- Functions are named for what they return. In `priml.baselines`:
+  craftax world model `scripts.dream_eval.episodes_of` is `row_episodes`,
+  `scripts.engine_checks.prefix_of` is `segment_prefix`, `testing.state_of` is
+  `row_state`, `viewer.bundle.stream_of` is `row_stream`; mlsbench
+  `normalization.norms.groups_for` is `group_count`,
+  `normalization.reference.norm_of` is `norm_builder`,
+  `pooling.reference.pool_of` is `named_pool`, `residual.reference.block_of`
+  is `named_block`, `vision.reference.logits_of` and
+  `machine_unlearning.methods.logits_of` are `model_logits`,
+  `weighting.upstream.script_of` is `variant_script`;
+  `name_that_llm.testing.frame_for` is `code_frame`; and
+  `wellbore_geology.model`'s `format_for` is `format_backbone`.
+
 ## 0.1.8 - 2026-10-26
 
 ### Changed

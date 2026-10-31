@@ -41,12 +41,12 @@ from priml.baselines.craftax.world_model.schema import done_id
 from priml.baselines.craftax.world_model.scripts.engine_checks import (
     forced_control,
     no_done,
-    prefix_of,
+    segment_prefix,
 )
 from priml.baselines.craftax.world_model.testing import (
     random_segment,
+    row_state,
     small_schema,
-    state_of,
     tiny_model,
 )
 from priml.model.attention.attention import Attention
@@ -228,7 +228,7 @@ def test_a_prefix_past_the_window_keeps_its_last_quarter() -> None:
     segment = random_segment(schema, 7, seed=29)
     # 1 + 2 * 7 positions overrun 16 - 2, so the last 4 decisions are kept.
     long = Engine(model, rows=1, t_max=16, generator=torch.Generator())
-    long.prefill(torch.tensor([0]), prefix_of(segment))
+    long.prefill(torch.tensor([0]), segment_prefix(segment))
     assert int(long.state.length[0]) == 8
     assert int(long.state.count[0]) == 4
     kept = Engine(model, rows=1, t_max=16, generator=torch.Generator())
@@ -252,14 +252,14 @@ def test_a_row_run_past_its_window_never_writes_another_rows_cache() -> None:
         generator=torch.Generator().manual_seed(27),
     )
     engine.step(no_done(engine))
-    before = state_of(engine, row=1)
+    before = row_state(engine, row=1)
     control = no_done(engine)
     control.active[1] = False
     # Row 0 takes four decisions without ``ensure_room``: 3 positions to 11 of 8.
     for _ in range(4):
         engine.decide(control)
     assert int(engine.state.length[0]) == 11
-    after = state_of(engine, row=1)
+    after = row_state(engine, row=1)
     for name, value in before.items():
         assert torch.equal(after[name], value), name
 
@@ -273,7 +273,7 @@ def test_prefill_then_step_equals_step_only() -> None:
     for step in range(3):
         stepped.decide(forced_control(stepped, segment, step))
     prefilled = Engine(model, rows=1, t_max=16, generator=torch.Generator())
-    prefilled.prefill(torch.tensor([0]), prefix_of(segment))
+    prefilled.prefill(torch.tensor([0]), segment_prefix(segment))
     assert torch.equal(prefilled.state.length, stepped.state.length)
     assert torch.equal(prefilled.state.cells, stepped.state.cells)
     _assert_same_decision(prefilled, stepped, seed=7)
@@ -539,7 +539,7 @@ def test_reprefill_after_a_wrapped_prefill_keeps_the_last_quarter() -> None:
     )
     segment = random_segment(schema, 7, seed=16, starts=False)
     # Seven decisions wrap the ring of four: decision 4 lands in slot 0.
-    engine.prefill(torch.tensor([0]), prefix_of(segment))
+    engine.prefill(torch.tensor([0]), segment_prefix(segment))
     assert engine.ensure_room() == 1
     action = engine.decide(no_done(engine)).action
     assert int(engine.state.length[0]) == 16
@@ -575,13 +575,13 @@ def test_ensure_room_reprefills_full_rows_a_few_at_a_time(
             prefill_rows=prefill_rows,
         )
         for row, segment in enumerate(segments):
-            engine.prefill(torch.tensor([row]), prefix_of(segment))
+            engine.prefill(torch.tensor([row]), segment_prefix(segment))
         engine.decide(no_done(engine))
         # One decision after 7 prefilled ones fills every row of 16 positions.
         assert engine.state.length.tolist() == [16] * 3
         monkeypatch.setattr(engine, "prefill", _counting(engine.prefill, calls))
         engine.ensure_room()
-        states.append([state_of(engine, row=row) for row in range(3)])
+        states.append([row_state(engine, row=row) for row in range(3)])
     # Re-prefilling every full row in one forward holds all their windows at once.
     assert calls == [2, 1, 3]
     for chunked, whole in zip(states[0], states[1], strict=True):
@@ -610,10 +610,10 @@ def test_full_rows_keep_their_cache_through_the_start_step() -> None:
     assert engine.ensure_room() == 1
     engine.decide(no_done(engine))
     assert engine.state.length.tolist() == [8, 8]
-    full = state_of(engine, row=0), state_of(engine, row=1)
+    full = row_state(engine, row=0), row_state(engine, row=1)
     engine.start(engine.control())
     for row, before in enumerate(full):
-        after = state_of(engine, row=row)
+        after = row_state(engine, row=row)
         for name, value in before.items():
             assert torch.equal(after[name], value), (row, name)
 
@@ -626,12 +626,12 @@ def test_inactive_rows_keep_their_state_when_their_job_ends() -> None:
         generator=torch.Generator().manual_seed(9),
     )
     engine.step(no_done(engine))
-    before = state_of(engine, row=1)
+    before = row_state(engine, row=1)
     control = no_done(engine)
     control.job_tokens[:, 1, 0] = done_id(done=True)
     control.active[1] = False
     engine.step(control)
-    after = state_of(engine, row=1)
+    after = row_state(engine, row=1)
     for name, value in before.items():
         assert torch.equal(after[name], value), name
     assert int(engine.state.length[0]) == 5
@@ -697,10 +697,10 @@ def test_action_logits_are_the_distribution_decide_samples_from() -> None:
         generator=torch.Generator().manual_seed(26),
     )
     engine.step(no_done(engine))
-    before = [state_of(engine, row=row) for row in range(2)]
+    before = [row_state(engine, row=row) for row in range(2)]
     logp = engine.action_logits().log_softmax(-1)
     for row, state in enumerate(before):
-        for name, value in state_of(engine, row=row).items():
+        for name, value in row_state(engine, row=row).items():
             assert torch.equal(value, state[name]), (row, name)
     control = no_done(engine)
     control.action_forced[:] = True

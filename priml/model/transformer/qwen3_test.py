@@ -407,7 +407,7 @@ class TestConfig:
         assert isinstance(block, TransformerBlock.Config)
         cfg.block = [block]
 
-        assert qwen3._attn_of(cfg, layer=1) is block.attn
+        assert qwen3._layer_attention(cfg, layer=1) is block.attn
 
     def test_attn_of_selects_the_requested_layer(self):
         cfg = Qwen3.Config.from_hf(hf_config()).finalize()
@@ -417,8 +417,8 @@ class TestConfig:
         assert isinstance(second.attn, Attention.Config)
         second.attn.channels_head = 12
 
-        assert qwen3._attn_of(cfg, layer=1) is second.attn
-        assert qwen3._attn_of(cfg, layer=1).channels_head == 12
+        assert qwen3._layer_attention(cfg, layer=1) is second.attn
+        assert qwen3._layer_attention(cfg, layer=1).channels_head == 12
 
 
 class TestSlots:

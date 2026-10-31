@@ -38,7 +38,7 @@ from priml.baselines.craftax.world_model.experiments import (
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import dream_eval
 from priml.baselines.craftax.world_model.scripts.engine_checks import (
-    prefix_of,
+    segment_prefix,
 )
 from priml.baselines.craftax.world_model.testing import (
     random_segment,
@@ -116,7 +116,7 @@ def played_segment(*, terminal: bool) -> Segment:
     )
 
 
-def features_of(segment: Segment) -> dream_eval.Features:
+def segment_features(segment: Segment) -> dream_eval.Features:
     return dream_eval.episode_features(segment, horizons=HORIZONS)
 
 
@@ -130,7 +130,7 @@ def check(features: dream_eval.Features, name: str) -> tuple[int, int]:
 def test_rollout_in_graphed_order_equals_dream() -> None:
     schema = small_schema()
     model = tiny_model(schema, global_layers=2)
-    prefixes = [prefix_of(random_segment(schema, 3, seed=1)), None]
+    prefixes = [segment_prefix(random_segment(schema, 3, seed=1)), None]
     actions = torch.tensor([[1, 2, 3], [3, 2, 1]])
     runs: list[Rollout] = []
     for use_dream in (True, False):
@@ -239,7 +239,7 @@ def test_teacher_forces_every_act_job_of_its_rows() -> None:
 
 
 def test_episode_features_of_a_played_death() -> None:
-    features = features_of(played_segment(terminal=True))
+    features = segment_features(played_segment(terminal=True))
     assert features.length == 4
     assert features.died
     assert features.floor_first[:3].tolist() == [0, 1, -1]
@@ -266,7 +266,7 @@ def test_episode_features_of_a_played_death() -> None:
 
 def test_episode_features_check_moves_and_hud_rules() -> None:
     censored = played_segment(terminal=False)
-    features = features_of(censored)
+    features = segment_features(censored)
     assert not features.died
     assert features.length == 4
     assert check(features, "move_inconsistent") == (0, 1)
@@ -276,7 +276,7 @@ def test_episode_features_check_moves_and_hud_rules() -> None:
         cells=torch.cat([censored.cells[:-1], board(7)[None]]),
         actions=torch.tensor([0, 0, 11, 1], dtype=torch.uint8),
     )
-    features = features_of(broken)
+    features = segment_features(broken)
     assert check(features, "move_inconsistent") == (1, 1)
     assert check(features, "floor_change_without_ladder") == (1, 1)
     assert check(features, "xp_without_descend") == (1, 1)
@@ -289,13 +289,13 @@ def test_episode_features_flag_invalid_cells_and_values_over_their_maximum() -> 
     cells[3, 10] = torch.tensor([0, 0, 0, 0, 3, 0, 0, 0])
     aux = segment.aux.clone()
     aux[2, dream_eval.FIELDS.index("health")] = 200
-    features = features_of(dataclasses.replace(segment, cells=cells, aux=aux))
+    features = segment_features(dataclasses.replace(segment, cells=cells, aux=aux))
     assert check(features, "invalid_frame") == (1, 5)
     assert check(features, "over_maximum") == (1, 5)
 
 
 def test_compare_finds_nothing_between_equal_samples() -> None:
-    real = [features_of(played_segment(terminal=True))] * 6
+    real = [segment_features(played_segment(terminal=True))] * 6
     result = dream_eval.compare(
         real,
         real,
@@ -318,8 +318,8 @@ def test_compare_finds_nothing_between_equal_samples() -> None:
 
 
 def test_compare_separates_deaths_from_survivals() -> None:
-    real = [features_of(played_segment(terminal=False))] * 8
-    dream_side = [features_of(played_segment(terminal=True))] * 8
+    real = [segment_features(played_segment(terminal=False))] * 8
+    dream_side = [segment_features(played_segment(terminal=True))] * 8
     result = dream_eval.compare(
         real,
         dream_side,
@@ -670,7 +670,7 @@ def test_rollout_refuses_no_decisions_and_a_prefix_per_row_short(
             engine,
             engine.step,
             decisions=decisions,
-            prefixes=[prefix_of(random_segment(schema, 2, seed=0))] * prefixes,
+            prefixes=[segment_prefix(random_segment(schema, 2, seed=0))] * prefixes,
         )
 
 

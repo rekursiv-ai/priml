@@ -210,9 +210,9 @@ def upstream_network(
         state = {k: v.clone() for k, v in model.state_dict().items()}
         draws = rng_fingerprint()
         model.train()
-        train = vision_reference.logits_of(model, reference.fixed_images32())
+        train = vision_reference.model_logits(model, reference.fixed_images32())
         model.eval()
-        evaluated = vision_reference.logits_of(model, reference.fixed_images32())
+        evaluated = vision_reference.model_logits(model, reference.fixed_images32())
     record = {
         f"draws/{name}": draws,
         f"forward/{name}/train": train.detach(),
@@ -382,7 +382,7 @@ class Run:
         model.eval()
         with torch.no_grad():
             self.probes.append(
-                vision_reference.logits_of(
+                vision_reference.model_logits(
                     model,
                     vision_reference.fixed_media(vision_reference.STEPS),
                 ),

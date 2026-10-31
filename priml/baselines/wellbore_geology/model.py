@@ -1278,7 +1278,7 @@ class SequenceModel(nn.Module):
         self.unet_gr_rmse_head = config.unet_gr_rmse_head.make()
         self.register_load_state_dict_pre_hook(_rename_legacy_head)
 
-    def format_for(self, device: torch.device) -> None:
+    def format_backbone(self, device: torch.device) -> None:
         """Store the CUDA image backbone with contiguous channel vectors.
 
         Args:

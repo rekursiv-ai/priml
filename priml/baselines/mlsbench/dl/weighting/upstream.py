@@ -140,7 +140,7 @@ class Trace:
     """The training positions its subset kept, in order."""
 
 
-def script_of(variant: Upstream) -> Script:
+def variant_script(variant: Upstream) -> Script:
     """Type an imported variant as this task's script."""
     return upstream.narrowed(variant, Script)
 
@@ -167,7 +167,9 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
         )
         for name in EDITED
     }
-    return {name: script_of(s) for name, s in ({"uniform": pristine} | edited).items()}
+    return {
+        name: variant_script(s) for name, s in ({"uniform": pristine} | edited).items()
+    }
 
 
 def trace_main(
@@ -308,7 +310,7 @@ def upstream_lockstep(
             model.eval()
             with torch.no_grad():
                 probes.append(
-                    vision_reference.logits_of(
+                    vision_reference.model_logits(
                         model,
                         vision_reference.fixed_media(vision_reference.STEPS),
                     ),

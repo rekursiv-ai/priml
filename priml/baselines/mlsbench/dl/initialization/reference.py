@@ -152,9 +152,9 @@ def network_record(
         draws = rng_fingerprint()
         media = reference.fixed_media(reference.STEPS)
         model.train()
-        train = reference.logits_of(model, media)
+        train = reference.model_logits(model, media)
         model.eval()
-        evaluated = reference.logits_of(model, media)
+        evaluated = reference.model_logits(model, media)
     return {
         f"network/{name}/draws": draws,
         f"network/{name}/train": train.detach(),

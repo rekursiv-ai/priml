@@ -82,7 +82,10 @@ _VALID_MODEL_TYPES = frozenset({"kimi_k2", "deepseek_v3"})
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
 # layer is built, so a per-layer list and a broadcast template both answer here without
 # this function knowing which it was given.
-def _attn_of(config: KimiK2.Config, layer: int) -> MultiHeadLatentAttention.Config:
+def _layer_attention(
+    config: KimiK2.Config,
+    layer: int,
+) -> MultiHeadLatentAttention.Config:
     """Return one layer's attention config."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
     # ``len == 1`` is the pre-finalize broadcast template, which answers for
@@ -427,7 +430,7 @@ class KimiK2(Transformer):
         return model
 
 
-def _moe_of(config: KimiK2.Config, layer: int) -> MoE.Config:
+def _layer_moe(config: KimiK2.Config, layer: int) -> MoE.Config:
     """Return one layer's MoE config, where the expert counts live."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
     block = blocks[0] if len(blocks) == 1 else blocks[layer]
@@ -467,7 +470,7 @@ def remap_hf_state_dict(
 
         # -- MLA --------------------------------------------------------
         attn, ba = f"{p}.self_attn", f"{b}.attn"
-        if _attn_of(config, i).q_lora_rank is None:
+        if _layer_attention(config, i).q_lora_rank is None:
             out[f"{ba}.proj_q.weight"] = hf_sd[f"{attn}.q_proj.weight"]
         else:
             out[f"{ba}.proj_q_a.weight"] = hf_sd[f"{attn}.q_a_proj.weight"]
@@ -490,7 +493,7 @@ def remap_hf_state_dict(
             # MoE router lives at ``ffn.router`` (gate + optional
             # aux-loss-free correction bias).
             out[f"{bf}.router.gate.weight"] = hf_sd[f"{p}.mlp.gate.weight"]
-            moe = _moe_of(config, i)
+            moe = _layer_moe(config, i)
             router = moe.router
             if isinstance(router, SigmoidRouter.Config) and router.use_correction_bias:
                 out[f"{bf}.router.e_score_correction_bias"] = hf_sd[

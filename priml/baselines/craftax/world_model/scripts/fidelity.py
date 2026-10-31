@@ -104,10 +104,10 @@ from priml.baselines.craftax.world_model.scripts.dream_eval import (
     choose_windows,
     divergence,
     episode_features,
-    episodes_of,
     ratio_interval,
     read_source,
     rollout,
+    row_episodes,
     sampling_engine,
     truncate,
 )
@@ -1063,7 +1063,7 @@ def _continuations(
     run = _cpu(
         rollout(engine, step, decisions=decisions, prefixes=prefixes, actions=actions),
     )
-    dreamed = episodes_of(run, rows=range(len(windows)))
+    dreamed = row_episodes(run, rows=range(len(windows)))
     truth = [w.real for w in windows]
     checkpoints = [k for k in CONTINUATION_CHECKPOINTS if k <= decisions]
     compare = functools.partial(

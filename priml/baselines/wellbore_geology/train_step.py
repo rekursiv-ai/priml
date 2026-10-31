@@ -51,7 +51,7 @@ class WellboreTrainStep(TrainStep):
         with torch.device("cpu"):
             super().__init__(config)
         self.config: WellboreTrainStep.Config = config  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to this class's own config; nothing assigns the base's.
-        self.model.format_for(self.device)
+        self.model.format_backbone(self.device)
         if isinstance(self.ema, InitializableEMA):
             self.ema.initialize(self.model)
 
@@ -139,7 +139,7 @@ class WellboreTrainStep(TrainStep):
         """
         if model is not None:
             model.to(self.device).eval()
-            model.format_for(self.device)
+            model.format_backbone(self.device)
         predictions: list[NDArray[np.float32]] = []
         metadata: list[dict[str, object]] = []
         with torch.no_grad():

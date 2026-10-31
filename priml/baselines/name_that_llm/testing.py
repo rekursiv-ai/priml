@@ -170,7 +170,7 @@ class NumericalTrace:
 
     def _deliver(self, code: CodeType) -> None:
         if code.co_name == "fit":
-            self._observe(frame_for(code).f_locals.get("self"))
+            self._observe(code_frame(code).f_locals.get("self"))
 
     def _observe(self, instance: object) -> None:
         kind = type(instance).__name__
@@ -188,7 +188,7 @@ class NumericalTrace:
                     self.put(f"{kind}/{index}/{key}", value=value)
 
 
-def frame_for(code: CodeType) -> FrameType:
+def code_frame(code: CodeType) -> FrameType:
     """Return the executing frame for a monitored code object.
 
     Args:

@@ -296,7 +296,7 @@ def port_training_config(*, clip: float, fault: Fault) -> ArcTrainStep.Config:
     return candidate
 
 
-def seed_of(rank: int, fault: Fault) -> int:
+def rank_seed(rank: int, fault: Fault) -> int:
     """Per-rank seeds expose a missing broadcast; the other controls share one."""
     return rank if fault in ("none", "broadcast") else 0
 
@@ -332,7 +332,7 @@ def _training_worker(root: Path, clip: float, fault: Fault, mesh: DeviceMesh) ->
     rank = mesh.get_rank()
     try:
         runtime.initialize()
-        torch.default_generator.manual_seed(seed_of(rank, fault))
+        torch.default_generator.manual_seed(rank_seed(rank, fault))
         with host_agnostic_numerics():
             subject = PortSubject(port_training_config(clip=clip, fault=fault))
             if fault == "ulp":

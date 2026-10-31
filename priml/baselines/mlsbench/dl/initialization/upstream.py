@@ -141,9 +141,9 @@ def upstream_network(
         draws = rng_fingerprint()
         media = reference.fixed_media(reference.STEPS)
         model.train()
-        train = reference.logits_of(model, media)
+        train = reference.model_logits(model, media)
         model.eval()
-        evaluated = reference.logits_of(model, media)
+        evaluated = reference.model_logits(model, media)
     record = {
         f"network/{name}/draws": draws,
         f"network/{name}/train": train.detach(),
@@ -198,7 +198,10 @@ def upstream_lockstep(
             model.eval()
             with torch.no_grad():
                 probes.append(
-                    reference.logits_of(model, reference.fixed_media(reference.STEPS)),
+                    reference.model_logits(
+                        model,
+                        reference.fixed_media(reference.STEPS),
+                    ),
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()

@@ -1134,8 +1134,8 @@ def test_channel_layout_belongs_to_the_model(monkeypatch: pytest.MonkeyPatch) ->
         config = tiny_model_config(dropout=0)
         config.channels_last = channels_last
         model = config.make()
-        model.format_for(torch.device("cpu"))
-        model.format_for(torch.device("cuda"))
+        model.format_backbone(torch.device("cpu"))
+        model.format_backbone(torch.device("cuda"))
     assert layouts == [torch.channels_last]
 
 
@@ -1226,7 +1226,7 @@ def test_channels_last_storage_applies_only_to_cuda_models_that_ask_for_it(
         return model.unet
 
     monkeypatch.setattr(model.unet, "to", record)
-    model.format_for(torch.device(device))
+    model.format_backbone(torch.device(device))
     assert calls == (
         [torch.channels_last] if device == "cuda" and channels_last else []
     )

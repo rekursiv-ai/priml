@@ -1197,17 +1197,17 @@ def _new_state_lists(s: Core) -> None:
     """new_state: seed the work lists from row and column sizes and activities."""
     m, n = s.m, s.n
     sizes, cols = s.row_sizes, s.col_sizes
-    s.empty_rows = _ivec_of(np.flatnonzero(np.equal(sizes, 0)))
-    s.ston_rows = _ivec_of(np.flatnonzero(np.equal(sizes, 1)))
+    s.empty_rows = _new_ivec(np.flatnonzero(np.equal(sizes, 0)))
+    s.ston_rows = _new_ivec(np.flatnonzero(np.equal(sizes, 1)))
     is_eq = np.not_equal(np.bitwise_and(s.row_tags, R_EQ), 0)
-    s.dton_rows = _ivec_of(np.flatnonzero(np.logical_and(np.equal(sizes, 2), is_eq)))
-    s.empty_cols = _ivec_of(np.flatnonzero(np.equal(cols, 0)))
-    s.ston_cols = _ivec_of(np.flatnonzero(np.equal(cols, 1)))
+    s.dton_rows = _new_ivec(np.flatnonzero(np.logical_and(np.equal(sizes, 2), is_eq)))
+    s.empty_cols = _new_ivec(np.flatnonzero(np.equal(cols, 0)))
+    s.ston_cols = _new_ivec(np.flatnonzero(np.equal(cols, 1)))
     usable = np.logical_or(np.equal(s.act_n_inf_min, 0), np.equal(s.act_n_inf_max, 0))
     updated = np.flatnonzero(usable)
     for row in updated:
         s.act_status[row] = ADDED
-    s.updated_activities = _ivec_of(updated)
+    s.updated_activities = _new_ivec(updated)
     s.fixed_cols_to_delete = _ivec_new(n // 100)
     s.sub_cols_to_delete = _ivec_new(n // 100)
     s.rows_to_delete = _ivec_new(m // 100)
@@ -1219,7 +1219,7 @@ def _new_state_lists(s: Core) -> None:
 
 
 @njit(cache=True, error_model="numpy")
-def _ivec_of(values: IBuf) -> IVec:
+def _new_ivec(values: IBuf) -> IVec:
     """Return a vector holding ``values``, with room to grow."""
     vec = _ivec_new(values.size + 16)
     vec.data[: values.size] = values

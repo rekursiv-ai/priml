@@ -265,7 +265,7 @@ def compare_full_network(
             ):
                 outputs.append(
                     {
-                        f"forward/{mode}": vision_reference.logits_of(
+                        f"forward/{mode}": vision_reference.model_logits(
                             model,
                             media,
                         ).detach(),

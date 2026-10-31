@@ -28,7 +28,7 @@ from priml.baselines.rsna_knee.model import (
     checkpoint_state,
     tiny_drop_path,
 )
-from priml.baselines.rsna_knee.support_test import blocks_of
+from priml.baselines.rsna_knee.support_test import kind_blocks
 from priml.cost import cost, elementwise_cost, reduction_cost
 from priml.math.custom_types import TensorFn
 from priml.model.coatnet import CoAtNet, CoAtTransformer
@@ -584,7 +584,7 @@ def _raptor_config() -> Raptor.Config:
     backbone.stem.channels_hidden = (1, 2)
     backbone.channels_hidden = (2, 4, 2, 4)
     backbone.blocks_per_stage = (1, 1, 1, 1)
-    for block in blocks_of(backbone, CoAtTransformer.Config):
+    for block in kind_blocks(backbone, CoAtTransformer.Config):
         block.attention.channels_head = 2
         block.attention.relative.mlp.channels_hidden = 2
     config.head.channels_hidden = 2
