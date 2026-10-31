@@ -710,17 +710,15 @@ def test_pooled_step_accepts_generic_train_step_defaults() -> None:
     assert not step.skip_step_on_nonfinite_grad
 
 
-def test_pooled_step_propagates_the_precision_cast_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_pooled_step_propagates_the_precision_cast_flag() -> None:
     """Set Inductor's process flag from the recipe before model construction."""
-    monkeypatch.setattr(inductor_config, "emulate_precision_casts", False)
-    config = port_config("exp005")
-    assert config.emulate_precision_casts is True
+    with inductor_config.patch(emulate_precision_casts=False):
+        config = port_config("exp005")
+        assert config.emulate_precision_casts is True
 
-    PooledActTrainStep(config.finalize())
+        PooledActTrainStep(config.finalize())
 
-    assert inductor_config.emulate_precision_casts is True
+        assert inductor_config.emulate_precision_casts is True
 
 
 def test_pooled_step_places_the_act_pool_on_the_model_device() -> None:
