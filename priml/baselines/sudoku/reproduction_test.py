@@ -256,16 +256,15 @@ def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
 @pytest.mark.parametrize("emulate", [True, False])
 def test_reproduction_accepts_a_one_step_cadence_and_sets_the_cast_flag(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     emulate: bool,
 ) -> None:
     """The smallest legal cadence builds; Inductor's flag follows the recipe step."""
-    monkeypatch.setattr(inductor_config, "emulate_precision_casts", not emulate)
-    cfg = _reproduction_config(tmp_path)
-    cfg.eval_every_steps = 1
-    cfg.generator.step.emulate_precision_casts = emulate
-    assert cfg.make().config.eval_every_steps == 1
-    assert inductor_config.emulate_precision_casts is emulate
+    with inductor_config.patch(emulate_precision_casts=not emulate):
+        cfg = _reproduction_config(tmp_path)
+        cfg.eval_every_steps = 1
+        cfg.generator.step.emulate_precision_casts = emulate
+        assert cfg.make().config.eval_every_steps == 1
+        assert inductor_config.emulate_precision_casts is emulate
 
 
 def test_reproduction_restores_stage_seconds_from_progress(tmp_path: Path) -> None:

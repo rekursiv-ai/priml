@@ -31,14 +31,14 @@ dependencies = [
     "torchao==0.17.0",
     "torchvision==0.26.0",
     # Kernels compile through it; torch installs it only on Linux.
-    "triton ; sys_platform == 'linux'",
+    "triton>=3.6.0 ; sys_platform == 'linux'",
     # vision models
-    "lpips",
+    "lpips>=0.1.4",
     # media
-    "imageio-ffmpeg>=0.6.0",
-    "imagesize>=1.4",
+    "imageio-ffmpeg>=0.7.0",
+    "imagesize>=2.0.1",
     "opencv-contrib-python-headless>=5.0.0.93",
-    "pillow",
+    "pillow>=11.3.0",
     "pygame-ce>=2.5.8",
     # On 24.04 LTS, package libturbojpeg is too old.
     #   R=libjpeg-turbo/libjpeg-turbo/releases
@@ -47,42 +47,60 @@ dependencies = [
     #   cd "$(mktemp -d)"
     #   curl -fsSL https://github.com/$R/download/$V/$F && sudo dpkg -i $F
     #   sudo ln -sf {/opt/libjpeg-turbo/lib64,/usr/local/lib}/libturbojpeg.so.0 && sudo ldconfig
-    "pyturbojpeg>=1.8.2",
+    "pyturbojpeg>=2.6.1",
     "webp>=0.4.0",
     # data
-    "pyarrow>=21.0.0",
+    "pyarrow>=26.0.0",
     # analysis
-    "numpy>=2.1",
-    "scipy",
+    "numpy>=2.5.4",
+    "scipy>=1.16.3",
     # ConvexTok's presolver and Craftax's CPU env; Craftax's Numba intrinsics
     # build LLVM IR with llvmlite directly.
-    "numba>=0.67",
-    "llvmlite",
+    "numba>=0.68.1",
+    "llvmlite>=0.50.0",
     # Craftax's world-model archives. The stdlib `compression.zstd` is
     # 3.14-only; the package validates on 3.12.
     "zstandard>=0.25.0",
     # nlp
     "rustbpe>=0.1.0",
-    "tiktoken>=0.12.0",
-    "tokenizers>=0.23.1",
+    "tiktoken>=0.14.0",
+    "tokenizers>=0.23.3",
     # typing
-    "jaxtyping",
-    "typeguard",
-    "typing_extensions",
+    "jaxtyping>=0.3.11",
+    "typeguard>=4.6.0",
+    "typing_extensions>=4.16.0",
     # training infra
-    "tqdm",
-    "wandb>=0.29.0",
+    "tqdm>=4.70.1",
+    "wandb>=0.31.0",
     # tensor utilities
-    "einops",
-    "einshape",
+    "einops>=0.8.2",
+    "einshape>=1.0",
     # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports,
     # and 1.4.2 the pformat layout every baseline's config golden is minted in
     "configgle>=1.4.4",
     # containers
-    "wrapt",
+    "wrapt>=2.5.2",
     # misc
 ]
 license-files = ["LICENSE", "LICENSES/*"]
+
+[project.optional-dependencies]
+# HuggingFace model import/export (priml.hub, qwen3/kimi_k2 loaders) and
+# quantized checkpoints. Opt-in so `import priml` and the core train/model path
+# stay light. Install via `pip install priml[hub]`.
+hub = [
+    "accelerate>=1.15.0",
+    "hf-transfer>=0.1.9",
+    "huggingface-hub>=2.4.0",
+    "safetensors>=0.8.0",
+    "transformers>=5.22.1",
+]
+# CUDA attention kernels. Flash4Attention and Flash4Varlen raise without
+# flash-attn-4; GatedDeltaNet needs flash-linear-attention on CUDA tensors only.
+cuda = [
+    "flash-attn-4>=4.0.0b37 ; sys_platform == 'linux'",
+    "flash-linear-attention>=0.6.0",
+]
 
 [project.scripts]
 priml = "priml.launch:main"
@@ -91,33 +109,33 @@ priml = "priml.launch:main"
 # NEVER ADD MORE DEPENDENCIES!
 
 debug = [
-    "ipython",
-    "tqdm",
+    "ipython>=9.18.0",
+    "tqdm>=4.70.1",
 ]
 lint = [
-    "codespell>=2.2.4",
-    "ruff",
+    "codespell>=2.4.3",
+    "ruff>=0.17.3",
 ]
 stubs = [
-    "scipy-stubs",
+    "scipy-stubs>=1.18.1.1",
 ]
 test = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "pytest>=7.0",
-    "pytest-cov",
-    "nodejs-wheel-binaries>=24.16.0",
-    "hypothesis>=6.155.1",
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "nodejs-wheel-binaries>=24.19.0",
+    "hypothesis>=6.170.14",
 ]
 typecheck = [
-    "basedpyright>=1.40.1",
+    "basedpyright>=1.40.2",
     "pyrefly>=1.4.0",
-    "ty>=0.0.84",
+    "ty>=0.0.95",
     "rekursiv-ai-typings>=0.1.11",
-    "safetensors",
+    "safetensors>=0.8.0",
 ]
 "pre-commit" = [
-    "pre-commit>=4.6",
+    "pre-commit>=4.7.0",
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
@@ -137,24 +155,6 @@ Documentation = "https://github.com/rekursiv-ai/priml/tree/main/docs"
 Source = "https://github.com/rekursiv-ai/priml"
 Issues = "https://github.com/rekursiv-ai/priml/issues"
 Changelog = "https://github.com/rekursiv-ai/priml/releases"
-
-[project.optional-dependencies]
-# HuggingFace model import/export (priml.hub, qwen3/kimi_k2 loaders) and
-# quantized checkpoints. Opt-in so `import priml` and the core train/model path
-# stay light. Install via `pip install priml[hub]`.
-hub = [
-    "accelerate>=1.13.0",
-    "hf-transfer",
-    "huggingface-hub",
-    "safetensors",
-    "transformers>=4.57.0",
-]
-# CUDA attention kernels. Flash4Attention and Flash4Varlen raise without
-# flash-attn-4; GatedDeltaNet needs flash-linear-attention on CUDA tensors only.
-cuda = [
-    "flash-attn-4>=4.0.0b32 ; sys_platform == 'linux'",
-    "flash-linear-attention>=0.5.0",
-]
 
 [build-system]
 requires = ["hatchling"]
