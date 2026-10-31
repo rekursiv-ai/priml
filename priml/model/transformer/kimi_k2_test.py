@@ -880,10 +880,15 @@ def _build_hf_model(
         AutoModelForCausalLM,
     )
 
-    config = AutoConfig.from_pretrained(
-        "deepseek-ai/DeepSeek-V3",
-        trust_remote_code=True,
-    )
+    # The checkpoint's own config class assigns ``rope_scaling``, which transformers
+    # 5.22 deprecated; that remote code is the reference, so only its warning is
+    # ignored, and only while it runs.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "`rope_scaling` is deprecated", FutureWarning)
+        config = AutoConfig.from_pretrained(
+            "deepseek-ai/DeepSeek-V3",
+            trust_remote_code=True,
+        )
     config.hidden_size = 32
     config.num_hidden_layers = 3
     config.num_attention_heads = 4
@@ -902,9 +907,12 @@ def _build_hf_model(
     config.topk_group = 1
     config.rope_theta = 50_000.0
     config.max_position_embeddings = 64
-    config.rope_scaling = (
+    config.rope_parameters = (
         {
+            # The remote modeling code reads ``type``; transformers, ``rope_type``.
             "type": "yarn",
+            "rope_type": "yarn",
+            "rope_theta": config.rope_theta,
             "factor": 32.0,
             "original_max_position_embeddings": 4,
             "mscale": 1.0,
