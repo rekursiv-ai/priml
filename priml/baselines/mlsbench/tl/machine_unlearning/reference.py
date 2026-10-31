@@ -384,7 +384,7 @@ def probe(model: nn.Module) -> Tensor:
     """
     model.eval()
     with torch.no_grad():
-        logits = reference.logits_of(model, reference.fixed_media(len(SCHEDULE) * 3))
+        logits = reference.model_logits(model, reference.fixed_media(len(SCHEDULE) * 3))
     model.train()
     return logits
 
@@ -576,7 +576,7 @@ def full_size_values(
             torch.no_grad(),
             host_agnostic_numerics(),
         ):
-            record[f"full/{key}/{mode}"] = reference.logits_of(model, media)
+            record[f"full/{key}/{mode}"] = reference.model_logits(model, media)
     return record
 
 

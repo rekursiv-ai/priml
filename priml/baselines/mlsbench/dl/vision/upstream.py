@@ -547,9 +547,9 @@ def upstream_network(script: Upstream) -> dict[str, Tensor]:
         draws = rng_fingerprint()
         media = reference.fixed_media(reference.STEPS)
         model.train()
-        train = reference.logits_of(model, media)
+        train = reference.model_logits(model, media)
         model.eval()
-        evaluated = reference.logits_of(model, media)
+        evaluated = reference.model_logits(model, media)
     return {
         "network/draws": draws,
         "network/train": train.detach(),

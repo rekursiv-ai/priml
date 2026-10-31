@@ -1076,7 +1076,7 @@ def _draw_spans(
         where=counts > 0,
     )
     tables = [
-        _spans_of(ix, size=config.span_decisions, stratum_weight=stratum_weight)
+        _aligned_spans(ix, size=config.span_decisions, stratum_weight=stratum_weight)
         for ix in indexes
     ]
     shard = np.concatenate(
@@ -1101,7 +1101,7 @@ def _draw_spans(
     ]
 
 
-def _spans_of(
+def _aligned_spans(
     index: ShardIndex,
     *,
     size: int,

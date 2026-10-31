@@ -174,8 +174,18 @@ def compare_setting(
             ours.train(mode == "train")
             theirs.train(mode == "train")
             report += mismatches(
-                {f"setting/{mode}": vision_reference.logits_of(theirs, media).detach()},
-                {f"setting/{mode}": vision_reference.logits_of(ours, media).detach()},
+                {
+                    f"setting/{mode}": vision_reference.model_logits(
+                        theirs,
+                        media,
+                    ).detach(),
+                },
+                {
+                    f"setting/{mode}": vision_reference.model_logits(
+                        ours,
+                        media,
+                    ).detach(),
+                },
             )
     return report
 

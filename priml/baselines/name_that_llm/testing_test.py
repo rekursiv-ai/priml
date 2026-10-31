@@ -280,7 +280,7 @@ def test_return_dispatch_preserves_actual_fit_state_and_unwind(
     assert len(frames) == 1
     monkeypatch.setattr(
         testing,
-        "frame_for",
+        "code_frame",
         value=partial(_saved_frame, frame=frames[0]),
     )
     trace = NumericalTrace()
@@ -300,7 +300,7 @@ def test_return_dispatch_preserves_actual_fit_state_and_unwind(
 def test_frame_resolution_returns_the_live_operation_frame() -> None:
     frame = inspect.currentframe()
     assert frame is not None
-    assert testing.frame_for(frame.f_code) is frame
+    assert testing.code_frame(frame.f_code) is frame
 
 
 def test_trace_records_sigmoid_calibration_under_its_class_name() -> None:

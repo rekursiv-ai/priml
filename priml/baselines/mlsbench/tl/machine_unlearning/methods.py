@@ -92,7 +92,7 @@ class RetainFinetune:
         """
         del forget_batch, step, epoch
         retain_x, retain_y = retain_batch
-        loss = functional.cross_entropy(logits_of(model, retain_x), retain_y)
+        loss = functional.cross_entropy(model_logits(model, retain_x), retain_y)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -143,8 +143,8 @@ class NegativeGradient:
         del step, epoch
         retain_x, retain_y = retain_batch
         forget_x, forget_y = forget_batch
-        retain_loss = functional.cross_entropy(logits_of(model, retain_x), retain_y)
-        forget_loss = functional.cross_entropy(logits_of(model, forget_x), forget_y)
+        retain_loss = functional.cross_entropy(model_logits(model, retain_x), retain_y)
+        forget_loss = functional.cross_entropy(model_logits(model, forget_x), forget_y)
         loss = retain_loss - self.forget_weight * forget_loss
         optimizer.zero_grad()
         loss.backward()
@@ -241,10 +241,10 @@ class BadTeacher:
             ],
             dim=0,
         )
-        student = logits_of(model, x)
+        student = model_logits(model, x)
         with torch.no_grad():
-            full = logits_of(self.competent, x)
-            unlearn = logits_of(self.incompetent, x)
+            full = model_logits(self.competent, x)
+            unlearn = model_logits(self.incompetent, x)
         loss = self._unlearner_loss(student, full, unlearn, is_forget)
         optimizer.zero_grad()
         loss.backward()
@@ -330,15 +330,15 @@ class Scrub:
         forget_x, _ = forget_batch
         if epoch < self.max_epochs:
             optimizer.zero_grad()
-            student_forget = logits_of(model, forget_x)
+            student_forget = model_logits(model, forget_x)
             with torch.no_grad():
-                teacher_forget = logits_of(teacher, forget_x)
+                teacher_forget = model_logits(teacher, forget_x)
             (-self._kd_kl(student_forget, teacher_forget)).backward()
             optimizer.step()
         optimizer.zero_grad()
-        student_retain = logits_of(model, retain_x)
+        student_retain = model_logits(model, retain_x)
         with torch.no_grad():
-            teacher_retain = logits_of(teacher, retain_x)
+            teacher_retain = model_logits(teacher, retain_x)
         retain_ce = functional.cross_entropy(student_retain, retain_y)
         retain_kl = self._kd_kl(student_retain, teacher_retain)
         loss = self.gamma * retain_ce + self.alpha * retain_kl
@@ -354,7 +354,7 @@ class Scrub:
         return functional.kl_div(log_s, p_t, reduction="batchmean") * (t * t)
 
 
-def logits_of(model: Classifier, media: Tensor) -> Tensor:
+def model_logits(model: Classifier, media: Tensor) -> Tensor:
     """Run a network, typed as the images-to-logits map it is."""
     return model(media)
 

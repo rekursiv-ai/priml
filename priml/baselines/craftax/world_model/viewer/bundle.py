@@ -96,7 +96,7 @@ class Manifest:
     annotations: Annotations
 
 
-def stream_of(rollout: Rollout, *, row: int, action_mark: Mark = Mark.MODEL) -> Stream:
+def row_stream(rollout: Rollout, *, row: int, action_mark: Mark = Mark.MODEL) -> Stream:
     """Return one row of a ``dream`` rollout as a marked stream.
 
     Args:

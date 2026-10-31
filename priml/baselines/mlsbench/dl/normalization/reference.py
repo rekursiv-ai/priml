@@ -75,7 +75,7 @@ FMNIST: Final = "mobilenetv2-fmnist"
 """The setting whose dataset differs from ``exp000``'s, so its loaders are compared."""
 
 
-def norm_of(factory: Callable[[], VisionTrainLoop]) -> Callable[[int], nn.Module]:
+def norm_builder(factory: Callable[[], VisionTrainLoop]) -> Callable[[int], nn.Module]:
     """Return the normalization builder an experiment's model holds.
 
     Args:
@@ -100,7 +100,7 @@ def norm_record() -> dict[str, Tensor]:
     """
     record: dict[str, Tensor] = {}
     for name, factory in NORMS.items():
-        record |= norm_run(norm_of(factory), name)
+        record |= norm_run(norm_builder(factory), name)
     record["norm/group_norm/groups"] = torch.tensor(
         [GroupNorm(c).num_groups for c in GROUP_CHANNELS],
     )

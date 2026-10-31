@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 import numpy as np
 import torch
 
-from priml.baselines.mlsbench.tl.machine_unlearning.methods import logits_of
+from priml.baselines.mlsbench.tl.machine_unlearning.methods import model_logits
 
 
 if TYPE_CHECKING:
@@ -91,7 +91,7 @@ def evaluate_accuracy(
     correct, total = 0, 0
     confidences: list[NDArray[np.float32]] = []
     for media, label in batches:
-        probs = torch.softmax(logits_of(model, media.to(device)), dim=1)
+        probs = torch.softmax(model_logits(model, media.to(device)), dim=1)
         correct += int(probs.argmax(dim=1).eq(label.to(device)).sum())
         total += label.size(0)
         confidences.append(probs.max(dim=1).values.cpu().numpy())

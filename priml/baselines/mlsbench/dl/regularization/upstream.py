@@ -313,7 +313,7 @@ def upstream_lockstep(
             model.eval()
             with torch.no_grad():
                 probes.append(
-                    vision_reference.logits_of(
+                    vision_reference.model_logits(
                         model,
                         vision_reference.fixed_media(vision_reference.STEPS),
                     ),

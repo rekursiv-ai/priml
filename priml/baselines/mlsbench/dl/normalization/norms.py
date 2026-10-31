@@ -39,7 +39,7 @@ class GroupNorm(nn.GroupNorm):
     """
 
     def __init__(self, num_features: int) -> None:
-        super().__init__(groups_for(num_features), num_features)
+        super().__init__(group_count(num_features), num_features)
 
     @classmethod
     def cost(
@@ -67,7 +67,7 @@ class GroupNorm(nn.GroupNorm):
         return cost(
             GroupNorm2d.Config(
                 channels,
-                num_groups=groups_for(channels),
+                num_groups=group_count(channels),
                 elementwise_affine=True,
             ),
             seq_len=seq_len,
@@ -77,7 +77,7 @@ class GroupNorm(nn.GroupNorm):
         )
 
 
-def groups_for(num_features: int) -> int:
+def group_count(num_features: int) -> int:
     """Return the most groups, up to :data:`MAX_GROUPS`, that divide ``num_features``."""
     groups = min(MAX_GROUPS, num_features)
     while num_features % groups:

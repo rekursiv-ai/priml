@@ -236,9 +236,9 @@ def network_record(name: str) -> dict[str, Tensor]:
         model = full_step(SETTINGS[name]).model
         draws = rng_fingerprint()
         model.train()
-        train = reference.logits_of(model, fixed_images32())
+        train = reference.model_logits(model, fixed_images32())
         model.eval()
-        evaluated = reference.logits_of(model, fixed_images32())
+        evaluated = reference.model_logits(model, fixed_images32())
     return {
         f"draws/{name}": draws,
         f"forward/{name}/train": train.detach(),

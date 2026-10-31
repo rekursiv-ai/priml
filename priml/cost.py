@@ -181,7 +181,7 @@ class Cost:
         _validate_nonnegative_integer("params_active", self.params_active)
         _validate_nonnegative_integer("bytes_state", self.bytes_state)
         if not self.axes:
-            object.__setattr__(self, "axes", _axes_of(self.cells, _COST_AXES))
+            object.__setattr__(self, "axes", _key_axes(self.cells, _COST_AXES))
         object.__setattr__(
             self,
             "cells",
@@ -350,7 +350,7 @@ class Report:
 
     def __post_init__(self) -> None:
         if not self.axes:
-            object.__setattr__(self, "axes", _axes_of(self.cells, _REPORT_AXES))
+            object.__setattr__(self, "axes", _key_axes(self.cells, _REPORT_AXES))
         object.__setattr__(
             self,
             "cells",
@@ -1113,7 +1113,7 @@ def _position(axes: tuple[str, ...], value: object) -> int:
     return axes.index(kind)
 
 
-def _axes_of(
+def _key_axes(
     cells: Mapping[tuple[object, ...], object],
     empty: tuple[str, ...],
 ) -> tuple[str, ...]:

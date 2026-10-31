@@ -430,8 +430,8 @@ class TestSlots:
     def test_layer_accessors_broadcast_one_template(self):
         cfg = KimiK2.Config.from_hf(hf_config())
         assert isinstance(cfg.block, TransformerBlock.Config)
-        assert kimi_k2._attn_of(cfg, 1) is cfg.block.attn
-        assert kimi_k2._moe_of(cfg, 1) is cfg.block.ffn
+        assert kimi_k2._layer_attention(cfg, 1) is cfg.block.attn
+        assert kimi_k2._layer_moe(cfg, 1) is cfg.block.ffn
 
     def test_layer_accessors_use_each_layers_config(self):
         cfg = KimiK2.Config.from_hf(hf_config()).finalize()
@@ -444,8 +444,8 @@ class TestSlots:
         second.attn.q_lora_rank = 6
         second.ffn.router.top_k = 2
 
-        assert kimi_k2._attn_of(cfg, 1).q_lora_rank == 6
-        assert kimi_k2._moe_of(cfg, 1).router.top_k == 2
+        assert kimi_k2._layer_attention(cfg, 1).q_lora_rank == 6
+        assert kimi_k2._layer_moe(cfg, 1).router.top_k == 2
 
     def test_a_router_edit_survives_finalize(self):
         """Editing the router slot must reach the built MoE layers.
@@ -683,7 +683,7 @@ class TestRemap:
             match = "not MoE"
         if bad_part in ("block", "ffn"):
             with pytest.raises(TypeError, match=match) as exc_info:
-                kimi_k2._moe_of(cfg, 0)
+                kimi_k2._layer_moe(cfg, 0)
             expected_message = (
                 "layer 0 is RMSNorm.Config, not a transformer."
                 if bad_part == "block"
@@ -692,7 +692,7 @@ class TestRemap:
             assert str(exc_info.value) == expected_message
         if bad_part in ("block", "attention"):
             with pytest.raises(TypeError, match=match) as exc_info:
-                kimi_k2._attn_of(cfg, 0)
+                kimi_k2._layer_attention(cfg, 0)
             expected_message = (
                 "layer 0 is RMSNorm.Config, not a transformer."
                 if bad_part == "block"

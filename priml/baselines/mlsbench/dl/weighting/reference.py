@@ -439,7 +439,7 @@ def lockstep_run(
             step.model.eval()
             with torch.no_grad():
                 probes.append(
-                    reference.logits_of(
+                    reference.model_logits(
                         step.model,
                         reference.fixed_media(reference.STEPS),
                     ),

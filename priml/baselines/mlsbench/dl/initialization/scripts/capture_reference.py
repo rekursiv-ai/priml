@@ -187,8 +187,8 @@ def compare_full_size(
             ours.train(mode == "train")
             theirs.train(mode == "train")
             report += mismatches(
-                {"forward": vision_reference.logits_of(theirs, media).detach()},
-                {"forward": vision_reference.logits_of(ours, media).detach()},
+                {"forward": vision_reference.model_logits(theirs, media).detach()},
+                {"forward": vision_reference.model_logits(ours, media).detach()},
             )
     return [f"full/{name}/{line}" for line in report]
 

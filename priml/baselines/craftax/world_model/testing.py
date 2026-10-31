@@ -184,7 +184,7 @@ def row_zero_done(make: Callable[[], Control], *, done: bool) -> Control:
     return control
 
 
-def state_of(engine: Engine, *, row: int) -> dict[str, Tensor]:
+def row_state(engine: Engine, *, row: int) -> dict[str, Tensor]:
     """Return a copy of one row's state, with only the valid part of its cache.
 
     Args:

@@ -64,7 +64,7 @@ def test_composite_boundaries_infer_only_unspecified_widths(
         )
 
 
-def blocks_of[Block: Fig[object]](
+def kind_blocks[Block: Fig[object]](
     backbone: CoAtNet.Config,
     kind: type[Block],
 ) -> list[Block]:
@@ -314,7 +314,7 @@ def _config() -> CoAtNet.Config:
     config.stem.channels_hidden = (1, 2)
     config.channels_hidden = (2, 4, 2, 4)
     config.blocks_per_stage = (2, 2, 3, 1)
-    for block in blocks_of(config, CoAtTransformer.Config):
+    for block in kind_blocks(config, CoAtTransformer.Config):
         block.attention.channels_head = 2
         block.attention.relative.mlp.channels_hidden = 2
     return config
@@ -483,25 +483,25 @@ def test_grid_validation_uses_configured_component_geometry(component: str) -> N
         config.stem.conv1.kernel_size = 2
         config.stem.conv1.padding = 0
     elif component == "expansion":
-        for conv_block in blocks_of(config, CoAtMBConv.Config):
+        for conv_block in kind_blocks(config, CoAtMBConv.Config):
             conv_block.conv1_1x1.stride = 2
     elif component == "depthwise":
-        for conv_block in blocks_of(config, CoAtMBConv.Config):
+        for conv_block in kind_blocks(config, CoAtMBConv.Config):
             conv_block.conv2_kxk.dilation = 2
     elif component == "projection":
-        for conv_block in blocks_of(config, CoAtMBConv.Config):
+        for conv_block in kind_blocks(config, CoAtMBConv.Config):
             conv_block.conv3_1x1.padding = 1
     elif component == "shortcut":
-        for conv_block in blocks_of(config, CoAtMBConv.Config):
+        for conv_block in kind_blocks(config, CoAtMBConv.Config):
             conv_block.shortcut.projection.kernel_size = 2
     elif component == "qkv":
-        for attention_block in blocks_of(config, CoAtTransformer.Config):
+        for attention_block in kind_blocks(config, CoAtTransformer.Config):
             attention_block.attention.qkv.padding = 1
     elif component == "attention":
-        for attention_block in blocks_of(config, CoAtTransformer.Config):
+        for attention_block in kind_blocks(config, CoAtTransformer.Config):
             attention_block.attention.projection.padding = 1
     else:
-        for attention_block in blocks_of(config, CoAtTransformer.Config):
+        for attention_block in kind_blocks(config, CoAtTransformer.Config):
             attention_block.mlp.fc2.padding = 1
     allocations: list[torch.Tensor] = []
     config.stem.conv1.init_weight = allocations.append
@@ -608,7 +608,7 @@ def test_coatnet_gradients_reset_and_invalid_head_geometry() -> None:
 def test_mbconv_residual_grid_mismatch_is_named() -> None:
     config = _config()
     config.blocks_per_stage = (1, 1, 1, 1)
-    for conv_block in blocks_of(config, CoAtMBConv.Config):
+    for conv_block in kind_blocks(config, CoAtMBConv.Config):
         conv_block.conv3_1x1.padding = 1
     with pytest.raises(ValueError, match=r"^CoAtNet MBConv residual grids differ\.$"):
         config.make()
@@ -639,7 +639,7 @@ def test_image_too_small_for_the_pooling_stages_names_the_pool_grid() -> None:
 def test_residual_grid_mismatch_in_a_transformer_block_is_named(component: str) -> None:
     config = _config()
     config.blocks_per_stage = (1, 1, 1, 1)
-    for block in blocks_of(config, CoAtTransformer.Config):
+    for block in kind_blocks(config, CoAtTransformer.Config):
         if component == "attention":
             block.attention.projection.padding = 1
         else:

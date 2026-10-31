@@ -264,7 +264,7 @@ def test_compare_tiny_settings_reports_each_setting_under_its_name(
         "compare_states",
         calls.returning("states", ["state differs"]),
     )
-    monkeypatch.setattr(reference, "logits_of", weight_sum)
+    monkeypatch.setattr(reference, "model_logits", weight_sum)
     script = SimpleNamespace(initialize_weights=calls.returning("init", None))
     report = capture_reference.compare_tiny_settings(cast(upstream.Upstream, script))
     # Both sides are the same stub, so the draws and both forwards agree and only

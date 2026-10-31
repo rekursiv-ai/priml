@@ -23,7 +23,7 @@ from priml.baselines.craftax.world_model.engine import (
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts.engine_checks import (
-    prefix_of,
+    segment_prefix,
 )
 from priml.baselines.craftax.world_model.testing import (
     random_segment,
@@ -58,9 +58,9 @@ def test_dream_from_per_row_prefixes_follows_recorded_actions() -> None:
     schema = small_schema()
     model = tiny_model(schema, global_layers=2)
     prefixes = [
-        prefix_of(random_segment(schema, 3, seed=1)),
+        segment_prefix(random_segment(schema, 3, seed=1)),
         None,
-        prefix_of(random_segment(schema, 1, seed=2, starts=False)),
+        segment_prefix(random_segment(schema, 1, seed=2, starts=False)),
     ]
     engine = Engine(model, rows=3, t_max=16, generator=torch.Generator().manual_seed(1))
     actions = torch.tensor([[1, 2], [4, 5], [7, 8]])
@@ -173,7 +173,7 @@ def test_dream_reprefills_a_full_row_from_its_recorded_decisions(
         t_max=8,
         generator=torch.Generator().manual_seed(6),
     )
-    prefix = prefix_of(random_segment(schema, 3, seed=4, starts=False))
+    prefix = segment_prefix(random_segment(schema, 3, seed=4, starts=False))
     calls: list[tuple[int, Prefix]] = []
     prefill = engine.prefill
 

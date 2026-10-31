@@ -28,9 +28,9 @@ from priml.baselines.craftax.world_model.testing import (
     played_frames,
     random_contexts,
     random_segment,
+    row_state,
     row_zero_done,
     small_schema,
-    state_of,
     tiny_model,
     window_segment,
 )
@@ -98,7 +98,7 @@ def test_state_of_copies_one_row_and_cuts_its_cache() -> None:
         generator=torch.Generator(),
     )
     engine.state.length[1] = 3
-    state = state_of(engine, row=1)
+    state = row_state(engine, row=1)
     assert state["keys"].shape[1] == 3
     assert state["values"].shape[1] == 3
     state["length"].fill_(7)

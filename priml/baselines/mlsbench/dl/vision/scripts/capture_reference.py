@@ -217,7 +217,7 @@ def compare_tiny_settings(script: Upstream) -> list[str]:
             for model, record in ((theirs, want), (ours, got)):
                 model.train(mode == "train")
                 with reference.seeded(reference.SEED), host_agnostic_numerics():
-                    record[mode] = reference.logits_of(model, media).detach()
+                    record[mode] = reference.model_logits(model, media).detach()
         lines += mismatches(want, got)
         report += [f"tiny/{name}: {line}" for line in lines]
     return report
@@ -549,14 +549,14 @@ def compare_full_size(
         ours.train()
         theirs.train()
         report += mismatches(
-            {"forward/train": reference.logits_of(theirs, media).detach()},
-            {"forward/train": reference.logits_of(ours, media).detach()},
+            {"forward/train": reference.model_logits(theirs, media).detach()},
+            {"forward/train": reference.model_logits(ours, media).detach()},
         )
         ours.eval()
         theirs.eval()
         report += mismatches(
-            {"forward/eval": reference.logits_of(theirs, media).detach()},
-            {"forward/eval": reference.logits_of(ours, media).detach()},
+            {"forward/eval": reference.model_logits(theirs, media).detach()},
+            {"forward/eval": reference.model_logits(ours, media).detach()},
         )
     return report
 

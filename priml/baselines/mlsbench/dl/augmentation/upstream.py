@@ -281,7 +281,10 @@ def upstream_lockstep(
             model.eval()
             with torch.no_grad():
                 probes.append(
-                    reference.logits_of(model, reference.fixed_media(reference.STEPS)),
+                    reference.model_logits(
+                        model,
+                        reference.fixed_media(reference.STEPS),
+                    ),
                 )
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()

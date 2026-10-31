@@ -564,7 +564,7 @@ def _fields_type(dtype: np.dtype[np.void]) -> type[_Fields]:
     return fields
 
 
-def _fields_of(record: np.record) -> _Fields:
+def _record_fields(record: np.record) -> _Fields:
     """Return a record of a one-dimensional structured array as :class:`_Fields`."""
     base = cast("object", record.base)
     if not isinstance(base, np.recarray) or base.ndim != 1:
@@ -576,7 +576,7 @@ def _fields_of(record: np.record) -> _Fields:
     return _fields_type(base.dtype)(base, index)
 
 
-def _records_of(array: np.ndarray) -> _Records:
+def _array_records(array: np.ndarray) -> _Records:
     """Return a structured array's :class:`_Records`, the one made first in the block."""
     seen = _SEEN.get(id(array))
     if seen is None:
@@ -662,12 +662,12 @@ def _viewed(value: object) -> object:
     """Return a structured array as :class:`_Records`, a record as :class:`_Fields`."""
     kind = type(value)
     if kind is np.record:
-        return _fields_of(cast("np.record", value))
+        return _record_fields(cast("np.record", value))
     if kind is np.ndarray or kind is np.recarray:
         array = cast("np.ndarray", value)
         if array.dtype.names is None:
             return value
-        return _records_of(array)
+        return _array_records(array)
     if not issubclass(kind, tuple):
         _PASSED.add(kind)
         return value

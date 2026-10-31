@@ -87,7 +87,7 @@ SETTINGS: Final[dict[str, dict[str, Callable[[], VisionTrainLoop]]]] = {
 """Per other setting of the task, the experiment that carries each block there."""
 
 
-def block_of(name: str, *, channels_out: int, stride: int) -> nn.Module:
+def named_block(name: str, *, channels_out: int, stride: int) -> nn.Module:
     """Build the block of experiment :data:`VARIANTS` ``[name]`` alone.
 
     A stochastic-depth template built alone keeps its defaults, position 1 of
@@ -124,7 +124,7 @@ def block_record() -> dict[str, Tensor]:
         for kind, channels_out, stride in BLOCKS:
             record |= block_run(
                 functools.partial(
-                    block_of,
+                    named_block,
                     name,
                     channels_out=channels_out,
                     stride=stride,
