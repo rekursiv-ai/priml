@@ -11,19 +11,10 @@ ML building blocks for training experiments.
 ## Quick Start
 
 ```bash
-# Mac:
-#   # Required for quick install.
-#   brew install uv
-
-# Ubuntu/Debian:
-#   # Required for quick install.
-#   sudo apt-get install -y curl
-#   curl -LsSf https://astral.sh/uv/install.sh | sh
-
 uv add priml
-
-# Alternatively: python -m pip install priml
 ```
+
+See [Install](#install) for additional details.
 
 ## What's inside
 
@@ -341,6 +332,28 @@ They are not measured HBM traffic: fusion and cache reuse can change physical
 memory transfers. The roofline comparisons above use that analytical traffic
 model; they do not establish achieved hardware utilization.
 
+
+## Install
+
+```bash
+uv add priml
+```
+
+If you're missing `uv`,
+- Mac
+  ```bash
+  brew install uv
+  ```
+- Linux
+  ```bash
+  sudo apt install -y curl
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+Or with pip,
+```bash
+python -m pip install priml
+```
 
 ## Development
 
