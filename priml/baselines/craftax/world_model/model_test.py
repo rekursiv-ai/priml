@@ -11,6 +11,7 @@ import dataclasses
 import math
 
 from torch import Tensor, nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils import checkpoint
 from torch.utils._python_dispatch import TorchDispatchMode
 
@@ -526,9 +527,9 @@ def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels() -> N
     plain = _two_layer_local_model(checkpoint=True)
     kept = _two_layer_local_model(checkpoint=True, keeps_attention=True)
     calls, calls_kept = _count_local_calls(plain), _count_local_calls(kept)
-    with _OpCounter() as ops:
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION), _OpCounter() as ops:
         loss, grads = _loss_and_grads(plain, batch)
-    with _OpCounter() as ops_kept:
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION), _OpCounter() as ops_kept:
         loss_kept, grads_kept = _loss_and_grads(kept, batch)
     # Both re-run every block's feed-forward in backward...
     assert calls == calls_kept == [2] * 4
