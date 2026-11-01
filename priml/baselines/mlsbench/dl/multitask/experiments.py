@@ -23,7 +23,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.multitask.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def exp000() -> MultiTaskTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 
@@ -136,7 +136,7 @@ def exp001() -> MultiTaskTrainLoop:
         to Weigh Losses for Scene Geometry and Semantics."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``uncertainty`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -161,7 +161,7 @@ def exp002() -> MultiTaskTrainLoop:
         Attention."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``dwa`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -188,7 +188,7 @@ def exp003() -> MultiTaskTrainLoop:
         Yu et al. 2020, "Gradient Surgery for Multi-Task Learning."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``pcgrad`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c. Its walk of the graph skips
+        b873944969c53b01e4ee6e843c77767b8c702485. Its walk of the graph skips
         a heap-dependent subset of the parameters; this takes all of them.
 
     Results:
@@ -216,7 +216,7 @@ def exp004() -> MultiTaskTrainLoop:
         He et al. 2016, "Deep Residual Learning for Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``resnet20-cifar100mt`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -243,7 +243,7 @@ def exp005() -> MultiTaskTrainLoop:
         to Weigh Losses for Scene Geometry and Semantics."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``uncertainty`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -267,7 +267,7 @@ def exp006() -> MultiTaskTrainLoop:
         Attention."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``dwa`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -291,7 +291,7 @@ def exp007() -> MultiTaskTrainLoop:
         Yu et al. 2020, "Gradient Surgery for Multi-Task Learning."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``pcgrad`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c. Its walk of the graph skips
+        b873944969c53b01e4ee6e843c77767b8c702485. Its walk of the graph skips
         a heap-dependent subset of the parameters; this takes all of them.
 
     Results:
@@ -322,7 +322,7 @@ def exp008() -> MultiTaskTrainLoop:
         Large-Scale Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100mt`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -349,7 +349,7 @@ def exp009() -> MultiTaskTrainLoop:
         to Weigh Losses for Scene Geometry and Semantics."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``uncertainty`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -373,7 +373,7 @@ def exp010() -> MultiTaskTrainLoop:
         Attention."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``dwa`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -397,7 +397,7 @@ def exp011() -> MultiTaskTrainLoop:
         Yu et al. 2020, "Gradient Surgery for Multi-Task Learning."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``pcgrad`` of ``cv-multitask-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c. Its walk of the graph skips
+        b873944969c53b01e4ee6e843c77767b8c702485. Its walk of the graph skips
         a heap-dependent subset of the parameters; this takes all of them.
 
     Results:

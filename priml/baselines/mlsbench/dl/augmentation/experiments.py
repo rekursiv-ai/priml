@@ -26,7 +26,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.augmentation.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -88,7 +88,7 @@ def exp001() -> VisionTrainLoop:
         Neural Networks with Cutout."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``cutout`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -115,7 +115,7 @@ def exp002() -> VisionTrainLoop:
         with a reduced search space."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``randaugment`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -143,7 +143,7 @@ def exp003() -> VisionTrainLoop:
         State-of-the-Art Data Augmentation."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``trivialaugment`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -168,7 +168,7 @@ def exp004() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``resnet20-cifar10`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -191,7 +191,7 @@ def exp005() -> VisionTrainLoop:
         Neural Networks with Cutout."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``cutout`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -217,7 +217,7 @@ def exp006() -> VisionTrainLoop:
         with a reduced search space."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``randaugment`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -244,7 +244,7 @@ def exp007() -> VisionTrainLoop:
         State-of-the-Art Data Augmentation."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``trivialaugment`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -271,7 +271,7 @@ def exp008() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Hidden setting ``mobilenetv2-fmnist`` of ``cv-data-augmentation`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1801.04381
         Sandler et al. 2018, "MobileNetV2: Inverted Residuals and Linear
         Bottlenecks."
@@ -298,7 +298,7 @@ def exp009() -> VisionTrainLoop:
         Neural Networks with Cutout."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``cutout`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -325,7 +325,7 @@ def exp010() -> VisionTrainLoop:
         with a reduced search space."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``randaugment`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -352,7 +352,7 @@ def exp011() -> VisionTrainLoop:
         State-of-the-Art Data Augmentation."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``trivialaugment`` of ``cv-data-augmentation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

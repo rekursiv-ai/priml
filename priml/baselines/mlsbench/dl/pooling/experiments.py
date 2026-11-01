@@ -22,7 +22,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.pooling.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1312.4400
         Lin, Chen and Yan 2014, "Network In Network."
 
@@ -88,7 +88,7 @@ def exp001() -> VisionTrainLoop:
         learning with convolutional neural networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``global_max`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -114,7 +114,7 @@ def exp002() -> VisionTrainLoop:
         No Human Annotation."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gem`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -137,7 +137,7 @@ def exp003() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``avg_max`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -162,7 +162,7 @@ def exp004() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1409.1556
         Simonyan and Zisserman 2015, "Very Deep Convolutional Networks for
         Large-Scale Image Recognition."
@@ -189,7 +189,7 @@ def exp005() -> VisionTrainLoop:
         learning with convolutional neural networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``global_max`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -216,7 +216,7 @@ def exp006() -> VisionTrainLoop:
         No Human Annotation."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gem`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -239,7 +239,7 @@ def exp007() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``avg_max`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -264,7 +264,7 @@ def exp008() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist`` of ``cv-pooling-aggregation`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1801.04381
         Sandler et al. 2018, "MobileNetV2: Inverted Residuals and Linear
         Bottlenecks."
@@ -292,7 +292,7 @@ def exp009() -> VisionTrainLoop:
         learning with convolutional neural networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``global_max`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -318,7 +318,7 @@ def exp010() -> VisionTrainLoop:
         No Human Annotation."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``gem`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -341,7 +341,7 @@ def exp011() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``avg_max`` of ``cv-pooling-aggregation`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

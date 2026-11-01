@@ -4,7 +4,7 @@ The task trains a ResNet on CIFAR-100 with two heads: fine (100 classes) and
 coarse (20 superclasses). Its editable `MultiTaskLoss` combines the two
 cross-entropies and may hold parameters the optimizer also trains. Here it is
 the slot `step.mtl_loss`. Ported at the `resnet56-cifar100mt` setting, pinned
-to MLS-Bench commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+to MLS-Bench commit `b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  sum of the two losses

@@ -4,7 +4,7 @@ ResNet-32 on long-tailed CIFAR-100 (`resnet32-cifar100lt`, imbalance ratio
 100). The task's editable `compute_class_weights` is the slot
 `step.loss.class_weight`: a function from per-class training counts to the
 weights of a weighted cross-entropy. Pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+`b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ```
 exp000  uniform weights

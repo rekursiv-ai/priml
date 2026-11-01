@@ -18,7 +18,7 @@ Prepare both datasets once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.opt.gradient_compression.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def exp000() -> CompressionTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``optimization-gradient-compression`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1512.03385
         He et al. 2016, "Deep Residual Learning for Image Recognition."
 
@@ -129,7 +129,7 @@ def exp001() -> CompressionTrainLoop.Config:
         Stich, Cordonnier and Jaggi 2018, "Sparsified SGD with Memory."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``topk_ef`` of ``optimization-gradient-compression`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -157,7 +157,7 @@ def exp002() -> CompressionTrainLoop.Config:
         Quantization and Encoding."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``qsgd`` of ``optimization-gradient-compression`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -185,7 +185,7 @@ def exp003() -> CompressionTrainLoop.Config:
         Non-Convex Problems."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``signsgd`` of ``optimization-gradient-compression`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -212,7 +212,7 @@ def exp004() -> CompressionTrainLoop.Config:
         Large-Scale Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg11-cifar100`` of ``optimization-gradient-compression``
-        at commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        at commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -242,7 +242,7 @@ def exp005() -> CompressionTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``resnet56-cifar10`` of ``optimization-gradient-compression``
-        at commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        at commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

@@ -21,7 +21,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data --dataset cifar10
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.tl.backdoor_defense.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def exp000() -> BackdoorTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``security-backdoor-defense`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1708.06733
         Gu, Dolan-Gavitt and Garg 2017, "BadNets: Identifying Vulnerabilities
         in the Machine Learning Model Supply Chain."
@@ -95,7 +95,7 @@ def exp001() -> BackdoorTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``confidence_filter`` of ``security-backdoor-defense`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -120,7 +120,7 @@ def exp002() -> BackdoorTrainLoop.Config:
         Tran, Li and Madry 2018, "Spectral Signatures in Backdoor Attacks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``spectral_signature`` of ``security-backdoor-defense`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -145,7 +145,7 @@ def exp003() -> BackdoorTrainLoop.Config:
         by Activation Clustering."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``activation_clustering`` of ``security-backdoor-defense`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -167,7 +167,7 @@ def exp004() -> BackdoorTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``zscore_outlier`` of ``security-backdoor-defense`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -190,7 +190,7 @@ def exp005() -> BackdoorTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100-blend`` of ``security-backdoor-defense`` at
-        commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        commit b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1712.05526
         Chen et al. 2017, "Targeted Backdoor Attacks on Deep Learning Systems
         Using Data Poisoning."
@@ -218,7 +218,7 @@ def exp006() -> BackdoorTrainLoop.Config:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist-badnets`` of ``security-backdoor-defense``
-        at commit 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        at commit b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

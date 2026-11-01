@@ -13,7 +13,7 @@ a config, so a new idea is an `expNNN` fork that changes one value.
   the default test tier, so CI checks parity without a clone.
 
 MLS-Bench has no license, so no upstream source is copied. Every port pins
-upstream commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
+upstream commit `b873944969c53b01e4ee6e843c77767b8c702485`.
 
 ## Scope
 
@@ -82,7 +82,7 @@ recipe to each other upstream setting.
 
 ```bash
 git clone https://github.com/Imbernoulli/MLS-Bench.git /opt/scratch/mlsbench
-git -C /opt/scratch/mlsbench checkout 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c
+git -C /opt/scratch/mlsbench checkout b873944969c53b01e4ee6e843c77767b8c702485
 ```
 
 Each package's `scripts/capture_reference.py --root /opt/scratch/mlsbench`

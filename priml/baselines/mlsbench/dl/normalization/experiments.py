@@ -26,7 +26,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.normalization.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def exp000() -> VisionTrainLoop:
         Training by Reducing Internal Covariate Shift."
       https://github.com/Imbernoulli/MLS-Bench
         Task ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -91,7 +91,7 @@ def exp001() -> VisionTrainLoop:
         Wu and He 2018, "Group Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``group_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -117,7 +117,7 @@ def exp002() -> VisionTrainLoop:
         Style-Invariant Neural Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``batch_instance_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -144,7 +144,7 @@ def exp003() -> VisionTrainLoop:
         Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``switchable_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -172,7 +172,7 @@ def exp004() -> VisionTrainLoop:
         He et al. 2016, "Deep Residual Learning for Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``resnet110-cifar100`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -195,7 +195,7 @@ def exp005() -> VisionTrainLoop:
         Wu and He 2018, "Group Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``group_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -220,7 +220,7 @@ def exp006() -> VisionTrainLoop:
         Style-Invariant Neural Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``batch_instance_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -245,7 +245,7 @@ def exp007() -> VisionTrainLoop:
         Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``switchable_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -275,7 +275,7 @@ def exp008() -> VisionTrainLoop:
         Bottlenecks."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``mobilenetv2-fmnist`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -298,7 +298,7 @@ def exp009() -> VisionTrainLoop:
         Wu and He 2018, "Group Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``group_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -323,7 +323,7 @@ def exp010() -> VisionTrainLoop:
         Style-Invariant Neural Networks."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``batch_instance_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -349,7 +349,7 @@ def exp011() -> VisionTrainLoop:
         Normalization."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``switchable_norm`` of ``dl-normalization`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

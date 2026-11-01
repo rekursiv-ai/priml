@@ -36,5 +36,5 @@ whose model and training recipes `baselines/arcagi` re-implements at commit
 no license text to reproduce here.
 
 [Imbernoulli/MLS-Bench](https://github.com/Imbernoulli/MLS-Bench), whose tasks
-`baselines/mlsbench` re-implements at commit `80cf5c5`, publishes no license,
+`baselines/mlsbench` re-implements at commit `b873944`, publishes no license,
 so there is no text to reproduce here either.

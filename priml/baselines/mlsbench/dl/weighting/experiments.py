@@ -23,7 +23,7 @@ Prepare the data once, then launch::
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
     uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.weighting.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The task is pinned to MLS-Bench commit ``b873944969c53b01e4ee6e843c77767b8c702485``.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def exp000() -> VisionTrainLoop:
     References:
       https://github.com/Imbernoulli/MLS-Bench
         Task ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
       https://arxiv.org/abs/1901.05555
         Cui et al. 2019, "Class-Balanced Loss Based on Effective Number of
         Samples," whose long-tailed CIFAR this is.
@@ -97,7 +97,7 @@ def exp001() -> VisionTrainLoop:
         Samples," on inverse-frequency reweighting.
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``inverse_freq`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -127,7 +127,7 @@ def exp002() -> VisionTrainLoop:
         Samples."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``effective_number`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -157,7 +157,7 @@ def exp003() -> VisionTrainLoop:
         Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``balanced_softmax`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -190,7 +190,7 @@ def exp004() -> VisionTrainLoop:
         Samples."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``resnet32-cifar10lt`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -221,7 +221,7 @@ def exp005() -> VisionTrainLoop:
         Samples," on inverse-frequency reweighting.
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``inverse_freq`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -249,7 +249,7 @@ def exp006() -> VisionTrainLoop:
         Samples."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``effective_number`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -276,7 +276,7 @@ def exp007() -> VisionTrainLoop:
         Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``balanced_softmax`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -309,7 +309,7 @@ def exp008() -> VisionTrainLoop:
         Large-Scale Image Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Setting ``vgg16bn-cifar100lt`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -334,7 +334,7 @@ def exp009() -> VisionTrainLoop:
         Samples," on inverse-frequency reweighting.
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``inverse_freq`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -360,7 +360,7 @@ def exp010() -> VisionTrainLoop:
         Samples."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``effective_number`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.
@@ -388,7 +388,7 @@ def exp011() -> VisionTrainLoop:
         Recognition."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``balanced_softmax`` of ``cv-sample-weighting`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
+        b873944969c53b01e4ee6e843c77767b8c702485.
 
     Results:
       TBD.

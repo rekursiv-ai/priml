@@ -3,7 +3,7 @@
 The task's editable `compute_loss` -- a function from the logits, the labels
 and the epoch to a scalar -- becomes the slot `step.loss`. Ported at the
 `resnet56-cifar100` setting, pinned to MLS-Bench commit
-`80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`. The task's pristine script is the
+`b873944969c53b01e4ee6e843c77767b8c702485`. The task's pristine script is the
 one [`vision/`](../vision/README.md) ports, so `exp000` is `vision`'s `exp000`
 under the task's name. A loss receives what the script's `config` dict
 carries, as a `LossContext`, so an epoch-dependent loss is expressible.
