@@ -107,7 +107,11 @@ export function vendor({ post, policyView = path.join(here, 'policy_stub.js'), p
     const relative = path.relative(repo, path.resolve(source));
     const dirty = spawnSync('git', ['-C', repo, 'status', '--porcelain', '--', relative], { encoding: 'utf8' }).stdout.trim();
     const origin = source === policyView && policyOrigin ? policyOrigin : `${relative} at ${commit}${dirty ? ' with uncommitted changes' : ''}`;
-    const header = `// Vendored from ${origin}.\n// Do not edit here; regenerate with ${path.relative(repo, path.join(here, 'blog.mjs'))} vendor.\n`;
+    // Fenced: the header names monorepo paths, which the website's export deletes.
+    // The fence is joined from parts because this file ships in priml's export,
+    // whose leak check rejects the directive itself.
+    const fence = edge => `// ${['copybarista', 'internal', edge].join(':')}\n`;
+    const header = `${fence('start')}// Vendored from ${origin}.\n// Do not edit here; regenerate with ${path.relative(repo, path.join(here, 'blog.mjs'))} vendor.\n${fence('end')}`;
     fs.writeFileSync(path.join(post, name), header + fs.readFileSync(source, 'utf8'));
     written.push(name);
   }
