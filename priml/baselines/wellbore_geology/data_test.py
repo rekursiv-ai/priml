@@ -55,6 +55,7 @@ from priml.baselines.wellbore_geology.data import (
     _smooth,
     collate_features,
     discover_wells,
+    image_probability,
     initialize_worker,
     load_raw,
     load_split,
@@ -63,6 +64,7 @@ from priml.baselines.wellbore_geology.data import (
     probability_image,
     read_centroids,
     read_numeric_csv,
+    shift_probability_axis,
     trajectory,
 )
 from priml.baselines.wellbore_geology.folds import GeographicPrior, RelativeSurface
@@ -92,6 +94,8 @@ from priml.testing.golden import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from numpy.typing import NDArray
 
     from priml.baselines.wellbore_geology.custom_types import Batch
@@ -399,6 +403,159 @@ def test_rotation_moves_probability_rows_and_their_paths_by_the_fitted_shift() -
     reference.uniform(1, 1)
     np.testing.assert_array_equal(numpy.get_state()[1], reference.get_state()[1])
     assert numpy.get_state()[2] == reference.get_state()[2]
+
+
+def _rotated(
+    *,
+    channels: list[str],
+    target: Sequence[float],
+    valid: Sequence[bool] | None = None,
+    planes: NDArray[np.float32] | None = None,
+    target_stats: tuple[float, float] = (0, 1),
+) -> tuple[FeatureItem, np.random.RandomState]:
+    """Rotate one item with no jitter or shift bound; return it and its generator."""
+    features = ImageFeatures.Config()
+    features.channels = channels
+    features.target_stats = target_stats
+    features.reference_columns = 4
+    config = ImageAugmentation.Config()
+    config.rotate_probability = 1
+    config.ratio_jitter = 0
+    config.maximum_shift = math.inf
+    config.channel_probability = config.sequence_probability = 0
+    rows = len(target)
+    item = FeatureItem(
+        arrays={
+            "unet_static": (
+                np.ones((len(channels), rows, 4), dtype=np.float32)
+                if planes is None
+                else planes
+            ),
+            "target": np.asarray(target, dtype=np.float32),
+            "target_mask": np.ones(rows, dtype=bool)
+            if valid is None
+            else np.asarray(valid, dtype=bool),
+            "suffix_mask": np.ones(rows, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    numpy = np.random.RandomState(7)
+    config.make()(
+        item,
+        features=features,
+        numpy=numpy,
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    return item, numpy
+
+
+def _drew_one_ratio(numpy: np.random.RandomState) -> bool:
+    """Report whether rotation got as far as drawing its ratio."""
+    reference = np.random.RandomState(7)
+    reference.uniform(1, 1)
+    return np.array_equal(numpy.get_state()[1], reference.get_state()[1])
+
+
+@pytest.mark.parametrize(
+    "prior",
+    ["pf_prob", "pf_prob_ffbsi", "pf_tvt", "pf_tvt_ffbsi"],
+)
+def test_each_particle_channel_alone_turns_rotation_on(prior: str) -> None:
+    _, numpy = _rotated(channels=["gr", prior], target=[0, 1, 2])
+
+    assert _drew_one_ratio(numpy)
+
+
+def test_two_targets_are_enough_to_fit_a_rotation() -> None:
+    _, numpy = _rotated(channels=["pf_tvt"], target=[0, 1])
+
+    assert _drew_one_ratio(numpy)
+
+
+def test_rotation_works_in_physical_depth_about_the_first_target() -> None:
+    """Standardized targets, a nonzero first target, and a row the mask leaves out.
+
+    Physical targets 2.5, 4.5 and 6.5 fit slope 1.75 through the first, so the
+    rows move by 0, 3.5 and 7; the masked row keeps its path.
+    """
+    item, _ = _rotated(
+        channels=["pf_tvt"],
+        target=[1, 2, 3, 9],
+        valid=[True, True, True, False],
+        target_stats=(0.5, 2),
+    )
+
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"][0],
+        np.broadcast_to(np.asarray([1, 2.75, 4.5, 1], np.float32)[:, None], (4, 4)),
+        strict=True,
+    )
+
+
+def test_a_path_is_rewritten_in_float32() -> None:
+    """The first target's row does not move, yet its path is computed anew."""
+    planes = np.full((1, 3, 4), 0.1, dtype=np.float32)
+    item, _ = _rotated(
+        channels=["pf_tvt"],
+        target=[0, 1, 2],
+        planes=planes,
+        target_stats=(0.7, 3),
+    )
+
+    depth = np.float32(0.1) * np.float32(3) + np.float32(0.7)
+    assert item.arrays["unet_static"][0, 0, 0] == (depth - 0.7) / 3
+
+
+def test_probabilities_shift_on_a_float32_candidate_axis() -> None:
+    """Three candidates in a unit window sit at -2/3, 0 and 2/3, inexact in float32.
+
+    A float64 axis moves the interpolated mass by an ulp, so the axis's dtype is
+    part of the contract.
+    """
+    features = ImageFeatures.Config()
+    features.channels = ["pf_prob"]
+    features.target_stats = (0, 0.1)
+    features.reference_columns = 3
+    features.reference_window = 1
+    config = ImageAugmentation.Config()
+    config.rotate_probability = 1
+    config.ratio_jitter = 0
+    config.maximum_shift = math.inf
+    config.channel_probability = config.sequence_probability = 0
+    planes = probability_image(
+        np.asarray([[0.2, 0.5, 0.3]] * 3, dtype=np.float32),
+        columns=3,
+    )
+    item = FeatureItem(
+        arrays={
+            "unet_static": planes[None].copy(),
+            "target": np.asarray([0, 1, 2], dtype=np.float32),
+            "target_mask": np.ones(3, dtype=bool),
+            "suffix_mask": np.ones(3, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    config.make()(
+        item,
+        features=features,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+
+    axis = np.asarray([-2 / 3, 0, 2 / 3], dtype=np.float32)
+    delta = np.asarray([0, 0.1, 0.2], dtype=np.float32)
+    shifted = shift_probability_axis(
+        normalize_probability(image_probability(planes, columns=3)),
+        delta=delta,
+        axis=axis,
+    )
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"][0],
+        probability_image(shifted, columns=3),
+        strict=True,
+    )
 
 
 def test_rotation_scales_the_fitted_slope_by_one_uniform_ratio() -> None:
