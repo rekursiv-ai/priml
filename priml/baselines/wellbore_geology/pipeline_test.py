@@ -37,6 +37,7 @@ from priml.baselines.wellbore_geology.inference import (
 )
 from priml.baselines.wellbore_geology.model import (
     DepthPosterior,
+    SequenceModel,
     depth_logits,
     finalize_heads,
     mismatch_head,
@@ -596,6 +597,27 @@ def test_inference_rejects_empty_checkpoints_before_creating_outputs(
     with pytest.raises(ValueError, match="every selected checkpoint"):
         predict_family(family, directory=directory, output=output)
     assert not output.exists()
+
+
+def test_inference_never_reads_the_pretrained_backbone_again(tmp_path: Path) -> None:
+    """The selected states hold every weight; the pretrained file may be gone."""
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset, test_wells=2)
+    family = tiny_family(particle=False)
+    family.dataset_directory = dataset
+    assert isinstance(family.training.step.model, SequenceModel.Config)
+    unet = family.training.step.model.unet
+    unet.channels_hidden = unet.channels_hidden[:1]
+    unet.backbone.network.blocks_per_stage = (1,)
+    unet.up_blocks = []
+    model = family.finalized().training.step.model
+    directory = tmp_path / "trained"
+    directory.mkdir()
+    torch.save(model.make().state_dict(), directory / "fold0.pt")
+    (directory / "checkpoints.json").write_text('["fold0.pt"]')
+    family.training.step.model.unet.backbone.checkpoint = tmp_path / "gone.safetensors"
+    path = predict_family(family, directory=directory, output=tmp_path / "inference")
+    assert len(read_table(path).rows.tvt) == 2 * 29
 
 
 def test_inference_main_deserializes_the_complete_native_family(
