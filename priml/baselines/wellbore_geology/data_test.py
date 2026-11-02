@@ -1931,12 +1931,8 @@ def test_particle_slot_attaches_each_well_cache(tmp_path: Path) -> None:
     particle.downsample = 2
     particle.reference_columns = 7
     particle.reference_window = 100.0
-    records = prepare_particles(
-        raw,
-        config=particle,
-        directory=cache,
-        has_target=True,
-    )
+    prepare_particles(raw, config=particle, directory=cache, has_target=True)
+    records = {name: read_particle_cache(cache / f"{name}.npz") for name in raw}
     config = FoldObservations.Config()
     config.directory = tmp_path / "train"
     config.geography = GeographicPrior.Config()

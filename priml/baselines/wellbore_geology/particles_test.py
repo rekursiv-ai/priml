@@ -10,10 +10,14 @@ import math
 import numpy as np
 import pytest
 
+from priml.baselines.wellbore_geology import particles
 from priml.baselines.wellbore_geology.data import load_split
 from priml.baselines.wellbore_geology.particles import (
     COUNTERS,
+    FLAGS,
+    PATHS,
     PROBABILITIES,
+    WINDOWS,
     ParticleCache,
     ParticleDynamics,
     ParticleEmission,
@@ -59,12 +63,9 @@ def test_complete_native_particle_cache_matches_full_producer_and_io(
     config.particles = 3
     config.seeds = 5
     config.paths = 2
-    actual = prepare_particles(
-        wells,
-        config=config,
-        directory=tmp_path / "cache",
-        has_target=True,
-    )
+    cache = tmp_path / "cache"
+    prepare_particles(wells, config=config, directory=cache, has_target=True)
+    actual = {name: read_particle_cache(cache / f"{name}.npz") for name in wells}
     expected: dict[str, dict[str, NDArray[np.generic]]] = {}
     for name, well in wells.items():
         filename = tmp_path / f"expected-{name}.npz"
@@ -77,18 +78,17 @@ def test_complete_native_particle_cache_matches_full_producer_and_io(
         mismatches(numerical_tensors(expected), numerical_tensors(actual), ulps=True)
         == []
     )
-    reused = prepare_particles(
-        wells,
-        config=config,
-        directory=tmp_path / "cache",
-        has_target=True,
-    )
+    prepare_particles(wells, config=config, directory=cache, has_target=True)
+    reused = {name: read_particle_cache(cache / f"{name}.npz") for name in wells}
     assert (
         mismatches(numerical_tensors(actual), numerical_tensors(reused), ulps=True)
         == []
     )
     config.seeds = 6
-    with pytest.raises(ValueError, match="configuration differs"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Particle cache configuration differs from this recipe\.$",
+    ):
         prepare_particles(
             wells,
             config=config,
@@ -97,11 +97,98 @@ def test_complete_native_particle_cache_matches_full_producer_and_io(
         )
 
 
+def test_preparing_writes_each_record_without_reading_it_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loaders read the cache; preparation only writes it."""
+    write_training_wells(tmp_path / "raw", count=2)
+
+    def unread(path: Path) -> dict[str, NDArray[np.generic]]:
+        raise AssertionError(f"read back {path.name}")
+
+    monkeypatch.setattr(particles, "read_particle_cache", unread)
+    config = ParticlePrior.Config(
+        prefix_rows=4,
+        target_rows=6,
+        downsample=2,
+        reference_columns=7,
+        reference_window=100.0,
+    )
+    # A family's split directory is created with its missing parents.
+    directory = tmp_path / "family" / "train"
+    prepared = prepare_particles(
+        load_split(tmp_path / "raw"),
+        config=config,
+        directory=directory,
+        has_target=True,
+    )
+    assert prepared is None
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "config.json",
+        "well0.npz",
+        "well1.npz",
+    ]
+    monkeypatch.undo()
+    slot = ParticleCache.Config()
+    slot.directory = directory
+    cached = slot.make().read("well1")
+    assert (
+        mismatches(
+            numerical_tensors(cached),
+            numerical_tensors(read_particle_cache(directory / "well1.npz")),
+            ulps=True,
+        )
+        == []
+    )
+
+
+def test_a_read_cache_restores_each_fields_type_and_blanks_the_visible_rows(
+    tmp_path: Path,
+) -> None:
+    """Rows 0 through ``last_seen_idx`` were visible; the posterior there is unread."""
+    # Original row of each of five bins: none, the first, the last seen, a later one.
+    index = np.array([-1.0, 0.0, 2.0, 3.0, np.nan], dtype=np.float32)
+    record: dict[str, NDArray[np.generic]] = {
+        name: np.full((5, 3), 0.5, dtype=np.float32) for name in PROBABILITIES
+    }
+    record.update({name: np.full(5, 7.0, dtype=np.float32) for name in PATHS})
+    record.update({name: np.arange(5, dtype=np.float32) for name in WINDOWS})
+    record["window_orig_index"] = index
+    record.update({name: np.ones(5, dtype=np.bool_) for name in FLAGS})
+    record.update({name: np.asarray(2) for name in COUNTERS})
+    record["tvt0"] = np.asarray(123.25)
+    path = tmp_path / "well.npz"
+    write_particle_cache(path, record)
+
+    cache = read_particle_cache(path)
+
+    dtypes = {name: values.dtype for name, values in cache.items()}
+    assert dtypes == {
+        **dict.fromkeys((*PROBABILITIES, *PATHS, *WINDOWS), np.dtype(np.float32)),
+        **dict.fromkeys(FLAGS, np.dtype(np.bool_)),
+        **dict.fromkeys(COUNTERS, np.dtype(np.int64)),
+        "tvt0": np.dtype(np.float64),
+    }
+    assert float(cache["tvt0"]) == 123.25
+    visible = np.array([False, True, True, False, False])
+    for name in PROBABILITIES:
+        np.testing.assert_array_equal(
+            cache[name],
+            np.where(visible[:, None], 0.0, np.full((5, 3), 0.5)).astype(np.float32),
+        )
+    for name in PATHS:
+        np.testing.assert_array_equal(cache[name], np.where(visible, np.nan, 7.0))
+
+
 def test_nonempty_unidentified_cache_fails_before_generating(tmp_path: Path) -> None:
     directory = tmp_path / "cache"
     directory.mkdir()
     (directory / "unidentified.npz").write_bytes(b"unknown")
-    with pytest.raises(FileExistsError, match="configuration manifest"):
+    with pytest.raises(
+        FileExistsError,
+        match=r"^Particle cache requires its native configuration manifest\.$",
+    ):
         prepare_particles(
             {},
             config=ParticlePrior.Config(),
@@ -170,7 +257,7 @@ def test_cold_cache_is_part_of_candidate_preprocessing(tmp_path: Path) -> None:
     (tmp_path / "cache_entry").write_text("previous candidate")
     with pytest.raises(
         FileExistsError,
-        match="Cold preprocessing requires an empty PF cache",
+        match=r"^Cold preprocessing requires an empty PF cache\.$",
     ):
         check_cold_cache(tmp_path, required=True)
     check_cold_cache(tmp_path, required=False)
