@@ -143,6 +143,55 @@ def test_preparing_writes_each_record_without_reading_it_back(
     )
 
 
+@pytest.mark.parametrize("anchor", [3, 2**24 + 3])
+def test_read_particle_cache_uses_the_rounded_float32_anchor_boundary(
+    tmp_path: Path,
+    anchor: int,
+) -> None:
+    boundary = np.float32(anchor)
+    step = np.float32(1 if anchor == 3 else 4)
+    record: dict[str, NDArray[np.generic]] = {
+        name: np.ones((2, 3), dtype=np.float32) for name in PROBABILITIES
+    }
+    record.update({name: np.ones(2, dtype=np.float32) for name in PATHS})
+    record.update(
+        {
+            "window_tvt": np.ones(2, dtype=np.float32),
+            "window_tvt_rel": np.ones(2, dtype=np.float32),
+            "window_orig_index": np.asarray(
+                [boundary, boundary + step],
+                dtype=np.float32,
+            ),
+        },
+    )
+    record.update({name: np.ones(2, dtype=np.bool_) for name in FLAGS})
+    record.update(
+        {
+            "last_seen_idx": np.asarray(anchor, dtype=np.int64),
+            "prefix_start": np.asarray(0, dtype=np.int64),
+            "suffix_len": np.asarray(1, dtype=np.int64),
+            "tvt0": np.asarray(1, dtype=np.float64),
+        },
+    )
+    path = tmp_path / "well.npz"
+    write_particle_cache(path, record)
+
+    cache = read_particle_cache(path)
+
+    for name in PROBABILITIES:
+        np.testing.assert_array_equal(
+            cache[name],
+            np.asarray([[0, 0, 0], [1, 1, 1]], dtype=np.float32),
+            strict=True,
+        )
+    for name in PATHS:
+        np.testing.assert_array_equal(
+            cache[name],
+            np.asarray([np.nan, 1], dtype=np.float32),
+            strict=True,
+        )
+
+
 def test_a_read_cache_restores_each_fields_type_and_blanks_the_visible_rows(
     tmp_path: Path,
 ) -> None:
