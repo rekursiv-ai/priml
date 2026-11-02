@@ -17,6 +17,7 @@ from typing import (
 )
 
 import csv
+import functools
 import math
 import random
 import re
@@ -2085,22 +2086,21 @@ def read_numeric_csv(
       columns: Required numeric column names in returned dictionary order.
 
     Returns:
-      arrays: Full float64 columns with empty observations represented by NaN.
+      arrays: Full float64 columns with empty observations represented by NaN;
+        the caller's own copies.
 
     """
-    with path.open(newline="") as stream:
-        reader = csv.DictReader(stream)
-        missing = set(columns).difference(reader.fieldnames or ())
-        if missing:
-            raise ValueError(f"CSV missing columns: {sorted(missing)}.")
-        values: dict[str, list[float]] = {name: [] for name in columns}
-        for row in reader:
-            for name in columns:
-                value = row[name]
-                values[name].append(_csv_float(value))
-    return {
-        name: np.asarray(column, dtype=np.float64) for name, column in values.items()
-    }
+    # Each fold rebuilds its observations from its config alone, so one run read
+    # every well's two CSVs 3.5 times over. Keyed on the file's identity and
+    # size, so an edited file is read again.
+    status = path.stat()
+    parsed = _parsed_numeric_csv(
+        str(path.resolve()),
+        tuple(columns),
+        status.st_mtime_ns,
+        status.st_size,
+    )
+    return {name: column.copy() for name, column in parsed.items()}
 
 
 def discover_wells(directory: Path) -> tuple[str, ...]:
@@ -2816,3 +2816,27 @@ def _csv_float(value: str) -> float:
     if math.isinf(number):
         raise ValueError(f"Numeric CSV observation exceeds float64 range: {value!r}.")
     return number
+
+
+@functools.lru_cache(maxsize=256)
+def _parsed_numeric_csv(
+    path: str,
+    columns: tuple[str, ...],
+    mtime_ns: int,
+    size: int,
+) -> dict[str, NDArray[np.float64]]:
+    """Parse one CSV's columns; the stat fields only key the cache."""
+    del mtime_ns, size
+    with Path(path).open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        missing = set(columns).difference(reader.fieldnames or ())
+        if missing:
+            raise ValueError(f"CSV missing columns: {sorted(missing)}.")
+        values: dict[str, list[float]] = {name: [] for name in columns}
+        for row in reader:
+            for name in columns:
+                value = row[name]
+                values[name].append(_csv_float(value))
+    return {
+        name: np.asarray(column, dtype=np.float64) for name, column in values.items()
+    }
