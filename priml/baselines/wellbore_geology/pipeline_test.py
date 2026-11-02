@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NotRequired, TypedDict, cast
 
@@ -11,6 +12,7 @@ import json
 import os
 import platform
 import sys
+import traceback
 
 from configgle import Fig, PartialConfig
 from treekle import json_dumps, json_loads, to_plain
@@ -113,7 +115,10 @@ def test_empty_validation_partition_fails_before_model_construction(
     family = tiny_family(particle=False)
     family.dataset_directory = dataset
     raw = load_split(dataset / "train")
-    with pytest.raises(ValueError, match="nonempty validation"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Native OOF training requires a nonempty validation fold\.$",
+    ):
         train_family(
             family,
             raw={"well0": raw["well0"]},
@@ -209,9 +214,11 @@ def test_cold_loop_startup_consumes_outer_allowance_and_expiration_closes_runtim
     initialize = WellboreFoldLoop.__init__
     train = WellboreFoldLoop.train
     caps: list[float] = []
+    declared: list[tuple[float, bool]] = []
 
     def construct(loop: WellboreFoldLoop, config: WellboreFoldLoop.Config) -> None:
         nonlocal elapsed
+        declared.append((config.max_time, config.evaluate_truncated))
         initialize(loop, config)
         elapsed += startup_seconds
 
@@ -249,11 +256,17 @@ def test_cold_loop_startup_consumes_outer_allowance_and_expiration_closes_runtim
             budget=budget,
         )
         assert caps == [228.0]
+    # The loop is declared with what remained before its startup, and evaluates
+    # the epoch a budget cuts short.
+    assert declared == [(270.0, True)]
     assert not runtime_initialized()
 
 
 def test_training_requires_the_family_dataset_directory(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="dataset directory"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Training requires the family's dataset directory\.$",
+    ):
         train_family(
             tiny_family(particle=False),
             raw={},
@@ -268,7 +281,10 @@ def test_training_requires_a_runtime_device(tmp_path: Path) -> None:
     family.dataset_directory = dataset
     assert isinstance(family.training.runtime, SingleProcess.Config)
     family.training.runtime.device = None
-    with pytest.raises(ValueError, match="runtime device"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Training requires the family's runtime device\.$",
+    ):
         train_family(
             family,
             raw=load_split(dataset / "train"),
@@ -284,11 +300,113 @@ def test_particle_family_requires_a_cache_directory_or_a_prepared_cache(
     family = tiny_family(particle=True)
     family.dataset_directory = dataset
     raw = load_split(dataset / "train")
-    with pytest.raises(ValueError, match="cache directory"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Particle priors require the family's cache directory\.$",
+    ):
         train_family(family, raw=raw, output_directory=tmp_path / "unused")
     family.pf_directory = tmp_path / "pf"
     with pytest.raises(FileNotFoundError, match="not prepared"):
         train_family(family, raw=raw, output_directory=tmp_path / "unused")
+    # A manifest for this recipe, in the training split, holding no well yet.
+    finalized = family.finalized()
+    assert finalized.particle is not None
+    particles.prepare_particles(
+        {},
+        config=finalized.particle,
+        directory=tmp_path / "pf/train",
+        has_target=True,
+    )
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"^Particle cache lacks 4 wells, such as well0\.$",
+    ):
+        train_family(family, raw=raw, output_directory=tmp_path / "unused")
+
+
+def test_preparing_particles_is_charged_to_the_outer_budget(tmp_path: Path) -> None:
+    """An expired allowance stops the preparation before it writes a record."""
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset)
+    family = tiny_family(particle=True)
+    family.dataset_directory = dataset
+    family.pf_directory = tmp_path / "pf"
+    family.prepare_particles = True
+    now = [0.0]
+    config = WallBudget.Config(seconds=300, reserve_evaluation_sec=30)
+    config.clock = partial(_now, now)
+    budget = config.make()
+    now[0] = 300.0
+    with pytest.raises(TimeoutError, match="No training time remains"):
+        train_family(
+            family,
+            raw=load_split(dataset / "train"),
+            output_directory=tmp_path / "unused",
+            budget=budget,
+        )
+    assert list((tmp_path / "pf/train").glob("*.npz")) == []
+
+
+def test_a_fold_without_a_selected_state_keeps_its_last_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no state selected, the checkpoint is the model as it stands."""
+    _selecting(monkeypatch, None)
+    output = _one_fold(tmp_path)
+    assert torch.load(output / "fold0.pt", weights_only=True)
+
+
+def test_a_fold_saves_its_selected_state_not_its_last_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _selecting(monkeypatch, 0.0)
+    with caplog.at_level("INFO", logger=pipeline.__name__):
+        output = _one_fold(tmp_path)
+    state = cast(
+        "dict[str, torch.Tensor]",
+        torch.load(output / "fold0.pt", weights_only=True),
+    )
+    assert all(not value.any() for value in state.values())
+    assert caplog.messages == ["fold0: priml best_epoch=7, best_rmse=0.2500"]
+
+
+def _selecting(monkeypatch: pytest.MonkeyPatch, fill: float | None) -> None:
+    """Skip training; select a state of ``fill`` everywhere, or none."""
+
+    def train(loop: WellboreFoldLoop) -> None:
+        step = loop.native_step
+        loop.best_epoch = 7
+        loop.best_score = 0.25
+        loop.best_state = (
+            None
+            if fill is None
+            else {
+                name: torch.full_like(value, fill)
+                for name, value in step.model.state_dict().items()
+            }
+        )
+
+    monkeypatch.setattr(WellboreFoldLoop, "train", train)
+
+
+def _now(now: list[float]) -> float:
+    return now[0]
+
+
+def _one_fold(tmp_path: Path) -> Path:
+    """Train the first fold of a plain family; return its output directory."""
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset)
+    output = tmp_path / "trained"
+    output.mkdir()
+    family = tiny_family(particle=False)
+    family.first_n_folds = 1
+    family.dataset_directory = dataset
+    train_family(family, raw=load_split(dataset / "train"), output_directory=output)
+    return output
 
 
 def test_budget_expiring_before_any_update_is_a_timeout(
@@ -307,7 +425,10 @@ def test_budget_expiring_before_any_update_is_a_timeout(
     family = tiny_family(particle=False)
     family.dataset_directory = dataset
     budget = WallBudget.Config(seconds=300, reserve_evaluation_sec=30).make()
-    with pytest.raises(TimeoutError, match="before an optimizer update"):
+    with pytest.raises(
+        TimeoutError,
+        match=r"^The outer budget expired before an optimizer update\.$",
+    ):
         train_family(
             family,
             raw=load_split(dataset / "train"),
@@ -343,7 +464,10 @@ def test_training_without_a_held_out_loader_is_rejected(
     family = tiny_family(particle=False)
     family.first_n_folds = 1
     family.dataset_directory = dataset
-    with pytest.raises(ValueError, match="validation is not None"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Expected loop\.fold_data\.validation is not None\.$",
+    ):
         train_family(family, raw=load_split(dataset / "train"), output_directory=output)
 
 
@@ -666,6 +790,7 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     family.pf_directory = tmp_path / "pf"
     config = NativeFamilyRunner.Config()
     config.inference = InProcessInference.Config()
+    copies = _counting_copies(monkeypatch, WellboreFoldLoop.Config)
     artifacts = config.make().run(
         family,
         output_directory=tmp_path / "trained",
@@ -696,6 +821,55 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
         assert "geo_nbr_distance_q10" in table.diagnostics
     assert len(list((tmp_path / "pf/train").glob("*.npz"))) == 4
     assert len(list((tmp_path / "pf/test").glob("*.npz"))) == 4
+    # Only the training records carry the target rows they are scored on.
+    for split, has_target in (("train", True), ("test", False)):
+        record = particles.read_particle_cache(tmp_path / "pf" / split / "well0.npz")
+        assert bool(np.asarray(record["target_mask"]).any()) is has_target
+    folds = (tmp_path / "trained/folds.json").read_text()
+    assert folds.startswith('[\n  {\n    "fold": "fold0",\n    "best_score": ')
+    assert [list(record) for record in summaries] == [
+        ["fold", "best_score", "best_epoch", "validation"],
+    ] * 2
+    # Training and prediction each finalize the family once; a fold binds its
+    # membership onto one copy and builds from one more.
+    assert copies == [
+        "train_family:family = family.finalized()",
+        *[
+            "fold_settings:config = family.training.copy_tree()",
+            "train_family:loop = configuration.make()",
+        ]
+        * 2,
+        "predict_family:family = family.finalized()",
+    ]
+
+
+def _counting_copies(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: type[WellboreFoldLoop.Config],
+) -> list[str]:
+    """Record each copy of a ``kind`` tree, named for the frame that asked."""
+    copies: list[str] = []
+    copy_tree = kind.copy_tree
+
+    def counted(
+        self: WellboreFoldLoop.Config,
+        visited: dict[int, object] | None = None,
+    ) -> WellboreFoldLoop.Config:
+        frames = traceback.extract_stack()[:-1]
+        own = [frame for frame in frames if "wellbore_geology" in frame.filename]
+        copies.append(f"{_source_name(own[-1].name)}:{own[-1].line}")
+        return copy_tree(self, visited)
+
+    monkeypatch.setattr(kind, "copy_tree", counted)
+    return copies
+
+
+def _source_name(frame: str) -> str:
+    """Return a function's name as written, undoing mutmut's ``x_<name>__mutmut_<N>``."""
+    name, mutated, _ = frame.partition("__mutmut_")
+    if not mutated:
+        return frame
+    return name.rpartition("ǁ")[2] if name.startswith("xǁ") else name.removeprefix("x_")
 
 
 def _python_tracker() -> particles.Kernel:

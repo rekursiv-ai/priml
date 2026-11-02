@@ -68,9 +68,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TrainedFamily:
-    """Complete selected model states and repeated out-of-fold artifact."""
+    """The averaged out-of-fold artifact; the selected states are in ``checkpoints.json``."""
 
-    checkpoints: tuple[str, ...]
     oof: Path
 
 
@@ -90,7 +89,7 @@ def train_family(
       budget: Optional separate experiment's cold wall allowance.
 
     Returns:
-      trained: Every selected complete CPU state and averaged original-row OOF file.
+      trained: The averaged original-row OOF file.
 
     Raises:
       ValueError: A dataset directory or a nonempty validation fold is missing.
@@ -98,7 +97,8 @@ def train_family(
     """
     require_fresh_runtime()
     family = family.finalized()
-    family.make()
+    # Validated as built, without the copy ``make`` would take of a finalized tree.
+    Family(family)
     if family.dataset_directory is None:
         raise ValueError("Training requires the family's dataset directory.")
     names = tuple(raw)
@@ -154,7 +154,7 @@ def train_family(
             budget.training_seconds() if budget is not None else math.inf,
         )
         fold_name = fold_identity(family, index=index)
-        loop = configuration.finalized().make()
+        loop = configuration.make()
         try:
             if budget is not None:
                 loop.max_time = min(loop.max_time, budget.training_seconds())
@@ -185,11 +185,8 @@ def train_family(
         checkpoints.append(filename)
         if loop.fold_data.validation is None:
             raise ValueError("Expected loop.fold_data.validation is not None.")
-        prediction, metadata = step.predict(
-            loop.fold_data.validation,
-            model=step.model,
-            move_cpu=True,
-        )
+        # The selected state, not the EMA shadow ``predict`` falls back to.
+        prediction, metadata = step.predict(loop.fold_data.validation, model=step.model)
         tables.append(
             builder.build(
                 prediction,
@@ -221,7 +218,7 @@ def train_family(
     (output_directory / "folds.json").write_text(
         json_dumps(summaries, indent=2),
     )
-    return TrainedFamily(checkpoints=tuple(checkpoints), oof=path)
+    return TrainedFamily(oof=path)
 
 
 def fold_settings(
