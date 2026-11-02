@@ -391,6 +391,43 @@ def quantile_truncated_normal(
     return torch.where(in_domain, y * scale + loc, math.nan)
 
 
+def quantile_student_t(p: Tensorable, *, df: int) -> Tensor:
+    """Quantile function of Student's t-distribution with integer degrees of freedom.
+
+    Bisects the exact finite-series CDF in ``theta = atan(|t| / sqrt(df))``
+    until every midpoint stops moving, so the result is as exact as ``p``'s
+    dtype allows.
+
+    Args:
+      p: Cumulative probability in (0, 1).
+      df: Degrees of freedom; at least one.
+
+    Returns:
+      quantile: Value at which the CDF equals p.
+
+    Raises:
+      ValueError: ``df`` is below one.
+
+    References:
+      https://personal.math.ubc.ca/~cbm/aands/page_948.htm
+        Abramowitz and Stegun (1964), 26.7.3 and 26.7.4.
+
+    """
+    if df < 1:
+        raise ValueError(f"df must be at least 1; got {df}.")
+    p = convert_to_tensor(p)
+    centered = 2 * p - 1
+    target = centered.abs()
+    low = torch.zeros_like(target)
+    high = torch.full_like(target, math.pi / 2)
+    while bool(((low < (middle := (low + high) / 2)) & (middle < high)).any()):
+        cdf = _student_t_two_sided_cdf(middle, df=df)
+        below = cdf < target  # pragma: no mutate -- A tie needs bit-equal floats.
+        low = torch.where(below, middle, low)
+        high = torch.where(below, high, middle)
+    return centered.sign() * (df * middle.tan().square()).sqrt()
+
+
 def pdf_logit_distribution(
     x: Tensorable,
     base_pdf: TensorableFn,
@@ -909,3 +946,19 @@ def _normal_cdf_difference(a: Tensorable, b: Tensorable) -> Tensor:
     hi = torch.where(flip, -b, a)
     lo = torch.where(flip, -a, b)
     return ndtr(hi) - ndtr(lo)
+
+
+def _student_t_two_sided_cdf(theta: Tensor, *, df: int) -> Tensor:
+    """Return ``P(|T| <= sqrt(df) tan(theta))`` by its finite series."""
+    cos_squared = theta.cos().square()
+    if df % 2:
+        term, total = theta.cos(), torch.zeros_like(theta)
+        for k in range(1, df // 2 + 1):
+            total = total + term
+            term = term * cos_squared * (2 * k / (2 * k + 1))
+        return 2 / math.pi * (theta + theta.sin() * total)
+    term, total = torch.ones_like(theta), torch.zeros_like(theta)
+    for k in range(df // 2):
+        total = total + term
+        term = term * cos_squared * ((2 * k + 1) / (2 * k + 2))
+    return theta.sin() * total

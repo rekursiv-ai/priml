@@ -1336,7 +1336,7 @@ def _run_unfused(
     ):
         return _unfused_batch_norm(func, args=args)
     if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
-        return decomposition_table[func](*args, **kwargs)
+        return _decomposition(func, args, kwargs)(*args, **kwargs)
     return func(*args, **kwargs)
 
 
@@ -1507,6 +1507,80 @@ def _unfused_addbmm(
     """Reduce completed batch products before scaling and adding the bias."""
     result = alpha * torch.bmm(batch1, batch2).sum(dim=0)
     return result if beta == 0 else result + beta * self
+
+
+# An optimizer or EMA step issues one in-place update per parameter, and torch's
+# reference for each costs ~180 us in its promotion and ``out=`` wrappers. Each
+# body is its reference's arithmetic, op for op, written into ``self`` as the
+# reference's ``out=self`` does, so the bits are the reference's.
+def _lerp_scalar_(self: Tensor, end: Tensor, weight: float) -> Tensor:
+    """Return ``torch._refs.lerp_`` for a scalar weight."""
+    scalar = self.new_full((), weight)
+    upper = scalar.abs() >= 0.5
+    coefficient = torch.where(upper, scalar - 1, scalar)
+    base = torch.where(upper, end, self)
+    return self.copy_(coefficient * (end - self) + base)
+
+
+def _addcmul_(
+    self: Tensor,
+    tensor1: Tensor,
+    tensor2: Tensor,
+    *,
+    value: float = 1,
+) -> Tensor:
+    """Return ``torch._refs.addcmul_``."""
+    return self.copy_(self + value * tensor1 * tensor2)
+
+
+def _addcdiv_(
+    self: Tensor,
+    tensor1: Tensor,
+    tensor2: Tensor,
+    *,
+    value: float = 1,
+) -> Tensor:
+    """Return ``torch._refs.addcdiv_``."""
+    return self.copy_(self + value * tensor1 / tensor2)
+
+
+def _add_(self: Tensor, other: Tensor, *, alpha: float) -> Tensor:
+    """Return ``torch._refs.add_``."""
+    return self.copy_(self + other * alpha)
+
+
+_UNFUSED_UPDATES: Final[dict[object, Callable[..., Tensor]]] = {
+    torch.ops.aten.lerp_.Scalar: _lerp_scalar_,
+    torch.ops.aten.addcmul_.default: _addcmul_,
+    torch.ops.aten.addcdiv_.default: _addcdiv_,
+    torch.ops.aten.add_.Tensor: _add_,
+}
+
+
+# The references promote mixed dtypes and broadcast; the updates do neither, so any
+# argument unlike ``self`` in dtype, device or shape takes the reference.
+def _decomposition(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> Callable[..., object]:
+    """Return ``func``'s separate-op form: its in-place update, else torch's reference."""
+    update = _UNFUSED_UPDATES.get(func)
+    first = args[0] if args else None
+    if (
+        update is None
+        or not isinstance(first, Tensor)
+        or not first.dtype.is_floating_point
+        or not all(
+            value.dtype == first.dtype
+            and value.device == first.device
+            and value.shape == first.shape
+            for value in (*args, *kwargs.values())
+            if isinstance(value, Tensor)
+        )
+    ):
+        return decomposition_table[func]
+    return update
 
 
 def _scales_or_fuses(

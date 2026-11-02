@@ -1961,6 +1961,85 @@ def test_softmax_backward_rounds_like_separate_ops(
     assert torch.equal(got, want.float())
 
 
+@pytest.mark.parametrize(
+    ("op", "count", "scalars", "kwargs"),
+    [
+        (torch.ops.aten.lerp_.Scalar, 2, (0.25,), {}),
+        (torch.ops.aten.lerp_.Scalar, 2, (0.5,), {}),
+        (torch.ops.aten.lerp_.Scalar, 2, (-0.75,), {}),
+        (torch.ops.aten.addcmul_.default, 3, (), {"value": 0.3}),
+        (torch.ops.aten.addcdiv_.default, 3, (), {"value": 0.3}),
+        (torch.ops.aten.add_.Tensor, 2, (), {"alpha": 0.3}),
+    ],
+    ids=["lerp_low", "lerp_half", "lerp_negative", "addcmul", "addcdiv", "add"],
+)
+def test_unfused_updates_write_their_references_bits_into_self(
+    op: OpOverload[..., object],
+    count: int,
+    scalars: tuple[float, ...],
+    kwargs: dict[str, object],
+) -> None:
+    """An optimizer's in-place update matches torch's reference bit for bit, in place."""
+    generator = torch.Generator().manual_seed(0)
+    operands = list(torch.randn(count, 2, 3, generator=generator, dtype=torch.float64))
+    want = operands[0].clone()
+    decomposition_table[op](want, *operands[1:], *scalars, **kwargs)
+    got = operands[0].clone()
+    assert _run_unfused(op, (got, *operands[1:], *scalars), kwargs) is got
+    assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize(
+    ("op", "count", "scalars"),
+    [
+        (torch.ops.aten.lerp_.Scalar, 2, (0.25,)),
+        (torch.ops.aten.addcmul_.default, 3, ()),
+        (torch.ops.aten.addcdiv_.default, 3, ()),
+    ],
+    ids=["lerp", "addcmul", "addcdiv"],
+)
+def test_unfused_updates_run_in_place_of_the_reference_at_its_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    op: OpOverload[..., object],
+    count: int,
+    scalars: tuple[float, ...],
+) -> None:
+    """Operands like ``self`` take the update, not the reference, and match its bits."""
+    generator = torch.Generator().manual_seed(0)
+    operands = list(torch.randn(count, 2, 3, generator=generator, dtype=torch.float64))
+    want = operands[0].clone()
+    decomposition_table[op](want, *operands[1:], *scalars)
+    sentinel = torch.full((2,), 7.0)
+    monkeypatch.setitem(decomposition_table, op, _FixedResult(result=sentinel))
+    got = operands[0].clone()
+    assert _run_unfused(op, (got, *operands[1:], *scalars), {}) is got
+    assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        torch.ones(3, dtype=torch.float64),
+        torch.ones(2, 3, dtype=torch.float32),
+        torch.ones(2, 3, dtype=torch.float64, device="meta"),
+    ],
+    ids=["broadcast", "dtype", "device"],
+)
+def test_unfused_updates_leave_promotion_and_broadcast_to_the_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    other: Tensor,
+) -> None:
+    op = torch.ops.aten.addcmul_.default
+    sentinel = torch.full((2,), 7.0)
+    monkeypatch.setitem(decomposition_table, op, _FixedResult(result=sentinel))
+    self = torch.zeros(2, 3, dtype=torch.float64)
+    assert _run_unfused(op, (self, other, other), {"value": 0.5}) is sentinel
+    integers = torch.zeros(2, 3, dtype=torch.int64)
+    assert _run_unfused(op, (integers, integers, integers), {"value": 2}) is sentinel
+    keyword: dict[str, object] = {"tensor1": other, "tensor2": other, "value": 0.5}
+    assert _run_unfused(op, (self,), keyword) is sentinel
+
+
 def add_in_place(m: Tensor, x: Tensor) -> Tensor:
     return m.clone().add_(x, alpha=0.1)
 
@@ -4330,6 +4409,59 @@ _RUNNING_TIE: Final = (
     -0.8086782693862915,
 )
 _RUNNING_TIE_MEAN: Final = -0.03300672024488449
+
+
+@pytest.mark.parametrize(
+    ("func", "args", "kwargs", "routed"),
+    [
+        (torch.ops.aten.native_batch_norm.default, (0,) * 8, {}, True),
+        (torch.ops.aten._native_batch_norm_legit.default, (0,) * 8, {}, True),
+        (torch.ops.aten.native_batch_norm.default, (0,) * 7, {}, False),
+        (torch.ops.aten.native_batch_norm.default, (0,) * 8, {"eps": 0}, False),
+        (torch.ops.aten.native_layer_norm.default, (0,) * 8, {}, False),
+    ],
+    ids=["batch_norm", "legit", "seven_args", "keyword", "other_op"],
+)
+def test_run_unfused_routes_only_positional_training_batch_norms(
+    monkeypatch: pytest.MonkeyPatch,
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    *,
+    routed: bool,
+) -> None:
+    """Only a batch norm's eight positional arguments reach the unfused update.
+
+    The placeholder arguments are no valid input, so an op left to its native
+    kernel raises; the stub stands in for the routed update.
+    """
+    sentinel = torch.full((2,), 7.0)
+    monkeypatch.setattr(
+        "priml.testing.bfb._unfused_batch_norm",
+        _FixedResult(result=sentinel),
+    )
+    if routed:
+        assert _run_unfused(func, args, kwargs) is sentinel
+    else:
+        with pytest.raises((RuntimeError, TypeError)):
+            _run_unfused(func, args, kwargs)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [torch.ops.aten.dot.default, torch.ops.aten.vdot.default],
+)
+def test_run_unfused_routes_real_dots_to_the_pairwise_sum(
+    monkeypatch: pytest.MonkeyPatch,
+    func: OpOverload[..., object],
+) -> None:
+    sentinel = torch.full((), 7.0)
+    monkeypatch.setattr(
+        "priml.testing.bfb._pairwise_dot",
+        _FixedResult(result=sentinel),
+    )
+    vector = torch.ones(3)
+    assert _run_unfused(func, (vector, vector), {}) is sentinel
 
 
 @pytest.mark.parametrize(
