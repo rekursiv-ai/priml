@@ -1363,7 +1363,7 @@ def read_particle_cache(path: Path) -> dict[str, NDArray[np.generic]]:
     visible = (
         np.isfinite(indices)
         & (indices >= 0)
-        & (indices <= cast("NDArray[np.int64]", result["last_seen_idx"]))
+        & (indices <= result["last_seen_idx"].astype(np.float32))
     )
     for name in PROBABILITIES:
         result[name][visible] = 0
