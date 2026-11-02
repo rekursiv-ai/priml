@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast, override
 
 import csv
 
-from configgle import Makes, PartialConfig
+from configgle import Fig, Makes, PartialConfig
 from torch import Tensor, nn
 
 import numpy as np
@@ -21,14 +21,16 @@ from priml.baselines.wellbore_geology.custom_types import (
 from priml.baselines.wellbore_geology.experiments import shrink_model
 from priml.baselines.wellbore_geology.loss import WellboreLoss
 from priml.baselines.wellbore_geology.metrics import PooledRMSE
-from priml.baselines.wellbore_geology.model import SequenceModel
+from priml.baselines.wellbore_geology.model import DepthPosterior, SequenceModel
 from priml.baselines.wellbore_geology.recipes import (
     Family,
+    _model,
     _paths,
     family_0719_v1,
     family_0803_v2,
 )
 from priml.baselines.wellbore_geology.train_loop import FoldData, WellboreFoldLoop
+from priml.cost import Cost, matmul_cost
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess
@@ -119,7 +121,7 @@ def tiny_family(*, particle: bool) -> Family.Config:
     assert isinstance(family.training.runtime, SingleProcess.Config)
     family.training.runtime.device = "cpu"
     family.training.step.dtype_autocast = None
-    shrink_model(family.training.step.model)
+    shrink_model(_model(family))
     family.training.dataset.loader.num_workers = 0
     family.training.dataset.loader.batch_size = (
         family.training.dataset.validation_batch_size
@@ -138,16 +140,18 @@ def tiny_family(*, particle: bool) -> Family.Config:
     return family
 
 
-def write_study_inputs(directory: Path, *, rows: int = 33) -> None:
+def write_study_inputs(directory: Path, *, rows: int = 33, test_wells: int = 4) -> None:
     """Write complete small study inputs with real simulation donor suffixes.
 
     Args:
       directory: Test-owned complete competition release directory.
       rows: Complete path length; the default meets the public donor minimum.
+      test_wells: Wells in the test split; the training split always has the
+        four that two geographic clusters of two folds need.
 
     """
-    for split in ("train", "test"):
-        write_training_wells(directory / split, rows=rows)
+    write_training_wells(directory / "train", rows=rows)
+    write_training_wells(directory / "test", count=test_wells, rows=rows)
     (directory / "train_png_typewell_map.csv").write_text(
         "well_id,horizontal_avg_X,horizontal_avg_Y\n"
         "well0,0,0\nwell1,1,1\nwell2,40,14\nwell3,41,15\n",
@@ -156,7 +160,7 @@ def write_study_inputs(directory: Path, *, rows: int = 33) -> None:
         "id,tvt\n"
         + "".join(
             f"well{number}_{row},0\n"
-            for number in range(3, -1, -1)
+            for number in range(test_wells - 1, -1, -1)
             for row in range(rows - 1, 3, -1)
         ),
     )
@@ -300,7 +304,7 @@ def tiny_recipe(family: Family.Config) -> WellboreFoldLoop.Config:
     config.max_epochs = 3
     config.dataset = BatchedFoldData.Config()
     config.step.dtype_autocast = None
-    model = tiny_model_config(dropout=family.training.step.model.dropout)
+    model = tiny_model_config(dropout=_model(family).dropout)
     # Two stages run every encoder, skip and decoder line of the four in 60% of the
     # time.
     model.unet.channels_hidden = (2, 3)
@@ -424,16 +428,42 @@ def capture_training(*, recipe: WellboreFoldLoop.Config) -> dict[str, Tensor]:
     }
 
 
-class ProbeModel(SequenceModel):
+class ProbeModel(DepthPosterior):
     """Keep a complete posterior output while shrinking only the wiring-test model."""
 
-    class Config(Makes["ProbeModel"], SequenceModel.Config, kw_only=True):
+    class Config(Fig["ProbeModel"]):
         """Typed small-model constructor with no initialized parameters in config."""
 
+        def cost(
+            self,
+            *,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the one 2-to-28 mapping for every sample.
+
+            Args:
+              batch_size: Samples per invocation.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: Unused outer cost arguments.
+
+            Returns:
+              cost: Complete mapping cost.
+
+            """
+            del kwargs
+            return matmul_cost(
+                channels_in=2,
+                channels_out=28,
+                bias=True,
+                rows=batch_size,
+                dtype=dtype,
+            )
+
     def __init__(self, config: Config) -> None:
-        nn.Module.__init__(self)
+        super().__init__()
         self.config = config
-        self.channels_last = config.channels_last
         self.mapping = nn.Linear(2, 28)
 
     @override

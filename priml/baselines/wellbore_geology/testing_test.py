@@ -13,7 +13,8 @@ import torch
 
 from priml.baselines.wellbore_geology.data import discover_wells, load_split
 from priml.baselines.wellbore_geology.experiments import exp000
-from priml.baselines.wellbore_geology.recipes import _paths
+from priml.baselines.wellbore_geology.model import SequenceModel
+from priml.baselines.wellbore_geology.recipes import _model, _paths
 from priml.baselines.wellbore_geology.scripts.prepare_data import geographic_map
 from priml.baselines.wellbore_geology.testing import (
     BatchedFoldData,
@@ -32,6 +33,7 @@ from priml.baselines.wellbore_geology.testing import (
     write_tiny_wells,
     write_training_wells,
 )
+from priml.cost import matmul_cost
 from priml.runtime import SingleProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import PinnedDropout, assert_tensor_golden, mismatches
@@ -86,6 +88,17 @@ def test_complete_study_fixture_keeps_every_original_target_identifier(
     )
 
 
+def test_a_smaller_test_split_keeps_every_training_well(tmp_path: Path) -> None:
+    write_study_inputs(tmp_path, rows=17, test_wells=2)
+    assert discover_wells(tmp_path / "train") == ("well0", "well1", "well2", "well3")
+    test = load_split(tmp_path / "test")
+    assert tuple(test) == ("well0", "well1")
+    assert [len(well.horizontal["MD"]) for well in test.values()] == [17, 17]
+    identifiers = (tmp_path / "sample_submission.csv").read_text().splitlines()[1:]
+    assert identifiers[0] == "well1_16,0"
+    assert identifiers[-1] == "well0_4,0"
+
+
 def test_tiny_native_geometry_preserves_all_stages_and_complete_input_shapes(
     tmp_path: Path,
 ) -> None:
@@ -99,21 +112,21 @@ def test_tiny_native_geometry_preserves_all_stages_and_complete_input_shapes(
             == family.training.dataset.validation_batch_size
             == 2
         )
-        assert family.training.step.model.unet.channels_hidden == (2, 3, 4, 5)
-        assert family.training.step.model.unet.backbone.network.blocks_per_stage == (
+        assert _model(family).unet.channels_hidden == (2, 3, 4, 5)
+        assert _model(family).unet.backbone.network.blocks_per_stage == (
             1,
             1,
             1,
             1,
         )
-        assert family.training.step.model.kernel_size == 1
-        stages = family.training.step.model.unet.backbone.network.stage
+        assert _model(family).kernel_size == 1
+        stages = _model(family).unet.backbone.network.stage
         assert isinstance(stages, list)
         for stage in stages:
             assert isinstance(stage.block, list)
             assert all(block.conv_dw.kernel_size == 3 for block in stage.block)
-        assert family.training.step.model.channels_hidden == 2
-        assert family.training.step.model.unet.backbone.checkpoint is None
+        assert _model(family).channels_hidden == 2
+        assert _model(family).unet.backbone.checkpoint is None
         if particle:
             assert family.particle is not None
             assert family.particle.particles == 3
@@ -121,7 +134,7 @@ def test_tiny_native_geometry_preserves_all_stages_and_complete_input_shapes(
             assert family.particle.paths == 2
         else:
             assert family.particle is None
-        assert family.training.step.model.reference_columns == 32
+        assert _model(family).reference_columns == 32
         assert family.prediction.expansion.prefix_rows == 4
         assert family.prediction.expansion.target_rows == 28
         assert family.prediction.expansion.downsample == 2
@@ -328,6 +341,8 @@ def test_each_family_trains_like_the_nexus_except_for_dropout(name: str) -> None
     Early stopping is excluded: no family may stop inside three epochs.
     """
     nexus, other = _family_recipe("0803_V2"), _family_recipe(name)
+    assert isinstance(nexus.step.model, SequenceModel.Config)
+    assert isinstance(other.step.model, SequenceModel.Config)
     nexus.step.model.dropout = other.step.model.dropout
     nexus, other = nexus.finalized(), other.finalized()
     for recipe in (nexus, other):
@@ -427,6 +442,18 @@ def test_probe_makes_fresh_runtime_objects_from_named_constructors() -> None:
 def test_probe_step_runs_eager_without_inductor() -> None:
     step = probe_recipe().step.make()
     assert step._compile_fn is None
+
+
+def test_probe_model_costs_its_one_mapping() -> None:
+    cost = ProbeModel.Config().cost(batch_size=3, dtype=torch.float32)
+    assert cost == matmul_cost(
+        channels_in=2,
+        channels_out=28,
+        bias=True,
+        rows=3,
+        dtype=torch.float32,
+    )
+    assert cost.params == 2 * 28 + 28
 
 
 def test_probe_model_maps_each_sample_to_four_depths_and_six_logits() -> None:

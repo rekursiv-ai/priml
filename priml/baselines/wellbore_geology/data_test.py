@@ -495,9 +495,9 @@ def test_rotation_works_in_physical_depth_about_the_first_target() -> None:
 
 def test_a_path_is_rewritten_in_float32() -> None:
     """The first target's row does not move, yet its path is computed anew."""
-    planes = np.full((1, 3, 4), 0.1, dtype=np.float32)
+    planes = np.full((2, 3, 4), 0.1, dtype=np.float32)
     item, _ = _rotated(
-        channels=["pf_tvt"],
+        channels=["pf_tvt", "pf_tvt_ffbsi"],
         target=[0, 1, 2],
         planes=planes,
         target_stats=(0.7, 3),
@@ -505,6 +505,7 @@ def test_a_path_is_rewritten_in_float32() -> None:
 
     depth = np.float32(0.1) * np.float32(3) + np.float32(0.7)
     assert item.arrays["unet_static"][0, 0, 0] == (depth - 0.7) / 3
+    assert item.arrays["unet_static"][1, 0, 0] == (depth - 0.7) / 3
 
 
 def test_probabilities_shift_on_a_float32_candidate_axis() -> None:

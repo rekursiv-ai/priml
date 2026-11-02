@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Final, NotRequired, Self, TypedDict, cast, override
 
 import argparse
 import gc
@@ -14,7 +15,7 @@ import platform
 import sys
 import traceback
 
-from configgle import Fig, PartialConfig
+from configgle import Fig, Makes, PartialConfig
 from treekle import json_dumps, json_loads, to_plain
 
 import numpy as np
@@ -34,6 +35,13 @@ from priml.baselines.wellbore_geology.inference import (
     read_table,
     write_table,
 )
+from priml.baselines.wellbore_geology.model import (
+    DepthPosterior,
+    depth_logits,
+    finalize_heads,
+    mismatch_head,
+)
+from priml.baselines.wellbore_geology.particles import ParticlePrior, ParticleWell
 from priml.baselines.wellbore_geology.pipeline import (
     FamilyPrediction,
     Flags,
@@ -60,6 +68,8 @@ from priml.baselines.wellbore_geology.testing import (
     write_training_wells,
 )
 from priml.baselines.wellbore_geology.train_loop import WellboreFoldLoop
+from priml.model.conv import Conv2d
+from priml.model.sequential import Sequential
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.train.budget import WallBudget
@@ -68,6 +78,8 @@ from priml.train.epoch_loop import EarlyStopping, first_periodic_and_last
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from numpy.typing import NDArray
 
 
 def test_flattened_fold_settings_retain_all_native_numerics() -> None:
@@ -754,6 +766,72 @@ class RecordingFamilyRunner:
         return FamilyArtifacts(oof=oof, test=test)
 
 
+class SmokeModel(DepthPosterior):
+    """The real posterior heads, reading the input planes where the U-Net's would be."""
+
+    class Config(Fig["SmokeModel"]):
+        channels_in: int = -1
+        """Input feature planes; -1 inherits the family's."""
+
+        channels_hidden: int = -1
+        """Features the heads read; the input planes themselves."""
+
+        dropout: float = -1.0
+        """No dropout site of its own; negative keeps the head's."""
+
+        reference_columns: int = -1
+        """Candidate depth bins; -1 inherits the family's."""
+
+        reference_window: float = -1.0
+        """Half-width of the candidate interval; negative inherits the family's."""
+
+        target_stats: tuple[float, float] | None = None
+        """Regression center and scale; None inherits the family's."""
+
+        proj_out: Conv2d.Config = field(default_factory=depth_logits)
+        """Shared alignment and regression logits."""
+
+        unet_gr_rmse_head: Sequential.Config = field(default_factory=mismatch_head)
+        """Auxiliary gamma-ray mismatch prediction head."""
+
+        @override
+        def finalize(self) -> Self:
+            self.channels_hidden = self.channels_in
+            finalize_heads(self)
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._build_posterior(config)
+
+    @override
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class StillParticles(ParticlePrior):
+    """Uniform posteriors in place of the filter; windows and caches stay real."""
+
+    class Config(Makes["StillParticles"], ParticlePrior.Config, kw_only=True):
+        """The parent's recipe, so the cache manifest is the real one."""
+
+    @override
+    def _suffix(
+        self,
+        well: ParticleWell,
+        *,
+        last: int,
+        anchor: float,
+        rows: int,
+    ) -> tuple[list[NDArray[np.float32]], list[NDArray[np.float32]]]:
+        del well, last
+        steps = -(-rows // self.config.tracking.merge_rows)
+        columns = self.config.reference_columns
+        uniform = np.full((steps, columns), 1 / columns, dtype=np.float32)
+        still = np.full(steps, anchor, dtype=np.float32)
+        return [uniform.copy() for _ in range(3)], [still.copy() for _ in range(2)]
+
+
 class InProcessInference:
     """Exercise complete native reconstruction while isolating process startup."""
 
@@ -798,22 +876,16 @@ def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The tracker runs as Python (STYLE.md, compiled kernels): its compiled
-    # form is the subject of particles_test, and loading Numba to call it cost
-    # this test 0.3-0.5 s.
-    monkeypatch.setattr(particles, "engine", _python_tracker)
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     family = tiny_family(particle=True)
-    # By size alone: two particle seeds and one extra clustering trial keep each
-    # draw's loop. Every fold, and the rows of every fold, is the subject of
+    # The pipeline is the subject, so its two costly pieces are stand-ins: the
+    # U-Net is model_test's, and the particle filter is particles_test's. Every
+    # fold, and the rows of every fold, is the subject of
     # test_repeated_folds_average_each_row_and_look_its_curves_up_again.
-    unet = family.training.step.model.unet
-    unet.channels_hidden = unet.channels_hidden[:1]
-    unet.backbone.network.blocks_per_stage = (1,)
-    unet.up_blocks = []
+    family.training.step.model = SmokeModel.Config()
     assert family.particle is not None
-    family.particle.seeds = 2
+    family.particle = StillParticles.Config().update(family.particle)
     family.cv.extra_trials = 1
     family.first_n_folds = 1
     family.prepare_particles = True
@@ -839,10 +911,10 @@ def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
     )
     assert [record["fold"] for record in summaries] == ["fold0"]
     assert [record["best_epoch"] for record in summaries] == [1]
-    # The fold holds out two of the four wells; the test split is all four.
+    # The fold holds out two of the four training wells; the test split has two.
     for path, target_present, wells in (
         (artifacts.oof, True, 2),
-        (artifacts.test, False, 4),
+        (artifacts.test, False, 2),
     ):
         table = read_table(path)
         assert len(table.rows.tvt) == wells * 29
@@ -855,7 +927,7 @@ def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
         assert "PF_TVT" in table.diagnostics
         assert "geo_nbr_distance_q10" in table.diagnostics
     assert len(list((tmp_path / "pf/train").glob("*.npz"))) == 4
-    assert len(list((tmp_path / "pf/test").glob("*.npz"))) == 4
+    assert len(list((tmp_path / "pf/test").glob("*.npz"))) == 2
     # Only the training records carry the target rows they are scored on.
     for split, has_target in (("train", True), ("test", False)):
         record = particles.read_particle_cache(tmp_path / "pf" / split / "well0.npz")
@@ -904,11 +976,6 @@ def _source_name(frame: str) -> str:
     if not mutated:
         return frame
     return name.rpartition("ǁ")[2] if name.startswith("xǁ") else name.removeprefix("x_")
-
-
-def _python_tracker() -> particles.Kernel:
-    """Return the particle tracker's source, in place of its compiled form."""
-    return particles._track_numba
 
 
 def _recorded_study(

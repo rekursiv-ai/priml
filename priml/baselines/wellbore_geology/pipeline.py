@@ -30,6 +30,7 @@ from priml.baselines.wellbore_geology.inference import (
     PublishResults,
     write_table,
 )
+from priml.baselines.wellbore_geology.model import SequenceModel
 from priml.baselines.wellbore_geology.particles import (
     ParticleCache,
     check_cold_cache,
@@ -409,7 +410,9 @@ def predict_family(family: Family.Config, *, directory: Path, output: Path) -> P
     assert isinstance(loader.dataset.observations, FoldObservations)
     prior = loader.dataset.observations.surfaces
     model_config = family.training.step.model.copy_tree()
-    model_config.unet.backbone.checkpoint = None
+    # Selected states replace the pretrained backbone, so it is not read again.
+    if isinstance(model_config, SequenceModel.Config):
+        model_config.unet.backbone.checkpoint = None
     step_config = family.training.step.copy_tree()
     step_config.dtype_autocast = recipe.dtype_autocast
     step_config.ema = recipe.ema.copy_tree()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Self, override
+from typing import TYPE_CHECKING, Protocol, Self, override, runtime_checkable
 
 import math
 
@@ -1040,7 +1040,156 @@ class PosteriorUNet(nn.Module):
         return self.out(self.full_up_block(self.to_full_resolution(x), stem))
 
 
-class SequenceModel(nn.Module):
+def depth_logits() -> Conv2d.Config:
+    """Return the 1x1 projection to one logit per candidate depth.
+
+    Returns:
+      projection: Unsized; the model's ``finalize`` sets both widths.
+
+    """
+    return Conv2d.Config(kernel_size=1, bias=True, init_bias=None)
+
+
+def mismatch_head() -> Sequential.Config:
+    """Return the auxiliary head predicting each row's gamma-ray mismatch.
+
+    Returns:
+      head: Unsized; the model's ``finalize`` sets its widths.
+
+    """
+    return Sequential.Config(
+        elements=[
+            Linear.Config(bias=True, init_bias=None),
+            BatchNorm.Config(elementwise_affine=True),
+            Activation.Config(),
+            Dropout.Config(p=0.0),
+            Linear.Config(bias=True, init_bias=None),
+        ],
+    )
+
+
+@runtime_checkable
+class PosteriorHeads(Protocol):
+    """The config fields a :class:`DepthPosterior` builds its heads and depth axis from."""
+
+    channels_in: int
+    channels_hidden: int
+    dropout: float
+    reference_columns: int
+    reference_window: float
+    target_stats: tuple[float, float] | None
+    proj_out: Conv2d.Config
+    unet_gr_rmse_head: Sequential.Config
+
+
+def finalize_heads(config: PosteriorHeads) -> None:
+    """Size both heads to read ``channels_hidden`` features, and apply ``dropout``.
+
+    Args:
+      config: A model config, edited in place before its children finalize.
+
+    """
+    if config.proj_out.channels_in == -1:
+        config.proj_out.channels_in = config.channels_hidden
+    if config.proj_out.channels_out == -1:
+        config.proj_out.channels_out = 1
+    head = config.unet_gr_rmse_head
+    if head.channels_in == -1:
+        head.channels_in = config.channels_hidden
+    if head.channels_out == -1:
+        head.channels_out = 1
+    elements = head.elements if isinstance(head.elements, list) else [head.elements]
+    first = elements[0] if elements else None
+    if isinstance(first, Linear.Config) and first.channels_out == -1:
+        first.channels_out = 2 * config.channels_hidden
+    if config.dropout >= 0:
+        for element in elements:
+            if isinstance(element, Dropout.Config):
+                element.p = config.dropout
+
+
+class DepthPosterior(nn.Module):
+    """Turn a feature grid into a posterior over candidate depths.
+
+    Subclasses supply the features, then build the heads with
+    :meth:`_build_posterior`: :class:`SequenceModel` from its U-Net.
+    """
+
+    def _build_posterior(self, config: PosteriorHeads) -> None:
+        """Build the heads and the depth axis, after any features a subclass built."""
+        if min(config.reference_columns, config.reference_window) < 0:
+            raise ValueError("The model requires its reference window geometry.")
+        if config.target_stats is None:
+            raise ValueError("The model requires its target statistics.")
+        self.proj_out = config.proj_out.make()
+        self.typewell_tvt_axis: Tensor
+        window, columns = config.reference_window, config.reference_columns
+        target_mean, target_std = config.target_stats
+        raw_axis = torch.linspace(
+            -window + window / columns,
+            window - window / columns,
+            columns,
+            dtype=torch.float32,
+            device="cpu",
+        )
+        self.register_buffer(
+            "typewell_tvt_axis_raw",
+            raw_axis,
+            persistent=False,
+        )
+        self.register_buffer(
+            "typewell_tvt_axis",
+            (raw_axis - target_mean) / target_std,
+            persistent=False,
+        )
+        self.unet_gr_rmse_head = config.unet_gr_rmse_head.make()
+        self.register_load_state_dict_pre_hook(_rename_legacy_head)
+
+    def features(self, x: Tensor) -> Tensor:
+        """Return the ``channels_hidden`` feature grid the heads read.
+
+        Args:
+          x: Input planes, ``(batch, channels_in, rows, columns)``.
+
+        Returns:
+          features: ``(batch, channels_hidden, rows, columns)``.
+
+        """
+        raise NotImplementedError
+
+    def format_backbone(self, device: torch.device) -> None:
+        """Lay out any image backbone for ``device``; this base has none.
+
+        Args:
+          device: Placement of the model, which decides whether a layout applies.
+
+        """
+        del device
+
+    @override
+    def forward(self, x: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
+        """Return depth expectation and complete posterior diagnostics."""
+        features = self.features(x)
+        logits = self.proj_out(features).squeeze(1)
+        probabilities = functional.softmax(logits, dim=-1)
+        axis = self.typewell_tvt_axis.to(
+            device=probabilities.device,
+            dtype=probabilities.dtype,
+        )
+        prediction = (probabilities * axis.reshape(1, 1, -1)).sum(dim=-1)
+        pooled = features.mean(dim=-1).transpose(1, 2)
+        batch, rows, channels = pooled.shape
+        mismatch = functional.softplus(
+            self.unet_gr_rmse_head(pooled.reshape(batch * rows, channels)),
+        ).reshape(batch, rows)
+        return prediction, {
+            "alignment_logits": logits,
+            "regression_logits": logits,
+            "unet_GR_RMSE_pred": mismatch,
+        }
+
+
+class SequenceModel(DepthPosterior):
     """Infer depth from the complete horizontal-by-typewell feature grid."""
 
     class Config(Fig["SequenceModel"]):
@@ -1074,26 +1223,10 @@ class SequenceModel(nn.Module):
         unet: PosteriorUNet.Config = field(default_factory=PosteriorUNet.Config)
         """Spatial feature encoder and decoder."""
 
-        proj_out: Conv2d.Config = field(
-            default_factory=lambda: Conv2d.Config(
-                kernel_size=1,
-                bias=True,
-                init_bias=None,
-            ),
-        )
+        proj_out: Conv2d.Config = field(default_factory=depth_logits)
         """Shared alignment and regression logits."""
 
-        unet_gr_rmse_head: Sequential.Config = field(
-            default_factory=lambda: Sequential.Config(
-                elements=[
-                    Linear.Config(bias=True, init_bias=None),
-                    BatchNorm.Config(elementwise_affine=True),
-                    Activation.Config(),
-                    Dropout.Config(p=0.0),
-                    Linear.Config(bias=True, init_bias=None),
-                ],
-            ),
-        )
+        unet_gr_rmse_head: Sequential.Config = field(default_factory=mismatch_head)
         """Auxiliary gamma-ray mismatch prediction head."""
 
         @override
@@ -1114,25 +1247,7 @@ class SequenceModel(nn.Module):
                     )
                 if self.dropout >= 0:
                     block.conv1.drop.p = block.drop.p = self.dropout
-            if self.proj_out.channels_in == -1:
-                self.proj_out.channels_in = self.channels_hidden
-            if self.proj_out.channels_out == -1:
-                self.proj_out.channels_out = 1
-            head = self.unet_gr_rmse_head
-            if head.channels_in == -1:
-                head.channels_in = self.channels_hidden
-            if head.channels_out == -1:
-                head.channels_out = 1
-            elements = (
-                head.elements if isinstance(head.elements, list) else [head.elements]
-            )
-            first = elements[0] if elements else None
-            if isinstance(first, Linear.Config) and first.channels_out == -1:
-                first.channels_out = 2 * self.channels_hidden
-            if self.dropout >= 0:
-                for element in elements:
-                    if isinstance(element, Dropout.Config):
-                        element.p = self.dropout
+            finalize_heads(self)
             return super().finalize()
 
         def cost(
@@ -1246,38 +1361,18 @@ class SequenceModel(nn.Module):
             )
 
     def __init__(self, config: Config) -> None:
-        if min(config.reference_columns, config.reference_window) < 0:
-            raise ValueError("The model requires its reference window geometry.")
-        if config.target_stats is None:
-            raise ValueError("The model requires its target statistics.")
         super().__init__()
         self.config = config
         self.channels_last = config.channels_last
+        # Built before the heads, so their initial draws follow the U-Net's.
         self.unet = config.unet.make()
-        self.proj_out = config.proj_out.make()
-        self.typewell_tvt_axis: Tensor
-        window, columns = config.reference_window, config.reference_columns
-        target_mean, target_std = config.target_stats
-        raw_axis = torch.linspace(
-            -window + window / columns,
-            window - window / columns,
-            columns,
-            dtype=torch.float32,
-            device="cpu",
-        )
-        self.register_buffer(
-            "typewell_tvt_axis_raw",
-            raw_axis,
-            persistent=False,
-        )
-        self.register_buffer(
-            "typewell_tvt_axis",
-            (raw_axis - target_mean) / target_std,
-            persistent=False,
-        )
-        self.unet_gr_rmse_head = config.unet_gr_rmse_head.make()
-        self.register_load_state_dict_pre_hook(_rename_legacy_head)
+        self._build_posterior(config)
 
+    @override
+    def features(self, x: Tensor) -> Tensor:
+        return self.unet(x)
+
+    @override
     def format_backbone(self, device: torch.device) -> None:
         """Store the CUDA image backbone with contiguous channel vectors.
 
@@ -1287,28 +1382,6 @@ class SequenceModel(nn.Module):
         """
         if self.channels_last and device.type == "cuda":
             self.unet.to(memory_format=torch.channels_last)
-
-    @override
-    def forward(self, x: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
-        """Return depth expectation and complete posterior diagnostics."""
-        features = self.unet(x)
-        logits = self.proj_out(features).squeeze(1)
-        probabilities = functional.softmax(logits, dim=-1)
-        axis = self.typewell_tvt_axis.to(
-            device=probabilities.device,
-            dtype=probabilities.dtype,
-        )
-        prediction = (probabilities * axis.reshape(1, 1, -1)).sum(dim=-1)
-        pooled = features.mean(dim=-1).transpose(1, 2)
-        batch, rows, channels = pooled.shape
-        mismatch = functional.softplus(
-            self.unet_gr_rmse_head(pooled.reshape(batch * rows, channels)),
-        ).reshape(batch, rows)
-        return prediction, {
-            "alignment_logits": logits,
-            "regression_logits": logits,
-            "unet_GR_RMSE_pred": mismatch,
-        }
 
 
 def _rename_legacy_head(

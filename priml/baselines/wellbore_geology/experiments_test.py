@@ -35,6 +35,7 @@ from priml.baselines.wellbore_geology.particles import (
 from priml.baselines.wellbore_geology.pipeline import WellboreStudy
 from priml.baselines.wellbore_geology.recipes import (
     Family,
+    _model,
     _paths,
     family_0719_v1,
     family_0724_v1,
@@ -104,7 +105,7 @@ def test_each_family_differs_from_its_parent_by_its_declared_change(
         _use_particles(reference)
     elif change == "earlier_simulation":
         reference.cv.split_seed = GeographicCV.Config().split_seed
-        reference.training.step.model.dropout = 0.05
+        _model(reference).dropout = 0.05
         reference.training.dataset.validation_batch_size = 32
         stopping.patience = 30
         paths.shift_probability = 0.75
@@ -159,7 +160,7 @@ def _use_particles(family: Family.Config) -> None:
 
 def test_production_exp000_model_depth() -> None:
     assert [
-        family.training.step.model.unet.backbone.network.blocks_per_stage
+        _model(family).unet.backbone.network.blocks_per_stage
         for family in exp000().families
     ] == [
         (3, 3, 27, 3),
@@ -222,7 +223,7 @@ def test_exp000_declares_every_native_family_and_ninety_models() -> None:
             "geo_tvt_rel",
         ],
     ]
-    assert [family.training.step.model.dropout for family in config.families] == [
+    assert [_model(family).dropout for family in config.families] == [
         0.05,
         0.05,
         0.05,
@@ -297,7 +298,7 @@ def test_each_named_fork_has_one_declared_change(
         for family in reference.families:
             family.training.max_epochs = family.cv.repeats = 1
             family.cv.folds = 2
-            shrink_model(family.training.step.model)
+            shrink_model(_model(family))
             features = family.training.dataset.loader.dataset.transform.features
             features.target_rows = 64
             features.reference_columns = 32
@@ -337,7 +338,7 @@ def test_smoke_reduces_geometry_and_retains_every_family_stage() -> None:
     for family in config.families:
         assert family.training.max_epochs == family.cv.repeats == 1
         assert family.cv.folds == 2
-        model = family.training.step.model
+        model = _model(family)
         assert model.channels_hidden == 2
         assert model.kernel_size == 1
         assert model.unet.channels_hidden == (2, 3, 4, 5)

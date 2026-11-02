@@ -20,7 +20,7 @@ from priml.baselines.wellbore_geology.custom_types import (
     InitializableEMA,
 )
 from priml.baselines.wellbore_geology.loss import WellboreLoss
-from priml.baselines.wellbore_geology.model import SequenceModel
+from priml.baselines.wellbore_geology.model import DepthPosterior, SequenceModel
 from priml.loss.custom_types import LossOutput
 from priml.train.train_step import TrainStep
 
@@ -36,11 +36,11 @@ class WellboreTrainStep(TrainStep):
 
     class Config(
         Makes["WellboreTrainStep"],
-        TrainStep.Config[SequenceModel.Config],
+        TrainStep.Config[Makeable[DepthPosterior]],
         kw_only=True,
     ):
-        model: SequenceModel.Config = field(default_factory=SequenceModel.Config)
-        """Complete four-stage posterior and regression model."""
+        model: Makeable[DepthPosterior] = field(default_factory=SequenceModel.Config)
+        """The depth posterior; the complete four-stage model unless replaced."""
 
         loss: Makeable[Callable[..., LossOutput]] = field(
             default_factory=WellboreLoss.Config,
@@ -57,8 +57,8 @@ class WellboreTrainStep(TrainStep):
 
     @property
     @override
-    def model(self) -> SequenceModel:
-        return cast("SequenceModel", self._model)
+    def model(self) -> DepthPosterior:
+        return cast("DepthPosterior", self._model)
 
     @override
     def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
@@ -122,7 +122,7 @@ class WellboreTrainStep(TrainStep):
         self,
         loader: BatchLoader,
         *,
-        model: SequenceModel | None = None,
+        model: DepthPosterior | None = None,
         move_cpu: bool = False,
     ) -> tuple[NDArray[np.float32], list[dict[str, object]]]:
         """Predict every bin and retain every original-row observation.
