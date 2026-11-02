@@ -44,6 +44,7 @@ from priml.math.probability import (
     quantile_logit_distribution,
     quantile_logit_normal,
     quantile_normal,
+    quantile_student_t,
     quantile_truncated_normal,
     quantile_uniform,
     random_categorical,
@@ -427,6 +428,40 @@ def test_quantile_truncated_normal_sanitizes_out_of_domain_gradient() -> None:
     assert p.grad is not None
     assert torch.isfinite(p.grad[1])
     torch.testing.assert_close(result[1], torch.tensor(-0.24158715), atol=1e-6, rtol=0)
+
+
+@pytest.mark.parametrize(
+    ("p", "df", "quantile"),
+    [
+        # scipy.stats.t.ppf(p, df).
+        (0.975, 1, 12.706204736174694),
+        (0.975, 2, 4.302652729749462),
+        (0.975, 3, 3.1824463052837078),
+        (0.975, 5, 2.5705818356363146),
+        (0.975, 6, 2.4469118511449786),
+        (0.975, 30, 2.0422724563012378),
+        (0.995, 4, 4.604094871349992),
+        (0.6, 7, 0.2631668613520229),
+    ],
+)
+def test_quantile_student_t_matches_scipy_in_both_tails(
+    p: float,
+    df: int,
+    quantile: float,
+) -> None:
+    got = quantile_student_t(torch.tensor([p, 1 - p], dtype=torch.float64), df=df)
+    expected = torch.tensor([quantile, -quantile], dtype=torch.float64)
+    torch.testing.assert_close(got, expected, rtol=1e-11, atol=0)
+
+
+def test_quantile_student_t_is_zero_at_the_median() -> None:
+    median = quantile_student_t(torch.tensor(0.5, dtype=torch.float64), df=3)
+    assert torch.equal(median, torch.zeros((), dtype=torch.float64))
+
+
+def test_quantile_student_t_rejects_zero_degrees_of_freedom() -> None:
+    with pytest.raises(ValueError, match="df must be at least 1; got 0"):
+        quantile_student_t(0.975, df=0)
 
 
 def test_random_categorical_all_neg_inf_logits_propagate_nan():

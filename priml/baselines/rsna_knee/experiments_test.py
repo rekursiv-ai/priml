@@ -19,9 +19,11 @@ from priml.baselines.rsna_knee.experiments import (
 )
 from priml.baselines.rsna_knee.imaging import unchanged
 from priml.baselines.rsna_knee.inference import accept_logits
+from priml.baselines.rsna_knee.model import R7
 from priml.loss.simple_loss import SimpleLoss, bce_with_logits
 from priml.model.coatnet import CoAtNet
 from priml.model.linear import Linear
+from priml.model.resnet import ResNet
 from priml.optimizers.composite import CompositeOptimizer
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
@@ -37,7 +39,34 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_released_recipe_pins_every_finalized_field() -> None:
-    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
+    """Every field of the recipe, its networks shrunk by size alone.
+
+    Each network keeps one stage of every block kind and two blocks per stage,
+    so the transition and the repeated block both render; the full depth added
+    only copies and cost 0.31 s to render, against 0.08 s now.
+    """
+    config = exp000()
+    # raptor224 repeats raptor384's blocks; its transitions carry what differs,
+    # the grid each attention stage is sized for.
+    for arm, blocks in ((config.raptor384, (2, 2)), (config.raptor224, (1, 1))):
+        backbone = arm.model.backbone
+        assert isinstance(backbone, CoAtNet.Config)
+        assert isinstance(backbone.stage, list)
+        convolution, attention = backbone.stage[0], backbone.stage[2]
+        backbone.stage = [convolution, attention]
+        backbone.channels_hidden = backbone.channels_hidden[:2]
+        backbone.blocks_per_stage = blocks
+    model = config.r7.model
+    assert isinstance(model, R7.Config)
+    encoder = model.encoder
+    encoder.channels_hidden = encoder.channels_hidden[:1]
+    encoder.blocks_per_stage = (2,)
+    side = config.r7.side
+    assert isinstance(side, ResNet.Config)
+    side.channels_hidden = side.channels_hidden[:1]
+    side.blocks_per_stage = (2,)
+
+    assert_pprint_golden(test_file=__file__, name="exp000", config=config)
 
 
 def test_second_raptor_arm_changes_only_its_released_choices() -> None:
