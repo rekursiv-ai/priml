@@ -156,6 +156,15 @@ def test_the_loop_without_early_stopping_runs_every_epoch() -> None:
     assert "early_stopping" not in loop.state_dict()
 
 
+def test_the_loop_runs_with_unbounded_epochs() -> None:
+    config = _loop_config(epochs=1)
+    config.max_epochs = float("inf")
+    config.max_steps = 6
+    loop = config.make()
+    loop.train()
+    assert loop.step.global_step == 6
+
+
 def test_ranks_follow_rank_zeros_stop_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

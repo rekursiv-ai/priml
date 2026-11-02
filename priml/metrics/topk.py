@@ -103,7 +103,7 @@ class TopK:
           state: The per-``k`` correct counts and the total.
 
         """
-        return {"correct": self.correct, "total": self.total}
+        return {"correct": dict(self.correct), "total": self.total}
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load metric state from checkpoint.
