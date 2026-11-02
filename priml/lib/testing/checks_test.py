@@ -83,19 +83,35 @@ def test_the_command_keeps_the_pid_it_was_started_with() -> None:
 def test_the_prefix_runs_this_interpreter() -> None:
     # What the prefix DOES is the subprocess tests above; this pins the shape
     # they rely on, in the tier that runs on every commit.
-    assert default_signals(signal.SIGINT, signal.SIGHUP)[:2] == [sys.executable, "-c"]
+    assert default_signals(signal.SIGINT, signal.SIGHUP) == [
+        sys.executable,
+        "-c",
+        (
+            "import os, signal, sys\n"
+            "for number in (2, 1,):\n"
+            "    signal.signal(number, signal.SIG_DFL)\n"
+            "os.execvp(sys.argv[1], sys.argv[1:])\n"
+        ),
+    ]
 
 
 def test_naming_no_signal_is_an_error() -> None:
-    with pytest.raises(ValueError, match="at least one signal"):
+    with pytest.raises(ValueError, match=r"^name at least one signal to reset$"):
         default_signals()
 
 
 def test_help_that_exits_zero_without_a_docstring_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert_help_without_docstring(monkeypatch, checks, partial(sys.exit, 0))
+    argv: list[list[str]] = []
+
+    def entry() -> None:
+        argv.append(list(sys.argv))
+        sys.exit(0)
+
+    assert_help_without_docstring(monkeypatch, checks, entry)
     assert checks.__doc__ is None
+    assert argv == [[checks.__name__, "--help"]]
 
 
 def test_help_that_fails_without_a_docstring_is_reported(
@@ -130,6 +146,16 @@ def test_an_older_bash_earlier_on_path_is_passed_over(
 ) -> None:
     old, new = _bash_in(tmp_path / "old", exits=1), _bash_in(tmp_path / "new", exits=0)
     monkeypatch.setenv("PATH", f"{old.parent}{os.pathsep}{new.parent}")
+    assert bash_path() == str(new)
+
+
+def test_without_a_path_the_default_search_path_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    new = _bash_in(tmp_path / "default", exits=0)
+    monkeypatch.delenv("PATH", raising=False)
+    monkeypatch.setattr(os, "defpath", str(new.parent))
     assert bash_path() == str(new)
 
 
