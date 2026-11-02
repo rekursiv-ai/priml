@@ -646,6 +646,15 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     dataset = tmp_path / "data"
     write_study_inputs(dataset)
     family = tiny_family(particle=True)
+    # By size alone: two U-Net resolutions keep a skip and its decoder block,
+    # two particle seeds and one extra clustering trial keep each draw's loop.
+    unet = family.training.step.model.unet
+    unet.channels_hidden = unet.channels_hidden[:2]
+    unet.backbone.network.blocks_per_stage = (1, 1)
+    unet.up_blocks = unet.up_blocks[:1]
+    assert family.particle is not None
+    family.particle.seeds = 2
+    family.cv.extra_trials = 1
     family.first_n_folds = 2
     family.prepare_particles = True
     family.dataset_directory = dataset
