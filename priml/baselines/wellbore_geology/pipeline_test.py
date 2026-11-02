@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.wellbore_geology import pipeline
+from priml.baselines.wellbore_geology import particles, pipeline
 from priml.baselines.wellbore_geology.data import (
     FoldObservations,
     PredictionRows,
@@ -642,7 +642,12 @@ def test_declared_output_templates_resolve_without_touching_the_filesystem(
 
 def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The tracker runs as Python (STYLE.md, compiled kernels): its compiled
+    # form is the subject of particles_test, and loading Numba to call it cost
+    # this test 0.3-0.5 s.
+    monkeypatch.setattr(particles, "engine", _python_tracker)
     dataset = tmp_path / "data"
     write_study_inputs(dataset)
     family = tiny_family(particle=True)
@@ -691,6 +696,11 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
         assert "geo_nbr_distance_q10" in table.diagnostics
     assert len(list((tmp_path / "pf/train").glob("*.npz"))) == 4
     assert len(list((tmp_path / "pf/test").glob("*.npz"))) == 4
+
+
+def _python_tracker() -> particles.Kernel:
+    """Return the particle tracker's source, in place of its compiled form."""
+    return particles._track_numba
 
 
 def _recorded_study(

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, cast, override
 
 import csv
 import math
+import os
 import random
 
 from configgle import InlineConfig
@@ -20,6 +21,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.wellbore_geology import data
 from priml.baselines.wellbore_geology.data import (
     FORMATIONS,
     AugmentedFeatures,
@@ -573,6 +575,64 @@ def test_numeric_csv_preserves_complete_rows_and_requested_column_order(
         values.size == 0
         for values in read_numeric_csv(path, columns=("X", "Y")).values()
     )
+
+
+def test_a_csv_read_again_parses_once_and_hands_out_its_own_arrays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each fold rebuilt its wells from disk, so a run read every CSV 3.5 times."""
+    parsed: list[str] = []
+    real = data._csv_float
+
+    def counted(value: str) -> float:
+        parsed.append(value)
+        return real(value)
+
+    monkeypatch.setattr(data, "_csv_float", counted)
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n2\n")
+
+    first = read_numeric_csv(path, columns=("X",))
+    first["X"][0] = 9.0
+    second = read_numeric_csv(path, columns=("X",))
+
+    assert parsed == ["1", "2"]
+    np.testing.assert_array_equal(second["X"], [1.0, 2.0])
+
+
+def test_an_edited_csv_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n")
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0]
+
+    path.write_text("X\n1\n2\n")
+
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0, 2.0]
+
+
+def test_a_csv_edited_to_the_same_size_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n")
+    os.utime(path, ns=(1_000, 1_000))
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0]
+
+    path.write_text("X\n2\n")
+    os.utime(path, ns=(2_000, 2_000))
+
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [2.0]
+
+
+def test_a_csv_edited_within_one_timestamp_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n")
+    os.utime(path, ns=(1_000, 1_000))
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0]
+
+    path.write_text("X\n1\n2\n")
+    os.utime(path, ns=(1_000, 1_000))
+
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0, 2.0]
 
 
 def test_csv_precision_and_missing_values(tmp_path: Path) -> None:
