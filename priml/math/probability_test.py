@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fractions import Fraction
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest.mock import Mock, call
@@ -1524,6 +1525,91 @@ def test_quantile_fullgraph(function: Callable[..., Tensor]) -> None:
     compiled = torch.compile(function, backend="eager", fullgraph=True)
     p = torch.tensor([0.25, 0.75])
     torch.testing.assert_close(compiled(p), function(p))
+
+
+def test_gumbel_max_adds_float32_noise_and_picks_along_the_last_axis() -> None:
+    logits = torch.randn(4, 3, 5, generator=torch.Generator().manual_seed(1))
+    ours, theirs = torch.Generator().manual_seed(6), torch.Generator().manual_seed(6)
+    noise = random_gumbel(4, 3, 5, generator=theirs, dtype=torch.float32)
+    expected = (logits + noise).argmax(-1)
+    # A float64 default would draw float64 noise unless the noise names float32.
+    default = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        actual = gumbel_max(logits, generator=ours)
+    finally:
+        torch.set_default_dtype(default)
+    assert torch.equal(actual, expected)
+
+
+def test_gumbel_draws_on_the_requested_device_and_dtype() -> None:
+    noise = random_gumbel(2, 3, dtype=torch.float64, device=torch.device("meta"))
+    assert (noise.dtype, noise.device.type) == (torch.float64, "meta")
+    index = gumbel_max(torch.zeros(2, 3, device="meta"))
+    assert (index.shape, index.device.type) == ((2,), "meta")
+
+
+def test_log_gamma_correction_is_its_six_term_series() -> None:
+    coefficients = (
+        Fraction(0.833333333333333e-01),
+        Fraction(-0.277777777760991e-02),
+        Fraction(0.793650666825390e-03),
+        Fraction(-0.595202931351870e-03),
+        Fraction(0.837308034031215e-03),
+        Fraction(-0.165322962780713e-02),
+    )
+    # `sum` c_k / x^(2k + 1), exactly; Horner's rounding stays within a few ULP.
+    series = sum(c / Fraction(8) ** (2 * k + 1) for k, c in enumerate(coefficients))
+    actual = log_gamma_correction(torch.tensor([8.0], dtype=torch.float64))
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([float(series)], dtype=torch.float64),
+        rtol=1e-14,
+        atol=0.0,
+    )
+
+
+def test_log_cdf_truncated_normal_is_flat_at_and_beyond_its_bounds() -> None:
+    x = torch.tensor([-3.0, -1.0, 2.0, 4.0], dtype=torch.float64, requires_grad=True)
+    loc = torch.tensor(0.5, dtype=torch.float64, requires_grad=True)
+    scale = torch.tensor(1.5, dtype=torch.float64, requires_grad=True)
+    low = torch.tensor(-1.0, dtype=torch.float64, requires_grad=True)
+    high = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    result = log_cdf_truncated_normal(x, loc=loc, scale=scale, low=low, high=high)
+    assert result.tolist() == [-math.inf, -math.inf, 0.0, 0.0]
+    result[1:].sum().backward()
+    for value in (x.grad, loc.grad, scale.grad, low.grad, high.grad):
+        assert value is not None
+        assert torch.equal(value, torch.zeros_like(value))
+
+
+def test_log_cdf_of_reversed_bounds_is_one_at_and_below_high() -> None:
+    result = log_cdf_truncated_normal(torch.tensor([-2.0, -1.0]), low=1.0, high=-1.0)
+    assert result.tolist() == [0.0, 0.0]
+
+
+def test_quantile_truncated_normal_past_one_is_nan_even_in_a_far_tail() -> None:
+    # ndtr(-10) + 1.5 (ndtr(-5) - ndtr(-10)) is still far under 1.
+    assert torch.isnan(
+        quantile_truncated_normal(torch.tensor(1.5), low=-10.0, high=-5.0),
+    )
+
+
+def test_quantile_truncated_normal_keeps_location_and_scale_gradients_finite() -> None:
+    loc = torch.tensor(0.5, requires_grad=True)
+    scale = torch.tensor(1.5, requires_grad=True)
+    result = quantile_truncated_normal(
+        torch.tensor([0.3, 2.0]),
+        loc=loc,
+        scale=scale,
+        low=-2.0,
+        high=2.0,
+    )
+    result[0].backward()
+    assert loc.grad is not None
+    assert scale.grad is not None
+    assert torch.isfinite(loc.grad)
+    assert torch.isfinite(scale.grad)
 
 
 if __name__ == "__main__":

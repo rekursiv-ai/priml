@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import math
 import sys
+import traceback
 
 import pytest
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
+    from types import ModuleType
+
+    from torch.overrides import TorchFunctionMode
 
     import torch
 else:
@@ -119,6 +123,60 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
         for _ in range(blocks):
             block = torch.full(shape, math.nan)
             del block
+
+
+@pytest.fixture
+def placed_factories() -> Callable[[ModuleType], TorchFunctionMode]:
+    """Return a mode, per module, failing each tensor factory it calls without a device.
+
+    A factory that names no device builds on the default one: the inputs' own
+    on a CPU-only host, so no CPU test sees a factory that forgot them. The
+    mode fails a factory call whose caller is ``module`` itself; a factory
+    torch's own Python code calls is torch's, not the module's. Opt-in: request
+    it by name.
+
+    Returns:
+      mode: Called with a module, the mode to enter around the code under test.
+
+    """
+    factories = frozenset(
+        (
+            torch.arange,
+            torch.empty,
+            torch.eye,
+            torch.full,
+            torch.ones,
+            torch.rand,
+            torch.randint,
+            torch.randn,
+            torch.tensor,
+            torch.zeros,
+        ),
+    )
+
+    class Placed(torch.overrides.TorchFunctionMode):
+        def __init__(self, module: ModuleType) -> None:
+            super().__init__()
+            self.path = module.__file__
+
+        @override
+        def __torch_function__(
+            self,
+            func: Callable[..., object],
+            types: object,
+            args: tuple[object, ...] = (),
+            kwargs: dict[str, object] | None = None,
+        ) -> object:
+            kwargs = kwargs or {}
+            if (
+                func in factories
+                and traceback.extract_stack(limit=2)[0].filename == self.path
+                and kwargs.get("device") is None
+            ):
+                raise ValueError(f"{func} names no device")
+            return func(*args, **kwargs)
+
+    return Placed
 
 
 def _cuda_is_initialized() -> bool:

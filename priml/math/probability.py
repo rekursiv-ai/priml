@@ -343,9 +343,12 @@ def log_cdf_truncated_normal(
     interior = (x > torch.minimum(low, high)) & (x < torch.maximum(low, high))
     # Mask all operands, not only the result: logsubexp(a, a) has an
     # infinite derivative that would leak through the unselected branch.
+    # pragma: no mutate start -- the fills feed only the branch the last where drops,
+    # and where routes no gradient to a dropped entry: any fill gives the same bits.
     std_x = torch.where(interior, (x - loc) / scale, 0.5)
     std_low = torch.where(interior, (low - loc) / scale, 0.0)
     std_high = torch.where(interior, (high - loc) / scale, 1.0)
+    # pragma: no mutate end
     log_cdf = logsubexp(
         torch.special.log_ndtr(std_x),
         torch.special.log_ndtr(std_low),
@@ -836,7 +839,7 @@ def log_gamma_correction(x: Tensorable) -> Tensor:
             -0.165322962780713e-02,
         ],
         dtype=x.dtype,
-        device=x.device,
+        device=x.device,  # pragma: no mutate -- read only as 0-dim scalars.
     )
     inv_x = x.reciprocal()
     inv_x2 = inv_x * inv_x

@@ -52,6 +52,7 @@ from priml.testing.bfb import (
     _module_device,
     _op_name,
     _ordered,
+    _plan,
     _replay_golden,
     _resolve_output,
     _run_unfused,
@@ -3732,6 +3733,50 @@ def test_scales_operand_reads_default_and_alpha_forms() -> None:
     assert _scales_operand(add, (left, right), {"alpha": 0.25})
 
 
+def test_plan_records_what_each_op_alone_decides() -> None:
+    aten = torch.ops.aten
+    plans = {
+        str(func): _plan(func)
+        for func in (
+            aten.mul.Tensor,
+            aten.alias.default,
+            aten.add_.Tensor,
+            aten.exp.default,
+            aten.convolution_backward.default,
+            torch.ops.prims.mul.default,
+        )
+    }
+    # An alpha decides per call; a transcendental never passes through.
+    assert {
+        name: (plan.native, plan.passes_through, plan.aten, plan.name, plan.writes)
+        for name, plan in plans.items()
+    } == {
+        "aten.mul.Tensor": (True, True, True, "mul", False),
+        "aten.alias.default": (True, True, True, "alias", False),
+        "aten.add_.Tensor": (False, True, True, "add_", True),
+        "aten.exp.default": (False, False, True, "exp", False),
+        "aten.convolution_backward.default": (
+            False,
+            False,
+            True,
+            "convolution_backward",
+            False,
+        ),
+        "prims.mul.default": (False, False, False, "mul", False),
+    }
+    assert [name for name, plan in plans.items() if plan.convolution_backward] == [
+        "aten.convolution_backward.default",
+    ]
+
+
+@pytest.mark.parametrize(("alpha", "upcast"), [(1, False), (0.5, True)])
+def test_add_passes_through_unless_its_alpha_scales(alpha: float, upcast: bool) -> None:
+    left, right = torch.ones(2, 3), torch.full((2, 3), 0.25)
+    with OpsIssued() as issued, host_agnostic_numerics():
+        torch.add(left, right, alpha=alpha)
+    assert ("aten.to.dtype" in issued.names) is upcast
+
+
 def test_scales_or_fuses_distinguishes_add_sub_and_decomposed_ops() -> None:
     left, right = torch.ones(2), torch.ones(2)
     assert not _scales_or_fuses(torch.ops.aten.add.Tensor, (left, right), {})
@@ -5117,6 +5162,255 @@ def test_convolution_backward_out_preserves_complete_gradients_and_buffers() -> 
         assert tensor_bits_equal(got, b=want)
 
 
+def test_argument_reads_a_position_then_falls_back_to_its_keyword() -> None:
+    assert bfb._argument((2, 3), {"x": 5}, index=1, name="x") == 3
+    assert bfb._argument((2,), {"x": 5}, index=1, name="x") == 5
+    assert bfb._argument((2,), {}, index=1, name="x") is None
+
+
+def test_dtype_as_keyword_refuses_more_positionals_than_the_schema_names() -> None:
+    with pytest.raises(ValueError, match="longer"):
+        bfb._dtype_as_keyword(
+            torch.ops.aten.softmax.int,
+            args=(torch.ones(2, 3), -1, torch.float32, "extra"),
+            kwargs={},
+        )
+
+
+# The contraction of one is the case ``_one_term_mm`` exists for; two rows and
+# two columns are each its smallest accepted size.
+@pytest.mark.parametrize(("rows", "columns"), [(2, 3), (3, 2)])
+def test_one_term_mm_returns_the_outer_product(rows: int, columns: int) -> None:
+    left = torch.arange(2.0, 2.0 + rows).reshape(rows, 1)
+    right = torch.arange(5.0, 5.0 + columns).reshape(1, columns)
+    actual = bfb._one_term_mm(torch.ops.aten.mm.default, args=(left, right))
+    assert actual is not None
+    assert torch.equal(actual, left * right)
+
+
+def test_host_agnostic_mm_takes_the_one_term_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    products: list[Tensor | None] = []
+    one_term_mm = bfb._one_term_mm
+
+    def record(
+        func: OpOverload[..., object],
+        args: tuple[object, ...],
+    ) -> Tensor | None:
+        products.append(one_term_mm(func, args=args))
+        return products[-1]
+
+    monkeypatch.setattr(bfb, "_one_term_mm", record)
+    left = torch.tensor([[2.0], [3.0]])
+    right = torch.tensor([[5.0, 6.0, 7.0]])
+    with host_agnostic_numerics():
+        actual = torch.mm(left, right)
+    (product,) = products
+    assert product is not None
+    assert product.dtype == torch.float64
+    assert torch.equal(actual, left * right)
+
+
+def _refuse(*args: object, **kwargs: object) -> object:
+    del args, kwargs
+    raise AssertionError("called")
+
+
+_CONVOLUTION_BACKWARD: Final = torch.ops.aten.convolution_backward.default
+
+
+def _convolution_backward_arguments(
+    dtype: torch.dtype,
+) -> tuple[object, ...]:
+    """Return a weight-gradient request with every geometry argument off its default."""
+    # Stride (2, 1), padding (1, 0), dilation (1, 2) over a [6, 12] image and a
+    # [2, 4] kernel leave a [4, 6] output.
+    media = (torch.arange(2 * 3 * 6 * 12) % 7).reshape(2, 3, 6, 12).to(dtype)
+    weight = (torch.arange(5 * 3 * 2 * 4) % 5).reshape(5, 3, 2, 4).to(dtype)
+    grad = (torch.arange(2 * 5 * 4 * 6) % 3).reshape(2, 5, 4, 6).to(dtype)
+    return (grad, media, weight, [5], [2, 1], [1, 0], [1, 2], False, [0, 0], 1)
+
+
+def test_pairwise_convolution_backward_honors_stride_padding_and_dilation() -> None:
+    arguments = _convolution_backward_arguments(torch.float64)
+    mask = [False, True, False]
+    expected = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        _CONVOLUTION_BACKWARD(*arguments, mask),
+    )
+    actual = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        bfb._pairwise_convolution_backward(
+            _CONVOLUTION_BACKWARD,
+            (*arguments, mask),
+            {},
+        ),
+    )
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_pairwise_convolution_backward_reads_a_keyword_output_mask() -> None:
+    arguments = _convolution_backward_arguments(torch.float64)
+    mask = [False, True, False]
+    expected = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        _CONVOLUTION_BACKWARD(*arguments, output_mask=mask),
+    )
+    actual = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        bfb._pairwise_convolution_backward(
+            _CONVOLUTION_BACKWARD,
+            arguments,
+            {"output_mask": mask},
+        ),
+    )
+    assert actual[0] is None
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_pairwise_convolution_backward_leaves_float32_to_the_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bfb, "fixed_pairwise_sum", _refuse)
+    arguments = (*_convolution_backward_arguments(torch.float32), [False, True, False])
+    expected = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        _CONVOLUTION_BACKWARD(*arguments),
+    )
+    actual = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        bfb._pairwise_convolution_backward(_CONVOLUTION_BACKWARD, arguments, {}),
+    )
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_result_dtype_answers_one_dtype_without_the_promotion_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bfb, "elementwise_dtypes", _refuse)
+    tensors = [torch.ones(2, dtype=torch.float16), torch.ones(3, dtype=torch.float16)]
+    assert bfb._result_dtype(tensors) == torch.float16
+
+
+def test_set_deterministic_clears_warn_only_by_default() -> None:
+    state = bfb._capture_torch_process_state()
+    try:
+        bfb._set_deterministic(False, warn_only=True)
+        bfb._set_deterministic(True)
+        assert torch.is_deterministic_algorithms_warn_only_enabled() is False
+    finally:
+        bfb._restore_torch_process_state(state)
+
+
+def _batch_norm_arguments() -> tuple[object, ...]:
+    media = torch.arange(24.0).reshape(3, 2, 4) / 7
+    running = torch.tensor([1.0, 2.0]), torch.tensor([3.0, 5.0])
+    return (media, None, None, *running, True, 0.1, 1e-5)
+
+
+class _BatchNormCalls(TorchDispatchMode):
+    """Record the arguments reaching the native batch-norm kernel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[object, ...]] = []
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        if func is torch.ops.aten.native_batch_norm.default:
+            self.calls.append(args)
+        return func(*args, **(kwargs or {}))
+
+
+def test_unfused_batch_norm_runs_the_kernel_at_unit_momentum_on_fresh_buffers() -> None:
+    arguments = _batch_norm_arguments()
+    with _BatchNormCalls() as recorded:
+        bfb._unfused_batch_norm(
+            torch.ops.aten.native_batch_norm.default,
+            args=arguments,
+        )
+    (call,) = recorded.calls
+    assert call[6] == 1.0
+    assert call[3] is not arguments[3]
+    assert call[4] is not arguments[4]
+
+
+# The kernel refuses one running buffer without the other; the unfused update
+# would fail on the missing one first.
+@pytest.mark.parametrize("missing", [3, 4])
+def test_unfused_batch_norm_leaves_a_missing_running_buffer_to_the_kernel(
+    missing: int,
+) -> None:
+    arguments = list(_batch_norm_arguments())
+    arguments[missing] = None
+    with pytest.raises(ValueError, match="must either both be None"):
+        bfb._unfused_batch_norm(
+            torch.ops.aten.native_batch_norm.default,
+            args=tuple(arguments),
+        )
+
+
+def test_dispatch_writes_keyword_running_buffers_back() -> None:
+    media, _, _, running_mean, running_var, _, momentum, eps = _batch_norm_arguments()
+    assert isinstance(media, Tensor)
+    assert isinstance(running_mean, Tensor)
+    assert isinstance(running_var, Tensor)
+    expected_mean, expected_var = running_mean.double(), running_var.double()
+    _ = torch.ops.aten.native_batch_norm.default(
+        media.double(),
+        None,
+        None,
+        expected_mean,
+        expected_var,
+        True,
+        momentum,
+        eps,
+    )
+    _ = bfb._Float64Compute()._dispatch(
+        torch.ops.aten.native_batch_norm.default,
+        (media,),
+        {
+            "weight": None,
+            "bias": None,
+            "running_mean": running_mean,
+            "running_var": running_var,
+            "training": True,
+            "momentum": momentum,
+            "eps": eps,
+        },
+    )
+    assert not torch.equal(expected_mean.float(), torch.tensor([1.0, 2.0]))
+    assert torch.equal(running_mean, expected_mean.float())
+    assert torch.equal(running_var, expected_var.float())
+
+
+def test_dispatch_copies_running_buffers_back_for_batch_norm_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bfb, "_copy_back", _refuse)
+    media = torch.arange(30.0).reshape(2, 3, 5) / 7
+    with host_agnostic_numerics():
+        # ``ceil_mode=True`` puts a True at batch norm's ``training`` position.
+        pooled = torch.ops.aten.max_pool1d.default(media, [2], [2], [0], [1], True)
+    assert isinstance(pooled, Tensor)
+    assert torch.equal(pooled, torch.nn.functional.max_pool1d(media, 2, ceil_mode=True))
+
+
+def test_host_agnostic_arange_of_integers_stays_exact() -> None:
+    with host_agnostic_numerics():
+        actual = torch.arange(2**53, 2**53 + 3)
+    assert actual.dtype == torch.int64
+    assert actual.tolist() == [2**53, 2**53 + 1, 2**53 + 2]
+
+
 class BackwardRequests(TorchDispatchMode):
     """Observe the masks reaching the native convolution backend."""
 
@@ -5138,6 +5432,26 @@ class BackwardRequests(TorchDispatchMode):
             mask = args[10] if len(args) > 10 else kwargs["output_mask"]
             self.masks.append(tuple(cast(list[bool], mask)))
         return func(*args, **kwargs)
+
+
+class OpsIssued(TorchDispatchMode):
+    """Record the name of every op reaching the mode below the harness."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.names: list[str] = []
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        self.names.append(str(func))
+        return func(*args, **(kwargs or {}))
 
 
 if __name__ == "__main__":

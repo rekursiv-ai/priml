@@ -26,7 +26,7 @@ from priml.lib.testing.resources import (
     pytest_collection_modifyitems,
 )
 from priml.testing import regenerate
-from priml.testing.fixtures import cleanup_cuda
+from priml.testing.fixtures import cleanup_cuda, placed_factories
 
 
 if TYPE_CHECKING:
@@ -60,10 +60,12 @@ class _TorchModule(Protocol):
 # directory of the conftest that names it, so binding it here is what points
 # every priml test's XDG lookups at a tmp dir instead of the developer's own,
 # and what reclaims CUDA memory around every priml test instead of only the
-# files that remembered to import ``cleanup_cuda``.
+# files that remembered to import ``cleanup_cuda``. ``placed_factories`` is opt-in,
+# re-exported so any priml test may request it.
 __all__ = [
     "cleanup_cuda",
     "isolate_user_dirs",
+    "placed_factories",
     "pytest_addoption",
     "pytest_collection_modifyitems",
     "pytest_configure",
