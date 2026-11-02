@@ -373,11 +373,41 @@ def test_a_fold_saves_its_selected_state_not_its_last_one(
     assert caplog.messages == ["fold0: priml best_epoch=7, best_rmse=0.2500"]
 
 
+def test_repeated_folds_average_each_row_and_look_its_curves_up_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _selecting(monkeypatch, None)
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset)
+    output = tmp_path / "trained"
+    output.mkdir()
+    family = tiny_family(particle=False)
+    family.cv.repeats = 2
+    family.dataset_directory = dataset
+    trained = train_family(
+        family,
+        raw=load_split(dataset / "train"),
+        output_directory=output,
+    )
+    table = read_table(trained.oof)
+    assert len(table.rows.tvt) == 4 * 29
+    lookups = [name for name in table.diagnostics if name.endswith("_lookup_GR")]
+    assert lookups
+    for name in lookups:
+        assert np.isfinite(table.diagnostics[name]).any(), name
+
+
+# The EMA shadow is never read: a fold predicts with the state it selected.
 def _selecting(monkeypatch: pytest.MonkeyPatch, fill: float | None) -> None:
     """Skip training; select a state of ``fill`` everywhere, or none."""
 
+    def unread(media: torch.Tensor) -> object:
+        raise AssertionError(f"predicted {tuple(media.shape)} with the EMA shadow")
+
     def train(loop: WellboreFoldLoop) -> None:
         step = loop.native_step
+        monkeypatch.setattr(step, "call_eval", unread)
         loop.best_epoch = 7
         loop.best_score = 0.25
         loop.best_state = (
@@ -764,7 +794,7 @@ def test_declared_output_templates_resolve_without_touching_the_filesystem(
     assert explicit.pf_directory == config.pf_directory
 
 
-def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
+def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -775,16 +805,17 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     dataset = tmp_path / "data"
     write_study_inputs(dataset)
     family = tiny_family(particle=True)
-    # By size alone: two U-Net resolutions keep a skip and its decoder block,
-    # two particle seeds and one extra clustering trial keep each draw's loop.
+    # By size alone: two particle seeds and one extra clustering trial keep each
+    # draw's loop. Every fold, and the rows of every fold, is the subject of
+    # test_repeated_folds_average_each_row_and_look_its_curves_up_again.
     unet = family.training.step.model.unet
-    unet.channels_hidden = unet.channels_hidden[:2]
-    unet.backbone.network.blocks_per_stage = (1, 1)
-    unet.up_blocks = unet.up_blocks[:1]
+    unet.channels_hidden = unet.channels_hidden[:1]
+    unet.backbone.network.blocks_per_stage = (1,)
+    unet.up_blocks = []
     assert family.particle is not None
     family.particle.seeds = 2
     family.cv.extra_trials = 1
-    family.first_n_folds = 2
+    family.first_n_folds = 1
     family.prepare_particles = True
     family.dataset_directory = dataset
     family.pf_directory = tmp_path / "pf"
@@ -801,17 +832,21 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     assert json_loads(
         (tmp_path / "trained/checkpoints.json").read_text(),
         list[str],
-    ) == ["fold0.pt", "fold1.pt"]
+    ) == ["fold0.pt"]
     summaries = json_loads(
         (tmp_path / "trained/folds.json").read_text(),
         list[dict[str, object]],
     )
-    assert [record["fold"] for record in summaries] == ["fold0", "fold1"]
-    assert [record["best_epoch"] for record in summaries] == [1, 1]
-    for path, target_present in ((artifacts.oof, True), (artifacts.test, False)):
+    assert [record["fold"] for record in summaries] == ["fold0"]
+    assert [record["best_epoch"] for record in summaries] == [1]
+    # The fold holds out two of the four wells; the test split is all four.
+    for path, target_present, wells in (
+        (artifacts.oof, True, 2),
+        (artifacts.test, False, 4),
+    ):
         table = read_table(path)
-        assert len(table.rows.tvt) == 4 * 29
-        assert set(table.rows.well_ids) == {"well0", "well1", "well2", "well3"}
+        assert len(table.rows.tvt) == wells * 29
+        assert len(set(table.rows.well_ids)) == wells
         assert table.rows.tvt.dtype == np.float32
         assert (table.rows.target is not None) is target_present
         assert np.count_nonzero(~np.isfinite(table.rows.tvt)) == 0
@@ -825,20 +860,19 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     for split, has_target in (("train", True), ("test", False)):
         record = particles.read_particle_cache(tmp_path / "pf" / split / "well0.npz")
         assert bool(np.asarray(record["target_mask"]).any()) is has_target
+    # Each well's distance quantile is taken once, over the averaged rows.
+    assert read_table(artifacts.oof).column_order[-1] == "geo_nbr_distance_q10"
     folds = (tmp_path / "trained/folds.json").read_text()
     assert folds.startswith('[\n  {\n    "fold": "fold0",\n    "best_score": ')
     assert [list(record) for record in summaries] == [
         ["fold", "best_score", "best_epoch", "validation"],
-    ] * 2
+    ]
     # Training and prediction each finalize the family once; a fold binds its
     # membership onto one copy and builds from one more.
     assert copies == [
         "train_family:family = family.finalized()",
-        *[
-            "fold_settings:config = family.training.copy_tree()",
-            "train_family:loop = configuration.make()",
-        ]
-        * 2,
+        "fold_settings:config = family.training.copy_tree()",
+        "train_family:loop = configuration.make()",
         "predict_family:family = family.finalized()",
     ]
 

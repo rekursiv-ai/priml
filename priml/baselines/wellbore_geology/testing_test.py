@@ -13,6 +13,7 @@ import torch
 
 from priml.baselines.wellbore_geology.data import discover_wells, load_split
 from priml.baselines.wellbore_geology.experiments import exp000
+from priml.baselines.wellbore_geology.recipes import _paths
 from priml.baselines.wellbore_geology.scripts.prepare_data import geographic_map
 from priml.baselines.wellbore_geology.testing import (
     BatchedFoldData,
@@ -31,6 +32,7 @@ from priml.baselines.wellbore_geology.testing import (
     write_tiny_wells,
     write_training_wells,
 )
+from priml.runtime import SingleProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import PinnedDropout, assert_tensor_golden, mismatches
 from priml.train.epoch_loop import EarlyStopping
@@ -124,6 +126,10 @@ def test_tiny_native_geometry_preserves_all_stages_and_complete_input_shapes(
         assert family.prediction.expansion.target_rows == 28
         assert family.prediction.expansion.downsample == 2
         assert family.training.step.dtype_autocast is None
+        runtime = family.training.runtime
+        assert isinstance(runtime, SingleProcess.Config)
+        assert runtime.device == "cpu"
+        assert _paths(family).trend.minimum_suffix_rows == 8
     write_training_wells(tmp_path / "train", count=2)
     wells = load_split(tmp_path / "train")
     assert list(wells) == ["well0", "well1"]
