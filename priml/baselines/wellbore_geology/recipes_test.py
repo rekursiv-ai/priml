@@ -19,6 +19,7 @@ from priml.baselines.wellbore_geology.recipes import (
     family_0801_v2,
     family_0803_v2,
 )
+from priml.baselines.wellbore_geology.testing import ProbeModel
 from priml.baselines.wellbore_geology.train_step import WellboreTrainStep
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr_schedule import RecursiveCosine
@@ -159,6 +160,15 @@ def test_published_family_helpers_reject_a_missing_rule() -> None:
     paths.training.dataset.loader.dataset.transform.paths = None
     with pytest.raises(TypeError, match="path simulation"):
         _paths(paths)
+    model = family_0803_v2()
+    model.training.step.model = ProbeModel.Config()
+    with pytest.raises(
+        TypeError,
+        match=r"^Every published family declares the complete",
+    ):
+        _model(model)
+    # A model without the posterior geometry is left as it was declared.
+    assert isinstance(model.finalized().training.step.model, ProbeModel.Config)
 
 
 def test_family_without_held_out_observations_still_resolves_its_inputs() -> None:

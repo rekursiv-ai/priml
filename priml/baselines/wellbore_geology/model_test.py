@@ -26,6 +26,8 @@ from priml.baselines.wellbore_geology.model import (
     SequenceModel,
     backbone_mlp,
     bilinear_cost,
+    finalize_heads,
+    mismatch_head,
     retained_stage_configs,
 )
 from priml.baselines.wellbore_geology.testing import tiny_model_config
@@ -1230,6 +1232,33 @@ def test_channels_last_storage_applies_only_to_cuda_models_that_ask_for_it(
     assert calls == (
         [torch.channels_last] if device == "cuda" and channels_last else []
     )
+
+
+def test_a_single_linear_head_is_widened_like_the_first_of_a_list() -> None:
+    config = SequenceModel.Config(channels_hidden=3)
+    config.unet_gr_rmse_head = Sequential.Config(elements=Linear.Config())
+    finalize_heads(config)
+    head = config.unet_gr_rmse_head.elements
+    assert isinstance(head, Linear.Config)
+    assert head.channels_out == 6
+
+
+def test_an_empty_head_is_sized_without_a_first_element() -> None:
+    config = SequenceModel.Config(channels_hidden=3, dropout=0.5)
+    config.unet_gr_rmse_head = Sequential.Config(elements=[])
+    finalize_heads(config)
+    assert config.unet_gr_rmse_head.channels_in == 3
+
+
+def test_zero_dropout_reaches_every_head_dropout() -> None:
+    config = SequenceModel.Config(dropout=0.0)
+    config.unet_gr_rmse_head = mismatch_head()
+    elements = config.unet_gr_rmse_head.elements
+    assert isinstance(elements, list)
+    drop = next(e for e in elements if isinstance(e, Dropout.Config))
+    drop.p = 0.3
+    finalize_heads(config)
+    assert drop.p == 0.0
 
 
 if __name__ == "__main__":
