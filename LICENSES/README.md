@@ -21,6 +21,7 @@ names its file here.
 | `cifar10-airbench` | [KellerJordan/cifar10-airbench](https://github.com/KellerJordan/cifar10-airbench) | MIT | `baselines/cifar10` |
 | `ffcv-imagenet` | [libffcv/ffcv-imagenet](https://github.com/libffcv/ffcv-imagenet) | Apache-2.0 | `baselines/imagenet` |
 | `generative-inverse-heat-dissipation` | [AaltoML/generative-inverse-heat-dissipation](https://github.com/AaltoML/generative-inverse-heat-dissipation) | MIT | `math/frequency.py` |
+| `openai-math` | [openai/math](https://github.com/openai/math) @ `adc7f12` | Apache-2.0 | `baselines/openaimath` |
 | `purejaxql` | [mttga/purejaxql](https://github.com/mttga/purejaxql) | Apache-2.0 | `baselines/craftax` (PQN) |
 | `torch-dct` | [zh217/torch-dct](https://github.com/zh217/torch-dct) | MIT | `math/frequency.py` |
 | `transformerXL_PPO_JAX` | [Reytuag/transformerXL_PPO_JAX](https://github.com/Reytuag/transformerXL_PPO_JAX) | MIT | `baselines/craftax` (GTrXL) |
@@ -38,3 +39,8 @@ no license text to reproduce here.
 [Imbernoulli/MLS-Bench](https://github.com/Imbernoulli/MLS-Bench), whose tasks
 `baselines/mlsbench` re-implements at commit `80cf5c5`, publishes no license,
 so there is no text to reproduce here either.
+
+[FineEnvs/openai-math](https://huggingface.co/datasets/FineEnvs/openai-math),
+whose tasks and grader `baselines/openaimath` runs unchanged, is Apache-2.0
+and ships its license and notice inside the dataset; nothing of the dataset
+itself is copied into priml, so there is no license text to reproduce here.
