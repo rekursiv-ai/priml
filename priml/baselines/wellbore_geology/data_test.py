@@ -601,14 +601,30 @@ def test_a_csv_read_again_parses_once_and_hands_out_its_own_arrays(
     np.testing.assert_array_equal(second["X"], [1.0, 2.0])
 
 
-def test_an_edited_csv_is_read_again(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("edited", "keep_mtime"),
+    [("X\n7\n", False), ("X\n1\n2\n", True)],
+    ids=["same-size", "same-mtime"],
+)
+def test_an_edited_csv_is_read_again(
+    tmp_path: Path,
+    edited: str,
+    *,
+    keep_mtime: bool,
+) -> None:
+    """Either half of the file's identity, alone, marks an edit."""
     path = tmp_path / "rows.csv"
     path.write_text("X\n1\n")
-    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0]
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    first = read_numeric_csv(path, columns=("X",))["X"].tolist()
 
-    path.write_text("X\n1\n2\n")
+    path.write_text(edited)
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000 if keep_mtime else 2_000_000_000))
 
-    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0, 2.0]
+    assert first == [1.0]
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [
+        float(value) for value in edited.split()[1:]
+    ]
 
 
 def test_a_csv_edited_to_the_same_size_is_read_again(tmp_path: Path) -> None:
