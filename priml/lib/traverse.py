@@ -107,7 +107,7 @@ def path_matches_pattern(
 
     regex_pattern = r"\.".join(regex_parts)
 
-    if pattern.endswith(".*") or "*" in pattern:
+    if "*" in pattern:
         regex_pattern = f"^{regex_pattern}$"
     else:
         regex_pattern = f"^{regex_pattern}(?:\\.|$)"
@@ -135,25 +135,14 @@ def could_path_lead_to_pattern(path_str: str, pattern: str) -> bool:
         return True
 
     path_parts = path_str.split(".")
-
-    if pattern.endswith(".*"):
-        prefix = pattern[:-2]
-        return path_str == prefix or path_str.startswith(f"{prefix}.")
-
-    if pattern.count("*") > 0:
-        parts = pattern.split(".")
-        if len(path_parts) <= len(parts):
-            return all(
-                part == "*" or (i < len(path_parts) and part == path_parts[i])
-                for i, part in enumerate(parts[: len(path_parts)])
-            )
-        for i in range(len(path_parts) - len(parts) + 1):
-            ancestor = ".".join(path_parts[: i + len(parts)])
-            if path_matches_pattern(ancestor, pattern):
-                return True
-        return False
-
-    return pattern.startswith(f"{path_str}.")
+    parts = pattern.split(".")
+    # Past the target: only the ancestor as long as the pattern can match it.
+    if len(path_parts) > len(parts):
+        return path_matches_pattern(".".join(path_parts[: len(parts)]), pattern)
+    # On the way: every segment so far agrees with the pattern's.
+    return all(
+        part in {"*", segment} for part, segment in zip(parts, path_parts, strict=False)
+    )
 
 
 def should_recurse_for_patterns(
