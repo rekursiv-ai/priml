@@ -42,7 +42,6 @@ from priml.model.sequential import Sequential
 from priml.model.special import Activation, Dropout
 from priml.model.swiglu import SwiGLU, gelu, relu, silu
 from priml.testing.bfb import (
-    fill_parameters,
     host_agnostic_numerics,
     portable_half_precision,
 )
@@ -890,9 +889,7 @@ def test_whole_fresh_constructor_and_rng() -> None:
     torch.manual_seed(27)
     random.seed(31)
     with host_agnostic_numerics():
-        with torch.random.fork_rng(devices=[]):
-            model = config.make()
-            fill_parameters(model, std=0.02)
+        model = config.make()
         actual = {name: value.clone() for name, value in model.state_dict().items()}
         actual.update(
             {f"buffer/{name}": value.clone() for name, value in model.named_buffers()},

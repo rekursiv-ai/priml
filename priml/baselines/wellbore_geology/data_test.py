@@ -1604,6 +1604,68 @@ def test_quadratic_feature_planes_clip_each_normalized_coefficient(
         )
 
 
+def test_feature_statistics_round_before_normalization() -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=4,
+        target_rows=8,
+        downsample=2,
+        reference_columns=5,
+    )
+    builder = config.make()
+    window = builder._window(feature_well())
+    pairs = np.asarray(
+        [[0.1, 0.7], [1.3, 7.8], [-6.3, 1.1], [0.2, 0.9], [0.01, 9.3], [1.7, 13.9]],
+        dtype=np.float32,
+    )
+    window.raw["gamma"][:] = pairs.ravel()
+    planes = builder._planes(
+        window,
+        gamma=np.zeros(7, dtype=np.float32),
+        nan_rate=np.zeros(7, dtype=np.float32),
+        reference=np.zeros(5, dtype=np.float32),
+        axis=np.arange(5, dtype=np.float32),
+        seen=np.zeros(7, dtype=np.float32),
+    )
+    expected_std = pairs.astype(np.float64).std(axis=1).astype(np.float32)
+    expected_delta = pairs[:, 1] - pairs[:, 0]
+    for name, expected in (
+        ("gr_std", expected_std),
+        ("gr_first_last_delta", expected_delta),
+    ):
+        np.testing.assert_array_equal(
+            planes[name][:6, 0],
+            expected / config.gamma_stats[1],
+            strict=True,
+        )
+
+
+def test_feature_slope_rejects_nearly_coincident_depths() -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=2,
+        target_rows=4,
+        downsample=2,
+        reference_columns=5,
+    )
+    builder = config.make()
+    window = builder._window(feature_well())
+    window.raw["gamma"][:] = [1, 2, 3, 5, 7, 11]
+    window.raw["md"][:] = [0, 1e-7, 0, 0.5, 0, 0.25]
+    planes = builder._planes(
+        window,
+        gamma=np.zeros(4, dtype=np.float32),
+        nan_rate=np.zeros(4, dtype=np.float32),
+        reference=np.zeros(5, dtype=np.float32),
+        axis=np.arange(5, dtype=np.float32),
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    expected = np.asarray([0, 4, 16, 0], dtype=np.float32)
+    np.testing.assert_array_equal(
+        planes["gr_slope"][:, 0],
+        expected * config.downsample / config.gamma_stats[1],
+        strict=True,
+    )
+
+
 def feature_well() -> WellRecord:
     """Build the deterministic paths of the feature tests."""
     row = np.arange(97, dtype=np.float32)
