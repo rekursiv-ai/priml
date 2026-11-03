@@ -19,6 +19,7 @@ from priml.baselines.cifar10.model import (
     SpeedNet,
     _activation,
 )
+from priml.math.probability import weyl_randint, weyl_randn
 from priml.model.init import dirac
 from priml.model.norm import BatchNorm2d
 from priml.testing.bfb import assert_bfb_against_golden
@@ -196,7 +197,7 @@ def test_resnet_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="resnet",
         build_module=tiny_resnet().make,
-        build_input=lambda: torch.randn(2, 3, 4, 5),
+        build_input=lambda: weyl_randn(2, 3, 4, 5),
         seed=0,
     )
 
@@ -210,7 +211,7 @@ def test_speednet_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="speednet",
         build_module=tiny_speednet().make,
-        build_input=lambda: torch.randint(0, 256, (2, 3, 7, 8), dtype=torch.uint8),
+        build_input=lambda: weyl_randint(0, 256, (2, 3, 7, 8), dtype=torch.uint8),
         seed=0,
         run=lambda module, image: cast(SpeedNet, module)(image.float()),
     )

@@ -36,6 +36,7 @@ import torch
 import torch.distributed as dist
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.kernel import (
     SdpaFused,
@@ -914,12 +915,12 @@ def test_latent_attention_bfb(device: str) -> None:
         golden_name="latent_attention",
         build_module=lambda: LatentAttention.Config().make().to(device),
         build_input=lambda: {
-            "q_nope": torch.randn(2, 3, 4, 5),
-            "q_pe": torch.randn(2, 3, 4, 7),
-            "c_kv": torch.randn(2, 3, 6),
-            "k_pe": torch.randn(2, 3, 7),
-            "w_kr": torch.randn(4, 5, 6),
-            "w_uv": torch.randn(4, 8, 6),
+            "q_nope": weyl_randn(2, 3, 4, 5),
+            "q_pe": weyl_randn(2, 3, 4, 7, salt=1),
+            "c_kv": weyl_randn(2, 3, 6, salt=2),
+            "k_pe": weyl_randn(2, 3, 7, salt=3),
+            "w_kr": weyl_randn(4, 5, 6, salt=4),
+            "w_uv": weyl_randn(4, 8, 6, salt=5),
         },
         seed=0,
     )
@@ -945,7 +946,7 @@ def test_mla_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(2, 3, 4), device),
+        build_input=lambda: move_to_device(weyl_randn(2, 3, 4), device),
         seed=0,
         run=lambda m, x: cast(MultiHeadLatentAttention, m)(x),
     )

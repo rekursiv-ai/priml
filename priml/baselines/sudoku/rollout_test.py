@@ -15,7 +15,7 @@ from priml.baselines.sudoku.rollout import (
     learned_persistent_rollout_rows,
     segmented_rollout_rows,
 )
-from priml.baselines.sudoku.testing import tiny_recursion
+from priml.baselines.sudoku.testing import tiny_recursion_config
 
 
 if TYPE_CHECKING:
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 def test_rollouts_return_row_logits_and_checkpoint_scores() -> None:
-    typed_model = tiny_recursion()
+    typed_model = tiny_recursion_config().make().eval()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     kwargs: dict[str, Tensor] = {}
@@ -63,7 +63,7 @@ def test_checkpoint_rollout_needs_steps_and_persistence_rejects_drift() -> None:
     preds = torch.full((2, 81), 2, dtype=torch.long)
     with pytest.raises(ValueError, match="at least one"):
         learned_checkpoint_rollout_rows(
-            tiny_recursion(),
+            tiny_recursion_config().make().eval(),
             {},
             2,
             media,
@@ -91,7 +91,7 @@ def test_checkpoint_rollout_needs_steps_and_persistence_rejects_drift() -> None:
 
 
 def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
-    model = tiny_recursion()
+    model = tiny_recursion_config().make().eval()
     boards = torch.full((3, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     rows = torch.arange(3)
@@ -189,7 +189,7 @@ def test_segmented_rollout_without_q8_gate_continues_all_rows(
 
 
 def test_checkpoint_rollout_rejects_disordered_or_out_of_range_steps() -> None:
-    model = tiny_recursion()
+    model = tiny_recursion_config().make().eval()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     for checkpoints, message in (((3, 2), "strictly increasing"), ((2, 5), "within")):
         with pytest.raises(ValueError, match=message):
@@ -431,7 +431,7 @@ def test_checkpoint_rollout_gathers_puzzle_identifiers_by_row() -> None:
 def test_family_rollout_reads_q8_at_the_cap_and_needs_a_step() -> None:
     """Below eight ACT steps the UNSAT probe reads the last step's halt logit."""
     torch.manual_seed(0)
-    model = tiny_recursion()
+    model = tiny_recursion_config().make().eval()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     out, q_halt8 = family_rollout(model, boards, step_kwargs={}, max_steps=2)
@@ -443,7 +443,7 @@ def test_family_rollout_reads_q8_at_the_cap_and_needs_a_step() -> None:
 
 def test_persistent_rollout_scores_the_weakest_checkpoint() -> None:
     torch.manual_seed(0)
-    model = tiny_recursion()
+    model = tiny_recursion_config().make().eval()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     rows = torch.arange(2)

@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randn
 from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import (
@@ -572,7 +573,7 @@ def test_router_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(2, 4), device),
+        build_input=lambda: move_to_device(weyl_randn(2, 4), device),
         seed=0,
         run=_first_tensor,
     )
@@ -599,7 +600,7 @@ def test_moe_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(3, 2, 4), device),
+        build_input=lambda: move_to_device(weyl_randn(3, 2, 4), device),
         seed=0,
         run=_first_tensor,
     )

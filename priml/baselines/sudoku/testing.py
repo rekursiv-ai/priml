@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import json
 
+from configgle import Makes, Makes2
 from torch import Tensor
 
 import numpy as np
@@ -35,19 +36,22 @@ import torch
 
 from priml.baselines.sudoku import experiments
 from priml.baselines.sudoku.harvest import Harvest, write_npz
-from priml.baselines.sudoku.hypotheses import HypothesisRecursion, WinnerRecompute
+from priml.baselines.sudoku.hypotheses import (
+    HypothesisRecursion,
+    WinnerRecompute,
+    equalize_alignment,
+)
 from priml.baselines.sudoku.latent_recursion import LatentRecursion, recipe_block
 from priml.baselines.sudoku.runner import file_sha256, load_eval_weights
 from priml.baselines.sudoku.search import HpsSearch
-from priml.baselines.sudoku.verifier import SudokuVerifier
+from priml.baselines.sudoku.verifier import DenoisingVerifier, SudokuVerifier
 from priml.baselines.sudoku.verifier_fit import VerifierFit, VerifierLoss
 from priml.model.swiglu import SwiGLU
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
 from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
-from priml.testing import regenerate
-from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.bfb import fill_parameters, host_agnostic_numerics
 from priml.testing.golden import read_tensors, stored
 
 
@@ -125,7 +129,10 @@ def replay(
 
     """
     write_dataset(scratch / "data")
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+    with (
+        torch.random.fork_rng(devices=[]),
+        host_agnostic_numerics(),
+    ):
         torch.manual_seed(0)
         harness = Harness(scratch, train=train)
         return {k: stored(v) for k, v in record(harness).items()}
@@ -153,7 +160,10 @@ def train_fixture(
     """
     write_dataset(scratch / "data")
     others = {k: v for k, v in known.items() if not k.startswith(f"{group}/")}
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+    with (
+        torch.random.fork_rng(devices=[]),
+        host_agnostic_numerics(),
+    ):
         torch.manual_seed(0)
         harness = Harness(scratch, train=True, known=others)
         if group == "gen_b":
@@ -171,16 +181,6 @@ def train_fixture(
         k: v.detach().clone() if k.startswith("harvest/") else stored(v)
         for k, v in harness.trained.items()
     }
-
-
-def load_golden(case: str) -> dict[str, Tensor]:
-    """Load the frozen golden ``testdata/<case>.pt``."""
-    return read_tensors(_CWD / "testdata" / f"{case}.pt")
-
-
-def weight_tensors(prefix: str, state: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    """Return every trained tensor under ``prefix``, whole."""
-    return {f"{prefix}/{k}": v.detach().clone() for k, v in state.items()}
 
 
 def metric_tensors(values: Mapping[str, object]) -> dict[str, Tensor]:
@@ -237,16 +237,61 @@ def tiny_recursion_config() -> LatentRecursion.Config:
     return cfg
 
 
-def tiny_recursion() -> LatentRecursion:
-    """Build a real CPU TRM at the smallest size the eval runners accept."""
-    return tiny_recursion_config().make().eval()
-
-
 def sudoku_solution() -> Tensor:
     """Return one valid 9x9 solution as 81 digit tokens (2-10)."""
     return torch.tensor(
         [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
     )
+
+
+class FilledRecursion(LatentRecursion):
+    """Build fixture weights and latent buffers without consuming execution RNG."""
+
+    class Config(Makes["FilledRecursion"], LatentRecursion.Config):
+        """The unchanged generator architecture."""
+
+    def __init__(self, config: Config) -> None:
+        with torch.random.fork_rng(devices=[]):
+            super().__init__(config)
+            fill_parameters(self, std=0.02, buffers=("slow_init", "fast_init"))
+
+
+class FilledHypotheses(HypothesisRecursion):
+    """Prepare the hypothesis fixture before training creates its carried state."""
+
+    class Config(Makes2["FilledHypotheses"], HypothesisRecursion.Config):
+        """The unchanged hypothesis architecture."""
+
+    def __init__(self, config: Config) -> None:
+        with torch.random.fork_rng(devices=[]):
+            super().__init__(config)
+            fill_parameters(self, std=0.02, buffers=("slow_init", "fast_init"))
+            with torch.no_grad():
+                equalize_alignment(self.fast_init, self.ffn_subspace())
+
+
+class FilledVerifier(SudokuVerifier):
+    """Build deterministic fixture verifier weights, preserving structural buffers."""
+
+    class Config(Makes["FilledVerifier"], SudokuVerifier.Config):
+        """The unchanged verifier architecture."""
+
+    def __init__(self, config: Config) -> None:
+        with torch.random.fork_rng(devices=[]):
+            super().__init__(config)
+            fill_parameters(self, std=0.02)
+
+
+class FilledDenoisingVerifier(DenoisingVerifier):
+    """Prepare the denoising fixture through the same deterministic fill."""
+
+    class Config(Makes2["FilledDenoisingVerifier"], DenoisingVerifier.Config):
+        """The unchanged denoising verifier architecture."""
+
+    def __init__(self, config: Config) -> None:
+        with torch.random.fork_rng(devices=[]):
+            super().__init__(config)
+            fill_parameters(self, std=0.02)
 
 
 class Harness:
@@ -269,7 +314,7 @@ class Harness:
     ) -> None:
         self.scratch = scratch
         self.data = scratch / "data"
-        self.train = train or regenerate.b4b()
+        self.train = train
         self.fixtures: Mapping[str, Tensor] = (
             (known or {}) if self.train else read_tensors(FIXTURES)
         )
@@ -282,7 +327,7 @@ class Harness:
           config: The tiny TRM with a two-token puzzle prefix.
 
         """
-        cfg = LatentRecursion.Config()
+        cfg = FilledRecursion.Config()
         cfg.vocab_size = 11
         cfg.puzzle_grid_shape = (81,)
         cfg.pos2d_grid_shape = (9, 9)
@@ -312,7 +357,7 @@ class Harness:
           config: The two-hypothesis staircase generator.
 
         """
-        cfg = HypothesisRecursion.Config().update(self.model())
+        cfg = FilledHypotheses.Config().update(self.model())
         cfg.channels_in = 12
         block = cfg.block = recipe_block()
         assert isinstance(block.ffn, SwiGLU.Config)
@@ -362,7 +407,7 @@ class Harness:
 
     def verifier_model(self) -> SudokuVerifier.Config:
         """Return the verifier architecture."""
-        cfg = SudokuVerifier.Config()
+        cfg = FilledVerifier.Config()
         cfg.channels_hidden = 4
         cfg.num_layers = 1
         cfg.heads = 2
@@ -445,7 +490,7 @@ class Harness:
         cfg.experiment_name = f"verifier_s{seed}"
         cfg.seed = seed
         cfg.base_dir = self.scratch
-        cfg.model = model or self.verifier_model()
+        cfg.model = self.verifier_model() if model is None else model
         if loss is not None:
             cfg.loss = loss
         cfg.dataset.working_dir = "/data"
@@ -456,8 +501,8 @@ class Harness:
         cfg.device = "cpu"
         cfg.dtype_autocast = None
         cfg.max_steps = 3
-        if loss is not None:
-            # A custom objective is the fit under test, so it always trains.
+        if model is not None or loss is not None:
+            # Custom architectures and objectives cannot use the default fixture.
             return cfg.make().run()
         path = self.scratch / "runs" / cfg.experiment_name / "checkpoints"
         path /= "step_00000003.pt"

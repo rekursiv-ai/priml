@@ -20,7 +20,6 @@ from priml.baselines.sudoku.search import (
 )
 from priml.baselines.sudoku.testing import (
     sudoku_solution,
-    tiny_recursion,
     tiny_recursion_config,
 )
 from priml.baselines.sudoku.views import IDENTITY_DIGITS
@@ -209,7 +208,7 @@ def test_search_config_rejects_invalid_policies() -> None:
 
 
 def test_eval_search_run_branches_and_errors() -> None:
-    model = tiny_recursion()
+    model = tiny_recursion_config().make().eval()
     config = HpsSearch.Config(
         max_act_steps=2,
         acceptance_checkpoints=(1, 2),
@@ -305,7 +304,10 @@ def test_search_without_checkpoints_rolls_the_family_forward() -> None:
     )
     media = torch.full((2, 81), 1, dtype=torch.long)
     media[:, 0] = 2
-    result = config.make().run(tiny_recursion(), {"media": media, "valid_count": 2})
+    result = config.make().run(
+        tiny_recursion_config().make().eval(),
+        {"media": media, "valid_count": 2},
+    )
     assert result.accepted.shape == (2,)
     assert not bool(result.accepted.any())
 

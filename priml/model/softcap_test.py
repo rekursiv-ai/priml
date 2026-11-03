@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.linear import Linear
 from priml.model.softcap import SoftCap
 from priml.testing.bfb import assert_bfb_against_golden
@@ -37,7 +38,7 @@ def test_softcap_bfb() -> None:
             channels_in=4,
             channels_out=4,
         ).make,
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

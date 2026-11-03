@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import math
 
@@ -25,14 +25,19 @@ from priml.model.coatnet import CoAtNet
 from priml.model.linear import Linear
 from priml.model.resnet import ResNet
 from priml.optimizers.composite import CompositeOptimizer
-from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.bfb import fill_parameters, host_agnostic_numerics
 from priml.testing.golden import (
     assert_pprint_golden,
     assert_tensor_golden,
+    mismatches,
     put_steps,
     rng_fingerprint,
 )
 from priml.train.parallelism import NoParallel
+
+
+if TYPE_CHECKING:
+    import pytest
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -142,6 +147,26 @@ def test_optimizer_stack_replays_three_updates_bit_for_bit() -> None:
     Only size shrinks, and autocast is dropped because CPU half-precision
     kernels are host-specific; the optimizer, loss and learning rate stay.
     """
+    assert_tensor_golden(_CWD / "testdata" / "train_exp000.pt", record_optimizer())
+
+
+def test_owned_record_ignores_constructor_sampler_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = record_optimizer()
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            return tensor.uniform_(-0.1, 0.1)
+
+    monkeypatch.setattr(torch.nn.init, "_no_grad_trunc_normal_", different_sampler)
+    assert not mismatches(expected, record_optimizer())
+
+
+def record_optimizer() -> dict[str, Tensor]:
+    """Record three updates of the tiny cold-training optimizer stack."""
     config = train_exp000().cold_loop.step
     encoder = Linear.Config()
     encoder.channels_in, encoder.channels_out = 4, 7
@@ -151,11 +176,13 @@ def test_optimizer_stack_replays_three_updates_bit_for_bit() -> None:
     config.dtype_autocast = None
     config.parallelism = NoParallel.Config(device="cpu")
     records: list[dict[str, Tensor]] = []
-    with host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(19)
-        step = config.make()
+        with torch.random.fork_rng(devices=[]):
+            step = config.make()
+            fill_parameters(step.model)
         assert isinstance(step.optimizer, CompositeOptimizer)
-        initial = {
+        initial: dict[str, Tensor] = {
             f"initial/{key}": value.detach().clone()
             for key, value in step.model.state_dict().items()
         }
@@ -184,9 +211,9 @@ def test_optimizer_stack_replays_three_updates_bit_for_bit() -> None:
                     },
                 },
             )
-    record = {**initial, "rng": rng_fingerprint()}
-    put_steps(record, "step", records)
-    assert_tensor_golden(_CWD / "testdata" / "train_exp000.pt", record)
+        record = {**initial, "rng": rng_fingerprint()}
+        put_steps(record, "step", records)
+        return record
 
 
 if __name__ == "__main__":

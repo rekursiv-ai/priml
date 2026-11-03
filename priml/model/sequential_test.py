@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.conv import Conv2d
 from priml.model.convnext import ConvNeXt
@@ -67,7 +68,7 @@ def test_sequential_bfb() -> None:
             elements=Linear.Config(4, 4),
             repeat=2,
         ).make(),
-        build_input=lambda: torch.randn(size=(2, 3, 4)),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

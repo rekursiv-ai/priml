@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -458,7 +459,7 @@ def test_kernel_bfb(device: str, name: str, kernel: object) -> None:
         golden_dir=_CWD / "testdata",
         golden_name=name,
         build_module=lambda: _Kernel(kernel.make()).to(device),
-        build_input=lambda: tuple(torch.randn(2, 3, 4, 5) for _ in range(3)),
+        build_input=lambda: tuple(weyl_randn(2, 3, 4, 5, salt=i) for i in range(3)),
         seed=0,
     )
 

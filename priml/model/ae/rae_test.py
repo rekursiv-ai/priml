@@ -24,6 +24,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randint
 from priml.model.ae.checkpoint import HubFile, LocalFile
 from priml.model.ae.latent_norm import ElementwiseLatentStats
 from priml.model.ae.rae import (
@@ -92,10 +93,9 @@ def _keys(listing: str) -> dict[str, tuple[int, ...]]:
 # and replay loads the stored input rather than rebuilding it.
 def _image() -> Tensor:
     """Return a uint8 image batch larger than the encoder side."""
-    generator = torch.Generator().manual_seed(0)
     # ``testdata/rae.pt`` stores the upstream outputs for this input; a new shape
     # re-mints that golden on x86-64.
-    return torch.randint(0, 256, (2, 3, 16, 16), generator=generator, dtype=torch.uint8)
+    return weyl_randint(0, 256, (2, 3, 16, 16), dtype=torch.uint8)
 
 
 def _round_trip(module: nn.Module, image: Tensor) -> Tensor:

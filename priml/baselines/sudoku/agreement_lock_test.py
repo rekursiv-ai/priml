@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import logging
@@ -17,19 +18,15 @@ from priml.baselines.sudoku.agreement_lock import (
 )
 from priml.baselines.sudoku.runner import open_npz
 from priml.baselines.sudoku.search_dump import learned_hps_output_width
-from priml.baselines.sudoku.testing import (
-    Harness,
-    load_golden,
-    metric_tensors,
-    replay,
-)
+from priml.baselines.sudoku.testing import Harness, metric_tensors, replay
 from priml.baselines.sudoku.views import NINE_VIEWS
-from priml.testing.golden import mismatches
+from priml.testing.golden import assert_tensor_golden, read_tensors
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 
@@ -166,6 +163,8 @@ def test_modal_grid_breaks_ties_to_the_first_member() -> None:
 
 
 def _record_lock(h: Harness) -> dict[str, Tensor]:
+    # Reference outputs require the source-trained weights, not reminted fixtures.
+    h.fixtures = read_tensors(_CWD / "testdata" / "search_inputs.pt")
     gen_a = h.generator("gen_a", seed=0)
     gen_b = h.generator("gen_b", seed=1)
     cfg = AgreementLockEval.Config()
@@ -202,8 +201,7 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
     actual = replay(_RECORDERS[case], tmp_path, train=False)
-    report = mismatches(load_golden(case), actual)
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
+    assert_tensor_golden(_CWD / "testdata" / f"{case}.pt", actual)
 
 
 if __name__ == "__main__":

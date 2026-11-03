@@ -13,6 +13,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.vision.model import Activation
 from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
+from priml.math.probability import weyl_randn
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -151,7 +152,7 @@ def test_vgg16bn_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="vgg16bn",
         build_module=lambda: tiny().make().eval(),
-        build_input=lambda: torch.randn(BATCH, 3, SIDE, SIDE),
+        build_input=lambda: weyl_randn(BATCH, 3, SIDE, SIDE),
         seed=0,
     )
 

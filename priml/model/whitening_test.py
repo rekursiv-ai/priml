@@ -12,6 +12,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.math.probability import weyl_randn
 from priml.math.stats import pca_eigh
 from priml.model.whitening import PCAWhiteningConv2d
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
@@ -182,7 +183,10 @@ def test_whitening_bfb(device: str) -> None:
             bias=False,
         ).to(device),
         # Kernel size 2 requires spatial inputs at least 2x2.
-        build_input=lambda: (torch.randn(3, 2, 4, 5), torch.randn(3, 2, 4, 5)),
+        build_input=lambda: (
+            weyl_randn(3, 2, 4, 5),
+            weyl_randn(3, 2, 4, 5, salt=1),
+        ),
         seed=0,
         run=run,
     )

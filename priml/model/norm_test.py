@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.norm import (
     BatchNorm,
@@ -527,7 +528,7 @@ def test_rms_norm_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="rms_norm",
         build_module=lambda: RMSNorm.Config(4).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -537,7 +538,7 @@ def test_centered_rms_norm_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="centered_rms_norm",
         build_module=lambda: CenteredRMSNorm.Config(4).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -547,7 +548,7 @@ def test_layer_norm_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="layer_norm",
         build_module=lambda: LayerNorm.Config(4).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -557,7 +558,7 @@ def test_batch_norm_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="batch_norm",
         build_module=lambda: BatchNorm.Config(4).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -567,7 +568,7 @@ def test_batch_renorm_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="batch_renorm",
         build_module=lambda: BatchRenorm.Config(channels_in=4).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -577,7 +578,7 @@ def test_batch_norm2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="batch_norm2d",
         build_module=lambda: BatchNorm2d.Config(4).make(),
-        build_input=lambda: torch.randn(2, 4, 3, 5),
+        build_input=lambda: weyl_randn(2, 4, 3, 5),
         seed=0,
     )
 
@@ -587,7 +588,7 @@ def test_group_norm2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="group_norm2d",
         build_module=lambda: GroupNorm2d.Config(4, num_groups=2).make(),
-        build_input=lambda: torch.randn(2, 4, 3, 5),
+        build_input=lambda: weyl_randn(2, 4, 3, 5),
         seed=0,
     )
 
@@ -597,7 +598,7 @@ def test_group_norm_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="group_norm",
         build_module=lambda: GroupNorm.Config(4, num_groups=2).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

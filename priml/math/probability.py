@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, cast
 
 import functools
 import math
@@ -19,6 +19,86 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from priml.math.custom_types import Tensorable, TensorableFn
+
+
+_SQRT_2: Final = cast("float", 2.0**0.5)
+
+
+def weyl_randn(
+    *size: int,
+    dtype: torch.dtype = torch.float32,
+    salt: int = 0,
+    requires_grad: bool = False,
+) -> Tensor:
+    """Return the golden-ratio Weyl sequence of ``size`` as standard normal quantiles.
+
+    The sequence is equidistributed, so through the normal inverse CDF it looks
+    like ``torch.randn`` while drawing nothing: the same whatever the generator
+    holds or an initializer drew.
+
+    Args:
+      *size: Shape of the result.
+      dtype: Floating dtype of the result.
+      salt: Distinguishes results of one size, so ``q`` and ``k`` differ.
+      requires_grad: Whether the result records gradients.
+
+    Returns:
+      values: Weyl values distributed as a standard normal.
+
+    """
+    values = (
+        (torch.erfinv(_weyl_unit((salt << 20), math.prod(size)) * 2 - 1) * _SQRT_2)
+        .to(dtype)
+        .reshape(size)
+    )
+    return values.requires_grad_(requires_grad)
+
+
+def weyl_rand(
+    *size: int,
+    dtype: torch.dtype = torch.float32,
+    salt: int = 0,
+    requires_grad: bool = False,
+) -> Tensor:
+    """Return the golden-ratio Weyl sequence of ``size`` on ``[0, 1)``, like ``torch.rand``.
+
+    Args:
+      *size: Shape of the result.
+      dtype: Floating dtype of the result.
+      salt: Distinguishes results of one size.
+      requires_grad: Whether the result records gradients.
+
+    Returns:
+      values: Weyl values, uniform on ``[0, 1)``.
+
+    """
+    values = _weyl_unit(salt << 20, math.prod(size)).to(dtype).reshape(size)
+    return values.requires_grad_(requires_grad)
+
+
+def weyl_randint(
+    low: int,
+    high: int,
+    size: tuple[int, ...],
+    *,
+    dtype: torch.dtype = torch.int64,
+    salt: int = 0,
+) -> Tensor:
+    """Return the golden-ratio Weyl sequence of ``size`` floored onto ``[low, high)``.
+
+    Args:
+      low: Least value.
+      high: One past the greatest value.
+      size: Shape of the result.
+      dtype: Integer dtype of the result.
+      salt: Distinguishes results of one size.
+
+    Returns:
+      values: Every integer in range, evenly spread, for indices and masks.
+
+    """
+    unit = _weyl_unit(salt << 20, math.prod(size))
+    return (torch.floor(unit * (high - low)) + low).to(dtype).reshape(size)
 
 
 # Adapted from tensorflow/probability.
@@ -920,6 +1000,13 @@ def lbeta(x: Tensorable, y: Tensorable) -> Tensor:
         two_large,
         torch.where(y >= 8, one_large, small),
     )
+
+
+def _weyl_unit(offset: int, count: int) -> Tensor:
+    """Return ``frac(i * (phi - 1))`` for ``offset < i <= offset + count``."""
+    index = torch.arange(offset + 1, offset + count + 1, dtype=torch.float64)
+    golden_ratio_minus_one = (5**0.5 - 1) / 2
+    return torch.remainder(index * golden_ratio_minus_one, 1.0)
 
 
 def _unpack_size(*samples_size: int | Sequence[int]) -> tuple[int, ...]:

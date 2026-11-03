@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import operator
 import re
 
 from numpy.typing import NDArray
+from packaging.version import Version
 from pyarrow import parquet
 from torch import Tensor
 from treekle import json_loads
@@ -1698,12 +1700,23 @@ def test_parquet_metric_rejects_quantized_tensor_valid_count(tmp_path: Path) -> 
     )
     batch["canonical_puzzle_names"] = ["task-a"]
     batch["canonical_inputs"] = [np.asarray([[1, 2]], dtype=np.uint8)]
-    batch["valid_count"] = torch.quantize_per_tensor(
-        torch.tensor(1.0),
-        scale=1.0,
-        zero_point=0,
-        dtype=torch.qint8,
+    warning = (
+        pytest.warns(UserWarning, match="quantized tensor creation.*deprecated")
+        if Version(torch.__version__).release >= (2, 15)
+        else nullcontext()
     )
+    previous = torch.is_warn_always_enabled()
+    torch.set_warn_always(True)
+    try:
+        with warning:
+            batch["valid_count"] = torch.quantize_per_tensor(
+                torch.tensor(1.0),
+                1.0,
+                0,
+                torch.qint8,
+            )
+    finally:
+        torch.set_warn_always(previous)
 
     with pytest.raises(TypeError, match="valid_count tensor must have integer dtype"):
         metric.update(torch.stack((candidate, candidate)), **batch)

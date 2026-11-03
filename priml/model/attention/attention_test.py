@@ -15,6 +15,7 @@ import torch
 
 from priml.cost import cost, matmul_cost
 from priml.math.linear import cast_parameters_to_input
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
@@ -1171,7 +1172,7 @@ def test_self_attention_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: torch.randn(3, 2, 4),
+        build_input=lambda: weyl_randn(3, 2, 4),
         seed=0,
     )
 

@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.cost import cost, map_cost, set_cost
+from priml.math.probability import weyl_randn
 from priml.model.conv import (
     Conv1d,
     Conv2d,
@@ -264,7 +265,7 @@ def test_conv1d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv1d",
         build_module=lambda: Conv1d.Config(2, channels_out=3).make(),
-        build_input=lambda: torch.randn(3, 2, 4),
+        build_input=lambda: weyl_randn(3, 2, 4),
         seed=0,
     )
 
@@ -283,7 +284,7 @@ def test_conv2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv2d",
         build_module=lambda: Conv2d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(3, 2, 4, 5),
+        build_input=lambda: weyl_randn(3, 2, 4, 5),
         seed=0,
     )
 
@@ -302,7 +303,7 @@ def test_conv3d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv3d",
         build_module=lambda: Conv3d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(3, 2, 4, 5, 6),
+        build_input=lambda: weyl_randn(3, 2, 4, 5, 6),
         seed=0,
     )
 
@@ -353,6 +354,46 @@ def test_conv_output_grid_rejects_incomplete_axis_tuples(
             padding=padding,
             dilation=dilation,
         )
+
+
+@pytest.mark.parametrize("output_padding", [(0,), (0, 0, 0)])
+def test_conv_output_grid_rejects_output_padding_with_wrong_axis_count(
+    output_padding: tuple[int, ...],
+) -> None:
+    with pytest.raises(ValueError, match="zip"):
+        conv_output_grid(
+            (5, 7),
+            kernel_size=(2, 3),
+            stride=(2, 3),
+            padding=(0, 1),
+            dilation=(1, 2),
+            transposed=True,
+            output_padding=output_padding,
+        )
+
+
+def test_conv_output_grid_rejects_jointly_truncated_geometry() -> None:
+    with pytest.raises(ValueError, match="zip"):
+        conv_output_grid(
+            (5, 7),
+            kernel_size=(2,),
+            stride=2,
+            padding=0,
+            dilation=1,
+            transposed=True,
+            output_padding=(0,),
+        )
+
+
+def test_transpose_output_grid_defaults_to_zero_output_padding() -> None:
+    assert conv_output_grid(
+        (3, 5),
+        kernel_size=(2, 3),
+        stride=(2, 3),
+        padding=(0, 1),
+        dilation=(1, 2),
+        transposed=True,
+    ) == (6, 15)
 
 
 def test_conv_output_grid_applies_tuple_geometry_per_axis() -> None:
@@ -673,20 +714,38 @@ def test_none_bias_initializer_matches_complete_torch_construction(
     assert torch.equal(torch.get_rng_state(), expected_rng)
 
 
-@pytest.mark.parametrize("config_type", [Conv1d.Config, Conv2d.Config, Conv3d.Config])
-def test_zero_fan_in_reset_preserves_allocated_bias_and_rng(
-    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+@pytest.mark.parametrize(
+    ("config_type", "channels_in", "channels_out"),
+    [
+        (Conv1d.Config, 0, 3),
+        (Conv2d.Config, 0, 3),
+        (Conv3d.Config, 0, 3),
+        (ConvTranspose2d.Config, 3, 0),
+    ],
+)
+def test_zero_fan_in_initializes_and_resets_bias_to_zero(
+    config_type: type[
+        Conv1d.Config | Conv2d.Config | Conv3d.Config | ConvTranspose2d.Config
+    ],
+    channels_in: int,
+    channels_out: int,
 ) -> None:
+    # ConvTranspose2d reverses the channel axes of the weight tensor.
     with pytest.warns(UserWarning, match="zero-element"):
-        module = config_type(0, 3, bias=True, init_bias=None).make()
+        module = config_type(
+            channels_in,
+            channels_out,
+            kernel_size=3,
+            bias=True,
+            init_bias=None,
+        ).make()
     assert module.bias is not None
+    assert torch.equal(module.bias, torch.zeros_like(module.bias))
     with torch.no_grad():
         module.bias.fill_(0.375)
-    before = torch.get_rng_state()
     with pytest.warns(UserWarning, match="zero-element"):
         module.reset_parameters()
-    assert torch.equal(module.bias, torch.full((3,), 0.375))
-    assert torch.equal(torch.get_rng_state(), before)
+    assert torch.equal(module.bias, torch.zeros_like(module.bias))
 
 
 @pytest.mark.parametrize(

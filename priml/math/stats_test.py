@@ -971,11 +971,19 @@ def test_householder_qr_continues_after_a_zero_column():
     torch.testing.assert_close(torch.tril(r, diagonal=-1), torch.zeros_like(r))
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_quantile_normalize_respects_input_precision(dtype: torch.dtype) -> None:
+    x = torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 100.0]], dtype=dtype)
+    bounds = torch.quantile(x.flatten(), torch.tensor([0.2, 0.8], dtype=dtype))
+    expected = (x - bounds[0]) / (bounds[1] - bounds[0])
+    assert torch.equal(quantile_normalize(x, q=0.2), expected)
+
+
 def test_quantile_normalize_pins_quantile_endpoints():
-    x = torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 100.0]])
+    x = torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 100.0]], dtype=torch.float64)
     torch.testing.assert_close(quantile_normalize(x, q=0.1), (x - 0.5) / 51.5)
     torch.testing.assert_close(quantile_normalize(x, q=0.2), (x - 1.0) / 3.0)
-    narrow = torch.tensor([0.0, 0.25, 0.5, 0.75])
+    narrow = torch.tensor([0.0, 0.25, 0.5, 0.75], dtype=torch.float64)
     torch.testing.assert_close(
         quantile_normalize(narrow, q=0.25),
         (narrow - 0.1875) / 0.375,

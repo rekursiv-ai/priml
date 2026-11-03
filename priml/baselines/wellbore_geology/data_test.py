@@ -1153,7 +1153,13 @@ def test_worker_seed_uses_modulo_of_the_complete_torch_seed() -> None:
         torch.manual_seed(2**32 + 19)
         initialize_worker(
             0,
-            information=partial(WorkerInfo, dataset=dataset),
+            information=partial(
+                WorkerInfo,
+                id=0,
+                num_workers=1,
+                seed=torch.initial_seed(),
+                dataset=dataset,
+            ),
         )
     expected = full_rng_record(
         numpy=np.random.RandomState(19),
@@ -1191,7 +1197,16 @@ def test_a_seeded_worker_keeps_its_streams_for_every_later_item() -> None:
     dataset = WorkerProbe(length=1)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(23)
-        initialize_worker(0, information=partial(WorkerInfo, dataset=dataset))
+        initialize_worker(
+            0,
+            information=partial(
+                WorkerInfo,
+                id=0,
+                num_workers=1,
+                seed=torch.initial_seed(),
+                dataset=dataset,
+            ),
+        )
     numpy = np.random.RandomState(23)
     for _ in range(3):
         np.testing.assert_array_equal(

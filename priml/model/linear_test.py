@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, matmul_cost
+from priml.math.probability import weyl_randn
 from priml.model import linear
 from priml.model.init import kaiming_uniform
 from priml.model.linear import EnsembleLinear, Linear
@@ -40,7 +41,7 @@ def test_linear_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="linear",
         build_module=lambda: Linear.Config(3, channels_out=2).make(),
-        build_input=lambda: torch.randn(2, 4, 3),
+        build_input=lambda: weyl_randn(2, 4, 3),
         seed=0,
     )
 
@@ -84,7 +85,7 @@ def test_ensemble_linear_bfb() -> None:
             channels_out=2,
             num_ensemble=2,
         ).make(),
-        build_input=lambda: torch.randn(2, 4, 3),
+        build_input=lambda: weyl_randn(2, 4, 3),
         seed=0,
     )
 

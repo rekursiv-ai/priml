@@ -23,6 +23,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randint
 from priml.model.ae.checkpoint import HubFile, LocalFile, UrlFile
 from priml.model.ae.distribution import PointMass
 from priml.model.ae.latent_norm import ChannelLatentStats
@@ -77,8 +78,7 @@ def _json(name: str) -> dict[str, object]:
 # A private generator keeps the input off the global one the harness reseeds. The
 # sides differ, so a swapped height and width cannot pass.
 def _image() -> Tensor:
-    generator = torch.Generator().manual_seed(0)
-    return torch.randint(0, 256, (2, 3, 8, 12), generator=generator, dtype=torch.uint8)
+    return weyl_randint(0, 256, (2, 3, 8, 12), dtype=torch.uint8)
 
 
 def _round_trip(module: nn.Module, image: Tensor) -> Tensor:

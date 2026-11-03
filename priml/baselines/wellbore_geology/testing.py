@@ -34,6 +34,7 @@ from priml.cost import Cost, matmul_cost
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess
+from priml.testing.bfb import fill_parameters
 from priml.testing.golden import PinnedDropout
 from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA
@@ -381,7 +382,9 @@ def capture_training(*, recipe: WellboreFoldLoop.Config) -> dict[str, Tensor]:
         and event leaf, with float64 scalars rounded once to float32.
 
     """
-    loop = recipe.finalized().make()
+    with torch.random.fork_rng(devices=[]):
+        loop = recipe.finalized().make()
+        fill_parameters(loop.native_step.model, std=0.02)
     step = loop.native_step
     model = step.model
     start = {name: value.clone() for name, value in model.state_dict().items()}

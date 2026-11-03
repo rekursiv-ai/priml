@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randint
 from priml.model.ae.checkpoint import HubFile, LocalFile
 from priml.model.ae.distribution import DiagonalGaussian
 from priml.model.ae.invae import INVAE, remap_hf_state_dict
@@ -71,8 +72,8 @@ def _published_keys() -> dict[str, tuple[int, ...]]:
 # building the module; an input drawn from it would shift that draw between mint and
 # replay, since replay loads the stored input instead of rebuilding it.
 def _image() -> Tensor:
-    generator = torch.Generator().manual_seed(0)
-    return torch.randint(0, 256, (2, 3, 16, 16), generator=generator, dtype=torch.uint8)
+    torch.Generator().manual_seed(0)
+    return weyl_randint(0, 256, (2, 3, 16, 16), dtype=torch.uint8)
 
 
 def _round_trip(module: nn.Module, image: Tensor) -> Tensor:
