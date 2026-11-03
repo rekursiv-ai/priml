@@ -322,7 +322,9 @@ class ImageFeatures:
                 ("pf_tvt", "pf_tvt_rel_pred"),
                 ("pf_tvt_ffbsi", "pf_tvt_rel_pred_ffbsi"),
             ):
-                values = (particle[key] - cfg.target_stats[0]) / cfg.target_stats[1]
+                values = (
+                    (particle[key] - cfg.target_stats[0]) / cfg.target_stats[1]
+                ).astype(np.float32, copy=False)
                 valid = (
                     particle[
                         "pf_prob_ffbsi" if name.endswith("ffbsi") else "pf_prob"
@@ -549,7 +551,7 @@ class ImageFeatures:
             shape,
         )
         planes["tw_tvt_rel"] = np.broadcast_to(
-            (axis / cfg.depth_axis_scale)[None, :],
+            (axis / cfg.depth_axis_scale).astype(np.float32, copy=False)[None, :],
             shape,
         )
         absolute_gamma = np.abs(
