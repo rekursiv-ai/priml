@@ -20,6 +20,7 @@ import torch.distributed as dist
 from priml.optimizers.parameter_filter import complement, everything, matching
 from priml.runtime import best_device
 from priml.train import ema as ema_module
+from priml.train.checkpointer import Checkpointer
 from priml.train.ema import (
     EMA,
     NoEMA,
@@ -507,6 +508,34 @@ def test_ema_state_dict_preserves_metadata() -> None:
     assert ema.shadow_model is not None
     source_sd = cast(_StateDict, ema.shadow_model.state_dict())
     assert shadow_sd._metadata == source_sd._metadata
+
+
+def test_ema_module_shadow_resumes_through_the_checkpointer(tmp_path: Path) -> None:
+    model = nn.Linear(2, 3)
+    ema = EMA.Config(decay=0.5).make()
+    ema(model)
+    with torch.no_grad():
+        model.weight.add_(1.0)
+    ema(model)
+    Checkpointer.Config(working_dir=str(tmp_path)).make().save(ema, step=4)
+
+    restored = EMA.Config(decay=0.5).make()
+    assert (
+        Checkpointer.Config(working_dir=str(tmp_path))
+        .make()
+        .load(restored, max_steps=4)
+    )
+    restored.initialize(nn.Linear(2, 3))
+
+    assert ema.shadow_model is not None
+    assert restored.shadow_model is not None
+    expected = cast(_StateDict, ema.shadow_model.state_dict())
+    actual = cast(_StateDict, restored.state_dict()["shadow_model"])
+    assert actual.keys() == expected.keys()
+    for name, value in expected.items():
+        assert torch.equal(actual[name], value), name
+    assert actual._metadata == expected._metadata
+    assert (restored.global_step, restored.local_step) == (2, 2)
 
 
 def test_ema_apply_to_raises_on_missing_tracked_param() -> None:
