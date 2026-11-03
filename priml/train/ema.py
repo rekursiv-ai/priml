@@ -666,11 +666,12 @@ class EMA:
 
 
 class _StateDict(OrderedDict[str, Tensor]):
-    """The mapping ``nn.Module.state_dict`` actually returns.
+    """A typing view of the mapping ``nn.Module.state_dict`` returns; never built.
 
-    torch attaches ``_metadata`` to it and reads it back in ``load_state_dict``
-    for module-version migration hooks. No stub declares the attribute, so a
-    plain ``OrderedDict`` cannot carry it across a clone.
+    torch attaches ``_metadata`` to a plain ``OrderedDict`` and reads it back in
+    ``load_state_dict`` for module-version migration hooks. No stub declares the
+    attribute. An instance of this subclass in a checkpoint is a global
+    ``torch.load(weights_only=True)`` refuses, so the clone stays torch's type.
     """
 
     _metadata: OrderedDict[str, dict[str, object]]
@@ -678,9 +679,9 @@ class _StateDict(OrderedDict[str, Tensor]):
 
 def _clone_module_state(source: Mapping[str, Tensor]) -> _StateDict:
     """Clone a module ``state_dict`` for storage independence, keeping ``_metadata``."""
-    cloned = _StateDict((name, v.detach().clone()) for name, v in source.items())
+    cloned = OrderedDict((name, v.detach().clone()) for name, v in source.items())
     metadata = getattr(source, "_metadata", None)
     if metadata is not None:
         metadata_name = "_" + "metadata"
         setattr(cloned, metadata_name, metadata)
-    return cloned
+    return cast(_StateDict, cloned)
