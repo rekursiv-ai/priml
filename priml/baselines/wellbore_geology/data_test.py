@@ -1447,6 +1447,163 @@ def test_short_visible_context_retains_original_rows_and_owns_output_storage() -
         np.testing.assert_array_equal(values, before[name])
 
 
+def test_reference_interpolation_includes_endpoints_and_rejects_exterior() -> None:
+    well = feature_well()
+    anchor = np.float32(well.horizontal["TVT_input"][31])
+    well = replace(
+        well,
+        reference_depth=anchor + np.asarray([-4, 0, 4], dtype=np.float32),
+        reference_gamma=np.asarray([10, 20, 30], dtype=np.float32),
+    )
+    config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=7)
+    config.reference_window = 7
+    item = config.make()(well, training=False)
+    np.testing.assert_array_equal(
+        item.arrays["typewell_aux"],
+        np.asarray(
+            [[0, 10, 15, 20, 25, 30, 0], [1, 0, 0, 0, 0, 0, 1]],
+            dtype=np.float32,
+        ),
+        strict=True,
+    )
+    penalty = item.auxiliary["GR_penalty_error"]
+    np.testing.assert_array_equal(penalty[:3, (0, 6)], np.full((3, 2), 25, np.float32))
+    np.testing.assert_array_equal(penalty[3], np.zeros(7, dtype=np.float32))
+    assert item.arrays["typewell_target_probs"].dtype == np.float32
+    assert item.arrays["typewell_target_probs"].shape == (0,)
+
+
+def test_alignment_targets_clip_both_tails_before_gaussian_normalization() -> None:
+    well = feature_well()
+    anchor = np.float32(well.horizontal["TVT_input"][31])
+    truth = well.horizontal["TVT"].copy()
+    truth[32:64] = anchor - 10
+    truth[64:96] = anchor + 10
+    well = replace(well, horizontal={**well.horizontal, "TVT": truth})
+    config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=5)
+    config.reference_window = 5
+    item = config.make()(well, training=True)
+    axis = np.asarray([-4, -2, 0, 2, 4], dtype=np.float64)
+    masses = np.exp(-0.5 * ((axis[None, :] - np.asarray([-4, 4])[:, None]) / 1.25) ** 2)
+    masses /= masses.sum(axis=1, keepdims=True)
+    expected = np.zeros((4, 5), dtype=np.float32)
+    expected[1:3] = masses.astype(np.float32)
+    np.testing.assert_array_equal(
+        item.arrays["typewell_target_probs"],
+        expected,
+        strict=True,
+    )
+
+
+def test_particle_paths_normalize_separately_and_mask_their_own_empty_rows() -> None:
+    well = feature_well()
+    assert well.particle is not None
+    cache = {name: values.copy() for name, values in well.particle.items()}
+    cache["pf_prob"][1] = 0
+    cache["pf_prob_ffbsi"][2] = 0
+    well = replace(well, particle=cache)
+    config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=7)
+    config.channels = ["pf_tvt", "pf_tvt_ffbsi"]
+    config.target_stats = (0.7, 3)
+    config.particle = ParticleFeatures.Config()
+    item = config.make()(well, training=True)
+    depth = well.horizontal["TVT"]
+    anchor = np.float32(depth[31])
+    relative = np.asarray(
+        [
+            np.mean(depth[:32] - anchor),
+            np.mean(depth[32:64] - anchor),
+            np.mean(depth[64:96] - anchor),
+        ],
+        dtype=np.float32,
+    )
+    paths = np.zeros((2, 4), dtype=np.float32)
+    paths[0, (0, 2)] = (relative[[0, 2]] + np.asarray([0, -0.5], np.float32) - 0.7) / 3
+    paths[1, :2] = (relative[:2] + np.asarray([0, 0.5], np.float32) - 0.7) / 3
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"],
+        np.broadcast_to(paths[:, :, None], (2, 4, 7)),
+        strict=True,
+    )
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_feature_planes_keep_float32_statistics_and_clip_slopes(direction: int) -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=2,
+        target_rows=4,
+        downsample=2,
+        reference_columns=5,
+    )
+    config.feature_clip = 0.25
+    builder = config.make()
+    window = builder._window(feature_well())
+    window.raw["gamma"][:] = np.asarray([1, 1, 2, 4, 9, np.nan], np.float32) * direction
+    window.raw["md"][:] = [0, 0.5, 0, 0.5, 0, 1]
+    window.raw["z"][:] = np.arange(6, dtype=np.float32) / 2
+    gamma = np.asarray([1, 3, 9, 8], dtype=np.float32) * direction
+    nan_rate = np.asarray([0, 0, 0, 1], dtype=np.float32)
+    reference = np.asarray([1, 2, np.nan, 4, 5], dtype=np.float32)
+    axis = np.asarray([-4, -2, 0, 2, 4], dtype=np.float32)
+    planes = builder._planes(
+        window,
+        gamma=gamma,
+        nan_rate=nan_rate,
+        reference=reference,
+        axis=axis,
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    assert all(plane.dtype == np.float32 for plane in planes.values())
+    np.testing.assert_array_equal(
+        planes["gr_std"][:, 0],
+        np.asarray([0, 1, 0, 0], np.float32) / config.gamma_stats[1],
+        strict=True,
+    )
+    np.testing.assert_array_equal(planes["gr_slope"][:, 0], [0, direction * 0.25, 0, 0])
+    np.testing.assert_array_equal(planes["gr_abs_diff"][3], np.zeros(5, np.float32))
+    np.testing.assert_array_equal(planes["gr_abs_diff"][:, 2], np.zeros(4, np.float32))
+    expected_step = (
+        np.float32(0.5) - config.vertical_step_stats[0]
+    ) / config.vertical_step_stats[1]
+    np.testing.assert_array_equal(
+        planes["z_diff"][:, 0],
+        np.asarray([expected_step, expected_step, expected_step, 0], np.float32),
+        strict=True,
+    )
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_quadratic_feature_planes_clip_each_normalized_coefficient(
+    direction: int,
+) -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=8,
+        target_rows=16,
+        downsample=8,
+        reference_columns=5,
+    )
+    config.gamma_stats = (0, 1)
+    config.quadratic_stats = ((0, 1),) * 4
+    config.feature_clip = 0.25
+    builder = config.make()
+    window = builder._window(feature_well())
+    x = np.linspace(-1, 1, 8, dtype=np.float32)
+    window.raw["gamma"][:] = np.tile(direction * (2 * x**2 + 3 * x + 5), 3)
+    planes = builder._planes(
+        window,
+        gamma=np.ones(4, dtype=np.float32),
+        nan_rate=np.zeros(4, dtype=np.float32),
+        reference=np.ones(5, dtype=np.float32),
+        axis=np.arange(5, dtype=np.float32),
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    for name in ("gr_quadratic_a", "gr_quadratic_b", "gr_quadratic_c"):
+        np.testing.assert_array_equal(
+            planes[name][:3],
+            np.full((3, 5), direction * 0.25, np.float32),
+        )
+
+
 def feature_well() -> WellRecord:
     """Build the deterministic paths of the feature tests."""
     row = np.arange(97, dtype=np.float32)
