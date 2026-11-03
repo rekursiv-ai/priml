@@ -36,9 +36,13 @@ def test_a_kernel_runs_on_the_cpu_and_leaves_triton_as_it_was() -> None:
     tensor_before = dict(vars(language.tensor))
     values = torch.arange(6, dtype=torch.float32)
     total = torch.zeros(1)
-    with triton_interpreter():
-        assert os.environ["TRITON_INTERPRET"] == "1"
-        triton.jit(_sum_kernel)[(1,)](values, total, 6, block=8)
+    rewritten = triton_runtime_interpreter.InterpretedFunction.rewritten_fn
+    for _ in range(2):
+        with triton_interpreter():
+            assert os.environ["TRITON_INTERPRET"] == "1"
+            assert not triton_runtime_interpreter.InterpretedFunction.rewritten_fn
+            triton.jit(_sum_kernel)[(1,)](values, total, 6, block=8)
+        assert triton_runtime_interpreter.InterpretedFunction.rewritten_fn is rewritten
     assert total.tolist() == [15.0]
     assert "TRITON_INTERPRET" not in os.environ
     after = {name: dict(vars(module)) for name, module in _language_modules()}
@@ -122,15 +126,19 @@ def test_every_language_submodule_is_loaded_before_the_snapshot(
 
 
 def test_the_runtime_hooks_are_restored_like_any_other_attribute() -> None:
-    before = dict(vars(triton_jit)), dict(vars(triton_runtime_interpreter))
+    owners = (
+        triton_jit,
+        triton_runtime_interpreter,
+        language,
+        language.tensor,
+        language.dtype,
+    )
+    names = tuple(f"_test_leaked_{index}" for index in range(len(owners)))
     with triton_interpreter():
-        cast("dict[str, object]", vars(triton_jit))["leaked"] = 1
-        cast("dict[str, object]", vars(triton_runtime_interpreter))["leaked"] = 1
-    after = dict(vars(triton_jit)), dict(vars(triton_runtime_interpreter))
-    assert [sorted(set(a) ^ set(b)) for a, b in zip(before, after, strict=True)] == [
-        [],
-        [],
-    ]
+        for owner, name in zip(owners, names, strict=True):
+            setattr(owner, name, 1)
+    for owner, name in zip(owners, names, strict=True):
+        assert name not in vars(owner)
 
 
 @pytest.mark.parametrize(
@@ -164,6 +172,22 @@ def _sum_kernel(
     idx = language.arange(0, block)
     values = language.load(values_ptr + idx, mask=idx < count, other=0.0)
     language.store(total_ptr, language.sum(values, axis=0))
+
+
+def _masked_kernel(values_ptr: language.tensor, block: language.constexpr) -> None:
+    index = language.arange(0, block)
+    mask = (index >= 2) & (index < block - 1)
+    value = language.load(values_ptr + index, mask=mask, other=0)
+    language.store(values_ptr + index, value + index, mask=mask)
+
+
+def test_comparison_masks_keep_their_boolean_handle_and_restore_the_builder() -> None:
+    original = triton_runtime_interpreter.InterpreterBuilder.binary_op
+    values = torch.arange(8, dtype=torch.int32)
+    with triton_interpreter():
+        triton.jit(_masked_kernel)[(1,)](values, block=8)
+        assert torch.equal(values, torch.tensor([0, 1, 4, 6, 8, 10, 12, 7]))
+    assert triton_runtime_interpreter.InterpreterBuilder.binary_op is original
 
 
 def _loop_kernel(

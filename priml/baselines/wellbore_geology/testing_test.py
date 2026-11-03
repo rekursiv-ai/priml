@@ -325,6 +325,31 @@ def test_complete_native_record_retains_every_tensor_scalar_and_container() -> N
     assert values["name/@str"].tolist() == list(b"native")
 
 
+@pytest.mark.parametrize("name", ["0719_V1", "0803_V2", "0801_V2"])
+def test_owned_record_ignores_constructor_sampler_changes(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(31)
+        expected = capture_training(recipe=_family_recipe(name))
+        torch.manual_seed(31)
+
+        def different_sampler(
+            tensor: torch.Tensor,
+            *args: object,
+            **kwargs: object,
+        ) -> torch.Tensor:
+            del args, kwargs
+            with torch.no_grad():
+                torch.rand(17)
+                return tensor.uniform_(-0.1, 0.1)
+
+        monkeypatch.setattr(torch.nn.init, "_no_grad_trunc_normal_", different_sampler)
+        actual = capture_training(recipe=_family_recipe(name))
+    assert not mismatches(expected, actual)
+
+
 def test_nexus_family_training_golden() -> None:
     with host_agnostic_numerics():
         record = capture_training(recipe=_family_recipe("0803_V2"))

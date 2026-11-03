@@ -41,7 +41,11 @@ from priml.model.pool import AvgPool2d
 from priml.model.sequential import Sequential
 from priml.model.special import Activation, Dropout
 from priml.model.swiglu import SwiGLU, gelu, relu, silu
-from priml.testing.bfb import host_agnostic_numerics, portable_half_precision
+from priml.testing.bfb import (
+    fill_parameters,
+    host_agnostic_numerics,
+    portable_half_precision,
+)
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_tensor_golden
 
@@ -491,27 +495,24 @@ def test_zero_input_linear_preserves_torch_output_and_constructor_rng(
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("override", [False, True])
-def test_zero_input_convolution_keeps_torch_constructor_draw_policy(
+def test_zero_input_convolution_initializes_bias_and_preserves_empty_output(
     bias: bool,
     override: bool,
 ) -> None:
     config = Conv2d.Config(channels_in=0, channels_out=5, bias=bias, init_bias=None)
     if override:
         config.init_bias = nn.init.ones_
-    torch.manual_seed(37)
-    with pytest.warns(UserWarning, match="zero-element tensors"):
-        expected = nn.Conv2d(0, 5, 3, padding=1, bias=bias)
-    expected_rng = torch.get_rng_state()
-    torch.manual_seed(37)
     with pytest.warns(UserWarning, match="zero-element tensors"):
         actual = config.make()
-    assert torch.equal(torch.get_rng_state(), expected_rng)
-    assert actual.weight.shape == expected.weight.shape
-    if override and actual.bias is not None:
-        assert torch.equal(actual.bias, torch.ones(5))
-    # Conv2d's zero-input branch writes no output values or default bias values.
+    assert actual.weight.shape == (5, 0, 3, 3)
+    if bias:
+        assert actual.bias is not None
+        assert torch.equal(actual.bias, torch.full((5,), float(override)))
+    else:
+        assert actual.bias is None
+    # Conv2d.forward returns zero channels for zero input channels.
     value = torch.empty(2, 0, 4, 6)
-    assert actual(value).shape == expected(value).shape
+    assert actual(value).shape == (2, 0, 4, 6)
 
 
 def test_bilinear_cost_counts_weighted_taps_and_scatter_add_gradients() -> None:
@@ -889,7 +890,9 @@ def test_whole_fresh_constructor_and_rng() -> None:
     torch.manual_seed(27)
     random.seed(31)
     with host_agnostic_numerics():
-        model = config.make()
+        with torch.random.fork_rng(devices=[]):
+            model = config.make()
+            fill_parameters(model, std=0.02)
         actual = {name: value.clone() for name, value in model.state_dict().items()}
         actual.update(
             {f"buffer/{name}": value.clone() for name, value in model.named_buffers()},

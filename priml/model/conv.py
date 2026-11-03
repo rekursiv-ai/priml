@@ -62,7 +62,7 @@ class Conv1d(nn.Conv1d):
         """Weight initialization function."""
 
         init_bias: InitFn | None = nn.init.zeros_
-        """Bias initializer; ``None`` preserves torch's fan-in uniform draw."""
+        """Bias initializer; None uses fan-in uniform, or zeros for zero fan-in."""
 
         @override
         def finalize(self) -> Self:
@@ -155,10 +155,7 @@ class Conv1d(nn.Conv1d):
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
             if self._init_bias is None:
-                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
-                if fan_in:
-                    bound = 1 / fan_in**0.5
-                    nn.init.uniform_(self.bias, -bound, bound)
+                _fan_in_bias_init(self.bias, self.weight)
             else:
                 call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
@@ -344,7 +341,7 @@ class Conv2d(nn.Conv2d):
         """Weight initialization function."""
 
         init_bias: InitFn | None = nn.init.zeros_
-        """Bias initializer; ``None`` preserves torch's fan-in uniform draw."""
+        """Bias initializer; None uses fan-in uniform, or zeros for zero fan-in."""
 
         @override
         def finalize(self) -> Self:
@@ -432,10 +429,7 @@ class Conv2d(nn.Conv2d):
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
             if self._init_bias is None:
-                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
-                if fan_in:
-                    bound = 1 / fan_in**0.5
-                    nn.init.uniform_(self.bias, -bound, bound)
+                _fan_in_bias_init(self.bias, self.weight)
             else:
                 call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
@@ -491,7 +485,7 @@ class ConvTranspose2d(nn.ConvTranspose2d):
         """Initializer of the input-by-output-channel weight tensor."""
 
         init_bias: InitFn | None = nn.init.zeros_
-        """Bias initializer; None uses Torch's transposed-weight fan-in draw."""
+        """Bias initializer; None uses fan-in uniform, or zeros for zero fan-in."""
 
         @override
         def finalize(self) -> Self:
@@ -593,10 +587,7 @@ class ConvTranspose2d(nn.ConvTranspose2d):
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
             if self._init_bias is None:
-                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
-                if fan_in:
-                    bound = 1 / fan_in**0.5
-                    nn.init.uniform_(self.bias, -bound, bound)
+                _fan_in_bias_init(self.bias, self.weight)
             else:
                 call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
@@ -654,7 +645,7 @@ class Conv3d(nn.Conv3d):
         """Weight initialization function."""
 
         init_bias: InitFn | None = nn.init.zeros_
-        """Bias initializer; ``None`` preserves torch's fan-in uniform draw."""
+        """Bias initializer; None uses fan-in uniform, or zeros for zero fan-in."""
 
         @override
         def finalize(self) -> Self:
@@ -742,10 +733,7 @@ class Conv3d(nn.Conv3d):
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
             if self._init_bias is None:
-                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
-                if fan_in:
-                    bound = 1 / fan_in**0.5
-                    nn.init.uniform_(self.bias, -bound, bound)
+                _fan_in_bias_init(self.bias, self.weight)
             else:
                 call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
@@ -943,3 +931,13 @@ def _sequence_conv_output_length(
             f"{output_length} is shorter than input length {input_length}.",
         )
     return output_length
+
+
+def _fan_in_bias_init(bias: Tensor, weight: Tensor) -> None:
+    """Initialize bias uniformly by weight fan-in, or zero it for zero fan-in."""
+    fan_in = weight.shape[1] * math.prod(weight.shape[2:])
+    if not fan_in:
+        nn.init.zeros_(bias)
+        return
+    bound = 1 / fan_in**0.5
+    nn.init.uniform_(bias, -bound, bound)

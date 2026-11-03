@@ -72,6 +72,8 @@ def triton_interpreter(*caches: _Cache) -> Generator[None]:
             _patch_scalar_index,
             patch=interpreter._patch_lang_tensor,  # noqa: SLF001 -- Likewise.
         )
+        interpreter.InterpreterBuilder.binary_op = _binary_op  # pyrefly: ignore[method-assign] -- Scoped replacement of Triton's interpreter implementation.
+        interpreter.InterpretedFunction.rewritten_fn = {}
         _jit_library()
         yield
 
@@ -107,6 +109,19 @@ def _patch_scalar_index(
 
 def _scalar_index(tensor: _InterpretedTensor) -> int:
     return int(tensor.handle.data.item())  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+
+
+def _binary_op(
+    self: interpreter.InterpreterBuilder,
+    lhs: interpreter.TensorHandle,
+    rhs: interpreter.TensorHandle,
+    op: Callable[[NDArray[np.generic], NDArray[np.generic]], NDArray[np.generic]],
+) -> interpreter.TensorHandle:
+    del self
+    data = op(lhs.data, rhs.data)
+    # Comparison handles must retain int1 when combined into load/store masks.
+    dtype = triton.language.int1 if data.dtype.kind == "b" else lhs.dtype
+    return interpreter.TensorHandle(data, dtype)
 
 
 @contextmanager
@@ -150,7 +165,12 @@ class _InterpretedTensor(Protocol):
 
 def _patched_owners() -> list[object]:
     """Every module and class the interpreter or this context sets attributes on."""
-    hooks: list[object] = [jit, interpreter]
+    hooks: list[object] = [
+        jit,
+        interpreter,
+        interpreter.InterpreterBuilder,
+        interpreter.InterpretedFunction,
+    ]
     modules: list[ModuleType] = [
         module
         for name, module in list(sys.modules.items())

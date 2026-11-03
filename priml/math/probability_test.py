@@ -54,6 +54,9 @@ from priml.math.probability import (
     random_gumbel,
     random_logit_normal,
     random_student_t,
+    weyl_rand,
+    weyl_randint,
+    weyl_randn,
 )
 from priml.memory import convert_to_tensor
 
@@ -1610,6 +1613,58 @@ def test_quantile_truncated_normal_keeps_location_and_scale_gradients_finite() -
     assert scale.grad is not None
     assert torch.isfinite(loc.grad)
     assert torch.isfinite(scale.grad)
+
+
+@pytest.mark.parametrize("salt", [0, 3])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_weyl_uniform_values_and_options(
+    salt: int,
+    dtype: torch.dtype,
+    requires_grad: bool,
+) -> None:
+    offset = salt * 1_048_576
+    expected = torch.tensor(
+        [(index * 0.6180339887498949) % 1 for index in range(offset + 1, offset + 7)],
+        dtype=dtype,
+    ).reshape(2, 3)
+    actual = weyl_rand(2, 3, salt=salt, dtype=dtype, requires_grad=requires_grad)
+    assert actual.dtype == dtype
+    assert actual.requires_grad is requires_grad
+    assert torch.equal(actual, expected)
+
+
+def test_weyl_uniform_defaults() -> None:
+    actual = weyl_rand(2, 3)
+    assert actual.dtype == torch.float32
+    assert not actual.requires_grad
+    assert torch.equal(actual, weyl_rand(2, 3, salt=0))
+
+
+def test_weyl_sequences_draw_nothing_and_match_their_distribution() -> None:
+    """Normal like ``randn``, uniform like ``rand``, every integer like ``randint``."""
+    state = torch.get_rng_state()
+    normal = weyl_randn(4096, requires_grad=True)
+    other = weyl_randn(4096, salt=1)
+    uniform = weyl_rand(4096)
+    integers = weyl_randint(2, 7, (6, 3), dtype=torch.int32)
+
+    assert torch.equal(torch.get_rng_state(), state)
+    assert (normal.shape, normal.dtype, normal.requires_grad) == (
+        (4096,),
+        torch.float32,
+        True,
+    )
+    assert abs(normal.mean().item()) < 0.02
+    assert abs(normal.std().item() - 1) < 0.02
+    assert not torch.equal(normal.detach(), other)
+    assert bool((uniform >= 0).all())
+    assert bool((uniform < 1).all())
+    assert abs(uniform.mean().item() - 0.5) < 0.01
+    assert integers.dtype == torch.int32
+    assert set(integers.flatten().tolist()) == {2, 3, 4, 5, 6}
+    torch.manual_seed(1)
+    assert torch.equal(weyl_randn(4096), normal.detach())
 
 
 if __name__ == "__main__":

@@ -41,20 +41,12 @@ def single_rank_group(tmp_path: Path) -> Generator[None, None, None]:
         dist.destroy_process_group()
 
 
-# The gathers really run over the single rank; only the world-size probe is faked, so
-# the arithmetic under test is the real collective result.
-def _world_of_two(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the 1-rank group read as 2 ranks so the aggregated paths are taken."""
-    monkeypatch.setattr(dist, "get_world_size", _one_rank)
+def _force_aggregation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force aggregation over the real single-rank group's collectives."""
     monkeypatch.setattr(
         "priml.optimizers.sign_sgd._is_distributed",
         lambda: True,
     )
-
-
-def _one_rank(group: object = None) -> int:
-    del group
-    return 1
 
 
 def _sparse_group(
@@ -149,7 +141,7 @@ def test_aggregate_distributed_defaults_true_and_is_settable() -> None:
     """The cross-rank sparse-gather flag defaults True (DP) and can be disabled.
 
     Task-parallel use (per-task TTT) sets it False so the per-step sparse
-    ``all_gather_into_tensor`` is skipped -- a per-step collective desyncs when
+    ``all_gather`` is skipped -- a per-step collective desyncs when
     ranks step an independent number of times and the NCCL watchdog aborts. With
     it False the sparse step is purely local; the actual update is identical to
     the single-process case (no distributed init here), which this exercises.
@@ -459,7 +451,7 @@ def test_aggregated_sparse_step_matches_the_local_rule(
 ) -> None:
     """Gathering rows over the group leaves a one-rank world's update unchanged."""
     del single_rank_group
-    _world_of_two(monkeypatch)
+    _force_aggregation(monkeypatch)
     weights = torch.arange(20, dtype=torch.float32).reshape(5, 4) / 10
     local_weights = torch.zeros(3, 4, requires_grad=True)
     local_ids = torch.tensor([2, 2, 4], dtype=torch.int32)
@@ -492,7 +484,7 @@ def test_optimizer_routes_sparse_groups_without_collectives_when_disabled(
     monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
     monkeypatch.setattr(
         dist,
-        "all_gather_into_tensor",
+        "all_gather",
         Mock(side_effect=AssertionError("unexpected distributed gather")),
     )
     weights = torch.ones(4, 3)
@@ -536,22 +528,16 @@ def test_sparse_group_routes_remote_updates_through_collective(
             return None
 
     def gather(
-        output: Tensor,
+        output: list[Tensor],
         values: Tensor,
         *,
         async_op: bool = False,
     ) -> Work | None:
-        if output.numel() == 2:
-            output.copy_(torch.tensor([1, 2]))
-        elif output.ndim == 1:
-            output[:2].copy_(values)
-            output[2:].copy_(remote_ids)
-        else:
-            output[:2].copy_(values)
-            output[2:].copy_(remote_grads)
+        output[0].copy_(values)
+        output[1].copy_(remote_ids if values.ndim == 1 else remote_grads)
         return Work() if async_op else None
 
-    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    monkeypatch.setattr(dist, "all_gather", gather)
     weights = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     local_weights = torch.zeros(2, 3, requires_grad=True)
     local_weights.grad = torch.tensor([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0]])
@@ -583,7 +569,7 @@ def test_distributed_dense_step_decays_and_signs_touched_rows_only(
 ) -> None:
     """The cross-rank dense path reproduces the local touched-row rule."""
     del single_rank_group
-    _world_of_two(monkeypatch)
+    _force_aggregation(monkeypatch)
     p = torch.nn.Parameter(torch.ones(3, 2))
     p.grad = torch.tensor([[1.0, -1.0], [0.0, 0.0], [0.0, 2.0]])
     SignSGD([p], lr=0.1, weight_decay=0.5).step()
@@ -599,7 +585,7 @@ def test_distributed_dense_step_without_decay_only_signs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del single_rank_group
-    _world_of_two(monkeypatch)
+    _force_aggregation(monkeypatch)
     p = torch.nn.Parameter(torch.ones(2, 3))
     p.grad = torch.tensor([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0]])
     SignSGD([p], lr=0.1, weight_decay=0.0).step()
@@ -611,7 +597,7 @@ def test_distributed_dense_step_with_no_touched_rows_is_a_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del single_rank_group
-    _world_of_two(monkeypatch)
+    _force_aggregation(monkeypatch)
     p = torch.nn.Parameter(torch.ones(2, 3))
     p.grad = torch.zeros(2, 3)
     SignSGD([p], lr=0.1, weight_decay=0.5).step()
@@ -623,7 +609,7 @@ def test_distributed_parameter_update_does_not_stop_later_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del single_rank_group
-    _world_of_two(monkeypatch)
+    _force_aggregation(monkeypatch)
     distributed = torch.nn.Parameter(torch.ones(2, 3))
     distributed.grad = torch.tensor([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0]])
     vector = torch.nn.Parameter(torch.ones(2))
@@ -691,25 +677,23 @@ def test_distributed_dense_update_combines_rows_from_each_rank(
 ) -> None:
     monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
     monkeypatch.setattr(dist, "get_world_size", lambda: 2)
-    gathered_counts = torch.tensor([1, 2], dtype=torch.long)
     gathered_ids = torch.tensor([1, 2], dtype=torch.long)
     gathered_grads = torch.tensor([[-1.0, 1.0], [-1.0, 1.0]])
     padded_ids = torch.tensor([0, 0], dtype=torch.long)
     padded_grads = torch.tensor([[1.0, -1.0], [0.0, 0.0]])
 
-    def gather(output: Tensor, values: Tensor) -> None:
-        if output.numel() == 2:
-            output.copy_(gathered_counts)
-        elif output.ndim == 1:
+    def gather(output: list[Tensor], values: Tensor) -> None:
+        output[0].copy_(values)
+        if values.numel() == 1:
+            output[1].fill_(2)
+        elif values.ndim == 1:
             assert torch.equal(values, padded_ids)
-            output[:2].copy_(values)
-            output[2:].copy_(gathered_ids)
+            output[1].copy_(gathered_ids)
         else:
             assert torch.equal(values, padded_grads)
-            output[:2].copy_(values)
-            output[2:].copy_(gathered_grads)
+            output[1].copy_(gathered_grads)
 
-    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    monkeypatch.setattr(dist, "all_gather", gather)
     parameter = torch.nn.Parameter(torch.arange(10, dtype=torch.float32).reshape(5, 2))
     parameter.grad = torch.tensor(
         [[1.0, -1.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
@@ -758,17 +742,17 @@ def test_sparse_embedding_step_aggregates_remote_duplicate_ids(
         def wait(self) -> None:
             return None
 
-    def gather(output: Tensor, values: Tensor, *, async_op: bool) -> Work:
+    def gather(output: list[Tensor], values: Tensor, *, async_op: bool) -> Work:
         assert async_op
-        output[:2].copy_(values)
-        output[2:].copy_(
+        output[0].copy_(values)
+        output[1].copy_(
             torch.tensor([1, 2])
-            if output.ndim == 1
+            if values.ndim == 1
             else torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
         )
         return Work()
 
-    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    monkeypatch.setattr(dist, "all_gather", gather)
     weights = torch.arange(15, dtype=torch.float32).reshape(5, 3)
     local_weights = torch.zeros(2, 3, requires_grad=True)
     local_ids = torch.zeros(2, dtype=torch.int32)
@@ -813,7 +797,7 @@ def test_sparse_embedding_step_requires_gradient_gather_work(
 ) -> None:
     monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
     monkeypatch.setattr(dist, "get_world_size", lambda: 2)
-    monkeypatch.setattr(dist, "all_gather_into_tensor", Mock(side_effect=[None, None]))
+    monkeypatch.setattr(dist, "all_gather", Mock(side_effect=[None, None]))
 
     with pytest.raises(ValueError, match=r"^Expected grad_work is not None\.$"):
         _sparse_embedding_step(
@@ -832,7 +816,7 @@ def test_sparse_embedding_step_requires_ids_gather_work(
     monkeypatch.setattr(dist, "get_world_size", lambda: 2)
     monkeypatch.setattr(
         dist,
-        "all_gather_into_tensor",
+        "all_gather",
         Mock(side_effect=[Mock(), None]),
     )
 
@@ -856,17 +840,17 @@ def test_sparse_embedding_step_defaults_to_distributed_aggregation(
         def wait(self) -> None:
             return None
 
-    def gather(output: Tensor, values: Tensor, *, async_op: bool) -> Work:
+    def gather(output: list[Tensor], values: Tensor, *, async_op: bool) -> Work:
         assert async_op
-        output[:2].copy_(values)
-        output[2:].copy_(
+        output[0].copy_(values)
+        output[1].copy_(
             torch.tensor([1, 1])
-            if output.ndim == 1
+            if values.ndim == 1
             else torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
         )
         return Work()
 
-    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    monkeypatch.setattr(dist, "all_gather", gather)
     weights = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     _sparse_embedding_step(
         torch.tensor([[1.0, -1.0, 0.0], [1.0, -1.0, 0.0]]),

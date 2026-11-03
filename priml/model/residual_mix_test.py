@@ -16,6 +16,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.math.probability import weyl_randn
 from priml.model.residual_mix import ResidualMix
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -57,7 +58,7 @@ def test_residual_mix_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="residual_mix",
         build_module=lambda: ResidualMix.Config(num_layers=2).make(),
-        build_input=lambda: (torch.randn(2, 3, 4), torch.randn(2, 3, 4)),
+        build_input=lambda: (weyl_randn(2, 3, 4), weyl_randn(2, 3, 4, salt=1)),
         seed=0,
         run=run,
     )

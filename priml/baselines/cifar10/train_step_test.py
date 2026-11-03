@@ -16,6 +16,7 @@ import torch
 
 from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep, _tta_logits
+from priml.math.probability import weyl_randint, weyl_randn
 from priml.math.schedules import cosine, polynomial
 from priml.optimizers import CompositeOptimizer, Muon, learning_rate
 from priml.optimizers.parameter_filter import complement, excluding
@@ -73,10 +74,10 @@ def muon_optimizer() -> CompositeOptimizer.Config:
 
 def tiny_batch(*, size: int = 2, image: int = 4, seed: int = 0) -> dict[str, Tensor]:
     """Return a deterministic batch of noise images and labels."""
-    generator = torch.Generator().manual_seed(seed)
+    torch.Generator().manual_seed(seed)
     return {
-        "media": torch.randn(size, 3, image, image, generator=generator),
-        "label": torch.randint(0, 2, (size,), generator=generator),
+        "media": weyl_randn(size, 3, image, image),
+        "label": weyl_randint(0, 2, (size,), salt=1),
     }
 
 

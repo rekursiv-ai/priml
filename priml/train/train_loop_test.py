@@ -3250,11 +3250,18 @@ def test_train_step_omits_gpu_memory_on_a_cpu_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A CPU run logs no GPU memory, even on a host that has CUDA."""
+
+    def current_accelerator(check_available: bool = False) -> None:
+        del check_available
+
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    # The faked CUDA host must stay inert where torch itself probes it: Adam's
-    # step asks whether a CUDA graph is capturing, a real CUDA call that fails
-    # on a host with no GPU (a CPU CI runner).
+    # Torch 2.11 probes CUDA directly; newer optimizers use the accelerator API.
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        torch.accelerator,
+        "current_accelerator",
+        current_accelerator,
+    )
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.checkpointer = None

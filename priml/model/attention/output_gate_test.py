@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache, alloc_layer_cache
@@ -142,7 +143,7 @@ def test_output_gate_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

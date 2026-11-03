@@ -43,7 +43,6 @@ from priml.baselines.sudoku.testing import (
     metric_tensors,
     replay,
     shrink_newton_schulz,
-    weight_tensors,
     write_dataset,
 )
 from priml.baselines.sudoku.train_loop import SudokuTrainLoop
@@ -697,7 +696,10 @@ def _segment_record(repro: Reproduction, stage: str) -> dict[str, Tensor]:
     """Record the eval weights a segment wrote, and its whole state if one follows."""
     boundary = int(stage.removeprefix("train_"))
     path = repro._checkpoint_path(boundary)
-    out = weight_tensors(f"{stage}/eval", load_eval_weights(path))
+    out = {
+        f"{stage}/eval/{name}": value.detach().clone()
+        for name, value in load_eval_weights(path).items()
+    }
     if boundary != _boundaries(repro)[-1]:
         out |= _tensors(_segment_state(repro, boundary), prefix=f"{stage}/state/")
     return out

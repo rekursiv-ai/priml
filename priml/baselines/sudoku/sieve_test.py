@@ -30,7 +30,6 @@ from priml.baselines.sudoku.sieve import (
 )
 from priml.baselines.sudoku.testing import (
     Harness,
-    load_golden,
     metric_tensors,
     replay,
     sudoku_solution,
@@ -42,9 +41,11 @@ from priml.baselines.sudoku.verifier_fit import VerifierFit
 from priml.baselines.sudoku.views import NINE_VIEWS, View
 from priml.data.arrays import load_array
 from priml.model.swiglu import SwiGLU
-from priml.testing.golden import mismatches
+from priml.testing.golden import assert_tensor_golden
 from priml.train.train_loop import EvalTimeLimitError
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -836,8 +837,7 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
     actual = replay(_RECORDERS[case], tmp_path, train=False)
-    report = mismatches(load_golden(case), actual)
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
+    assert_tensor_golden(_CWD / "testdata" / f"{case}.pt", actual)
 
 
 if __name__ == "__main__":

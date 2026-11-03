@@ -62,7 +62,7 @@ def _sparse_distributed_step(
     world_size = dist.get_world_size()
     count = torch.tensor([local_ids.numel()], device=p.device, dtype=torch.long)
     counts = torch.empty(world_size, device=p.device, dtype=torch.long)
-    dist.all_gather_into_tensor(counts, count)
+    dist.all_gather(list(counts.chunk(world_size)), count)
     max_count = int(counts.max().item())
     if max_count == 0:
         return
@@ -89,8 +89,8 @@ def _sparse_distributed_step(
         device=p.device,
         dtype=grad.dtype,
     )
-    dist.all_gather_into_tensor(all_ids, ids_padded)
-    dist.all_gather_into_tensor(all_grads, grads_padded)
+    dist.all_gather(list(all_ids.chunk(world_size)), ids_padded)
+    dist.all_gather(list(all_grads.chunk(world_size)), grads_padded)
 
     valid = torch.arange(max_count, device=p.device).expand(world_size, -1)
     valid = valid < counts.view(-1, 1)
@@ -145,12 +145,16 @@ def _sparse_embedding_step(
             dtype=local_ids.dtype,
             device=local_ids.device,
         )
-        grad_work = dist.all_gather_into_tensor(
-            all_weights_grad,
+        grad_work = dist.all_gather(
+            list(all_weights_grad.chunk(world_size)),
             local_weights_grad,
             async_op=True,
         )
-        ids_work = dist.all_gather_into_tensor(all_ids, local_ids, async_op=True)
+        ids_work = dist.all_gather(
+            list(all_ids.chunk(world_size)),
+            local_ids,
+            async_op=True,
+        )
         if grad_work is None:
             raise ValueError("Expected grad_work is not None.")
         if ids_work is None:
@@ -249,7 +253,7 @@ class SignSGD(Optimizer):
         # Whether the sparse-embedding step all-gathers gradient rows across
         # ranks (the data-parallel default). MUST be False for TASK-PARALLEL use
         # (e.g. per-task TTT) where each rank optimizes an INDEPENDENT problem and
-        # steps a DIFFERENT number of times: a per-step ``all_gather_into_tensor``
+        # steps a DIFFERENT number of times: a per-step ``all_gather``
         # then desyncs (one rank finishes while another keeps stepping with no
         # peer) and the NCCL watchdog aborts the job. False = purely local update.
         self.aggregate_distributed = aggregate_distributed

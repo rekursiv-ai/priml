@@ -28,6 +28,7 @@ from priml.baselines.nanochat.model import (
 from priml.baselines.nanochat.ngram import HashedNgramTables
 from priml.cost import cost
 from priml.custom_types import HasCost
+from priml.math.probability import weyl_randint
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
@@ -113,7 +114,7 @@ def _mixing_model(**overrides: object) -> NanoChatLM:
 
 
 def _tokens() -> Tensor:
-    return torch.randint(0, VOCAB, (2, SEQ))
+    return weyl_randint(0, VOCAB, (2, SEQ))
 
 
 def test_forward_returns_logits_per_position() -> None:
@@ -804,7 +805,7 @@ def test_the_shipped_experiments_forward_bfb() -> None:
             return module(tokens)
 
     def build_input() -> Tensor:
-        return torch.randint(0, _model().vocab_size, (2, _model().max_seq_len))
+        return weyl_randint(0, _model().vocab_size, (2, _model().max_seq_len))
 
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",

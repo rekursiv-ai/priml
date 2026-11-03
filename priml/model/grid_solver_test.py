@@ -22,6 +22,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost, elementwise_cost
+from priml.math.probability import weyl_randint
 from priml.model import grid_solver
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
@@ -423,7 +424,7 @@ def test_one_slow_cycle_is_valid() -> None:
 
 
 def _tiny_tokens() -> Tensor:
-    return torch.randint(0, 2, (3, 2))
+    return weyl_randint(0, 2, (3, 2))
 
 
 def test_plain_forward_bfb() -> None:
@@ -440,6 +441,7 @@ def test_plain_forward_bfb() -> None:
         build_input=_tiny_tokens,
         seed=0,
         run=_logits,
+        buffers=("slow_init", "fast_init"),
     )
 
 
@@ -981,6 +983,7 @@ def test_recurrent_forward_bfb() -> None:
         build_input=_tiny_tokens,
         seed=0,
         run=_logits,
+        buffers=("slow_init", "fast_init"),
     )
 
 

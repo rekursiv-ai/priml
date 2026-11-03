@@ -18,6 +18,7 @@ from priml.baselines.imagenet.model import (
     TorchvisionResNet,
     apply_blurpool,
 )
+from priml.math.probability import weyl_randn
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -202,7 +203,7 @@ def test_resnet_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="blurpool_net",
         build_module=lambda: tiny_resnet().make().eval(),
-        build_input=lambda: torch.randn(2, 3, 4, 5),
+        build_input=lambda: weyl_randn(2, 3, 4, 5),
         seed=0,
     )
 
