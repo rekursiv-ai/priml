@@ -1,38 +1,49 @@
-"""
-SRSD Feynman Dataset Loader
+"""SRSD Feynman Dataset Loader.
+
 Downloads and caches the 120 Feynman equations from SRSD benchmark.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, TypedDict
+
+import ast
 import json
+
 import numpy as np
 import requests
+
+from priml.lib.userdirs import cache_dir as user_cache_dir
 
 
 @dataclass
 class FeynmanEquation:
-    """Single Feynman equation from SRSD benchmark"""
+    """Single Feynman equation from SRSD benchmark."""
+
     eq_id: str
     formula: str
     target_dim: str
-    variables: Dict[str, str]  # var_name -> dimension
+    variables: dict[str, str]  # var_name -> dimension
     description: str
     difficulty: str  # Easy, Medium, Hard
 
 
 @dataclass
 class FeynmanDataset:
-    """Container for Feynman benchmark data"""
-    equations: List[FeynmanEquation]
+    """Container for Feynman benchmark data."""
+
+    equations: list[FeynmanEquation]
     split: str  # "easy", "medium", "hard", "all"
 
-    def get_split(self, split: str) -> "FeynmanDataset":
+    def get_split(self, split: str) -> FeynmanDataset:
+        """Get a difficulty split from the dataset."""
         if split == "all":
             return self
-        filtered = [eq for eq in self.equations if eq.difficulty.lower() == split.lower()]
+        filtered = [
+            eq for eq in self.equations if eq.difficulty.lower() == split.lower()
+        ]
         return FeynmanDataset(equations=filtered, split=split)
 
     def __len__(self) -> int:
@@ -41,17 +52,31 @@ class FeynmanDataset:
     def __getitem__(self, idx: int) -> FeynmanEquation:
         return self.equations[idx]
 
+    def __iter__(self):
+        return iter(self.equations)
+
+
+class FeynmanEquationData(TypedDict):
+    """Typed dict for Feynman equation data."""
+
+    eq_id: str
+    formula: str
+    target_dim: str
+    variables: dict[str, str]
+    description: str
+    difficulty: str
+
 
 # SRSD Feynman equation metadata (subset for exp000 - 10 equations for fast iteration)
 # Full 120 equations loaded from cached JSON
-FEYNMAN_10_SUBSET = [
+FEYNMAN_10_SUBSET: list[FeynmanEquationData] = [
     {
         "eq_id": "feynman-i.12.1",
         "formula": "x0*x1",
         "target_dim": "M L T^-2",
         "variables": {"x0": "M", "x1": "L T^-2"},
         "description": "Force = mass * acceleration",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.12.2",
@@ -59,7 +84,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^2 T^-2",
         "variables": {"x0": "M", "x1": "L", "x2": "L T^-2"},
         "description": "Work = force * distance",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.12.4",
@@ -67,7 +92,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^2 T^-2",
         "variables": {"x0": "M", "x1": "L T^-1"},
         "description": "Kinetic energy",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.13.4",
@@ -75,7 +100,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^-1 T^-2",
         "variables": {"x0": "M", "x1": "L T^-2", "x2": "L"},
         "description": "Pressure = force / area",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.14.3",
@@ -83,7 +108,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "T",
         "variables": {"x0": "L", "x1": "L T^-1"},
         "description": "Time = distance / velocity",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.15.3",
@@ -91,7 +116,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^2 T^-1",
         "variables": {"x0": "M L T^-1", "x1": "L"},
         "description": "Angular momentum",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.16.2",
@@ -99,7 +124,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^3 T^-2",
         "variables": {"x0": "L^3 T^-1", "x1": "M"},
         "description": "Kepler's third law variant",
-        "difficulty": "Medium"
+        "difficulty": "Medium",
     },
     {
         "eq_id": "feynman-i.18.1",
@@ -107,7 +132,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^2 T^-2",
         "variables": {"x0": "M", "x1": "L T^-1", "x2": "L T^-1"},
         "description": "Energy = mass * velocity^2",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.18.2",
@@ -115,7 +140,7 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "M L^2 T^-2",
         "variables": {"x0": "M", "x1": "L T^-1"},
         "description": "Kinetic energy (alt)",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
     {
         "eq_id": "feynman-i.19.1",
@@ -123,26 +148,26 @@ FEYNMAN_10_SUBSET = [
         "target_dim": "L",
         "variables": {"x0": "L^2", "x1": "L"},
         "description": "Length = area / width",
-        "difficulty": "Easy"
+        "difficulty": "Easy",
     },
 ]
 
 
 def load_feynman_10() -> FeynmanDataset:
-    """Load the 10-equation subset for fast exp000 iteration"""
+    """Load the 10-equation subset for fast exp000 iteration."""
     equations = [FeynmanEquation(**eq) for eq in FEYNMAN_10_SUBSET]
     return FeynmanDataset(equations=equations, split="subset10")
 
 
-def load_feynman_full(cache_dir: Path = None) -> FeynmanDataset:
-    """Load all 120 SRSD Feynman equations from cache or download"""
+def load_feynman_full(cache_dir: Path | None = None) -> FeynmanDataset:
+    """Load all 120 SRSD Feynman equations from cache or download."""
     if cache_dir is None:
-        cache_dir = Path.home() / ".cache" / "priml" / "feynman_sr"
+        cache_dir = user_cache_dir() / "feynman_sr"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "feynman_srsd_120.json"
 
     if cache_file.exists():
-        with open(cache_file) as f:
+        with cache_file.open() as f:
             data = json.load(f)
     else:
         # Download from SRSD repository
@@ -151,9 +176,9 @@ def load_feynman_full(cache_dir: Path = None) -> FeynmanDataset:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             data = response.json()
-            with open(cache_file, "w") as f:
+            with cache_file.open("w") as f:
                 json.dump(data, f)
-        except Exception:
+        except requests.RequestException:
             # Fallback: generate from known SRSD list
             data = _generate_fallback_srsd()
 
@@ -161,8 +186,8 @@ def load_feynman_full(cache_dir: Path = None) -> FeynmanDataset:
     return FeynmanDataset(equations=equations, split="all")
 
 
-def _generate_fallback_srsd() -> List[Dict]:
-    """Generate fallback SRSD data if download fails"""
+def _generate_fallback_srsd() -> list[FeynmanEquationData]:
+    """Generate fallback SRSD data if download fails."""
     # This would contain all 120 equations in production
     # For exp000 we use the 10-equation subset
     return FEYNMAN_10_SUBSET
@@ -172,19 +197,19 @@ def generate_data_for_equation(
     eq: FeynmanEquation,
     n_samples: int = 1000,
     seed: int = 42,
-    noise: float = 0.0
-) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-    """
-    Generate synthetic data for a Feynman equation.
+    noise: float = 0.0,
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Generate synthetic data for a Feynman equation.
+
     Returns (variables_dict, target_values)
     """
     rng = np.random.default_rng(seed)
-    variables = {}
+    variables: dict[str, np.ndarray] = {}
 
     # Generate random values for each variable within reasonable ranges
     for var_name, dim_str in eq.variables.items():
         # Sample from log-uniform distribution for physical quantities
-        if dim_str == "1" or dim_str == "":
+        if dim_str in {"1", ""}:
             val = rng.uniform(0.1, 10.0, n_samples)
         elif "T^-2" in dim_str:  # acceleration-like
             val = rng.uniform(0.1, 50.0, n_samples)
@@ -211,38 +236,80 @@ def generate_data_for_equation(
     return variables, target.astype(np.float64)
 
 
-def _eval_formula(formula: str, variables: Dict[str, np.ndarray]) -> np.ndarray:
-    """Safely evaluate a formula string with numpy"""
+# Allowed functions for safe formula evaluation
+_ALLOWED_FUNCS = {
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
+    "exp": np.exp,
+    "log": np.log,
+    "sqrt": np.sqrt,
+    "abs": np.abs,
+    "pi": np.pi,
+    "e": np.e,
+}
+
+
+def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
+    """Safely evaluate a formula string with numpy using AST parsing."""
     # Replace variable names with array references
-    local_dict = {k: v for k, v in variables.items()}
-    local_dict.update({
-        'np': np,
-        'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
-        'exp': np.exp, 'log': np.log, 'sqrt': np.sqrt,
-        'abs': np.abs, 'pi': np.pi, 'e': np.e
-    })
+    local_dict: dict[str, Any] = dict(variables.items())
+    local_dict.update(_ALLOWED_FUNCS)
 
     # Replace ^ with ** for Python
-    formula_py = formula.replace('^', '**')
+    formula_py = formula.replace("^", "**")
 
     try:
-        return eval(formula_py, {"__builtins__": {}}, local_dict)
-    except Exception:
+        # Parse and validate AST - only allow safe node types
+        tree = ast.parse(formula_py, mode="eval")
+        _validate_ast(tree)
+        # Evaluate with restricted globals (AST validated, no user input)
+        result = eval(  # noqa: S307
+            compile(tree, "<string>", "eval"),
+            {"__builtins__": {}},
+            local_dict,
+        )
+        return np.asarray(result, dtype=np.float64)
+    except (ValueError, SyntaxError):
         # Fallback: return zeros
         n = len(next(iter(variables.values())))
         return np.zeros(n, dtype=np.float64)
 
 
+def _validate_ast(node: ast.AST) -> None:
+    """Validate that AST contains only safe operations."""
+    allowed_nodes = {
+        ast.Expression,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Call,
+        ast.Name,
+        ast.Constant,
+        ast.Load,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+    }
+    for child in ast.walk(node):
+        if type(child) not in allowed_nodes:
+            raise ValueError(f"Disallowed AST node: {type(child).__name__}")
+
+
 class FeynmanDataConfig:
-    """Configgle-compatible data configuration"""
+    """Configgle-compatible data configuration."""
+
     def __init__(
         self,
         split: str = "subset10",
         n_samples: int = 1000,
         seed: int = 42,
         noise: float = 0.0,
-        cache_dir: str = None
-    ):
+        cache_dir: str | None = None,
+    ) -> None:
         self.split = split
         self.n_samples = n_samples
         self.seed = seed
@@ -250,10 +317,11 @@ class FeynmanDataConfig:
         self.cache_dir = cache_dir
 
     def load_dataset(self) -> FeynmanDataset:
+        """Load the dataset based on the configured split."""
         if self.split == "subset10":
             return load_feynman_10()
-        elif self.split in ("easy", "medium", "hard", "all"):
+        if self.split in ("easy", "medium", "hard", "all"):
             full = load_feynman_full(Path(self.cache_dir) if self.cache_dir else None)
             return full.get_split(self.split)
-        else:
-            raise ValueError(f"Unknown split: {self.split}")
+        msg = f"Unknown split: {self.split}"
+        raise ValueError(msg)
