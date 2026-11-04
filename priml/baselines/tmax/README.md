@@ -85,9 +85,9 @@ cd "$TMAX/training/open-instruct"
 uv sync --frozen
 uv pip install --python .venv --no-deps -e /path/to/priml
 uv pip install --python .venv \
-  configgle einshape jaxtyping typeguard rustbpe torchao==0.17.0 \
+  configgle jaxtyping typeguard rustbpe torchao==0.17.0 \
   lpips imageio-ffmpeg imagesize opencv-contrib-python-headless \
-  pygame-ce pyturbojpeg webp
+  pyturbojpeg webp
 uv --quiet run --frozen python -c \
   "import priml.baselines.tmax.experiments, open_instruct.grpo_fast, ray, vllm"
 ```

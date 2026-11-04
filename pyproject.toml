@@ -1,6 +1,6 @@
 # NEVER EDIT THIS FILE!
-# uv sync --all-groups --frozen  # cu132 aka "cuda"
-# uv sync --all-groups --frozen --no-group cuda --extra cpu
+# uv sync --all-groups --no-group jax --no-group tf --frozen  # cu132 aka "cuda"
+# uv sync --all-groups --no-group jax --no-group tf --frozen --no-group cuda --extra cpu
 
 [project]
 name = "priml"
@@ -40,7 +40,6 @@ dependencies = [
     "imagesize>=2.0.1",
     "opencv-contrib-python-headless>=5.0.0.93",
     "pillow>=11.3.0",
-    "pygame-ce>=2.5.8",
     # On 24.04 LTS, package libturbojpeg is too old.
     #   R=libjpeg-turbo/libjpeg-turbo/releases
     #   V=$(curl -fsSL https://api.github.com/repos/$R/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
@@ -73,9 +72,6 @@ dependencies = [
     # training infra
     "tqdm>=4.70.1",
     "wandb>=0.31.0",
-    # tensor utilities
-    "einops>=0.8.2",
-    "einshape>=1.0",
     # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports,
     # and 1.4.2 the pformat layout every baseline's config golden is minted in
     "configgle>=1.4.4",
@@ -89,42 +85,31 @@ license-files = ["LICENSE", "LICENSES/*"]
 cpu = [
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 cu126 = [
-    "jax[cuda12] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 cu128 = [
-    "jax[cuda12] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 cu130 = [
-    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 cu132 = [
-    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 cu134 = [
-    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 # HuggingFace model import/export (priml.hub, qwen3/kimi_k2 loaders) and
@@ -132,7 +117,6 @@ cu134 = [
 # stay light. Install via `pip install priml[hub]`.
 hub = [
     "accelerate>=1.15.0",
-    "hf-transfer>=0.1.9",
     "huggingface-hub>=2.4.0",
     "safetensors>=0.8.0",
     "transformers>=5.22.1",
@@ -151,10 +135,8 @@ priml = "priml.launch:main"
 # NEVER ADD MORE DEPENDENCIES!
 
 cuda = [
-    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchao",
-    "torchaudio",
     "torchvision",
 ]
 
@@ -196,7 +178,7 @@ dev = [
     {include-group = "debug"},
 ]
 
-# NEVER ADD MORE DEPENDENCY GROUPS!
+# NEVER ADD OTHER DEPENDENCY GROUPS: A NEW GROUP SERVES A PROJECT, AS ABOVE.
 
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
@@ -887,4 +869,3 @@ rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch =
 # torch = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 # torchao = [{index = "pytorch-cu128", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'"}]
 # torchvision = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
-# torchaudio = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
