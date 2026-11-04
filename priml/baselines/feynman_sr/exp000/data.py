@@ -264,9 +264,9 @@ def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
         tree = ast.parse(formula_py, mode="eval")
         _validate_ast(tree)
         # Evaluate with restricted globals (AST validated, no user input)
-        result = eval(
+        result = eval(  # noqa: S307
             compile(tree, "<string>", "eval"), {"__builtins__": {}}, local_dict
-        )  # noqa: S307
+        )
         return np.asarray(result, dtype=np.float64)
     except (ValueError, SyntaxError):
         # Fallback: return zeros
