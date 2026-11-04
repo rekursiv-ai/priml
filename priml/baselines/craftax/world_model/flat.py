@@ -162,10 +162,10 @@ def flat_layout(batch: PackedBatch, *, context: int) -> FlatLayout:
     )
     kind = batch.kind
     opens = batch.segment != functional.pad(batch.segment[:, :-1], (1, 0), value=-1)
-    lead = (kind == Kind.OBS) & opens
+    lead = (kind == Kind.OBS.value) & opens
     size = (
         torch.where(
-            (kind == Kind.START) | (kind == Kind.ACT),
+            (kind == Kind.START.value) | (kind == Kind.ACT.value),
             HEAD + frame_slots * has_next.view(rows, t_g),
             0,
         )

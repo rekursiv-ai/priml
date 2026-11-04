@@ -46,11 +46,15 @@ def cleanup_cuda() -> Generator[None]:
 
     """
     torch_loaded_at_setup = "torch" in sys.modules
-    on_cuda_host = torch_loaded_at_setup and torch.cuda.is_available()
-    if on_cuda_host and _cuda_is_initialized():
+    reclaim = (
+        _cuda_reclaimer()
+        if torch_loaded_at_setup and torch.cuda.is_available()
+        else None
+    )
+    if reclaim is not None and _cuda_is_initialized():
         # Same gate as teardown: with no context there is nothing to reclaim,
         # and reaching `synchronize` would force the lazy init anyway.
-        _reclaim_cuda()
+        reclaim()
     yield
     if torch_loaded_at_setup:
         # All three are load-bearing: the setup snapshot, because a test faking
@@ -58,12 +62,12 @@ def cleanup_cuda() -> Generator[None]:
         # `_cuda_is_initialized()`, because forcing CUDA's lazy init on a host
         # the test never touched can raise; and a live `is_available()`, because
         # a test that faked CUDA away is still faked when this runs.
-        if on_cuda_host and _cuda_is_initialized() and torch.cuda.is_available():
-            _reclaim_cuda()
+        if reclaim is not None and _cuda_is_initialized() and torch.cuda.is_available():
+            reclaim()
     elif _cuda_is_initialized():
         # Torch first imported by the test body: no setup snapshot either way,
         # so reclaim only if that import path actually created a context.
-        _reclaim_cuda()
+        _cuda_reclaimer()()
 
 
 @contextmanager
@@ -184,7 +188,15 @@ def _cuda_is_initialized() -> bool:
     return "torch" in sys.modules and torch.cuda.is_initialized()
 
 
-def _reclaim_cuda() -> None:
-    """Synchronize and empty the CUDA cache. Callers gate on CUDA being present."""
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+# Bound now because a test's `monkeypatch` of these is still in place at this fixture's
+# teardown, and a fake taking other arguments would fail the test on any host with an
+# initialized GPU.
+def _cuda_reclaimer() -> Callable[[], None]:
+    """Return what synchronizes and empties the CUDA cache; callers gate on CUDA."""
+    synchronize, empty_cache = torch.cuda.synchronize, torch.cuda.empty_cache
+
+    def reclaim() -> None:
+        synchronize()
+        empty_cache()
+
+    return reclaim

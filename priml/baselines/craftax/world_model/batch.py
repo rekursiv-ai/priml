@@ -18,6 +18,8 @@ import enum
 import torch
 
 
+# Compare a tensor with `.value`: under torch 2.15 Dynamo folds `tensor == Kind.OBS` to a
+# Python bool, and the `torch.where` it feeds stops compiling.
 class Kind(enum.IntEnum):
     """Global position kinds."""
 
