@@ -586,13 +586,18 @@ def test_respawn_tears_down_the_degraded_pool_before_spawning(
 
 
 @pytest.mark.parametrize(
-    ("cuda_available", "expected_backend"),
-    [(False, "gloo"), (True, "cpu:gloo,cuda:nccl")],
+    ("cuda_available", "cuda_device_count", "expected_backend"),
+    [
+        (False, 0, "gloo"),
+        (True, 6, "cpu:gloo,cuda:nccl"),
+        (True, 1, "gloo"),
+    ],
 )
 def test_worker_configures_cpu_mesh_and_acknowledges_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cuda_available: bool,
+    cuda_device_count: int,
     expected_backend: str,
 ) -> None:
     mesh = MagicMock()
@@ -608,6 +613,7 @@ def test_worker_configures_cpu_mesh_and_acknowledges_completion(
     fake_dist = MagicMock()
     monkeypatch.setattr(testing, "td", fake_dist)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: cuda_device_count)
     monkeypatch.setenv("MASTER_ADDR", "before")
     monkeypatch.setenv("MASTER_PORT", "before")
 
