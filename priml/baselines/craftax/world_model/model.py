@@ -1146,9 +1146,9 @@ class WorldModel(nn.Module):
         """Place the start vector, projected frames, and action embeddings."""
         kind = batch.kind[..., None]
         obs = self.obs_proj(pooled)[batch.frame_of.clamp(min=0).long()]
-        act = self.action_embedding(batch.action.long()) * (kind == Kind.ACT)
-        inputs = torch.where(kind == Kind.OBS, obs, act)
-        return torch.where(kind == Kind.START, self.start, inputs)
+        act = self.action_embedding(batch.action.long()) * (kind == Kind.ACT.value)
+        inputs = torch.where(kind == Kind.OBS.value, obs, act)
+        return torch.where(kind == Kind.START.value, self.start, inputs)
 
     def _local_inputs(
         self,
@@ -1196,7 +1196,7 @@ def slot_terms(
     kind = batch.kind
     action = cross_entropy(logits.action, batch.action.roll(-1, dims=-1).long())
     scored_action = functional.pad(
-        (kind[:, :-1] == Kind.OBS) & (kind[:, 1:] == Kind.ACT),
+        (kind[:, :-1] == Kind.OBS.value) & (kind[:, 1:] == Kind.ACT.value),
         (0, 1),
     )
     prefix = len(schema.prefix_ranges)
