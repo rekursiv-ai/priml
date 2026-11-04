@@ -103,8 +103,8 @@ cuda = [
 ]
 # Feynman Symbolic Regression baseline. Requires deap for genetic algorithms,
 # sympy for symbolic math, and scipy-stubs for type checking.
-# Install via `pip install priml[feynman_sr]`.
-feynman_sr = [
+# Install via `pip install priml[feynman-sr]`.
+feynman-sr = [
     "deap>=1.4.1",
     "sympy>=1.13.0",
     "scipy-stubs>=1.18.1.1",
@@ -691,7 +691,7 @@ exclude = [
     "**/third_party/",
     # NEVER ADD MORE EXCLUSIONS! SUPPRESS IN FILE!
     "**/typings/",
-    "**/priml/baselines/feynman_sr/",
+    "**/priml/baselines/feynman-sr/",
     "**/priml/inference/",
 ]
 
@@ -730,7 +730,7 @@ project-excludes = [
     "typings/",
     "**/.export/typings/",
     "website/rekursiv-ai.github.io/_site/",
-    "**/priml/baselines/feynman_sr/",
+    "**/priml/baselines/feynman-sr/",
     "**/priml/inference/",
 ]
 search-path = ["typings"]
