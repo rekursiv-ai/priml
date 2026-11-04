@@ -973,7 +973,9 @@ def replace_subexpr_at_path(
 
 
 def crossover(
-    individual1: list, individual2: list, max_nodes: int = 30
+    individual1: list,
+    individual2: list,
+    max_nodes: int = 30,
 ) -> tuple[list, list]:
     """Perform crossover between two individuals.
 
@@ -1093,7 +1095,9 @@ def clone_individual(individual: list) -> list:
 
 
 def generate_individual(
-    grammar: Grammar, target_dim: DimVec, seed: int | None = None
+    grammar: Grammar,
+    target_dim: DimVec,
+    seed: int | None = None,
 ) -> list:
     """Generate a random individual.
 
