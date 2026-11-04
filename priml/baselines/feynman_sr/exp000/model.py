@@ -5,25 +5,23 @@ exp000: Baseline Genetic Algorithm with dimensional constraints.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import ClassVar
-
 import random
 import re
 import warnings
-
-from deap import algorithms, base, creator, tools
-from scipy.optimize import least_squares
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import ClassVar
 
 import numpy as np
 import sympy as sp
+from deap import algorithms, base, creator, tools
+from scipy.optimize import least_squares
 
 from priml.baselines.feynman_sr.exp000.data import (
     FeynmanDataset,
     FeynmanEquation,
     generate_data_for_equation,
 )
-
 
 # =============================================================================
 # DIMENSIONAL GRAMMAR (from feynman_sr/grammar.py)
@@ -41,7 +39,7 @@ class Dim:
     NAMES = ("M", "L", "T", "Q", "THETA")
 
     @classmethod
-    def from_str(cls, s: str) -> tuple[int, int, int, int, int] | None:
+    def from_str(cls, s: str) -> tuple[int, ...] | None:
         """Parse dimension string into vector.
 
         Args:
@@ -68,14 +66,14 @@ class Dim:
         for match in re.finditer(r"(THETA|[MLTQΘ])(?:\^(-?\d+))?", s):
             dim_str, exp = match.group(1), int(match.group(2) or 1)
             vec[mapping[dim_str]] = exp
-        return tuple(vec)
+        return tuple(vec)  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
 class DimVec:
     """Immutable dimensional vector for physical quantities."""
 
-    vec: tuple[int, int, int, int, int]
+    vec: tuple[int, ...]
 
     @classmethod
     def zero(cls) -> DimVec:
@@ -110,43 +108,103 @@ class DimVec:
 DIMENSIONLESS = DimVec.zero()
 
 
+def _dim_const(_: object) -> None:
+    return None
+
+
+def _dim_var(_: object) -> None:
+    return None
+
+
+def _dim_add(a: DimVec, b: DimVec) -> DimVec | None:
+    return a if a == b else None
+
+
+def _dim_sub(a: DimVec, b: DimVec) -> DimVec | None:
+    return a if a == b else None
+
+
+def _dim_mul(a: DimVec, b: DimVec) -> DimVec:
+    return a + b
+
+
+def _dim_div(a: DimVec, b: DimVec) -> DimVec:
+    return a - b
+
+
+def _dim_pow(a: DimVec, b: DimVec) -> DimVec | None:
+    return a + a if b.is_dimensionless() else None
+
+
+def _dim_pow2(a: DimVec) -> DimVec:
+    return a + a
+
+
+def _dim_pow3(a: DimVec) -> DimVec:
+    return a + a + a
+
+
+def _dim_pow_neg1(a: DimVec) -> DimVec:
+    return DimVec(tuple(-v for v in a.vec))
+
+
+def _dim_pow_half(a: DimVec) -> DimVec | None:
+    return (
+        DimVec(tuple(v // 2 for v in a.vec)) if all(v % 2 == 0 for v in a.vec) else None
+    )
+
+
+def _dim_neg(a: DimVec) -> DimVec:
+    return a
+
+
+def _dim_sqrt(a: DimVec) -> DimVec | None:
+    return (
+        DimVec(tuple(v // 2 for v in a.vec)) if all(v % 2 == 0 for v in a.vec) else None
+    )
+
+
+def _dim_sin(a: DimVec) -> DimVec | None:
+    return a if a.is_dimensionless() else None
+
+
+def _dim_cos(a: DimVec) -> DimVec | None:
+    return a if a.is_dimensionless() else None
+
+
+def _dim_exp(a: DimVec) -> DimVec | None:
+    return a if a.is_dimensionless() else None
+
+
+def _dim_log(a: DimVec) -> DimVec | None:
+    return a if a.is_dimensionless() else None
+
+
+def _dim_abs(a: DimVec) -> DimVec:
+    return a
+
+
 class OpType:
     """Operator type definitions with dimensional rules."""
 
-    CONST = ("const", 0, lambda *_: None)
-    VAR = ("var", 0, lambda *_: None)
-    ADD = ("add", 2, lambda a, b: a if a == b else None)
-    SUB = ("sub", 2, lambda a, b: a if a == b else None)
-    MUL = ("mul", 2, lambda a, b: a + b)
-    DIV = ("div", 2, lambda a, b: a - b)
-    POW = ("pow", 2, lambda a, b: a + a if b.is_dimensionless() else None)
-    POW2 = ("pow2", 1, lambda a: a + a)
-    POW3 = ("pow3", 1, lambda a: a + a + a)
-    POW_NEG1 = ("pow_neg1", 1, lambda a: DimVec(tuple(-v for v in a.vec)))
-    POW_HALF = (
-        "pow_half",
-        1,
-        lambda a: (
-            DimVec(tuple(v // 2 for v in a.vec))
-            if all(v % 2 == 0 for v in a.vec)
-            else None
-        ),
-    )
-    NEG = ("neg", 1, lambda a: a)
-    SQRT = (
-        "sqrt",
-        1,
-        lambda a: (
-            DimVec(tuple(v // 2 for v in a.vec))
-            if all(v % 2 == 0 for v in a.vec)
-            else None
-        ),
-    )
-    SIN = ("sin", 1, lambda a: a if a.is_dimensionless() else None)
-    COS = ("cos", 1, lambda a: a if a.is_dimensionless() else None)
-    EXP = ("exp", 1, lambda a: a if a.is_dimensionless() else None)
-    LOG = ("log", 1, lambda a: a if a.is_dimensionless() else None)
-    ABS = ("abs", 1, lambda a: a)
+    CONST = ("const", 0, _dim_const)
+    VAR = ("var", 0, _dim_var)
+    ADD = ("add", 2, _dim_add)
+    SUB = ("sub", 2, _dim_sub)
+    MUL = ("mul", 2, _dim_mul)
+    DIV = ("div", 2, _dim_div)
+    POW = ("pow", 2, _dim_pow)
+    POW2 = ("pow2", 1, _dim_pow2)
+    POW3 = ("pow3", 1, _dim_pow3)
+    POW_NEG1 = ("pow_neg1", 1, _dim_pow_neg1)
+    POW_HALF = ("pow_half", 1, _dim_pow_half)
+    NEG = ("neg", 1, _dim_neg)
+    SQRT = ("sqrt", 1, _dim_sqrt)
+    SIN = ("sin", 1, _dim_sin)
+    COS = ("cos", 1, _dim_cos)
+    EXP = ("exp", 1, _dim_exp)
+    LOG = ("log", 1, _dim_log)
+    ABS = ("abs", 1, _dim_abs)
 
     ALL_OPS = (
         CONST,
@@ -187,7 +245,7 @@ class OpType:
         LOG,
         ABS,
     )
-    SYMBOLS: ClassVar[dict] = {
+    SYMBOLS: ClassVar[dict[str, str]] = {
         "add": "+",
         "sub": "-",
         "mul": "*",
@@ -206,7 +264,7 @@ class OpType:
         "abs": "|·|",
     }
 
-    def __init__(self, name: str, arity: int, dim_rule: callable) -> None:
+    def __init__(self, name: str, arity: int, dim_rule: Callable) -> None:
         self.op_name = name
         self.arity = arity
         self.dim_rule = dim_rule
@@ -810,8 +868,10 @@ def evaluate_individual(
             return (-float("inf"),)
         nmse = mse / var
 
-        individual.optimized_expr = optimized_expr
-        individual.const_values = const_values
+        # Store optimized expression and constant values on individual
+        # DEAP Individual is a list with dynamic attributes
+        individual.optimized_expr = optimized_expr  # type: ignore[attr-defined]
+        individual.const_values = const_values  # type: ignore[attr-defined]
         return (-nmse,)
     except (ValueError, RuntimeError):
         return (-float("inf"),)
@@ -922,8 +982,8 @@ def crossover(
         return individual1, individual2
 
     for _ in range(10):
-        path1 = random.choice(paths1)  # noqa: S311
-        path2 = random.choice(paths2)  # noqa: S311
+        path1 = random.choice(paths1)
+        path2 = random.choice(paths2)
         sub1 = get_subexpr_at_path(expr1, path1)
         sub2 = get_subexpr_at_path(expr2, path2)
         if sub1.dim == sub2.dim:
@@ -932,8 +992,8 @@ def crossover(
             if new1 and new2:
                 individual1[0] = new1
                 individual2[0] = new2
-                del individual1.fitness.values
-                del individual2.fitness.values
+                del individual1.fitness.values  # type: ignore[attr-defined]
+                del individual2.fitness.values  # type: ignore[attr-defined]
                 return individual1, individual2
     return individual1, individual2
 
@@ -964,23 +1024,25 @@ def mutate(
     rng = np.random.default_rng(seed)
     # With 20% probability, insert a constant instead of replacing subtree
     if rng.random() < 0.2:
-        path = rng.choice(paths)
+        path = random.choice(paths)
         subexpr = get_subexpr_at_path(expr, path)
         # Multiply by a constant (dimensionless)
         const = TypedExpr.constant(rng.uniform(0.1, 5.0), DIMENSIONLESS)
-        new_expr = replace_subexpr_at_path(
-            expr,
-            path,
-            TypedExpr.binary("mul", subexpr, const),
-            max_nodes,
-        )
-        if new_expr:
-            individual[0] = new_expr
-            del individual.fitness.values
-            return (individual,)
+        binary_expr = TypedExpr.binary("mul", subexpr, const)
+        if binary_expr is not None:
+            new_expr = replace_subexpr_at_path(
+                expr,
+                path,
+                binary_expr,
+                max_nodes,
+            )
+            if new_expr:
+                individual[0] = new_expr
+                del individual.fitness.values  # type: ignore[attr-defined]
+                return (individual,)
 
     # Standard subtree replacement
-    path = random.choice(paths)  # noqa: S311
+    path = random.choice(paths)
     subexpr = get_subexpr_at_path(expr, path)
     replacements = grammar.generate_dimension(
         subexpr.dim,
@@ -990,12 +1052,12 @@ def mutate(
     )
     if not replacements:
         return (individual,)
-    replacement = random.choice(replacements)  # noqa: S311
+    replacement = random.choice(replacements)
     new_expr = replace_subexpr_at_path(expr, path, replacement, max_nodes)
     if new_expr is None:
         return (individual,)
     individual[0] = new_expr
-    del individual.fitness.values
+    del individual.fitness.values  # type: ignore[attr-defined]
     return (individual,)
 
 
@@ -1010,9 +1072,9 @@ def clone_individual(individual: list) -> list:
 
     """
     clone = creator.Individual(list(individual))
-    clone.fitness = (
-        creator.FitnessMin(individual.fitness.values)
-        if individual.fitness.valid
+    clone.fitness = (  # type: ignore[attr-defined]
+        creator.FitnessMin(individual.fitness.values)  # type: ignore[attr-defined]
+        if individual.fitness.valid  # type: ignore[attr-defined]
         else creator.FitnessMin()
     )
     return clone
@@ -1038,8 +1100,7 @@ def generate_individual(
         n_samples=5,
         seed=seed,
     )
-    rng = np.random.default_rng(seed)
-    expr = rng.choice(exprs) if exprs else TypedExpr.constant(0.5, DimVec.parse("1"))
+    expr = random.choice(exprs) if exprs else TypedExpr.constant(0.5, DimVec.parse("1"))
     return creator.Individual([expr])
 
 
@@ -1084,7 +1145,7 @@ def run_ga_search(
 
     # Set seeds for reproducibility
     random.seed(config.seed)
-    np.random.seed(config.seed)  # noqa: NPY002
+    np.random.seed(config.seed)
 
     toolbox = base.Toolbox()
     toolbox.register(
@@ -1232,7 +1293,7 @@ class FeynmanSRModel:
             best_expr, nmse, info = self.solve_equation(eq, variables, target)
 
             # Check exact recovery (symbolic equality with 1% constant tolerance)
-            exact = self.check_exact_recovery(best_expr, eq.formula, eq.variables)
+            exact = self.check_exact_recovery(best_expr, eq.formula)
             if exact:
                 exact_recoveries += 1
 

@@ -5,12 +5,11 @@ Downloads and caches the 120 Feynman equations from SRSD benchmark.
 
 from __future__ import annotations
 
+import ast
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import ast
-import json
 
 import numpy as np
 import requests
@@ -52,10 +51,13 @@ class FeynmanDataset:
     def __getitem__(self, idx: int) -> FeynmanEquation:
         return self.equations[idx]
 
+    def __iter__(self):
+        return iter(self.equations)
+
 
 # SRSD Feynman equation metadata (subset for exp000 - 10 equations for fast iteration)
 # Full 120 equations loaded from cached JSON
-FEYNMAN_10_SUBSET = [
+FEYNMAN_10_SUBSET: list[dict[str, str | dict[str, str]]] = [
     {
         "eq_id": "feynman-i.12.1",
         "formula": "x0*x1",
@@ -250,7 +252,7 @@ def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
         tree = ast.parse(formula_py, mode="eval")
         _validate_ast(tree)
         # Evaluate with restricted globals
-        return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, local_dict)  # noqa: S307
+        return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, local_dict)
     except (ValueError, SyntaxError):
         # Fallback: return zeros
         n = len(next(iter(variables.values())))
