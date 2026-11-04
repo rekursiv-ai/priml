@@ -8,10 +8,10 @@ Survey (arXiv:2401.07851) shows FP16→FP32 loses 27-61% speedup — FP4 is unex
 Search space: 480 configs for agent swarm campaign.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-from configgle import Fig, field
+from configgle import Fig
 
 
 class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
