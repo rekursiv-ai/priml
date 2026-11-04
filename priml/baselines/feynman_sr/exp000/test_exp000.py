@@ -66,8 +66,6 @@ def test_exp000_reproducibility() -> None:
             f"  {status} {r['eq_id']}: NMSE={r['nmse']:.6f}, expr={r['expression'][:80]}"
         )
 
-    return
-
 
 if __name__ == "__main__":
     test_exp000_reproducibility()

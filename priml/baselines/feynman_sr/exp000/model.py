@@ -8,7 +8,7 @@ from __future__ import annotations
 import random
 import warnings
 from dataclasses import dataclass, field
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import numpy as np
 from deap import algorithms, base, creator, tools
@@ -31,7 +31,7 @@ class Dim:
     NAMES = ("M", "L", "T", "Q", "THETA")
 
     @classmethod
-    def from_str(cls, s: str) -> Optional[tuple[int, int, int, int, int]]:
+    def from_str(cls, s: str) -> tuple[int, int, int, int, int] | None:
         """Parse dimension string into vector.
 
         Args:
@@ -68,19 +68,19 @@ class DimVec:
     vec: tuple[int, int, int, int, int]
 
     @classmethod
-    def zero(cls) -> "DimVec":
+    def zero(cls) -> DimVec:
         """Create dimensionless vector."""
         return cls((0, 0, 0, 0, 0))
 
     @classmethod
-    def parse(cls, s: str) -> "DimVec":
+    def parse(cls, s: str) -> DimVec:
         """Parse dimension string into DimVec."""
         return cls(Dim.from_str(s) or (0, 0, 0, 0, 0))
 
-    def __add__(self, other: "DimVec") -> "DimVec":
+    def __add__(self, other: DimVec) -> DimVec:
         return DimVec(tuple(a + b for a, b in zip(self.vec, other.vec)))
 
-    def __sub__(self, other: "DimVec") -> "DimVec":
+    def __sub__(self, other: DimVec) -> DimVec:
         return DimVec(tuple(a - b for a, b in zip(self.vec, other.vec)))
 
     def is_dimensionless(self) -> bool:
@@ -93,7 +93,7 @@ class DimVec:
     def __hash__(self) -> int:
         return hash(self.vec)
 
-    def __deepcopy__(self, memo: dict) -> "DimVec":
+    def __deepcopy__(self, memo: dict) -> DimVec:
         return self
 
 
@@ -202,7 +202,7 @@ class OpType:
         self.dim_rule = dim_rule
 
     @classmethod
-    def from_name(cls, name: str) -> "OpType":
+    def from_name(cls, name: str) -> OpType:
         """Create OpType from operator name."""
         for op in cls.ALL_OPS:
             if op[0] == name:
@@ -215,28 +215,28 @@ class TypedExpr:
     """Typed expression node with dimensional information."""
 
     op: OpType
-    children: tuple["TypedExpr", ...]
+    children: tuple[TypedExpr, ...]
     dim: DimVec
-    value: Optional[float] = None
-    var_name: Optional[str] = None
-    const_id: Optional[int] = None
+    value: float | None = None
+    var_name: str | None = None
+    const_id: int | None = None
 
     @classmethod
     def constant(
-        cls, value: float, dim: DimVec = DIMENSIONLESS, const_id: Optional[int] = None
-    ) -> "TypedExpr":
+        cls, value: float, dim: DimVec = DIMENSIONLESS, const_id: int | None = None
+    ) -> TypedExpr:
         """Create constant expression."""
         return cls(OpType.from_name("const"), (), dim, value=value, const_id=const_id)
 
     @classmethod
-    def variable(cls, name: str, dim: DimVec) -> "TypedExpr":
+    def variable(cls, name: str, dim: DimVec) -> TypedExpr:
         """Create variable expression."""
         return cls(OpType.from_name("var"), (), dim, var_name=name)
 
     @classmethod
     def binary(
-        cls, op_name: str, left: "TypedExpr", right: "TypedExpr"
-    ) -> Optional["TypedExpr"]:
+        cls, op_name: str, left: TypedExpr, right: TypedExpr
+    ) -> TypedExpr | None:
         """Create binary operation expression."""
         op = OpType.from_name(op_name)
         dim = op.dim_rule(left.dim, right.dim)
@@ -245,7 +245,7 @@ class TypedExpr:
         return cls(op, (left, right), dim)
 
     @classmethod
-    def unary(cls, op_name: str, child: "TypedExpr") -> Optional["TypedExpr"]:
+    def unary(cls, op_name: str, child: TypedExpr) -> TypedExpr | None:
         """Create unary operation expression."""
         op = OpType.from_name(op_name)
         dim = op.dim_rule(child.dim)
@@ -269,10 +269,10 @@ class TypedExpr:
             sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
             return f"({self.children[0]!s} {sym} {self.children[1]!s})"
 
-    def __deepcopy__(self, memo: dict) -> "TypedExpr":
+    def __deepcopy__(self, memo: dict) -> TypedExpr:
         return self
 
-    def get_constants(self) -> list["TypedExpr"]:
+    def get_constants(self) -> list[TypedExpr]:
         """Get all constant nodes in expression."""
         if self.op.op_name == "const":
             return [self]
@@ -287,11 +287,11 @@ class TypedExpr:
             return 1
         return 1 + sum(c.count_nodes() for c in self.children)
 
-    def set_constants(self, new_values: list) -> "TypedExpr":
+    def set_constants(self, new_values: list) -> TypedExpr:
         """Create new expression with updated constant values."""
         const_iter = iter(new_values)
 
-        def replace_consts(expr: "TypedExpr") -> "TypedExpr":
+        def replace_consts(expr: TypedExpr) -> TypedExpr:
             if expr.op.op_name == "const":
                 return TypedExpr.constant(next(const_iter), expr.dim, expr.const_id)
             if not expr.children:
@@ -497,12 +497,12 @@ class Grammar:
 
     def generate_random_expr(
         self,
-        target_dim: Optional[DimVec] = None,
+        target_dim: DimVec | None = None,
         depth: int = 0,
-        rng: Optional[np.random.Generator] = None,
+        rng: np.random.Generator | None = None,
         max_nodes: int = 20,
-        _call_count: Optional[list] = None,
-    ) -> Optional[TypedExpr]:
+        _call_count: list | None = None,
+    ) -> TypedExpr | None:
         """Generate random expression matching target dimension.
 
         Args:
@@ -640,10 +640,10 @@ class Grammar:
     def generate_dimension(
         self,
         target_dim: DimVec,
-        max_depth: Optional[int] = None,
+        max_depth: int | None = None,
         max_nodes: int = 20,
         n_samples: int = 10,
-        seed: Optional[int] = None,
+        seed: int | None = None,
     ) -> list[TypedExpr]:
         """Generate multiple expressions matching target dimension.
 
@@ -792,7 +792,7 @@ def evaluate_individual(
 def collect_subtree_paths(
     expr: TypedExpr,
     path: tuple[int, ...] = (),
-    visited: Optional[set] = None,
+    visited: set | None = None,
     max_depth: int = 15,
 ) -> list[tuple[int, ...]]:
     """Collect all subtree paths in expression.
@@ -837,7 +837,7 @@ def get_subexpr_at_path(expr: TypedExpr, path: tuple[int, ...]) -> TypedExpr:
 
 def replace_subexpr_at_path(
     expr: TypedExpr, path: tuple[int, ...], replacement: TypedExpr, max_nodes: int = 30
-) -> Optional[TypedExpr]:
+) -> TypedExpr | None:
     """Replace subexpression at path with new expression.
 
     Args:
@@ -903,7 +903,7 @@ def mutate(
     grammar: Grammar,
     target_dim: DimVec,
     max_nodes: int = 30,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ):
     """Mutate an individual by replacing a random subtree.
 
@@ -971,9 +971,7 @@ def clone_individual(individual):
     return clone
 
 
-def generate_individual(
-    grammar: Grammar, target_dim: DimVec, seed: Optional[int] = None
-):
+def generate_individual(grammar: Grammar, target_dim: DimVec, seed: int | None = None):
     """Generate a random individual.
 
     Args:
