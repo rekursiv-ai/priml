@@ -1718,6 +1718,70 @@ def test_feature_slope_excludes_the_exact_denominator_boundary() -> None:
     )
 
 
+@pytest.mark.parametrize("particle", [False, True])
+def test_feature_planes_are_float32_before_stacking(
+    monkeypatch: pytest.MonkeyPatch,
+    particle: bool,
+) -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=4,
+        target_rows=8,
+        downsample=2,
+        reference_columns=7,
+    )
+    config.channels = ["tw_tvt_rel", "gr"]
+    if particle:
+        config.particle = ParticleFeatures.Config()
+        config.channels.extend(("pf_tvt", "pf_tvt_ffbsi"))
+    stack = np.stack
+
+    def stack_float32(
+        arrays: Sequence[NDArray[np.generic]],
+        axis: int = 0,
+    ) -> NDArray[np.generic]:
+        assert all(values.dtype == np.float32 for values in arrays)
+        return stack(arrays, axis=axis)
+
+    monkeypatch.setattr(np, "stack", stack_float32)
+    item = config.make()(feature_well(), training=True)
+    assert item.arrays["unet_static"].dtype == np.float32
+
+
+def test_finite_gamma_survives_missing_fraction_rounding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=4,
+        target_rows=8,
+        downsample=2,
+        reference_columns=5,
+    )
+    builder = config.make()
+    well = feature_well()
+    expected = builder(well, training=True).auxiliary["GR_penalty_error"]
+    missing_fraction = np.float32(2**25 / (2**25 + 1))
+    assert missing_fraction == 1
+    missing = ~np.isfinite(builder._window(well).raw["gamma"])
+    bin_mean = data._bin_mean
+
+    def rounded_missing_fraction(
+        values: NDArray[np.float32],
+        valid: NDArray[np.bool_],
+        downsample: int,
+        bins: int,
+    ) -> NDArray[np.float32]:
+        result = bin_mean(values, valid, downsample, bins)
+        return (
+            np.full_like(result, missing_fraction)
+            if np.array_equal(values, missing)
+            else result
+        )
+
+    monkeypatch.setattr(data, "_bin_mean", rounded_missing_fraction)
+    actual = builder(well, training=True).auxiliary["GR_penalty_error"]
+    np.testing.assert_array_equal(actual, expected, strict=True)
+
+
 def feature_well() -> WellRecord:
     """Build the deterministic paths of the feature tests."""
     row = np.arange(97, dtype=np.float32)
