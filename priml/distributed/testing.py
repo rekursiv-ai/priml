@@ -371,10 +371,13 @@ class WorkerPool:
         # Setup fake process group.
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(port)
-        # The combined "cpu:gloo,cuda:nccl" backend eagerly constructs the NCCL
-        # backend even when no CUDA tensor is ever used, which raises on a
-        # GPU-less host. Select gloo-only there so CPU multirank tests run.
-        backend = "cpu:gloo,cuda:nccl" if torch.cuda.is_available() else "gloo"
+        # The combined backend eagerly creates NCCL, whose rank-to-GPU mapping
+        # requires one distinct CUDA device per worker.
+        backend = (
+            "cpu:gloo,cuda:nccl"
+            if torch.cuda.is_available() and torch.cuda.device_count() >= world_size
+            else "gloo"
+        )
         # gloo's default op timeout is 30 minutes; a starved or port-collided
         # rendezvous would then block the dispatching parent on ack_queue.get()
         # for half an hour, long past pytest's per-test timeout (the failure

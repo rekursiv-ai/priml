@@ -268,7 +268,12 @@ def test_fixture_construction_ignores_sampler_bits_and_preserves_rng(
         del args, kwargs
         with torch.no_grad():
             torch.rand(17)
-            return tensor.fill_(0.125)
+            values = torch.arange(
+                tensor.numel(),
+                device=tensor.device,
+                dtype=tensor.dtype,
+            )
+            return tensor.copy_(values.sin().reshape_as(tensor))
 
     monkeypatch.setattr(
         "priml.model.init.fill_truncated_normal",
