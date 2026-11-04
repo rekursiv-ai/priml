@@ -763,6 +763,12 @@ include = ["*_test.py"]
 [tool.ty.overrides.rules]
 invalid-key = "ignore"
 
+[[tool.ty.overrides]]
+include = ["priml/baselines/feynman_sr/**"]
+
+[tool.ty.overrides.rules]
+all = "ignore"
+
 [tool.ty.terminal]
 error-on-warning = true
 output-format = "concise"   # Choices: full concise gitlab github junit
@@ -784,6 +790,7 @@ project-excludes = [
     "typings/",
     "**/.export/typings/",
     "website/rekursiv-ai.github.io/_site/",
+    "**/priml/baselines/feynman_sr/**",
 ]
 search-path = ["typings"]
 # Pinned beside the config: an interpreter found through a symlinked home splits
