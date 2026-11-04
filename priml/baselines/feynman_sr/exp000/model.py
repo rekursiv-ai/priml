@@ -39,6 +39,7 @@ class Dim:
 
         Returns:
             Tuple of exponents (M, L, T, Q, THETA) or None if dimensionless
+
         """
         s = s.upper().replace("[", "").replace("]", "")
         if not s or s == "1":
@@ -223,7 +224,10 @@ class TypedExpr:
 
     @classmethod
     def constant(
-        cls, value: float, dim: DimVec = DIMENSIONLESS, const_id: int | None = None
+        cls,
+        value: float,
+        dim: DimVec = DIMENSIONLESS,
+        const_id: int | None = None,
     ) -> TypedExpr:
         """Create constant expression."""
         return cls(OpType.from_name("const"), (), dim, value=value, const_id=const_id)
@@ -235,7 +239,10 @@ class TypedExpr:
 
     @classmethod
     def binary(
-        cls, op_name: str, left: TypedExpr, right: TypedExpr
+        cls,
+        op_name: str,
+        left: TypedExpr,
+        right: TypedExpr,
     ) -> TypedExpr | None:
         """Create binary operation expression."""
         op = OpType.from_name(op_name)
@@ -256,18 +263,16 @@ class TypedExpr:
     def __str__(self) -> str:
         if self.op.op_name == "const":
             return f"{self.value:.6g}"
-        elif self.op.op_name == "var":
+        if self.op.op_name == "var":
             return self.var_name or "x"
-        elif self.op.arity == 1:
+        if self.op.arity == 1:
             sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
             child_str = str(self.children[0])
             if self.op.op_name in ("pow2", "pow3", "pow_neg1", "pow_half"):
                 return f"{child_str}{sym}"
-            else:
-                return f"{sym}({child_str})"
-        else:
-            sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
-            return f"({self.children[0]!s} {sym} {self.children[1]!s})"
+            return f"{sym}({child_str})"
+        sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
+        return f"({self.children[0]!s} {sym} {self.children[1]!s})"
 
     def __deepcopy__(self, memo: dict) -> TypedExpr:
         return self
@@ -305,18 +310,18 @@ class TypedExpr:
         """Evaluate expression with given variable values."""
         if self.op.op_name == "const":
             return np.full_like(next(iter(variables.values())), self.value)
-        elif self.op.op_name == "var":
+        if self.op.op_name == "var":
             return variables[self.var_name]
 
         child_vals = [c.evaluate(variables) for c in self.children]
 
         if self.op.op_name == "add":
             return child_vals[0] + child_vals[1]
-        elif self.op.op_name == "sub":
+        if self.op.op_name == "sub":
             return child_vals[0] - child_vals[1]
-        elif self.op.op_name == "mul":
+        if self.op.op_name == "mul":
             return child_vals[0] * child_vals[1]
-        elif self.op.op_name == "div":
+        if self.op.op_name == "div":
             with np.errstate(divide="ignore", invalid="ignore"):
                 denom = child_vals[1]
                 safe = np.where(
@@ -368,7 +373,10 @@ class Grammar:
     """Fast dimensional grammar for generating valid expressions - SIMPLIFIED."""
 
     def __init__(
-        self, variables: dict[str, DimVec], target_dim: DimVec, max_depth: int = 10
+        self,
+        variables: dict[str, DimVec],
+        target_dim: DimVec,
+        max_depth: int = 10,
     ) -> None:
         """Initialize grammar with variable dimensions and target dimension.
 
@@ -376,6 +384,7 @@ class Grammar:
             variables: Mapping from variable name to dimension vector
             target_dim: Target dimension for generated expressions
             max_depth: Maximum depth for expression generation
+
         """
         self.variables = variables
         self.target_dim = target_dim
@@ -514,6 +523,7 @@ class Grammar:
 
         Returns:
             TypedExpr or None if generation fails
+
         """
         if _call_count is None:
             _call_count = [0]
@@ -533,7 +543,8 @@ class Grammar:
                 return TypedExpr.variable(rng.choice(matching_vars), target)
             if rng.random() < 0.3:
                 return TypedExpr.constant(
-                    rng.choice([0.5, 1.0, 2.0, 2 * np.pi]), target
+                    rng.choice([0.5, 1.0, 2.0, 2 * np.pi]),
+                    target,
                 )
             if depth < 3 and rng.random() < 0.3:
                 for op in [
@@ -604,10 +615,18 @@ class Grammar:
                     continue
                 # Recursively generate sub-expressions
                 left = self.generate_random_expr(
-                    d1, depth + 1, rng, max_nodes, _call_count
+                    d1,
+                    depth + 1,
+                    rng,
+                    max_nodes,
+                    _call_count,
                 )
                 right = self.generate_random_expr(
-                    d2, depth + 1, rng, max_nodes, _call_count
+                    d2,
+                    depth + 1,
+                    rng,
+                    max_nodes,
+                    _call_count,
                 )
                 if left and right:
                     expr = TypedExpr.binary(op.op_name, left, right)
@@ -656,12 +675,16 @@ class Grammar:
 
         Returns:
             List of generated expressions
+
         """
         results = []
         rng = np.random.default_rng(seed)
         for _ in range(n_samples):
             expr = self.generate_random_expr(
-                target_dim, depth=0, rng=rng, max_nodes=max_nodes
+                target_dim,
+                depth=0,
+                rng=rng,
+                max_nodes=max_nodes,
             )
             if expr:
                 results.append(expr)
@@ -693,6 +716,7 @@ def fit_constants(
 
     Returns:
         Tuple of (optimized expression, constant values dict)
+
     """
     try:
         from scipy.optimize import least_squares
@@ -758,13 +782,17 @@ def evaluate_individual(
 
     Returns:
         Tuple of negative NMSE (for minimization)
+
     """
     expr = individual[0]
     try:
         has_consts = any(c.op.op_name == "const" for c in expr.get_constants())
         if has_consts:
             optimized_expr, const_values = fit_constants(
-                expr, variables, target_values, max_iter=20
+                expr,
+                variables,
+                target_values,
+                max_iter=20,
             )
         else:
             optimized_expr, const_values = expr, {}
@@ -805,6 +833,7 @@ def collect_subtree_paths(
 
     Returns:
         List of path tuples
+
     """
     if visited is None:
         visited = set()
@@ -829,6 +858,7 @@ def get_subexpr_at_path(expr: TypedExpr, path: tuple[int, ...]) -> TypedExpr:
 
     Returns:
         Subexpression at path
+
     """
     for idx in path:
         expr = expr.children[idx]
@@ -836,7 +866,10 @@ def get_subexpr_at_path(expr: TypedExpr, path: tuple[int, ...]) -> TypedExpr:
 
 
 def replace_subexpr_at_path(
-    expr: TypedExpr, path: tuple[int, ...], replacement: TypedExpr, max_nodes: int = 30
+    expr: TypedExpr,
+    path: tuple[int, ...],
+    replacement: TypedExpr,
+    max_nodes: int = 30,
 ) -> TypedExpr | None:
     """Replace subexpression at path with new expression.
 
@@ -848,13 +881,17 @@ def replace_subexpr_at_path(
 
     Returns:
         New expression with replacement, or None if too large
+
     """
     if not path:
         return replacement if replacement.count_nodes() <= max_nodes else None
     idx = path[0]
     new_children = list(expr.children)
     replaced = replace_subexpr_at_path(
-        expr.children[idx], path[1:], replacement, max_nodes
+        expr.children[idx],
+        path[1:],
+        replacement,
+        max_nodes,
     )
     if replaced is None:
         return None
@@ -873,6 +910,7 @@ def crossover(individual1, individual2, max_nodes: int = 30):
 
     Returns:
         Tuple of offspring individuals
+
     """
     expr1, expr2 = individual1[0], individual2[0]
     paths1 = collect_subtree_paths(expr1, max_depth=15)
@@ -916,6 +954,7 @@ def mutate(
 
     Returns:
         Tuple containing mutated individual
+
     """
     expr = individual[0]
     paths = collect_subtree_paths(expr, max_depth=15)
@@ -929,7 +968,10 @@ def mutate(
         # Multiply by a constant (dimensionless)
         const = TypedExpr.constant(random.uniform(0.1, 5.0), DIMENSIONLESS)
         new_expr = replace_subexpr_at_path(
-            expr, path, TypedExpr.binary("mul", subexpr, const), max_nodes
+            expr,
+            path,
+            TypedExpr.binary("mul", subexpr, const),
+            max_nodes,
         )
         if new_expr:
             individual[0] = new_expr
@@ -940,7 +982,11 @@ def mutate(
     path = random.choice(paths)
     subexpr = get_subexpr_at_path(expr, path)
     replacements = grammar.generate_dimension(
-        subexpr.dim, max_depth=4, n_samples=10, max_nodes=max_nodes, seed=seed
+        subexpr.dim,
+        max_depth=4,
+        n_samples=10,
+        max_nodes=max_nodes,
+        seed=seed,
     )
     if not replacements:
         return (individual,)
@@ -961,6 +1007,7 @@ def clone_individual(individual):
 
     Returns:
         Cloned individual
+
     """
     clone = creator.Individual(list(individual))
     clone.fitness = (
@@ -981,9 +1028,14 @@ def generate_individual(grammar: Grammar, target_dim: DimVec, seed: int | None =
 
     Returns:
         New individual
+
     """
     exprs = grammar.generate_dimension(
-        target_dim, max_depth=6, n_samples=5, max_nodes=20, seed=seed
+        target_dim,
+        max_depth=6,
+        n_samples=5,
+        max_nodes=20,
+        seed=seed,
     )
     if exprs:
         expr = random.choice(exprs)
@@ -1026,6 +1078,7 @@ def run_ga_search(
 
     Returns:
         Tuple of (best expression, best NMSE, info dict)
+
     """
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -1035,7 +1088,8 @@ def run_ga_search(
 
     toolbox = base.Toolbox()
     toolbox.register(
-        "individual", lambda: generate_individual(grammar, target_dim, seed=config.seed)
+        "individual",
+        lambda: generate_individual(grammar, target_dim, seed=config.seed),
     )
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("mate", crossover, max_nodes=config.max_nodes)
@@ -1116,7 +1170,10 @@ class FeynmanSRModel:
     ga_config: GAConfig = field(default_factory=GAConfig)
 
     def solve_equation(
-        self, eq, variables, target_values
+        self,
+        eq,
+        variables,
+        target_values,
     ) -> tuple[TypedExpr, float, dict]:
         """Solve a single Feynman equation.
 
@@ -1127,20 +1184,31 @@ class FeynmanSRModel:
 
         Returns:
             Tuple of (best expression, NMSE, info dict)
+
         """
         # Build grammar
         var_dims = {name: DimVec.parse(dim) for name, dim in eq.variables.items()}
         target_dim = DimVec.parse(eq.target_dim)
         grammar = Grammar(
-            var_dims, target_dim, max_depth=self.ga_config.max_generations // 5 + 5
+            var_dims,
+            target_dim,
+            max_depth=self.ga_config.max_generations // 5 + 5,
         )
 
         return run_ga_search(
-            eq.eq_id, grammar, target_dim, variables, target_values, self.ga_config
+            eq.eq_id,
+            grammar,
+            target_dim,
+            variables,
+            target_values,
+            self.ga_config,
         )
 
     def evaluate_on_dataset(
-        self, dataset, n_samples: int = 1000, seed: int = 42
+        self,
+        dataset,
+        n_samples: int = 1000,
+        seed: int = 42,
     ) -> dict:
         """Evaluate model on a dataset split.
 
@@ -1151,13 +1219,16 @@ class FeynmanSRModel:
 
         Returns:
             Metrics dictionary
+
         """
         results = []
         exact_recoveries = 0
 
         for eq in dataset:
             variables, target = generate_data_for_equation(
-                eq, n_samples=n_samples, seed=seed
+                eq,
+                n_samples=n_samples,
+                seed=seed,
             )
             best_expr, nmse, info = self.solve_equation(eq, variables, target)
 
@@ -1174,7 +1245,7 @@ class FeynmanSRModel:
                     "nmse": nmse,
                     "exact": exact,
                     "complexity": info["complexity"],
-                }
+                },
             )
 
         recovery_rate = exact_recoveries / len(dataset) if dataset else 0.0
@@ -1186,7 +1257,10 @@ class FeynmanSRModel:
         }
 
     def check_exact_recovery(
-        self, expr: TypedExpr, true_formula: str, variables: dict
+        self,
+        expr: TypedExpr,
+        true_formula: str,
+        variables: dict,
     ) -> bool:
         """Check if expression matches true formula (symbolic + constant tolerance).
 
@@ -1197,11 +1271,15 @@ class FeynmanSRModel:
 
         Returns:
             True if expressions match
+
         """
         return self._check_exact_recovery(expr, true_formula, variables)
 
     def _check_exact_recovery(
-        self, expr: TypedExpr, true_formula: str, variables: dict
+        self,
+        expr: TypedExpr,
+        true_formula: str,
+        variables: dict,
     ) -> bool:
         """Check if expression matches true formula (symbolic + constant tolerance).
 
@@ -1212,6 +1290,7 @@ class FeynmanSRModel:
 
         Returns:
             True if expressions match
+
         """
         try:
             import sympy as sp
@@ -1232,43 +1311,44 @@ class FeynmanSRModel:
 
         Returns:
             Sympy expression
+
         """
         import sympy as sp
 
         if expr.op.op_name == "const":
             return sp.nsimplify(expr.value, [sp.pi, sp.E])
-        elif expr.op.op_name == "var":
+        if expr.op.op_name == "var":
             return sp.symbols(expr.var_name)
-        elif expr.op.op_name == "add":
+        if expr.op.op_name == "add":
             return self._to_sympy(expr.children[0]) + self._to_sympy(expr.children[1])
-        elif expr.op.op_name == "sub":
+        if expr.op.op_name == "sub":
             return self._to_sympy(expr.children[0]) - self._to_sympy(expr.children[1])
-        elif expr.op.op_name == "mul":
+        if expr.op.op_name == "mul":
             return self._to_sympy(expr.children[0]) * self._to_sympy(expr.children[1])
-        elif expr.op.op_name == "div":
+        if expr.op.op_name == "div":
             return self._to_sympy(expr.children[0]) / self._to_sympy(expr.children[1])
-        elif expr.op.op_name == "pow":
+        if expr.op.op_name == "pow":
             return self._to_sympy(expr.children[0]) ** self._to_sympy(expr.children[1])
-        elif expr.op.op_name == "pow2":
+        if expr.op.op_name == "pow2":
             return self._to_sympy(expr.children[0]) ** 2
-        elif expr.op.op_name == "pow3":
+        if expr.op.op_name == "pow3":
             return self._to_sympy(expr.children[0]) ** 3
-        elif expr.op.op_name == "pow_neg1":
+        if expr.op.op_name == "pow_neg1":
             return 1 / self._to_sympy(expr.children[0])
-        elif expr.op.op_name == "pow_half":
+        if expr.op.op_name == "pow_half":
             return sp.sqrt(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == "neg":
+        if expr.op.op_name == "neg":
             return -self._to_sympy(expr.children[0])
-        elif expr.op.op_name == "sqrt":
+        if expr.op.op_name == "sqrt":
             return sp.sqrt(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == "sin":
+        if expr.op.op_name == "sin":
             return sp.sin(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == "cos":
+        if expr.op.op_name == "cos":
             return sp.cos(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == "exp":
+        if expr.op.op_name == "exp":
             return sp.exp(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == "log":
+        if expr.op.op_name == "log":
             return sp.log(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == "abs":
+        if expr.op.op_name == "abs":
             return sp.Abs(self._to_sympy(expr.children[0]))
         return sp.symbols("x")

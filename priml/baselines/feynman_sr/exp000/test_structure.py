@@ -1,5 +1,4 @@
-"""
-Structure test for exp000 baseline - verifies imports and config structure.
+"""Structure test for exp000 baseline - verifies imports and config structure.
 Run this for quick CI verification without full GA execution.
 """
 
@@ -9,7 +8,7 @@ import sys
 sys.path.insert(
     0,
     os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     ),
 )
 
@@ -70,14 +69,14 @@ for e in exprs[:3]:
 
 print("\nTesting model...")
 model = FeynmanSRModel(
-    ga_config=GAConfig(population_size=10, max_generations=2, seed=42)
+    ga_config=GAConfig(population_size=10, max_generations=2, seed=42),
 )
 print("✓ Model created with GAConfig")
 
 print("\nTesting experiment configs...")
 cfg000 = exp000()
 print(
-    f"✓ exp000: split={cfg000.dataset_split}, pop={cfg000.step.model.ga_config.population_size}"
+    f"✓ exp000: split={cfg000.dataset_split}, pop={cfg000.step.model.ga_config.population_size}",
 )
 
 cfg001 = exp001()

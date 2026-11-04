@@ -1,6 +1,4 @@
-"""
-Training step utilities and evaluation metrics for Feynman SR.
-"""
+"""Training step utilities and evaluation metrics for Feynman SR."""
 
 from __future__ import annotations
 
@@ -49,10 +47,11 @@ def compute_nmse(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def check_exact_recovery(
-    expr_str: str, true_formula: str, tolerance: float = 0.01
+    expr_str: str,
+    true_formula: str,
+    tolerance: float = 0.01,
 ) -> bool:
-    """
-    Check if predicted expression matches true formula.
+    """Check if predicted expression matches true formula.
     Uses sympy for symbolic equality with constant tolerance.
     """
     try:
@@ -72,10 +71,12 @@ def check_exact_recovery(
 
         # If structure matches but constants differ within tolerance
         pred_structure = pred_expr.replace(
-            lambda x: x.is_Number, lambda x: sp.Symbol("C")
+            lambda x: x.is_Number,
+            lambda x: sp.Symbol("C"),
         )
         true_structure = true_expr.replace(
-            lambda x: x.is_Number, lambda x: sp.Symbol("C")
+            lambda x: x.is_Number,
+            lambda x: sp.Symbol("C"),
         )
 
         if pred_structure == true_structure:
@@ -97,7 +98,10 @@ def check_exact_recovery(
 
 
 def evaluate_expression(
-    expr, variables: dict[str, np.ndarray], target: np.ndarray, true_formula: str
+    expr,
+    variables: dict[str, np.ndarray],
+    target: np.ndarray,
+    true_formula: str,
 ) -> EvaluationMetrics:
     """Evaluate a single expression and return metrics."""
     pred = expr.evaluate(variables)

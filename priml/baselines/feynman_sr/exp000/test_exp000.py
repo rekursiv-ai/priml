@@ -1,6 +1,4 @@
-"""
-Test script for exp000 baseline - verifies bit-for-bit reproducibility.
-"""
+"""Test script for exp000 baseline - verifies bit-for-bit reproducibility."""
 
 import os
 import sys
@@ -8,7 +6,7 @@ import sys
 sys.path.insert(
     0,
     os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     ),
 )
 
@@ -52,7 +50,7 @@ def test_exp000_reproducibility() -> None:
     print("✓ Bit-for-bit reproducible!")
     print(f"  Recovery rate: {result1['recovery_rate']:.1%}")
     print(
-        f"  Exact recoveries: {result1['exact_recoveries']}/{result1['total_equations']}"
+        f"  Exact recoveries: {result1['exact_recoveries']}/{result1['total_equations']}",
     )
     valid_results = [r for r in result1["results"] if r["nmse"] != float("inf")]
     if valid_results:
@@ -63,7 +61,7 @@ def test_exp000_reproducibility() -> None:
     for r in result1["results"]:
         status = "✓" if r["exact"] else "✗"
         print(
-            f"  {status} {r['eq_id']}: NMSE={r['nmse']:.6f}, expr={r['expression'][:80]}"
+            f"  {status} {r['eq_id']}: NMSE={r['nmse']:.6f}, expr={r['expression'][:80]}",
         )
 
 

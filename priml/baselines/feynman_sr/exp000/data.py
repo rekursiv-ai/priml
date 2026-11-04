@@ -178,7 +178,10 @@ def _generate_fallback_srsd() -> list[dict[str, Any]]:
 
 
 def generate_data_for_equation(
-    eq: FeynmanEquation, n_samples: int = 1000, seed: int = 42, noise: float = 0.0
+    eq: FeynmanEquation,
+    n_samples: int = 1000,
+    seed: int = 42,
+    noise: float = 0.0,
 ) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Generate synthetic data for a Feynman equation.
 
@@ -220,7 +223,7 @@ def generate_data_for_equation(
 def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
     """Safely evaluate a formula string with numpy."""
     # Replace variable names with array references
-    local_dict = {k: v for k, v in variables.items()}
+    local_dict = dict(variables.items())
     local_dict.update(
         {
             "np": np,
@@ -233,7 +236,7 @@ def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
             "abs": np.abs,
             "pi": np.pi,
             "e": np.e,
-        }
+        },
     )
 
     # Replace ^ with ** for Python
@@ -268,8 +271,7 @@ class FeynmanDataConfig:
         """Load the dataset based on the configured split."""
         if self.split == "subset10":
             return load_feynman_10()
-        elif self.split in ("easy", "medium", "hard", "all"):
+        if self.split in ("easy", "medium", "hard", "all"):
             full = load_feynman_full(Path(self.cache_dir) if self.cache_dir else None)
             return full.get_split(self.split)
-        else:
-            raise ValueError(f"Unknown split: {self.split}")
+        raise ValueError(f"Unknown split: {self.split}")
