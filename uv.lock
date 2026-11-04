@@ -2940,7 +2940,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.12"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#97a750b68b255c04d5aa8adf9ade6f23b79aa57d" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#3327430a796a1a1119b802610d9757e35b9c9037" }
 
 [[package]]
 name = "requests"
