@@ -9,7 +9,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Import our model and data configs
-from .data import FeynmanEquation, generate_data_for_equation
+from .data import (
+    FeynmanEquation,
+    generate_data_for_equation,
+    load_feynman_10,
+    load_feynman_full,
+)
 from .model import FeynmanSRModel, GAConfig
 
 # =============================================================================
@@ -31,7 +36,8 @@ class FeynmanTrainStep:
     def run(self) -> dict:
         """Execute one equation evaluation."""
         if self.equation is None:
-            raise ValueError("No equation set")
+            msg = "No equation set"
+            raise ValueError(msg)
         if self.target_values is None:
             self.variables, self.target_values = generate_data_for_equation(
                 self.equation,
@@ -47,7 +53,6 @@ class FeynmanTrainStep:
         exact = self.model._check_exact_recovery(
             best_expr,
             self.equation.formula,
-            self.equation.variables,
         )
         return {
             "expression": str(best_expr),
@@ -68,8 +73,6 @@ class FeynmanTrainLoop:
 
     def run(self) -> dict:
         """Run evaluation on full dataset split."""
-        from .data import load_feynman_10, load_feynman_full
-
         if self.dataset_split == "subset10":
             dataset = load_feynman_10()
         else:
@@ -107,9 +110,10 @@ class FeynmanTrainLoop:
 
 def exp000() -> FeynmanTrainLoop:
     """Baseline: Dimensional GA + LM constant optimization.
+
     - Population: 200, Generations: 50
     - 10-equation subset (fast iteration)
-    - Seed: 42 (bit-for-bit reproducible)
+    - Seed: 42 (bit-for-bit reproducible).
     """
     cfg = FeynmanTrainLoop()
     cfg.dataset_split = "subset10"
@@ -134,6 +138,7 @@ def exp000() -> FeynmanTrainLoop:
 
 def exp001() -> FeynmanTrainLoop:
     """Fork: Increase generations to 100 for better convergence.
+
     Hypothesis: More generations → higher recovery rate.
     """
     cfg = exp000()
@@ -143,6 +148,7 @@ def exp001() -> FeynmanTrainLoop:
 
 def exp002() -> FeynmanTrainLoop:
     """Fork: Increase population to 500 for better exploration.
+
     Hypothesis: Larger population → better diversity → better recovery.
     """
     cfg = exp000()
@@ -152,6 +158,7 @@ def exp002() -> FeynmanTrainLoop:
 
 def exp003() -> FeynmanTrainLoop:
     """Fork: Run on full Easy split (30 equations).
+
     Hypothesis: Model generalizes to full Easy set.
     """
     cfg = exp000()
@@ -161,6 +168,7 @@ def exp003() -> FeynmanTrainLoop:
 
 def exp004() -> FeynmanTrainLoop:
     """Fork: Add MCTS-guided search (future exp004+).
+
     Hypothesis: Hypothesis pinning + MCTS → better search efficiency.
     """
     return exp000()
@@ -169,6 +177,7 @@ def exp004() -> FeynmanTrainLoop:
 
 def exp005() -> FeynmanTrainLoop:
     """Fork: Neural-guided expression generation (future exp005+).
+
     Hypothesis: Neural prior → better initial population → faster convergence.
     """
     return exp000()

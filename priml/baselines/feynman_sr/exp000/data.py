@@ -5,6 +5,7 @@ Downloads and caches the 120 Feynman equations from SRSD benchmark.
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -220,34 +221,62 @@ def generate_data_for_equation(
     return variables, target.astype(np.float64)
 
 
+# Allowed functions for safe formula evaluation
+_ALLOWED_FUNCS = {
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
+    "exp": np.exp,
+    "log": np.log,
+    "sqrt": np.sqrt,
+    "abs": np.abs,
+    "pi": np.pi,
+    "e": np.e,
+}
+
+
 def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
-    """Safely evaluate a formula string with numpy."""
+    """Safely evaluate a formula string with numpy using AST parsing."""
     # Replace variable names with array references
     local_dict = dict(variables.items())
-    local_dict.update(
-        {
-            "np": np,
-            "sin": np.sin,
-            "cos": np.cos,
-            "tan": np.tan,
-            "exp": np.exp,
-            "log": np.log,
-            "sqrt": np.sqrt,
-            "abs": np.abs,
-            "pi": np.pi,
-            "e": np.e,
-        },
-    )
+    local_dict.update(_ALLOWED_FUNCS)
 
     # Replace ^ with ** for Python
     formula_py = formula.replace("^", "**")
 
     try:
-        return eval(formula_py, {"__builtins__": {}}, local_dict)
+        # Parse and validate AST - only allow safe node types
+        tree = ast.parse(formula_py, mode="eval")
+        _validate_ast(tree)
+        # Evaluate with restricted globals
+        return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, local_dict)
     except (ValueError, SyntaxError):
         # Fallback: return zeros
         n = len(next(iter(variables.values())))
         return np.zeros(n, dtype=np.float64)
+
+
+def _validate_ast(node: ast.AST) -> None:
+    """Validate that AST contains only safe operations."""
+    allowed_nodes = {
+        ast.Expression,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Call,
+        ast.Name,
+        ast.Constant,
+        ast.Load,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+    }
+    for child in ast.walk(node):
+        if type(child) not in allowed_nodes:
+            raise ValueError(f"Disallowed AST node: {type(child).__name__}")
 
 
 class FeynmanDataConfig:
@@ -274,4 +303,5 @@ class FeynmanDataConfig:
         if self.split in ("easy", "medium", "hard", "all"):
             full = load_feynman_full(Path(self.cache_dir) if self.cache_dir else None)
             return full.get_split(self.split)
-        raise ValueError(f"Unknown split: {self.split}")
+        msg = f"Unknown split: {self.split}"
+        raise ValueError(msg)

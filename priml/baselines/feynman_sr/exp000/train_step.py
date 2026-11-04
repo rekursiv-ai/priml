@@ -84,7 +84,7 @@ def check_exact_recovery(
             pred_vals = [float(c) for c in pred_consts]
             true_vals = [float(c) for c in true_consts]
             if len(pred_vals) == len(true_vals):
-                for pv, tv in zip(pred_vals, true_vals):
+                for pv, tv in zip(pred_vals, true_vals, strict=False):
                     if tv != 0:
                         if abs(pv - tv) / abs(tv) > tolerance:
                             return False

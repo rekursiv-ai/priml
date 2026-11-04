@@ -6,14 +6,21 @@ exp000: Baseline Genetic Algorithm with dimensional constraints.
 from __future__ import annotations
 
 import random
+import re
 import warnings
 from dataclasses import dataclass, field
 from typing import ClassVar
 
 import numpy as np
+import sympy as sp
 from deap import algorithms, base, creator, tools
+from scipy.optimize import least_squares
 
-from priml.baselines.feynman_sr.exp000.data import generate_data_for_equation
+from priml.baselines.feynman_sr.exp000.data import (
+    FeynmanDataset,
+    FeynmanEquation,
+    generate_data_for_equation,
+)
 
 # =============================================================================
 # DIMENSIONAL GRAMMAR (from feynman_sr/grammar.py)
@@ -54,7 +61,6 @@ class Dim:
         }
         # Parse compound dimensions like "M L^-1 T^-2"
         vec = [0, 0, 0, 0, 0]
-        import re
 
         for match in re.finditer(r"(THETA|[MLTQΘ])(?:\^(-?\d+))?", s):
             dim_str, exp = match.group(1), int(match.group(2) or 1)
@@ -79,10 +85,10 @@ class DimVec:
         return cls(Dim.from_str(s) or (0, 0, 0, 0, 0))
 
     def __add__(self, other: DimVec) -> DimVec:
-        return DimVec(tuple(a + b for a, b in zip(self.vec, other.vec)))
+        return DimVec(tuple(a + b for a, b in zip(self.vec, other.vec, strict=False)))
 
     def __sub__(self, other: DimVec) -> DimVec:
-        return DimVec(tuple(a - b for a, b in zip(self.vec, other.vec)))
+        return DimVec(tuple(a - b for a, b in zip(self.vec, other.vec, strict=False)))
 
     def is_dimensionless(self) -> bool:
         """Check if vector represents dimensionless quantity."""
@@ -104,8 +110,8 @@ DIMENSIONLESS = DimVec.zero()
 class OpType:
     """Operator type definitions with dimensional rules."""
 
-    CONST = ("const", 0, lambda *a: None)
-    VAR = ("var", 0, lambda *a: None)
+    CONST = ("const", 0, lambda *_: None)
+    VAR = ("var", 0, lambda *_: None)
     ADD = ("add", 2, lambda a, b: a if a == b else None)
     SUB = ("sub", 2, lambda a, b: a if a == b else None)
     MUL = ("mul", 2, lambda a, b: a + b)
@@ -208,7 +214,8 @@ class OpType:
         for op in cls.ALL_OPS:
             if op[0] == name:
                 return cls(*op)
-        raise ValueError(f"Unknown operator: {name}")
+        msg = f"Unknown operator: {name}"
+        raise ValueError(msg)
 
 
 @dataclass
@@ -366,7 +373,8 @@ class TypedExpr:
                 return np.where(child_vals[0] > 0, np.log(child_vals[0]), np.nan)
         elif self.op.op_name == "abs":
             return np.abs(child_vals[0])
-        raise ValueError(f"Unknown operator: {self.op.op_name}")
+        msg = f"Unknown operator: {self.op.op_name}"
+        raise ValueError(msg)
 
 
 class Grammar:
@@ -446,10 +454,7 @@ class Grammar:
         # Build valid unary
         self.valid_unary: dict[DimVec, list[OpType]] = {}
         for d in all_dims:
-            valid = []
-            for op in self.unary_ops:
-                if op.dim_rule(d) is not None:
-                    valid.append(op)
+            valid = [op for op in self.unary_ops if op.dim_rule(d) is not None]
             if valid:
                 self.valid_unary[d] = valid
 
@@ -611,7 +616,7 @@ class Grammar:
             candidates = self.binary_candidates[target]
             for op, d1, d2 in candidates:
                 # Skip if either dimension is the target itself (avoid infinite recursion)
-                if d1 == target or d2 == target:
+                if target in (d1, d2):
                     continue
                 # Recursively generate sub-expressions
                 left = self.generate_random_expr(
@@ -659,7 +664,6 @@ class Grammar:
     def generate_dimension(
         self,
         target_dim: DimVec,
-        max_depth: int | None = None,
         max_nodes: int = 20,
         n_samples: int = 10,
         seed: int | None = None,
@@ -668,7 +672,6 @@ class Grammar:
 
         Args:
             target_dim: Target dimension
-            max_depth: Maximum depth (default: grammar's max_depth)
             max_nodes: Maximum nodes per expression
             n_samples: Number of expressions to generate
             seed: Random seed
@@ -718,11 +721,6 @@ def fit_constants(
         Tuple of (optimized expression, constant values dict)
 
     """
-    try:
-        from scipy.optimize import least_squares
-    except ImportError:
-        return expr, {}
-
     consts = expr.get_constants()
     if not consts:
         return expr, {}
@@ -767,8 +765,7 @@ if "Individual" not in creator.__dict__:
 
 
 def evaluate_individual(
-    individual,
-    grammar: Grammar,
+    individual: list,
     variables: dict[str, np.ndarray],
     target_values: np.ndarray,
 ) -> tuple[float]:
@@ -776,7 +773,6 @@ def evaluate_individual(
 
     Args:
         individual: DEAP individual containing expression
-        grammar: Grammar for dimensional validation
         variables: Input variable values
         target_values: Target output values
 
@@ -845,7 +841,7 @@ def collect_subtree_paths(
         return [path]
     paths = [path]
     for i, child in enumerate(expr.children):
-        paths.extend(collect_subtree_paths(child, path + (i,), visited, max_depth))
+        paths.extend(collect_subtree_paths(child, (*path, i), visited, max_depth))
     return paths
 
 
@@ -900,7 +896,9 @@ def replace_subexpr_at_path(
     return result if result.count_nodes() <= max_nodes else None
 
 
-def crossover(individual1, individual2, max_nodes: int = 30):
+def crossover(
+    individual1: list, individual2: list, max_nodes: int = 30
+) -> tuple[list, list]:
     """Perform crossover between two individuals.
 
     Args:
@@ -937,18 +935,16 @@ def crossover(individual1, individual2, max_nodes: int = 30):
 
 
 def mutate(
-    individual,
+    individual: list,
     grammar: Grammar,
-    target_dim: DimVec,
     max_nodes: int = 30,
     seed: int | None = None,
-):
+) -> tuple[list, ...]:
     """Mutate an individual by replacing a random subtree.
 
     Args:
         individual: Individual to mutate
         grammar: Grammar for generating valid replacements
-        target_dim: Target dimension
         max_nodes: Maximum nodes in expression
         seed: Random seed
 
@@ -961,12 +957,13 @@ def mutate(
     if not paths:
         return (individual,)
 
+    rng = np.random.default_rng(seed)
     # With 20% probability, insert a constant instead of replacing subtree
-    if random.random() < 0.2:
-        path = random.choice(paths)
+    if rng.random() < 0.2:
+        path = rng.choice(paths)
         subexpr = get_subexpr_at_path(expr, path)
         # Multiply by a constant (dimensionless)
-        const = TypedExpr.constant(random.uniform(0.1, 5.0), DIMENSIONLESS)
+        const = TypedExpr.constant(rng.uniform(0.1, 5.0), DIMENSIONLESS)
         new_expr = replace_subexpr_at_path(
             expr,
             path,
@@ -983,9 +980,8 @@ def mutate(
     subexpr = get_subexpr_at_path(expr, path)
     replacements = grammar.generate_dimension(
         subexpr.dim,
-        max_depth=4,
-        n_samples=10,
         max_nodes=max_nodes,
+        n_samples=10,
         seed=seed,
     )
     if not replacements:
@@ -999,7 +995,7 @@ def mutate(
     return (individual,)
 
 
-def clone_individual(individual):
+def clone_individual(individual: list) -> list:
     """Create a deep copy of an individual.
 
     Args:
@@ -1018,7 +1014,9 @@ def clone_individual(individual):
     return clone
 
 
-def generate_individual(grammar: Grammar, target_dim: DimVec, seed: int | None = None):
+def generate_individual(
+    grammar: Grammar, target_dim: DimVec, seed: int | None = None
+) -> list:
     """Generate a random individual.
 
     Args:
@@ -1032,15 +1030,12 @@ def generate_individual(grammar: Grammar, target_dim: DimVec, seed: int | None =
     """
     exprs = grammar.generate_dimension(
         target_dim,
-        max_depth=6,
-        n_samples=5,
         max_nodes=20,
+        n_samples=5,
         seed=seed,
     )
-    if exprs:
-        expr = random.choice(exprs)
-    else:
-        expr = TypedExpr.constant(0.5, DimVec.parse("1"))
+    rng = np.random.default_rng(seed)
+    expr = rng.choice(exprs) if exprs else TypedExpr.constant(0.5, DimVec.parse("1"))
     return creator.Individual([expr])
 
 
@@ -1097,14 +1092,12 @@ def run_ga_search(
         "mutate",
         mutate,
         grammar=grammar,
-        target_dim=target_dim,
         max_nodes=config.max_nodes,
         seed=config.seed,
     )
     toolbox.register(
         "evaluate",
         evaluate_individual,
-        grammar=grammar,
         variables=variables,
         target_values=target_values,
     )
@@ -1142,7 +1135,8 @@ def run_ga_search(
 
     best_fitness = best_individual.fitness.values
     if len(best_fitness) == 0:
-        raise ValueError("No fitness values found")
+        msg = "No fitness values found"
+        raise ValueError(msg)
 
     best_nmse = -float(best_fitness[0])
     complexity = best_expr.count_nodes()
@@ -1171,9 +1165,9 @@ class FeynmanSRModel:
 
     def solve_equation(
         self,
-        eq,
-        variables,
-        target_values,
+        eq: FeynmanEquation,
+        variables: dict[str, np.ndarray],
+        target_values: np.ndarray,
     ) -> tuple[TypedExpr, float, dict]:
         """Solve a single Feynman equation.
 
@@ -1206,7 +1200,7 @@ class FeynmanSRModel:
 
     def evaluate_on_dataset(
         self,
-        dataset,
+        dataset: FeynmanDataset,
         n_samples: int = 1000,
         seed: int = 42,
     ) -> dict:
@@ -1260,41 +1254,35 @@ class FeynmanSRModel:
         self,
         expr: TypedExpr,
         true_formula: str,
-        variables: dict,
     ) -> bool:
         """Check if expression matches true formula (symbolic + constant tolerance).
 
         Args:
             expr: Predicted expression
             true_formula: True formula string
-            variables: Variable dictionary
 
         Returns:
             True if expressions match
 
         """
-        return self._check_exact_recovery(expr, true_formula, variables)
+        return self._check_exact_recovery(expr, true_formula)
 
     def _check_exact_recovery(
         self,
         expr: TypedExpr,
         true_formula: str,
-        variables: dict,
     ) -> bool:
         """Check if expression matches true formula (symbolic + constant tolerance).
 
         Args:
             expr: Predicted expression
             true_formula: True formula string
-            variables: Variable dictionary
 
         Returns:
             True if expressions match
 
         """
         try:
-            import sympy as sp
-
             # Convert our expression to sympy
             expr_sympy = self._to_sympy(expr)
             true_sympy = sp.sympify(true_formula.replace("^", "**"))
