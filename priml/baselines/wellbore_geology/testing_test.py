@@ -345,7 +345,7 @@ def test_owned_record_ignores_constructor_sampler_changes(
                 torch.rand(17)
                 return tensor.uniform_(-0.1, 0.1)
 
-        monkeypatch.setattr(torch.nn.init, "_no_grad_trunc_normal_", different_sampler)
+        monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
         actual = capture_training(recipe=_family_recipe(name))
     assert not mismatches(expected, actual)
 

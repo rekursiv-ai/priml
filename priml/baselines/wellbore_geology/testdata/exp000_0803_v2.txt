@@ -2828,7 +2828,7 @@ Family.Config(
         │   │   │   │   │   │   drop_path_schedule=priml.model.convnext.linear_drop_path
         │   │   │   │   │   ),
         │   │   │   │   │   checkpoint=PosixPath('/opt/scratch/datasets/rogii-ruby-fade6112/initialization/convnext_small.safetensors'),
-        │   │   │   │   │   init_weight=functools.partial(torch.nn.init.trunc_normal_, std=0.02)
+        │   │   │   │   │   init_weight=functools.partial(priml.model.init.fill_truncated_normal, std=0.02)
         │   │   │   │   ),
         │   │   │   │   up_blocks=[
         │   │   │   │   │   ConcatUp.Config(

@@ -28,9 +28,9 @@ dependencies = [
     # 0.4.1 leaves dataclass fields at their defaults out of trees.
     "treekle>=0.4.1",
     # torch
-    "torch==2.11.0",
-    "torchao==0.17.0",
-    "torchvision==0.26.0",
+    "torch>=2.11.0",
+    "torchao>=0.17.0",
+    "torchvision>=0.26.0",
     # Kernels compile through it; torch installs it only on Linux.
     "triton>=3.6.0 ; sys_platform == 'linux'",
     # vision models

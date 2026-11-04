@@ -35,6 +35,7 @@ from priml.cost import (
     traffic,
 )
 from priml.math.basic import broadcast_sequences
+from priml.model.init import fill_truncated_normal
 
 
 if TYPE_CHECKING:
@@ -1237,7 +1238,7 @@ class RoPEMixed(RoPE):
         active_count = sum(1 for f in self._base_inv_freqs if f.numel())
         if self.num_heads > 1:
             directions = nn.functional.normalize(
-                nn.init.trunc_normal_(
+                fill_truncated_normal(
                     torch.empty(active_count, self.num_heads, 1, device=self.device),
                 ),
                 dim=0,

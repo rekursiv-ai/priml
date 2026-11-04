@@ -59,7 +59,10 @@ def test_owned_record_ignores_constructor_sampler_changes(
             torch.rand(17)
             return tensor.uniform_(-0.1, 0.1)
 
-    monkeypatch.setattr(torch.nn.init, "_no_grad_trunc_normal_", different_sampler)
+    monkeypatch.setattr(
+        "priml.model.init.fill_truncated_normal",
+        different_sampler,
+    )
     actual = train_fixture(group, tmp_path / "altered", known=known)
     assert not mismatches(expected, actual)
 
@@ -267,7 +270,10 @@ def test_fixture_construction_ignores_sampler_bits_and_preserves_rng(
             torch.rand(17)
             return tensor.fill_(0.125)
 
-    monkeypatch.setattr(torch.nn.init, "_no_grad_trunc_normal_", different_sampler)
+    monkeypatch.setattr(
+        "priml.model.init.fill_truncated_normal",
+        different_sampler,
+    )
     altered = config.make()
     assert torch.equal(state, torch.random.get_rng_state())
     assert not mismatches(original.state_dict(), altered.state_dict())

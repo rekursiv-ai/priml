@@ -21,6 +21,7 @@ from priml.model.init import (
     call_init,
     dirac,
     fan_in_truncated_normal,
+    fill_truncated_normal,
     kaiming_normal,
     kaiming_uniform,
     mup_output,
@@ -74,7 +75,7 @@ def test_init_api_text() -> None:
         (xavier_uniform, nn.init.xavier_uniform_),
         (xavier_normal, nn.init.xavier_normal_),
         (normal, partial(nn.init.normal_, std=0.02)),
-        (truncated_normal, partial(nn.init.trunc_normal_, std=0.02, a=-0.04, b=0.04)),
+        (truncated_normal, partial(fill_truncated_normal, std=0.02, a=-0.04, b=0.04)),
         (
             unit_fan_in_uniform,
             partial(nn.init.uniform_, a=-(3**0.5 * 3**-0.5), b=3**0.5 * 3**-0.5),
@@ -270,7 +271,7 @@ def test_truncated_normal_variance_correction_passes_closed_form_parameters(
         calls.append((tensor, std, a, b))
         return tensor
 
-    monkeypatch.setattr(nn.init, "trunc_normal_", trunc_normal_)
+    monkeypatch.setattr("priml.model.init.fill_truncated_normal", trunc_normal_)
     weight = torch.empty(2, 3)
     requested_std = 0.75
     lower, upper = -1.25, 2.0
@@ -315,6 +316,18 @@ def test_truncated_normal_variance_correction_realizes_requested_std():
     assert uncorrected.std().item() < 0.92
 
 
+def test_fill_truncated_normal_is_the_inverse_cdf_of_the_seeds_uniforms() -> None:
+    """One seed gives the weights torch 2.11 gave; rejection sampling would not."""
+    torch.manual_seed(0)
+    drawn = fill_truncated_normal(torch.empty(32, dtype=torch.float64), std=0.5)
+
+    torch.manual_seed(0)
+    bound = math.erf(2.0 / 0.5 / 2**0.5)
+    uniform = torch.empty(32, dtype=torch.float64).uniform_(-bound, bound)
+    assert torch.allclose(drawn, torch.erfinv(uniform) * 0.5 * 2**0.5)
+    assert drawn.abs().max() <= 2.0
+
+
 def test_truncated_normal_default_is_uncorrected():
     """The flag defaults off, so existing callers keep their init unchanged."""
     torch.manual_seed(0)
@@ -357,7 +370,7 @@ def test_fan_in_truncated_normal_is_truncated_normal_at_fan_in_std(width: int) -
     )
     assert torch.equal(
         drawn(lambda w: fan_in_truncated_normal(w, absolute_bounds=True)),
-        drawn(lambda w: nn.init.trunc_normal_(w, std=std)),
+        drawn(lambda w: fill_truncated_normal(w, std=std)),
     )
 
 

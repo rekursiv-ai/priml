@@ -47,7 +47,7 @@ from priml.model.custom_types import (
     propagate_attr,
 )
 from priml.model.embedding import Embedding
-from priml.model.init import InitFn, call_init, normal
+from priml.model.init import InitFn, call_init, fill_truncated_normal, normal
 from priml.model.linear import Linear
 from priml.model.norm import LayerNorm, LayerNorm2d
 from priml.model.sequential import Sequential
@@ -966,7 +966,7 @@ class FindingAttention(nn.Module):
         )
         """Projection to the finding-specific attention scores."""
 
-        init_weight: InitFn = partial(nn.init.trunc_normal_, std=0.02)
+        init_weight: InitFn = partial(fill_truncated_normal, std=0.02)
         """Initializer of the per-finding classifier weights."""
 
         init_bias: InitFn = nn.init.zeros_
@@ -1297,7 +1297,7 @@ class TinyConvNeXt(ConvNeXt):
     """Compose the cold recipe's Tiny encoder from existing native ConvNeXt blocks."""
 
     class Config(Makes["TinyConvNeXt"], ConvNeXt.Config):
-        init_weight: InitFn = partial(nn.init.trunc_normal_, std=0.02)
+        init_weight: InitFn = partial(fill_truncated_normal, std=0.02)
         """Weight initializer of every convolution and linear layer.
 
         Applied after construction, so each layer's own constructor draws keep

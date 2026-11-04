@@ -42,7 +42,7 @@ from priml.model.custom_types import (
     propagate_attr,
     validate_same_width,
 )
-from priml.model.init import InitFn
+from priml.model.init import InitFn, fill_truncated_normal
 from priml.model.linear import Linear
 from priml.model.norm import BatchNorm, BatchNorm2d, LayerNorm, LayerNorm2d
 from priml.model.pool import AvgPool2d
@@ -760,7 +760,7 @@ class Backbone:
         resolves against its dataset directory before construction.
         """
 
-        init_weight: InitFn = partial(nn.init.trunc_normal_, std=0.02)
+        init_weight: InitFn = partial(fill_truncated_normal, std=0.02)
         """Final backbone initializer after all default affine draws."""
 
     def __init__(self, config: Config) -> None:

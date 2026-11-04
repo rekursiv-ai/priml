@@ -125,6 +125,41 @@ def normal(w: Tensor, *, std: float = 0.02, depth_index: DepthIndex = ()) -> Non
     _depth_index_scale(w, depth_index)
 
 
+def fill_truncated_normal(
+    w: Tensor,
+    *,
+    std: float = 1.0,
+    a: float = -2.0,
+    b: float = 2.0,
+) -> Tensor:
+    """Fill ``w`` from a zero-mean normal truncated to ``[a, b]``, by the inverse CDF.
+
+    ``torch.nn.init.trunc_normal_`` drew this way through torch 2.11. By 2.14 it
+    rejection-samples, so one seed gives different weights, and every record
+    minted from a source implementation and every ``exp000`` stops reproducing.
+    Call this rather than torch's.
+
+    Args:
+      w: Tensor to fill in place.
+      std: Standard deviation before truncation.
+      a: Lower bound, in absolute units as in torch.
+      b: Upper bound, in absolute units as in torch.
+
+    Returns:
+      w: The filled tensor.
+
+    """
+    sqrt2 = 2.0**0.5
+    lower = (1.0 + math.erf(a / std / sqrt2)) / 2.0
+    upper = (1.0 + math.erf(b / std / sqrt2)) / 2.0
+    with torch.no_grad():
+        w.uniform_(2 * lower - 1, 2 * upper - 1)
+        w.erfinv_()
+        w.mul_(std * sqrt2)
+        w.clamp_(min=a, max=b)
+    return w
+
+
 def truncated_normal(
     w: Tensor,
     *,
@@ -167,7 +202,7 @@ def truncated_normal(
         # Std of N(0,1) truncated to [lower, upper].
         ratio = (pdf_u - pdf_l) / z
         std /= float((1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5)
-    nn.init.trunc_normal_(w, std=std, a=lower * std, b=upper * std)
+    fill_truncated_normal(w, std=std, a=lower * std, b=upper * std)
     _depth_index_scale(w, depth_index)
 
 
