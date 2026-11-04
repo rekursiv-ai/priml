@@ -1,24 +1,8 @@
-"""Feynman Symbolic Regression baselines for SRSD benchmark."""
+"""Feynman Symbolic Regression baselines for SRSD benchmark.
 
-from .exp000.experiments import (
-    ALL_EXPERIMENTS,
-    DEFAULT_EXPERIMENT,
-    exp000,
-    exp001,
-    exp002,
-    exp003,
-    exp004,
-    exp005,
-)
+This baseline requires optional dependencies:
+    pip install priml[feynman_sr]
 
-
-__all__ = [
-    "ALL_EXPERIMENTS",
-    "DEFAULT_EXPERIMENT",
-    "exp000",
-    "exp001",
-    "exp002",
-    "exp003",
-    "exp004",
-    "exp005",
-]
+Then import experiments from:
+    from priml.baselines.feynman_sr.exp000.experiments import exp000, ALL_EXPERIMENTS, ...
+"""

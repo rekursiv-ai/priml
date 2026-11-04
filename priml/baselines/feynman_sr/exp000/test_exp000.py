@@ -5,6 +5,17 @@ from pathlib import Path
 import sys
 
 
+# Check if optional dependencies are available
+try:
+    import deap  # noqa: F401
+    import sympy  # noqa: F401
+except ImportError:
+    import pytest
+
+    pytest.skip(
+        "feynman_sr optional dependencies not installed", allow_module_level=True
+    )
+
 sys.path.insert(
     0,
     str(Path(__file__).resolve().parents[4]),
