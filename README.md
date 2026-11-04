@@ -384,3 +384,4 @@ If you find our work useful, please consider citing:
       url={https://github.com/rekursiv-ai/priml},
 }
 ```
+# CI trigger
