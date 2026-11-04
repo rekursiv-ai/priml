@@ -177,6 +177,11 @@ lint = [
 stubs = [
     "scipy-stubs>=1.18.1.1",
 ]
+feynman-sr = [
+    "deap>=1.4.1",
+    "sympy>=1.13.0",
+    "scipy-stubs>=1.18.1.1",
+]
 test = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
