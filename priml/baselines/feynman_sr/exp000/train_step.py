@@ -1,4 +1,6 @@
-"""Training step utilities and evaluation metrics for Feynman SR."""
+"""
+Training step utilities and evaluation metrics for Feynman SR.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ import numpy as np
 
 @dataclass
 class EvaluationMetrics:
-    """Container for evaluation metrics"""
+    """Container for evaluation metrics."""
 
     nmse: float
     exact_recovery: bool
@@ -29,7 +31,7 @@ class EvaluationMetrics:
 
 
 def compute_nmse(pred: np.ndarray, target: np.ndarray) -> float:
-    """Compute Normalized Mean Squared Error"""
+    """Compute Normalized Mean Squared Error."""
     pred = pred.flatten() if pred.ndim > 1 else pred
     target = target.flatten() if target.ndim > 1 else target
 
@@ -47,11 +49,10 @@ def compute_nmse(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def check_exact_recovery(
-    expr_str: str,
-    true_formula: str,
-    tolerance: float = 0.01,
+    expr_str: str, true_formula: str, tolerance: float = 0.01
 ) -> bool:
-    """Check if predicted expression matches true formula.
+    """
+    Check if predicted expression matches true formula.
     Uses sympy for symbolic equality with constant tolerance.
     """
     try:
@@ -71,12 +72,10 @@ def check_exact_recovery(
 
         # If structure matches but constants differ within tolerance
         pred_structure = pred_expr.replace(
-            lambda x: x.is_Number,
-            lambda x: sp.Symbol("C"),
+            lambda x: x.is_Number, lambda x: sp.Symbol("C")
         )
         true_structure = true_expr.replace(
-            lambda x: x.is_Number,
-            lambda x: sp.Symbol("C"),
+            lambda x: x.is_Number, lambda x: sp.Symbol("C")
         )
 
         if pred_structure == true_structure:
@@ -93,17 +92,14 @@ def check_exact_recovery(
                 return True
 
         return False
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
 def evaluate_expression(
-    expr,
-    variables: dict[str, np.ndarray],
-    target: np.ndarray,
-    true_formula: str,
+    expr, variables: dict[str, np.ndarray], target: np.ndarray, true_formula: str
 ) -> EvaluationMetrics:
-    """Evaluate a single expression and return metrics"""
+    """Evaluate a single expression and return metrics."""
     pred = expr.evaluate(variables)
     nmse = compute_nmse(pred, target)
     exact = check_exact_recovery(str(expr), true_formula)
@@ -119,7 +115,7 @@ def evaluate_expression(
 
 
 def aggregate_results(results: list[EvaluationMetrics]) -> dict[str, Any]:
-    """Aggregate metrics across multiple equations"""
+    """Aggregate metrics across multiple equations."""
     if not results:
         return {"recovery_rate": 0.0, "mean_nmse": float("inf"), "mean_complexity": 0}
 
