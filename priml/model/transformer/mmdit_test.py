@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.multi_stream import MultiStreamAttention
@@ -77,7 +78,7 @@ def test_adaln_zero_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="ada_ln_zero",
         build_module=AdaLNZero.Config(channels_in=4, cond_dim=2).make,
-        build_input=lambda: torch.randn(3, 2),
+        build_input=lambda: weyl_randn(3, 2),
         seed=0,
         run=_run_adaln,
     )
@@ -299,7 +300,7 @@ def test_mmdit_block_bfb(device: str) -> None:
         golden_name="mmdit_block",
         build_module=lambda: _canonical_mmdit_config().make().to(device),
         build_input=lambda: move_to_device(
-            [torch.randn(2, 3, 4), torch.randn(2, 3, 4)],
+            [weyl_randn(2, 3, 4), weyl_randn(2, 3, 4, salt=1)],
             device,
         ),
         seed=0,

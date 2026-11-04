@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import field
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Final, NotRequired, Self, TypedDict, cast, override
 
 import argparse
 import gc
@@ -11,15 +13,16 @@ import json
 import os
 import platform
 import sys
+import traceback
 
-from configgle import Fig, PartialConfig
+from configgle import Fig, Makes, PartialConfig
 from treekle import json_dumps, json_loads, to_plain
 
 import numpy as np
 import pytest
 import torch
 
-from priml.baselines.wellbore_geology import pipeline
+from priml.baselines.wellbore_geology import particles, pipeline
 from priml.baselines.wellbore_geology.data import (
     FoldObservations,
     PredictionRows,
@@ -32,6 +35,14 @@ from priml.baselines.wellbore_geology.inference import (
     read_table,
     write_table,
 )
+from priml.baselines.wellbore_geology.model import (
+    DepthPosterior,
+    SequenceModel,
+    depth_logits,
+    finalize_heads,
+    mismatch_head,
+)
+from priml.baselines.wellbore_geology.particles import ParticlePrior, ParticleWell
 from priml.baselines.wellbore_geology.pipeline import (
     FamilyPrediction,
     Flags,
@@ -58,6 +69,8 @@ from priml.baselines.wellbore_geology.testing import (
     write_training_wells,
 )
 from priml.baselines.wellbore_geology.train_loop import WellboreFoldLoop
+from priml.model.conv import Conv2d
+from priml.model.sequential import Sequential
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.train.budget import WallBudget
@@ -66,6 +79,8 @@ from priml.train.epoch_loop import EarlyStopping, first_periodic_and_last
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from numpy.typing import NDArray
 
 
 def test_flattened_fold_settings_retain_all_native_numerics() -> None:
@@ -113,7 +128,10 @@ def test_empty_validation_partition_fails_before_model_construction(
     family = tiny_family(particle=False)
     family.dataset_directory = dataset
     raw = load_split(dataset / "train")
-    with pytest.raises(ValueError, match="nonempty validation"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Native OOF training requires a nonempty validation fold\.$",
+    ):
         train_family(
             family,
             raw={"well0": raw["well0"]},
@@ -209,9 +227,11 @@ def test_cold_loop_startup_consumes_outer_allowance_and_expiration_closes_runtim
     initialize = WellboreFoldLoop.__init__
     train = WellboreFoldLoop.train
     caps: list[float] = []
+    declared: list[tuple[float, bool]] = []
 
     def construct(loop: WellboreFoldLoop, config: WellboreFoldLoop.Config) -> None:
         nonlocal elapsed
+        declared.append((config.max_time, config.evaluate_truncated))
         initialize(loop, config)
         elapsed += startup_seconds
 
@@ -249,11 +269,17 @@ def test_cold_loop_startup_consumes_outer_allowance_and_expiration_closes_runtim
             budget=budget,
         )
         assert caps == [228.0]
+    # The loop is declared with what remained before its startup, and evaluates
+    # the epoch a budget cuts short.
+    assert declared == [(270.0, True)]
     assert not runtime_initialized()
 
 
 def test_training_requires_the_family_dataset_directory(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="dataset directory"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Training requires the family's dataset directory\.$",
+    ):
         train_family(
             tiny_family(particle=False),
             raw={},
@@ -268,7 +294,10 @@ def test_training_requires_a_runtime_device(tmp_path: Path) -> None:
     family.dataset_directory = dataset
     assert isinstance(family.training.runtime, SingleProcess.Config)
     family.training.runtime.device = None
-    with pytest.raises(ValueError, match="runtime device"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Training requires the family's runtime device\.$",
+    ):
         train_family(
             family,
             raw=load_split(dataset / "train"),
@@ -284,11 +313,143 @@ def test_particle_family_requires_a_cache_directory_or_a_prepared_cache(
     family = tiny_family(particle=True)
     family.dataset_directory = dataset
     raw = load_split(dataset / "train")
-    with pytest.raises(ValueError, match="cache directory"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Particle priors require the family's cache directory\.$",
+    ):
         train_family(family, raw=raw, output_directory=tmp_path / "unused")
     family.pf_directory = tmp_path / "pf"
     with pytest.raises(FileNotFoundError, match="not prepared"):
         train_family(family, raw=raw, output_directory=tmp_path / "unused")
+    # A manifest for this recipe, in the training split, holding no well yet.
+    finalized = family.finalized()
+    assert finalized.particle is not None
+    particles.prepare_particles(
+        {},
+        config=finalized.particle,
+        directory=tmp_path / "pf/train",
+        has_target=True,
+    )
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"^Particle cache lacks 4 wells, such as well0\.$",
+    ):
+        train_family(family, raw=raw, output_directory=tmp_path / "unused")
+
+
+def test_preparing_particles_is_charged_to_the_outer_budget(tmp_path: Path) -> None:
+    """An expired allowance stops the preparation before it writes a record."""
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset)
+    family = tiny_family(particle=True)
+    family.dataset_directory = dataset
+    family.pf_directory = tmp_path / "pf"
+    family.prepare_particles = True
+    now = [0.0]
+    config = WallBudget.Config(seconds=300, reserve_evaluation_sec=30)
+    config.clock = partial(_now, now)
+    budget = config.make()
+    now[0] = 300.0
+    with pytest.raises(TimeoutError, match="No training time remains"):
+        train_family(
+            family,
+            raw=load_split(dataset / "train"),
+            output_directory=tmp_path / "unused",
+            budget=budget,
+        )
+    assert list((tmp_path / "pf/train").glob("*.npz")) == []
+
+
+def test_a_fold_without_a_selected_state_keeps_its_last_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no state selected, the checkpoint is the model as it stands."""
+    _selecting(monkeypatch, None)
+    output = _one_fold(tmp_path)
+    assert torch.load(output / "fold0.pt", weights_only=True)
+
+
+def test_a_fold_saves_its_selected_state_not_its_last_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _selecting(monkeypatch, 0.0)
+    with caplog.at_level("INFO", logger=pipeline.__name__):
+        output = _one_fold(tmp_path)
+    state = cast(
+        "dict[str, torch.Tensor]",
+        torch.load(output / "fold0.pt", weights_only=True),
+    )
+    assert all(not value.any() for value in state.values())
+    assert caplog.messages == ["fold0: priml best_epoch=7, best_rmse=0.2500"]
+
+
+def test_repeated_folds_average_each_row_and_look_its_curves_up_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _selecting(monkeypatch, None)
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset)
+    output = tmp_path / "trained"
+    output.mkdir()
+    family = tiny_family(particle=False)
+    family.cv.repeats = 2
+    family.dataset_directory = dataset
+    trained = train_family(
+        family,
+        raw=load_split(dataset / "train"),
+        output_directory=output,
+    )
+    table = read_table(trained.oof)
+    assert len(table.rows.tvt) == 4 * 29
+    lookups = [name for name in table.diagnostics if name.endswith("_lookup_GR")]
+    assert lookups
+    for name in lookups:
+        assert np.isfinite(table.diagnostics[name]).any(), name
+
+
+# The EMA shadow is never read: a fold predicts with the state it selected.
+def _selecting(monkeypatch: pytest.MonkeyPatch, fill: float | None) -> None:
+    """Skip training; select a state of ``fill`` everywhere, or none."""
+
+    def unread(media: torch.Tensor) -> object:
+        raise AssertionError(f"predicted {tuple(media.shape)} with the EMA shadow")
+
+    def train(loop: WellboreFoldLoop) -> None:
+        step = loop.native_step
+        monkeypatch.setattr(step, "call_eval", unread)
+        loop.best_epoch = 7
+        loop.best_score = 0.25
+        loop.best_state = (
+            None
+            if fill is None
+            else {
+                name: torch.full_like(value, fill)
+                for name, value in step.model.state_dict().items()
+            }
+        )
+
+    monkeypatch.setattr(WellboreFoldLoop, "train", train)
+
+
+def _now(now: list[float]) -> float:
+    return now[0]
+
+
+def _one_fold(tmp_path: Path) -> Path:
+    """Train the first fold of a plain family; return its output directory."""
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset)
+    output = tmp_path / "trained"
+    output.mkdir()
+    family = tiny_family(particle=False)
+    family.first_n_folds = 1
+    family.dataset_directory = dataset
+    train_family(family, raw=load_split(dataset / "train"), output_directory=output)
+    return output
 
 
 def test_budget_expiring_before_any_update_is_a_timeout(
@@ -307,7 +468,10 @@ def test_budget_expiring_before_any_update_is_a_timeout(
     family = tiny_family(particle=False)
     family.dataset_directory = dataset
     budget = WallBudget.Config(seconds=300, reserve_evaluation_sec=30).make()
-    with pytest.raises(TimeoutError, match="before an optimizer update"):
+    with pytest.raises(
+        TimeoutError,
+        match=r"^The outer budget expired before an optimizer update\.$",
+    ):
         train_family(
             family,
             raw=load_split(dataset / "train"),
@@ -343,7 +507,10 @@ def test_training_without_a_held_out_loader_is_rejected(
     family = tiny_family(particle=False)
     family.first_n_folds = 1
     family.dataset_directory = dataset
-    with pytest.raises(ValueError, match="validation is not None"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Expected loop\.fold_data\.validation is not None\.$",
+    ):
         train_family(family, raw=load_split(dataset / "train"), output_directory=output)
 
 
@@ -430,6 +597,27 @@ def test_inference_rejects_empty_checkpoints_before_creating_outputs(
     with pytest.raises(ValueError, match="every selected checkpoint"):
         predict_family(family, directory=directory, output=output)
     assert not output.exists()
+
+
+def test_inference_never_reads_the_pretrained_backbone_again(tmp_path: Path) -> None:
+    """The selected states hold every weight; the pretrained file may be gone."""
+    dataset = tmp_path / "data"
+    write_study_inputs(dataset, test_wells=2)
+    family = tiny_family(particle=False)
+    family.dataset_directory = dataset
+    assert isinstance(family.training.step.model, SequenceModel.Config)
+    unet = family.training.step.model.unet
+    unet.channels_hidden = unet.channels_hidden[:1]
+    unet.backbone.network.blocks_per_stage = (1,)
+    unet.up_blocks = []
+    model = family.finalized().training.step.model
+    directory = tmp_path / "trained"
+    directory.mkdir()
+    torch.save(model.make().state_dict(), directory / "fold0.pt")
+    (directory / "checkpoints.json").write_text('["fold0.pt"]')
+    family.training.step.model.unet.backbone.checkpoint = tmp_path / "gone.safetensors"
+    path = predict_family(family, directory=directory, output=tmp_path / "inference")
+    assert len(read_table(path).rows.tvt) == 2 * 29
 
 
 def test_inference_main_deserializes_the_complete_native_family(
@@ -600,6 +788,72 @@ class RecordingFamilyRunner:
         return FamilyArtifacts(oof=oof, test=test)
 
 
+class SmokeModel(DepthPosterior):
+    """The real posterior heads, reading the input planes where the U-Net's would be."""
+
+    class Config(Fig["SmokeModel"]):
+        channels_in: int = -1
+        """Input feature planes; -1 inherits the family's."""
+
+        channels_hidden: int = -1
+        """Features the heads read; the input planes themselves."""
+
+        dropout: float = -1.0
+        """No dropout site of its own; negative keeps the head's."""
+
+        reference_columns: int = -1
+        """Candidate depth bins; -1 inherits the family's."""
+
+        reference_window: float = -1.0
+        """Half-width of the candidate interval; negative inherits the family's."""
+
+        target_stats: tuple[float, float] | None = None
+        """Regression center and scale; None inherits the family's."""
+
+        proj_out: Conv2d.Config = field(default_factory=depth_logits)
+        """Shared alignment and regression logits."""
+
+        unet_gr_rmse_head: Sequential.Config = field(default_factory=mismatch_head)
+        """Auxiliary gamma-ray mismatch prediction head."""
+
+        @override
+        def finalize(self) -> Self:
+            self.channels_hidden = self.channels_in
+            finalize_heads(self)
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._build_posterior(config)
+
+    @override
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class StillParticles(ParticlePrior):
+    """Uniform posteriors in place of the filter; windows and caches stay real."""
+
+    class Config(Makes["StillParticles"], ParticlePrior.Config, kw_only=True):
+        """The parent's recipe, so the cache manifest is the real one."""
+
+    @override
+    def _suffix(
+        self,
+        well: ParticleWell,
+        *,
+        last: int,
+        anchor: float,
+        rows: int,
+    ) -> tuple[list[NDArray[np.float32]], list[NDArray[np.float32]]]:
+        del well, last
+        steps = -(-rows // self.config.tracking.merge_rows)
+        columns = self.config.reference_columns
+        uniform = np.full((steps, columns), 1 / columns, dtype=np.float32)
+        still = np.full(steps, anchor, dtype=np.float32)
+        return [uniform.copy() for _ in range(3)], [still.copy() for _ in range(2)]
+
+
 class InProcessInference:
     """Exercise complete native reconstruction while isolating process startup."""
 
@@ -640,18 +894,28 @@ def test_declared_output_templates_resolve_without_touching_the_filesystem(
     assert explicit.pf_directory == config.pf_directory
 
 
-def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
+def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     family = tiny_family(particle=True)
-    family.first_n_folds = 2
+    # The pipeline is the subject, so its two costly pieces are stand-ins: the
+    # U-Net is model_test's, and the particle filter is particles_test's. Every
+    # fold, and the rows of every fold, is the subject of
+    # test_repeated_folds_average_each_row_and_look_its_curves_up_again.
+    family.training.step.model = SmokeModel.Config()
+    assert family.particle is not None
+    family.particle = StillParticles.Config().update(family.particle)
+    family.cv.extra_trials = 1
+    family.first_n_folds = 1
     family.prepare_particles = True
     family.dataset_directory = dataset
     family.pf_directory = tmp_path / "pf"
     config = NativeFamilyRunner.Config()
     config.inference = InProcessInference.Config()
+    copies = _counting_copies(monkeypatch, WellboreFoldLoop.Config)
     artifacts = config.make().run(
         family,
         output_directory=tmp_path / "trained",
@@ -662,17 +926,21 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
     assert json_loads(
         (tmp_path / "trained/checkpoints.json").read_text(),
         list[str],
-    ) == ["fold0.pt", "fold1.pt"]
+    ) == ["fold0.pt"]
     summaries = json_loads(
         (tmp_path / "trained/folds.json").read_text(),
         list[dict[str, object]],
     )
-    assert [record["fold"] for record in summaries] == ["fold0", "fold1"]
-    assert [record["best_epoch"] for record in summaries] == [1, 1]
-    for path, target_present in ((artifacts.oof, True), (artifacts.test, False)):
+    assert [record["fold"] for record in summaries] == ["fold0"]
+    assert [record["best_epoch"] for record in summaries] == [1]
+    # The fold holds out two of the four training wells; the test split has two.
+    for path, target_present, wells in (
+        (artifacts.oof, True, 2),
+        (artifacts.test, False, 2),
+    ):
         table = read_table(path)
-        assert len(table.rows.tvt) == 4 * 29
-        assert set(table.rows.well_ids) == {"well0", "well1", "well2", "well3"}
+        assert len(table.rows.tvt) == wells * 29
+        assert len(set(table.rows.well_ids)) == wells
         assert table.rows.tvt.dtype == np.float32
         assert (table.rows.target is not None) is target_present
         assert np.count_nonzero(~np.isfinite(table.rows.tvt)) == 0
@@ -681,7 +949,55 @@ def test_real_native_family_trains_all_folds_and_reconstructs_every_test_row(
         assert "PF_TVT" in table.diagnostics
         assert "geo_nbr_distance_q10" in table.diagnostics
     assert len(list((tmp_path / "pf/train").glob("*.npz"))) == 4
-    assert len(list((tmp_path / "pf/test").glob("*.npz"))) == 4
+    assert len(list((tmp_path / "pf/test").glob("*.npz"))) == 2
+    # Only the training records carry the target rows they are scored on.
+    for split, has_target in (("train", True), ("test", False)):
+        record = particles.read_particle_cache(tmp_path / "pf" / split / "well0.npz")
+        assert bool(np.asarray(record["target_mask"]).any()) is has_target
+    # Each well's distance quantile is taken once, over the averaged rows.
+    assert read_table(artifacts.oof).column_order[-1] == "geo_nbr_distance_q10"
+    folds = (tmp_path / "trained/folds.json").read_text()
+    assert folds.startswith('[\n  {\n    "fold": "fold0",\n    "best_score": ')
+    assert [list(record) for record in summaries] == [
+        ["fold", "best_score", "best_epoch", "validation"],
+    ]
+    # Training and prediction each finalize the family once; a fold binds its
+    # membership onto one copy and builds from one more.
+    assert copies == [
+        "train_family:family = family.finalized()",
+        "fold_settings:config = family.training.copy_tree()",
+        "train_family:loop = configuration.make()",
+        "predict_family:family = family.finalized()",
+    ]
+
+
+def _counting_copies(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: type[WellboreFoldLoop.Config],
+) -> list[str]:
+    """Record each copy of a ``kind`` tree, named for the frame that asked."""
+    copies: list[str] = []
+    copy_tree = kind.copy_tree
+
+    def counted(
+        self: WellboreFoldLoop.Config,
+        visited: dict[int, object] | None = None,
+    ) -> WellboreFoldLoop.Config:
+        frames = traceback.extract_stack()[:-1]
+        own = [frame for frame in frames if "wellbore_geology" in frame.filename]
+        copies.append(f"{_source_name(own[-1].name)}:{own[-1].line}")
+        return copy_tree(self, visited)
+
+    monkeypatch.setattr(kind, "copy_tree", counted)
+    return copies
+
+
+def _source_name(frame: str) -> str:
+    """Return a function's name as written, undoing mutmut's ``x_<name>__mutmut_<N>``."""
+    name, mutated, _ = frame.partition("__mutmut_")
+    if not mutated:
+        return frame
+    return name.rpartition("ǁ")[2] if name.startswith("xǁ") else name.removeprefix("x_")
 
 
 def _recorded_study(

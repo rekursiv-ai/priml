@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple, override
 
+import pytest
+
 from priml.lib.traverse import (
     could_path_lead_to_pattern,
     path_matches_pattern,
@@ -811,6 +813,123 @@ def test_a_container_pruned_on_one_path_is_still_visited_on_another():
     ]
 
     assert ("label",) in paths
+
+
+@pytest.mark.parametrize(
+    ("path", "pattern", "could"),
+    [
+        ("key", "key.*", True),
+        ("key.a.b", "key.*", True),
+        ("keyx", "key.*", False),
+        ("other.a", "key.*", False),
+        ("a", "a.b", True),
+        ("a.c", "a.b", False),
+        ("a.c.d", "a.b", False),
+        ("a.x", "a.*.c", True),
+        ("a.x.d", "a.*.c", False),
+        ("a.x.c.d", "a.*.c", True),
+        ("b.x.c.d", "a.*.c", False),
+        ("a", "**", True),
+    ],
+)
+def test_could_path_lead_to_pattern(path: str, pattern: str, *, could: bool) -> None:
+    assert could_path_lead_to_pattern(path, pattern) is could
+
+
+def _cyclic() -> list[tuple[str, object]]:
+    """One cycle through each kind of container the walk enters."""
+
+    class Slotted:
+        __slots__ = ("back",)
+
+        def __init__(self) -> None:
+            self.back: object = self
+
+    class Plain:
+        pass
+
+    class Member:
+        """Hashable, so it can sit in a set it points back to."""
+
+    as_map: dict[str, object] = {}
+    as_map["self"] = as_map
+    slotted = Slotted()
+    plain = Plain()
+    plain.__dict__["back"] = plain
+    member = Member()
+    as_set = {member}
+    member.__dict__["back"] = as_set
+    return [("map", as_map), ("slots", slotted), ("dict", plain), ("set", as_set)]
+
+
+def _short_id(value: object) -> str:
+    return str(value)[:5]
+
+
+@pytest.mark.parametrize(("kind", "value"), _cyclic(), ids=_short_id)
+def test_a_cycle_through_any_container_ends(kind: str, value: object) -> None:
+    del kind
+    assert len(list(recursively_iterate_over_object_descendants(value))) <= 3
+
+
+def test_paths_and_pruning_reach_inside_sets_slots_and_dicts() -> None:
+    class Slotted:
+        __slots__ = ("items",)
+
+        def __init__(self) -> None:
+            self.items = frozenset({7})
+
+    class Plain:
+        def __init__(self) -> None:
+            self.inner = Slotted()
+
+    def no_sevens(path: tuple[int | str, ...], obj: object) -> bool:
+        del path
+        return obj != 7
+
+    paths = [p for p, _ in recursively_iterate_over_object_descendants(Plain())]
+    pruned = [
+        p
+        for p, _ in recursively_iterate_over_object_descendants(
+            Plain(),
+            recurse=no_sevens,
+        )
+    ]
+
+    assert paths == [(), ("inner",), ("inner", "items"), ("inner", "items", 0)]
+    assert pruned == [(), ("inner",), ("inner", "items")]
+
+
+def test_a_slot_named_twice_in_the_mro_is_walked_once() -> None:
+    class Base:
+        __slots__ = ("x",)
+
+        def __init__(self) -> None:
+            self.x = 1
+
+    class Child(Base):
+        __slots__ = ("x",)
+
+    obj = Child()
+
+    paths = [p for p, _ in recursively_iterate_over_object_descendants(obj) if p]
+    assert paths == [("x",)]
+
+
+def test_an_unset_slot_does_not_hide_the_slots_after_it() -> None:
+    class Lazy:
+        __slots__ = ("missing", "x")
+
+        def __init__(self) -> None:
+            self.missing = 0
+            del self.missing
+            self.x = 1
+
+    obj = Lazy()
+
+    assert [p for p, _ in recursively_iterate_over_object_descendants(obj) if p] == [
+        ("x",),
+    ]
 
 
 def test_could_path_lead_to_pattern_wildcard_no_match():

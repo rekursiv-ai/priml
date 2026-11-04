@@ -23,6 +23,7 @@ import torch
 
 from priml.cost import cost
 from priml.math import gated_delta_rule
+from priml.math.probability import weyl_randn
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.special import Identity
 from priml.testing.bfb import (
@@ -304,7 +305,7 @@ def test_gated_delta_net_bfb(device: str) -> None:
             .to(device)
         ),
         build_input=lambda: move_to_device(
-            torch.randn(size=(2, 3, 8)),
+            weyl_randn(2, 3, 8),
             device=device,
         ),
         seed=0,

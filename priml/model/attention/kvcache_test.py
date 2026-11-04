@@ -11,6 +11,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.kvcache import KVCache, alloc_layer_cache
 from priml.model.attention.output_gate import OutputGate
@@ -332,7 +333,7 @@ def test_kv_cache_bfb(device: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name="kv_cache",
         build_module=lambda: _Cache().to(device),
-        build_input=lambda: torch.randn(2, 3, 5, 4),
+        build_input=lambda: weyl_randn(2, 3, 5, 4),
         seed=0,
     )
 

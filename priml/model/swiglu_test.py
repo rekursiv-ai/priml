@@ -23,6 +23,7 @@ import torch
 
 from priml.cost import cost, map_cost, set_cost
 from priml.math.linear import cast_parameters_to_input
+from priml.math.probability import weyl_randn
 from priml.model.conv import Conv1d, SequenceConv1d
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.linear import Linear
@@ -147,7 +148,7 @@ def test_swiglu_bfb() -> None:
             channels_in=4,
             channels_hidden=4,
         ).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -160,7 +161,7 @@ def test_swiglu_relu_squared_bfb() -> None:
             channels_in=4,
             channels_hidden=4,
         ).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

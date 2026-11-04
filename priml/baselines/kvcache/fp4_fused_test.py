@@ -177,7 +177,11 @@ def test_supported_tiles_compile_for_sm80_without_a_gpu(
         if name not in constants
     }
     source = compiler.ASTSource(_compiled_fp4_attention(), signature, constants)
-    compiled = compiler.compile(source, target=target_factory.GPUTarget("cuda", 80, 32))
+    compiled = compiler.compile(
+        source,
+        target=target_factory.GPUTarget("cuda", 80, 32),
+        options={"enable_fp_fusion": True},
+    )
     assert compiled is not None
 
 
@@ -488,7 +492,13 @@ def _reference(
 class _TritonCompiler(Protocol):
     ASTSource: Callable[[object, dict[str, str], dict[str, int | float | bool]], object]
 
-    def compile(self, source: object, *, target: object) -> object: ...
+    def compile(
+        self,
+        source: object,
+        *,
+        target: object,
+        options: dict[str, bool],
+    ) -> object: ...
 
 
 class _CudaBackend(Protocol):

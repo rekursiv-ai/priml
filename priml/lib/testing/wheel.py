@@ -233,8 +233,9 @@ def declared_extras(wheel: Wheel) -> tuple[str, ...]:
     names = [n for n in wheel.names() if n.endswith(".dist-info/METADATA")]
     if not names:
         return ()
-    metadata = parser.Parser().parsestr(wheel.read(names[0]), headersonly=True)
-    return tuple(metadata.get_all("Provides-Extra") or ())
+    metadata = parser.Parser().parsestr(wheel.read(names[0]))
+    extras = metadata.get_all("Provides-Extra")  # pragma: no mutate -- any case works.
+    return tuple(extras or ())
 
 
 def console_scripts(wheel: Wheel) -> dict[str, str]:
@@ -250,7 +251,7 @@ def console_scripts(wheel: Wheel) -> dict[str, str]:
     names = [n for n in wheel.names() if n.endswith(".dist-info/entry_points.txt")]
     if not names:
         return {}
-    parser = _CaseSensitiveParser(delimiters=("=",), interpolation=None)
+    parser = _CaseSensitiveParser()
     parser.read_string(wheel.read(names[0]))
     if not parser.has_section("console_scripts"):
         return {}

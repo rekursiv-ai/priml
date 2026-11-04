@@ -13,6 +13,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import pytest
 import torch
 
+from priml.math.probability import weyl_randn
 from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.window import (
     causal_chunk_mask,
@@ -347,7 +348,7 @@ def test_window_bfb(device: str) -> None:
         golden_name="window",
         build_module=lambda: _Window().to(device),
         # Sequence 4 is required: window=2 must produce a partial mask.
-        build_input=lambda: torch.randn(2, 3, 4, 5),
+        build_input=lambda: weyl_randn(2, 3, 4, 5),
         seed=0,
     )
 

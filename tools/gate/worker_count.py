@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
 Size a worker pool: parse a ``--workers`` argument, or compute the machine's default.
 
 Run (``python -m tools.gate.worker_count``), it prints the machine's default
@@ -57,6 +57,7 @@ memory an app marked disposable.
 
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -208,6 +209,10 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# Cached: the topology cannot change under a process, and reading it opens about
+# five files per logical CPU (640 on a 128-thread host, ~25 ms), which a caller
+# sizing a pool on every call (``nflsim1.game.physics.run_plays``) paid each time.
+@cache
 def _cores(cpu: Path) -> tuple[int, int]:
     """Return physical cores and physical performance cores."""
     if (cpu / "cpu0" / "topology").is_dir():
@@ -260,14 +265,14 @@ def _vm_stat_mib() -> int | None:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    page = 0
+    page: int | None = None
     pages = 0
     for line in text.splitlines():
         if "page size of" in line:
             page = int(line.split()[7])
         elif line.startswith(("Pages free:", "Pages purgeable:", "File-backed pages:")):
-            pages += int(line.split()[-1].rstrip("."))
-    return pages * page // 1_048_576 if page else None
+            pages += int(line.split()[-1].removesuffix("."))
+    return None if page is None else pages * page // 1_048_576
 
 
 def _read_int(path: Path) -> int | None:

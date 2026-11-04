@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.cost import cost, map_cost, set_cost
+from priml.math.probability import weyl_randn
 from priml.model.conv import (
     Conv1d,
     Conv2d,
@@ -264,7 +265,7 @@ def test_conv1d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv1d",
         build_module=lambda: Conv1d.Config(2, channels_out=3).make(),
-        build_input=lambda: torch.randn(3, 2, 4),
+        build_input=lambda: weyl_randn(3, 2, 4),
         seed=0,
     )
 
@@ -283,7 +284,7 @@ def test_conv2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv2d",
         build_module=lambda: Conv2d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(3, 2, 4, 5),
+        build_input=lambda: weyl_randn(3, 2, 4, 5),
         seed=0,
     )
 
@@ -302,7 +303,7 @@ def test_conv3d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv3d",
         build_module=lambda: Conv3d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(3, 2, 4, 5, 6),
+        build_input=lambda: weyl_randn(3, 2, 4, 5, 6),
         seed=0,
     )
 
@@ -355,6 +356,46 @@ def test_conv_output_grid_rejects_incomplete_axis_tuples(
         )
 
 
+@pytest.mark.parametrize("output_padding", [(0,), (0, 0, 0)])
+def test_conv_output_grid_rejects_output_padding_with_wrong_axis_count(
+    output_padding: tuple[int, ...],
+) -> None:
+    with pytest.raises(ValueError, match="zip"):
+        conv_output_grid(
+            (5, 7),
+            kernel_size=(2, 3),
+            stride=(2, 3),
+            padding=(0, 1),
+            dilation=(1, 2),
+            transposed=True,
+            output_padding=output_padding,
+        )
+
+
+def test_conv_output_grid_rejects_jointly_truncated_geometry() -> None:
+    with pytest.raises(ValueError, match="zip"):
+        conv_output_grid(
+            (5, 7),
+            kernel_size=(2,),
+            stride=2,
+            padding=0,
+            dilation=1,
+            transposed=True,
+            output_padding=(0,),
+        )
+
+
+def test_transpose_output_grid_defaults_to_zero_output_padding() -> None:
+    assert conv_output_grid(
+        (3, 5),
+        kernel_size=(2, 3),
+        stride=(2, 3),
+        padding=(0, 1),
+        dilation=(1, 2),
+        transposed=True,
+    ) == (6, 15)
+
+
 def test_conv_output_grid_applies_tuple_geometry_per_axis() -> None:
     """Apply tuple geometry with floor((size + 2*pad - dil*(kernel-1)-1)/stride)+1.
 
@@ -397,7 +438,10 @@ def test_sequence_conv1d_rejects_a_convolution_shorter_than_the_input() -> None:
     module = config.make()
     inputs = torch.randn(2, 4, 3)
 
-    with pytest.raises(ValueError, match="output length 2"):
+    with pytest.raises(
+        ValueError,
+        match=r"^SequenceConv1d convolution output length 2 is shorter than input length 4\.$",
+    ):
         module(inputs)
 
 
@@ -593,6 +637,21 @@ def test_conv_reset():
 
 
 @pytest.mark.parametrize(
+    "config_type",
+    [Conv1d.Config, Conv2d.Config, Conv3d.Config, ConvTranspose2d.Config],
+)
+def test_convolution_allocates_parameters_on_configured_device(
+    config_type: type[
+        Conv1d.Config | Conv2d.Config | Conv3d.Config | ConvTranspose2d.Config
+    ],
+) -> None:
+    module = config_type(2, 3, bias=True, device="meta").make()
+    assert module.weight.device.type == "meta"
+    assert module.bias is not None
+    assert module.bias.device.type == "meta"
+
+
+@pytest.mark.parametrize(
     ("config_type", "given", "inferred"),
     [
         (Conv1d.Config, "channels_out", "channels_in"),
@@ -673,20 +732,38 @@ def test_none_bias_initializer_matches_complete_torch_construction(
     assert torch.equal(torch.get_rng_state(), expected_rng)
 
 
-@pytest.mark.parametrize("config_type", [Conv1d.Config, Conv2d.Config, Conv3d.Config])
-def test_zero_fan_in_reset_preserves_allocated_bias_and_rng(
-    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+@pytest.mark.parametrize(
+    ("config_type", "channels_in", "channels_out"),
+    [
+        (Conv1d.Config, 0, 3),
+        (Conv2d.Config, 0, 3),
+        (Conv3d.Config, 0, 3),
+        (ConvTranspose2d.Config, 3, 0),
+    ],
+)
+def test_zero_fan_in_initializes_and_resets_bias_to_zero(
+    config_type: type[
+        Conv1d.Config | Conv2d.Config | Conv3d.Config | ConvTranspose2d.Config
+    ],
+    channels_in: int,
+    channels_out: int,
 ) -> None:
+    # ConvTranspose2d reverses the channel axes of the weight tensor.
     with pytest.warns(UserWarning, match="zero-element"):
-        module = config_type(0, 3, bias=True, init_bias=None).make()
+        module = config_type(
+            channels_in,
+            channels_out,
+            kernel_size=3,
+            bias=True,
+            init_bias=None,
+        ).make()
     assert module.bias is not None
+    assert torch.equal(module.bias, torch.zeros_like(module.bias))
     with torch.no_grad():
         module.bias.fill_(0.375)
-    before = torch.get_rng_state()
     with pytest.warns(UserWarning, match="zero-element"):
         module.reset_parameters()
-    assert torch.equal(module.bias, torch.full((3,), 0.375))
-    assert torch.equal(torch.get_rng_state(), before)
+    assert torch.equal(module.bias, torch.zeros_like(module.bias))
 
 
 @pytest.mark.parametrize(
@@ -745,8 +822,13 @@ def test_conv_cost_rejects_a_grid_of_the_wrong_rank() -> None:
 @pytest.mark.parametrize(
     ("batch_size", "input_grid", "error", "message"),
     [
-        (2.0, (4,), TypeError, "must be integers"),
-        (2, (2,), ValueError, "must be positive"),
+        (2.0, (4,), TypeError, r"^Convolution row counts must be integers\.$"),
+        (
+            2,
+            (2,),
+            ValueError,
+            r"^Convolution input and output rows must be positive\.$",
+        ),
     ],
 )
 def test_conv_cost_rejects_row_counts_that_are_not_positive_integers(
@@ -768,6 +850,63 @@ def test_conv_cost_rejects_row_counts_that_are_not_positive_integers(
             batch_size=batch_size,
             padding="valid",
         )
+
+
+def test_conv_cost_defaults_preserve_spatial_grid_and_include_bias_gradient() -> None:
+    analytical = conv_cost(
+        channels_in=3,
+        channels_out=5,
+        kernel_size=(2, 3),
+        ndim=2,
+        groups=1,
+        bias=True,
+        input_grid=(4, 7),
+        batch_size=2,
+        dtype=torch.float64,
+    )
+    rows, weights = 2 * 4 * 7, 5 * 3 * 2 * 3
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * rows * weights
+    assert analytical["bytes", "adjoint", "reduction"].sum() == (rows * 5 + 5) * 8
+    assert analytical.params_active == weights + 5
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+def test_conv_cost_defaults_to_unit_stride_and_zero_output_padding(
+    transposed: bool,
+) -> None:
+    analytical = conv_cost(
+        channels_in=3,
+        channels_out=5,
+        kernel_size=(2, 3),
+        ndim=2,
+        groups=1,
+        bias=True,
+        input_grid=(4, 7),
+        batch_size=2,
+        padding="valid",
+        transposed=transposed,
+        dtype=torch.float64,
+    )
+    rows = 2 * (5 * 9 if transposed else 3 * 5)
+    assert (
+        analytical["bytes", "primal", "matmul"].sum()
+        == (2 * 3 * 4 * 7 + 5 * 3 * 2 * 3 + rows * 5) * 8
+    )
+
+
+def test_conv_cost_accepts_one_input_and_output_row() -> None:
+    # _validate_row_count accepts the boundary of one spatial row.
+    analytical = conv_cost(
+        channels_in=2,
+        channels_out=3,
+        kernel_size=1,
+        ndim=1,
+        groups=1,
+        bias=True,
+        input_grid=(1,),
+        batch_size=1,
+    )
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * 3
 
 
 def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
@@ -906,6 +1045,17 @@ def test_convolution_cost_counts_only_requested_gradients(
     )
     assert analytical["flops", "matmul"].sum() == counter.get_total_flops()
     assert analytical["bytes", "matmul"].sum() == traffic.bytes["matmul"]
+    gradients = int(input_grad) + int(weight_grad)
+    assert analytical["bytes", "adjoint", "matmul"].sum() == (
+        dtype.itemsize * (6 * rows + gradients * (2 * 4 * 5 * 7 + weights))
+        if gradients
+        else 0
+    )
+    assert analytical["bytes", "primal", "elementwise"].sum() == 6 * dtype.itemsize
+    assert analytical["bytes", "adjoint", "reduction"].sum() == (
+        (rows * 6 + 6) * dtype.itemsize if bias_grad else 0
+    )
+    assert analytical.params_active == weights + 6
     assert (x.grad is not None) == input_grad
     assert (module.weight.grad is not None) == weight_grad
     assert (module.bias.grad is not None) == bias_grad

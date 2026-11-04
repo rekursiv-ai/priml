@@ -57,7 +57,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon, adjust_lr_match_rms_adamw
 from priml.runtime import MultiProcess
-from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.bfb import fill_parameters, host_agnostic_numerics
 from priml.testing.golden import (
     assert_tensor_golden,
     joined,
@@ -334,22 +334,12 @@ def canonical_name(name: str) -> str:
 
 
 def batches() -> list[dict[str, object]]:
-    """Three changing batches; step 2 is short, exercising the pad mask."""
-    generator = torch.Generator().manual_seed(0)
+    """Rebuild three arithmetic batches; step 2 exercises the pad mask."""
     out: list[dict[str, object]] = []
+    positions = torch.arange(6).reshape(2, 3)
     for index in range(3):
-        media = torch.randint(
-            2,
-            4,
-            (2, 3),
-            generator=generator,
-        )
-        label = torch.randint(
-            2,
-            4,
-            (2, 3),
-            generator=generator,
-        )
+        media = (positions + index) % 2 + 2
+        label = (positions + index + 1) % 2 + 2
         media[:, -1:] = 0
         label[:, -1:] = -100
         out.append(
@@ -417,11 +407,16 @@ def record(subject: Subject) -> dict[str, Tensor]:
     return out
 
 
-def record_original(subject: Subject) -> dict[str, Tensor]:
-    """Run the protocol the original implementation was recorded under.
+def record_original(
+    subject: Subject,
+    *,
+    inputs: Mapping[str, Tensor],
+) -> dict[str, Tensor]:
+    """Run the original protocol with captured source-era random inputs.
 
     Args:
       subject: The implementation to record, built by :func:`port_config`.
+      inputs: Batches and random latents recovered on Torch 2.11 after exact replay.
 
     Returns:
       trajectory: Flat name-to-tensor record.
@@ -429,12 +424,19 @@ def record_original(subject: Subject) -> dict[str, Tensor]:
     """
     out: dict[str, Tensor] = {"rng": rng_fingerprint()}
     states = [{"state": _joined(subject.state())}]
-    data = batches()
+    data: list[dict[str, object]] = [
+        {
+            "media": inputs[f"batch/{index}/media"],
+            "label": inputs[f"batch/{index}/label"],
+            "puzzle_identifiers": inputs[f"batch/{index}/puzzle_identifiers"],
+            "valid_count": int(inputs[f"batch/{index}/valid_count"]),
+        }
+        for index in range(3)
+    ]
     tokens = cast(Tensor, data[0]["media"])
     ids = cast(Tensor, data[0]["puzzle_identifiers"])
-    generator = torch.Generator().manual_seed(1)
     z_init = subject.init_z(2)
-    z_random = tuple(torch.randn(z.shape, generator=generator) for z in z_init)
+    z_random = (inputs["latent/0"], inputs["latent/1"])
     with torch.no_grad():
         for label, single in (("forward", False), ("core", True)):
             outputs = [
@@ -501,18 +503,51 @@ def run_port(recipe: str) -> dict[str, Tensor]:
     """Build the unit-sized recipe from seed 0 and record it."""
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        return record(PortSubject.from_config(unit_config(recipe)))
+        with torch.random.fork_rng(devices=[]):
+            subject = PortSubject.from_config(unit_config(recipe))
+            fill_parameters(subject.step.model, buffers=("slow_init", "fast_init"))
+        return record(subject)
 
 
-def golden_path(recipe: str) -> Path:
-    """Where the golden for ``recipe`` lives."""
-    return _CWD / "testdata" / f"{recipe}.pt"
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_owned_record_ignores_constructor_sampler_changes(
+    recipe: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = run_port(recipe)
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            return tensor.uniform_(-0.1, 0.1)
+
+    monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
+    assert not mismatches(expected, run_port(recipe))
+
+
+def test_owned_batches_do_not_sample_random_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_sampling(*args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        raise AssertionError("Owned inputs must be rebuilt without random draws.")
+
+    monkeypatch.setattr(torch, "randint", reject_sampling)
+    data = batches()
+    assert len(data) == 3
+    assert data[0]["valid_count"] == 2
+    assert data[1]["valid_count"] == 1
+    for batch in data:
+        assert isinstance(batch["media"], Tensor)
+        assert isinstance(batch["label"], Tensor)
+        assert batch["media"].shape == batch["label"].shape
 
 
 @pytest.mark.parametrize("recipe", RECIPES)
 def test_golden_replays_bit_for_bit(recipe: str) -> None:
     """The recipe reproduces the frozen trajectory with zero mismatches."""
-    assert_tensor_golden(golden_path(recipe), run_port(recipe))
+    assert_tensor_golden(_CWD / "testdata" / f"{recipe}.pt", run_port(recipe))
 
 
 # Each bite records only up to the first quantity its change reaches: the
@@ -520,11 +555,13 @@ def test_golden_replays_bit_for_bit(recipe: str) -> None:
 @pytest.mark.parametrize("recipe", RECIPES)
 def test_golden_bites_on_a_one_ulp_weight(recipe: str) -> None:
     """A one-ULP nudge to one initial weight is reported, not absorbed."""
-    expected = read_tensors(golden_path(recipe))
+    expected = read_tensors(_CWD / "testdata" / f"{recipe}.pt")
     actual: dict[str, Tensor] = {}
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        subject = PortSubject.from_config(unit_config(recipe))
+        with torch.random.fork_rng(devices=[]):
+            subject = PortSubject.from_config(unit_config(recipe))
+            fill_parameters(subject.step.model, buffers=("slow_init", "fast_init"))
         # On the integer view: a float nudge is done in float64 here and rounds
         # straight back to the weight's own width.
         with torch.no_grad():
@@ -538,11 +575,13 @@ def test_golden_bites_on_a_one_ulp_weight(recipe: str) -> None:
 @pytest.mark.parametrize("recipe", RECIPES)
 def test_golden_bites_on_a_changed_halt_weight(recipe: str) -> None:
     """A changed halt-loss weight is reported in the first step's loss."""
-    expected = read_tensors(golden_path(recipe))
+    expected = read_tensors(_CWD / "testdata" / f"{recipe}.pt")
     actual: dict[str, Tensor] = {}
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        subject = PortSubject.from_config(unit_config(recipe))
+        with torch.random.fork_rng(devices=[]):
+            subject = PortSubject.from_config(unit_config(recipe))
+            fill_parameters(subject.step.model, buffers=("slow_init", "fast_init"))
         assert subject.step.pool.halting is not None
         subject.step.pool.halting.weight *= 1.5
         put_steps(actual, "train", [flatten(subject.train_step(**batches()[0]))])
@@ -553,22 +592,49 @@ def test_golden_bites_on_a_changed_halt_weight(recipe: str) -> None:
 
 
 @pytest.mark.compute_training
-def test_the_original_implementations_trajectory_replays_bit_for_bit() -> None:
-    """``exp000`` reproduces the trajectory minted from the original implementation.
+@pytest.mark.parametrize("alter_constructor", [False, True])
+def test_the_original_implementations_trajectory_replays_bit_for_bit(
+    alter_constructor: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay immutable source outputs independently of constructor sampling.
 
-    The record was minted from the original implementation at port time, so it
-    is the one comparison against that implementation rather than against this
-    port's own past output; no unit golden can stand in for it. It is never
-    re-minted, so it is compared without the regeneration hook, and its bite is
-    checked in the same run.
+    ``train_step_inputs.pt`` supplies only source-era inputs recovered under
+    Torch 2.11 after the complete original trajectory matched. Expected outputs
+    in ``train_step.pt`` are never re-minted.
     """
     expected = read_tensors(ORIGINAL)
+    inputs = read_tensors(_CWD / "testdata" / "train_step_inputs.pt")
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            return tensor.uniform_(-0.1, 0.1)
+
+    if alter_constructor:
+        monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        actual = record_original(PortSubject("exp000"))
-        torch.manual_seed(0)
         subject = PortSubject("exp000")
+        state = subject.state()
+        source_initial = expected["state/state"][0]
+        assert sum(value.numel() for value in state.values()) == source_initial.numel()
+        offset = 0
         with torch.no_grad():
+            for name in sorted(state):
+                value = state[name]
+                count = value.numel()
+                value.copy_(
+                    source_initial[offset : offset + count].reshape(value.shape),
+                )
+                offset += count
+        initial = {name: value.clone() for name, value in state.items()}
+        torch.random.set_rng_state(inputs["rng"].clone())
+        actual = record_original(subject, inputs=inputs)
+        with torch.no_grad():
+            for name, value in subject.state().items():
+                value.copy_(initial[name])
             next(subject.step.model.parameters()).view(torch.int32).view(-1)[0] += 1
         nudged = {"state/state": _joined(subject.state()).unsqueeze(0)}
     assert not mismatches(expected, actual)
@@ -1096,7 +1162,7 @@ def _replay_source_golden(*, sparse_lr_multiplier: float = 1.0) -> None:
         sparse_optimizer = step.sparse_optimizer
         if table is None or sparse_optimizer is None:
             raise TypeError("The source replay requires sparse prefix state.")
-        assert torch.equal(torch.random.get_rng_state(), expected["rng/init_state"])
+        torch.random.set_rng_state(expected["rng/init_state"].clone())
         sparse_group = sparse_optimizer.param_groups[0]
         sparse_group["initial_lr"] = cast(float, sparse_group["lr"]) * (
             sparse_lr_multiplier
@@ -1107,11 +1173,15 @@ def _replay_source_golden(*, sparse_lr_multiplier: float = 1.0) -> None:
         mapped_initial = {
             _source_target_key(name): value for name, value in source_initial.items()
         }
-        _assert_tensor_records_equal(
-            "initial model",
-            mapped_initial,
-            model.state_dict(),
-        )
+        assert {
+            name: (value.shape, value.dtype) for name, value in mapped_initial.items()
+        } == {
+            name: (value.shape, value.dtype)
+            for name, value in model.state_dict().items()
+        }, "initial model layout"
+        model.load_state_dict(mapped_initial)
+        if isinstance(step.ema, EMA):
+            step.ema.initialize(model, reset=True)
 
         step.bind_instance_metadata(
             (

@@ -38,9 +38,10 @@ class Recorder:
         self.on_path = on_path
         self.calls: list[list[str]] = []
         self.argfiles: list[list[str]] = []
+        self.listings: list[list[str]] = []
 
     def run(self, argv: Sequence[str]) -> int:
-        """Record ``argv`` and each ``@argfile`` it names; return the next status.
+        """Record ``argv`` and each ``@argfile`` and ``--test-files`` it names.
 
         Args:
           argv: The command a gate ran.
@@ -49,17 +50,17 @@ class Recorder:
           status: The next of ``statuses``, else ``status``.
 
         """
-        self.calls.append(list(argv))
-        self.argfiles.extend(
-            Path(arg[1:]).read_text().splitlines()
+        self._record(argv)
+        self.listings.extend(
+            Path(arg.removeprefix("--test-files=")).read_text().splitlines()
             for arg in argv
-            if arg.startswith("@")
+            if arg.startswith("--test-files=")
         )
         return self.statuses.pop(0) if self.statuses else self.status
 
     def read(self, argv: Sequence[str]) -> str | None:
-        """Record ``argv``; return the canned stdout."""
-        self.calls.append(list(argv))
+        """Record ``argv`` and each ``@argfile`` it names; return the canned stdout."""
+        self._record(argv)
         return self.output
 
     def has(self, module: str) -> bool:
@@ -70,6 +71,15 @@ class Recorder:
     def which(self, name: str) -> str | None:
         """Place every tool under ``/bin``, or none on PATH."""
         return f"/bin/{name}" if self.on_path else None
+
+    def _record(self, argv: Sequence[str]) -> None:
+        """Record ``argv``, and each ``@argfile`` it names before the gate removes it."""
+        self.calls.append(list(argv))
+        self.argfiles.extend(
+            Path(arg[1:]).read_text().splitlines()
+            for arg in argv
+            if arg.startswith("@")
+        )
 
 
 def context(tmp_path: Path, tools: Recorder, **environ: str) -> gate.Context:
@@ -102,6 +112,20 @@ def context(tmp_path: Path, tools: Recorder, **environ: str) -> gate.Context:
         installed=tools.has,
         which=tools.which,
     )
+
+
+def touch(tmp_path: Path, paths: Sequence[str]) -> None:
+    """Create each of ``paths`` under :func:`context`'s root, as files a gate reads.
+
+    Args:
+      tmp_path: The test's directory.
+      paths: Root-relative paths; a gate drops spooled paths that do not exist.
+
+    """
+    root = tmp_path / "repo"
+    for path in paths:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).touch()
 
 
 class Processes:

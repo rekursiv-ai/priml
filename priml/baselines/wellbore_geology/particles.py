@@ -1220,8 +1220,10 @@ def prepare_particles(
     directory: Path,
     has_target: bool,
     budget: WallBudget | None = None,
-) -> dict[str, dict[str, NDArray[np.generic]]]:
-    """Generate or validate every complete per-well filtering and FFBSi record.
+) -> None:
+    """Generate every missing per-well filtering and FFBSi record into ``directory``.
+
+    Records already present are kept; :class:`ParticleCache` reads them back.
 
     Args:
       wells: Complete raw observations in declared well order.
@@ -1229,9 +1231,6 @@ def prepare_particles(
       directory: External family and split specific rebuildable cache.
       has_target: Retain original target observations in the complete record.
       budget: Optional separate experiment's remaining cold wall allowance.
-
-    Returns:
-      records: Every complete cache after its public float16 IO boundary.
 
     """
     directory = validated_output_path(directory)
@@ -1248,7 +1247,6 @@ def prepare_particles(
             )
         manifest.write_text(encoded)
     producer = config.make()
-    records: dict[str, dict[str, NDArray[np.generic]]] = {}
     for name, raw in wells.items():
         if budget is not None:
             budget.training_seconds()
@@ -1258,8 +1256,6 @@ def prepare_particles(
                 path,
                 producer(particle_well(raw), has_target=has_target),
             )
-        records[name] = read_particle_cache(path)
-    return records
 
 
 def validate_particles(

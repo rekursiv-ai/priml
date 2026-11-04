@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
 Regenerate the smoke fixture's logprobs with the smoke model.
 
 The response tokens and rewards come from two published rollout slices. This

@@ -68,15 +68,10 @@ def reduce(value: object, prefix: str = "") -> dict[str, Tensor]:
     }
 
 
-def golden_path(name: str) -> Path:
-    """Where the frozen records of test module ``name`` live."""
-    return _CWD / "testdata" / f"{name}.pt"
-
-
 def load(name: str) -> dict[str, dict[str, Tensor]]:
     """Load the case-keyed source records of one test module."""
     table: dict[str, dict[str, Tensor]] = {}
-    for key, value in read_tensors(golden_path(name)).items():
+    for key, value in read_tensors(_CWD / "testdata" / f"{name}.pt").items():
         case, _, leaf = key.partition(_CASE)
         table.setdefault(case, {})[leaf] = value
     return table
@@ -89,7 +84,7 @@ def save(name: str, table: Mapping[str, Mapping[str, Tensor]]) -> None:
         for case, record in table.items()
         for key, value in record.items()
     }
-    write_tensors(golden_path(name), flat)
+    write_tensors(_CWD / "testdata" / f"{name}.pt", flat)
 
 
 def assert_matches(name: str, case: str, record: Mapping[str, Tensor]) -> None:

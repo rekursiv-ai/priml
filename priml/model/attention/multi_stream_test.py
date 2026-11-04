@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
@@ -1081,7 +1082,7 @@ def test_multi_stream_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: [torch.randn(2, 3, 4), torch.randn(2, 3, 4)],
+        build_input=lambda: [weyl_randn(2, 3, 4), weyl_randn(2, 3, 4, salt=1)],
         seed=0,
         run=lambda module, xs: torch.cat(cast(tuple[Tensor, ...], module(xs)), dim=1),
     )

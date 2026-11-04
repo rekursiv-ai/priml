@@ -21,6 +21,7 @@ from priml.baselines.wellbore_geology.inference import (
     PredictionBuilder,
 )
 from priml.baselines.wellbore_geology.metrics import PooledRMSE
+from priml.baselines.wellbore_geology.model import PosteriorHeads, SequenceModel
 from priml.baselines.wellbore_geology.particles import ParticleCache, ParticlePrior
 from priml.baselines.wellbore_geology.train_loop import WellboreFoldLoop
 from priml.optimizers.composite import CompositeOptimizer
@@ -96,14 +97,15 @@ class Family:
         def finalize(self) -> Self:
             features = self.training.dataset.loader.dataset.transform.features
             model = self.training.step.model
-            if model.channels_in == -1:
-                model.channels_in = len(features.channels)
-            if model.reference_columns == -1:
-                model.reference_columns = features.reference_columns
-            if model.reference_window < 0:
-                model.reference_window = features.reference_window
-            if model.target_stats is None:
-                model.target_stats = features.target_stats
+            if isinstance(model, PosteriorHeads):
+                if model.channels_in == -1:
+                    model.channels_in = len(features.channels)
+                if model.reference_columns == -1:
+                    model.reference_columns = features.reference_columns
+                if model.reference_window < 0:
+                    model.reference_window = features.reference_window
+                if model.target_stats is None:
+                    model.target_stats = features.target_stats
             windows: list[RowWindow] = []
             if self.particle is not None:
                 if self.particle.reference_columns == -1:
@@ -141,10 +143,14 @@ class Family:
 
         def _push_inputs(self) -> None:
             """Fill the unset dataset, cache and geography of every fold observation."""
-            backbone = self.training.step.model.unet.backbone
-            if self.dataset_directory is not None and isinstance(
-                backbone.checkpoint,
-                str,
+            model = self.training.step.model
+            backbone = (
+                model.unet.backbone if isinstance(model, SequenceModel.Config) else None
+            )
+            if (
+                backbone is not None
+                and self.dataset_directory is not None
+                and isinstance(backbone.checkpoint, str)
             ):
                 backbone.checkpoint = Path(
                     backbone.checkpoint.format(
@@ -189,7 +195,7 @@ def family_0719_v1() -> Family.Config:
     """
     cfg = _base_family()
     cfg.name = "0719_V1"
-    cfg.training.step.model.dropout = 0.05
+    _model(cfg).dropout = 0.05
     cfg.training.dataset.validation_batch_size = 32
     _stopping(cfg).patience = 30
     paths = _paths(cfg)
@@ -317,7 +323,9 @@ def _base_family() -> Family.Config:
     step.dtype_autocast = torch.bfloat16
     step.autocast_cache_enabled = True
     step.compile = None
-    step.model.unet.backbone.checkpoint = (
+    _model(
+        cfg,
+    ).unet.backbone.checkpoint = (
         "{dataset_directory}/initialization/convnext_small.safetensors"
     )
     runtime = CudnnSingleProcess.Config()
@@ -343,6 +351,14 @@ def _stopping(cfg: Family.Config) -> EarlyStopping.Config:
     if not isinstance(stopping, EarlyStopping.Config):
         raise TypeError("Every published family declares early stopping.")
     return stopping
+
+
+def _model(cfg: Family.Config) -> SequenceModel.Config:
+    """Return the family's model, which every published family declares."""
+    model = cfg.training.step.model
+    if not isinstance(model, SequenceModel.Config):
+        raise TypeError("Every published family declares the complete model.")
+    return model
 
 
 def _paths(cfg: Family.Config) -> PathSimulation.Config:

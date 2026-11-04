@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import argparse
 import sys
 
 import pytest
@@ -37,6 +38,7 @@ def _typecheck(
 
 def _spool(tmp_path: Path, *paths: str) -> None:
     """Spool ``paths`` as one pre-commit run does: to every checker's twin."""
+    fakes.touch(tmp_path, paths)
     for name in ("ty-check", "pyrefly-check", "basedpyright"):
         spool.append(tmp_path / "spool", gate=name, key=9, paths=paths)
 
@@ -112,7 +114,8 @@ def test_the_fixer_runs_the_checker_in_its_place(
 
     _typecheck(name, tmp_path, tools, fixer="pkg.fixer")
 
-    assert tools.calls[0][1:] == [
+    [[_, *head, named]] = tools.calls
+    assert head == [
         "-m",
         "pkg.fixer",
         "--checker",
@@ -121,8 +124,9 @@ def test_the_fixer_runs_the_checker_in_its_place(
         "--threads",
         "3",
         "--",
-        "a.py",
     ]
+    assert named.startswith("@")
+    assert tools.argfiles == [["a.py"]]
 
 
 @pytest.mark.parametrize("name", ["ty-check", "pyrefly-check", "basedpyright"])
@@ -178,7 +182,7 @@ def test_dependents_widen_the_files_then_excludes_apply(tmp_path: Path) -> None:
     )
 
     walk, check = tools.calls
-    assert walk[1:] == [
+    assert walk[1:-1] == [
         "-m",
         "pkg.affected",
         "--emit",
@@ -188,8 +192,8 @@ def test_dependents_widen_the_files_then_excludes_apply(tmp_path: Path) -> None:
         "--workers",
         "3",
         "--",
-        "a.py",
     ]
+    assert tools.argfiles == [["a.py"]]
     assert check[-2:] == ["a.py", "b.py"]
 
 
@@ -267,12 +271,118 @@ def test_the_cli_checks_what_the_gate_spooled(
 ) -> None:
     """The spool command and the checker are separate CLIs sharing one spool."""
     for name in ("a.py", "b.py"):
+        Path(name).touch()
         monkeypatch.setattr(sys, "argv", ["gate", "spool", checker, name])
         assert gate.main() == 0
     monkeypatch.setattr(sys, "argv", ["typecheck", *argv])
 
     assert typecheck.main() == 4
     assert processes.calls[-1][1 : 1 + len(expected)] == expected
+
+
+def test_the_cli_widens_through_its_dependents_module(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Path("a.py").touch()
+    monkeypatch.setattr(sys, "argv", ["gate", "spool", "ty-check", "a.py"])
+    assert gate.main() == 0
+    monkeypatch.setenv("PRECOMMIT_CODEGRAPH_TYPECHECK", "2")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["typecheck", "ty-check", "--dependents", "pkg.affected"],
+    )
+
+    typecheck.main()
+
+    walks = [call for call in processes.calls if "--emit" in call]
+    assert [call[1:6] for call in walks] == [
+        ["-m", "pkg.affected", "--emit", "files", "--depth"],
+    ]
+
+
+@pytest.mark.parametrize("name", ["ty-check", "basedpyright"])
+def test_only_pyrefly_takes_what_ty_checked(tmp_path: Path, name: str) -> None:
+    """A hand-off left from another run must not replace the other checkers' spool."""
+    fakes.touch(tmp_path, ["b.py"])
+    spool.write(tmp_path / "spool", gate="typecheck-checked", key=9, paths=["b.py"])
+    _spool(tmp_path, "a.py")
+    tools = fakes.Recorder()
+
+    assert _typecheck(name, tmp_path, tools) == 0
+    assert [call[-1] for call in tools.calls] == ["a.py"]
+
+
+@pytest.mark.parametrize("name", ["ty-check", "pyrefly-check", "basedpyright"])
+def test_each_checker_is_a_command_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    # The flags come from the argv given, not the process's.
+    monkeypatch.setattr(sys, "argv", ["typecheck", "--bogus"])
+
+    flags = typecheck._parse_args(argparse.ArgumentParser(), [name])
+
+    assert (flags.command, flags.dependents, flags.fixer) == (name, None, None)
+    assert flags.handler is typecheck._check
+
+
+def test_a_command_is_required(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exited:
+        typecheck._parse_args(argparse.ArgumentParser(), [])
+
+    assert exited.value.code == 2
+    assert "required: command" in capsys.readouterr().err
+
+
+def test_ty_check_has_no_fixer() -> None:
+    with pytest.raises(SystemExit) as exited:
+        typecheck._parse_args(
+            argparse.ArgumentParser(),
+            ["ty-check", "--fixer", "pkg.fixer"],
+        )
+
+    assert exited.value.code == 2
+
+
+def test_the_help_names_each_checker_and_the_fixer_module(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        typecheck._parse_args(argparse.ArgumentParser(), ["--help"])
+    top = " ".join(capsys.readouterr().out.split())
+    with pytest.raises(SystemExit):
+        typecheck._parse_args(argparse.ArgumentParser(), ["pyrefly-check", "--help"])
+    pyrefly = capsys.readouterr().out
+
+    for name in ("ty-check", "pyrefly-check", "basedpyright"):
+        assert f"{name} Run {name} over its spool." in top
+    assert "--fixer MODULE" in pyrefly
+
+
+@pytest.mark.parametrize(
+    ("docstring", "after_usage"),
+    [
+        (typecheck.__doc__, "Run one type checker once"),
+        (None, "positional arguments:"),
+    ],
+    ids=["docstring", "optimized away"],
+)
+def test_main_help_describes_the_gate_from_its_docstring(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    docstring: str | None,
+    after_usage: str,
+) -> None:
+    """``python -OO`` strips the docstring; the help then has no description."""
+    monkeypatch.setattr(typecheck, "__doc__", docstring)
+    monkeypatch.setattr(sys, "argv", ["typecheck", "--help"])
+
+    with pytest.raises(SystemExit):
+        typecheck.main()
+
+    assert capsys.readouterr().out.split("\n\n")[1].startswith(after_usage)
 
 
 if __name__ == "__main__":

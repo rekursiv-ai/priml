@@ -27,7 +27,7 @@ from priml.model.prefix import SparsePuzzleEmbedding
 from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.bfb import fill_parameters, host_agnostic_numerics
 from priml.testing.golden import (
     assert_tensor_golden,
     joined,
@@ -113,12 +113,12 @@ def shrunk(factory: Callable[[], MazeTrainLoop]) -> BoundaryLossTrainStep.Config
 
 
 def batches() -> list[dict[str, object]]:
-    """Two training batches, the second short, then one evaluation batch."""
-    generator = torch.Generator().manual_seed(0)
+    """Two arithmetic training batches, the second short, then evaluation."""
+    positions = torch.arange(SLOTS * SIDE * SIDE).reshape(SLOTS, SIDE * SIDE)
     return [
         {
-            "media": torch.randint(1, 6, (SLOTS, SIDE * SIDE), generator=generator),
-            "label": torch.randint(1, 6, (SLOTS, SIDE * SIDE), generator=generator),
+            "media": (positions + index) % 5 + 1,
+            "label": (positions * 3 + index + 1) % 5 + 1,
             "valid_count": SLOTS - 1 if index == 1 else SLOTS,
             "puzzle_identifiers": torch.zeros(SLOTS, dtype=torch.int32),
         }
@@ -139,7 +139,9 @@ def record(config: BoundaryLossTrainStep.Config) -> dict[str, Tensor]:
     out: dict[str, Tensor] = {}
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        step = config.make()
+        with torch.random.fork_rng(devices=[]):
+            step = config.make()
+            fill_parameters(step.model, buffers=("slow_init", "fast_init"))
         out["rng"] = rng_fingerprint()
         out["init"] = joined(step.model.parameters())
         data = batches()
@@ -166,6 +168,41 @@ def record(config: BoundaryLossTrainStep.Config) -> dict[str, Tensor]:
 
 
 @pytest.mark.parametrize("name", RUNGS)
+def test_owned_record_ignores_constructor_sampler_changes(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = record(shrunk(RUNGS[name]))
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            return tensor.uniform_(-0.1, 0.1)
+
+    monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
+    assert not mismatches(expected, record(shrunk(RUNGS[name])))
+
+
+def test_owned_batches_do_not_sample_random_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_sampling(*args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        raise AssertionError("Owned inputs must be rebuilt without random draws.")
+
+    monkeypatch.setattr(torch, "randint", reject_sampling)
+    data = batches()
+    assert len(data) == 3
+    assert data[0]["valid_count"] == SLOTS
+    assert data[1]["valid_count"] == SLOTS - 1
+    for batch in data:
+        assert isinstance(batch["media"], Tensor)
+        assert isinstance(batch["label"], Tensor)
+        assert batch["media"].shape == batch["label"].shape
+
+
+@pytest.mark.parametrize("name", RUNGS)
 def test_the_rung_replays_bit_for_bit(name: str) -> None:
     assert_tensor_golden(_CWD / "testdata" / f"{name}.pt", record(shrunk(RUNGS[name])))
 
@@ -180,7 +217,9 @@ def test_the_golden_bites(name: str) -> None:
     expected = read_tensors(_CWD / "testdata" / f"{name}.pt")
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        step = shrunk(RUNGS[name]).make()
+        with torch.random.fork_rng(devices=[]):
+            step = shrunk(RUNGS[name]).make()
+            fill_parameters(step.model, buffers=("slow_init", "fast_init"))
         with torch.no_grad():
             next(step.model.parameters()).view(-1).view(torch.int32)[0] += 1
         init = joined(step.model.parameters())

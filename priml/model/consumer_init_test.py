@@ -1,4 +1,4 @@
-"""Freeze composite constructors, RNG consumption, and forward outputs."""
+"""Verify composite initialization contracts and deterministic forward outputs."""
 
 from functools import partial
 from pathlib import Path
@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from priml.baselines.nanochat.model import NanoChatLM
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
@@ -186,18 +187,21 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
     "kind",
     ["transformer", "mmdit", "moe", "mixer", "nanochat", "qwen", "kimi"],
 )
-def test_legacy_composite_constructor_bfb(kind: str) -> None:
+def test_composite_forward_bfb(kind: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name=f"consumer_init_{kind}",
-        build_module=nn.Identity,
-        build_input=lambda: torch.empty(0),
-        run=partial(_constructor_values, kind=kind),
+        build_module=partial(_build_composite, kind=kind),
+        build_input=(
+            (lambda: torch.tensor([[0, 1], [1, 0]]))
+            if kind in ("nanochat", "qwen", "kimi")
+            else (lambda: weyl_randn(3, 2, 4))
+        ),
+        run=_composite_output,
     )
 
 
-def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
-    del module, inp
+def _build_composite(*, kind: str) -> nn.Module:
     legacy_ffn = SwiGLU.Config(
         channels_hidden=2,
         init_weight=kaiming_uniform,
@@ -303,22 +307,15 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         cfg_nano.block.attn.channels_head = 2
         cfg_nano.block.attn.gate_channels = 2
         model = cfg_nano.make()
-    state = from_plain(model.state_dict(), dict[str, Tensor])
-    # The fingerprint pins the draw count in 8 values instead of the 5 KB
-    # Mersenne state.
-    values: list[Tensor] = [
-        golden.joined(state.values()),
-        golden.rng_fingerprint().float(),
-    ]
-    x = torch.randn(3, 2, 4)
+    return model
+
+
+def _composite_output(model: nn.Module, value: Tensor) -> Tensor:
     if isinstance(model, MMDiTBlock):
-        values.extend(value.float() for value in model([x, x]))
-    elif kind in ("nanochat", "qwen", "kimi"):
-        values.append(model(torch.tensor([[0, 1], [1, 0]])).float())
-    else:
-        values.append(model(x).float())
-    values.append(golden.rng_fingerprint().float())
-    return golden.joined(values)
+        return golden.joined(output.float() for output in model([value, value]))
+    output = model(value)
+    assert isinstance(output, Tensor)
+    return output.float()
 
 
 if __name__ == "__main__":

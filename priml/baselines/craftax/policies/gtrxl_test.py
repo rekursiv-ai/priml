@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax.policies.gtrxl import GTrXLPolicy
+from priml.math.probability import weyl_randn
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -410,13 +411,17 @@ def _windowed(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
 
 def _bfb_inputs() -> dict[str, Tensor]:
     """Draw 3 windows of 4 steps, a memory written 0, 3 and 7 rows deep, two starts."""
-    state = torch.randn(MEMORY, 3, CARRY)
+    state = weyl_randn(MEMORY, 3, CARRY)
     written = torch.arange(MEMORY)[:, None] >= torch.tensor([MEMORY, MEMORY - 3, 0])
     state = torch.where(written[..., None], state, 0.0)
     state[..., -1] = written.float()
     starts = torch.zeros(3, 4)
     starts[1, 2] = starts[2, 0] = 1.0
-    return {"observations": torch.randn(3, 4, 9), "state": state, "starts": starts}
+    return {
+        "observations": weyl_randn(3, 4, 9, salt=1),
+        "state": state,
+        "starts": starts,
+    }
 
 
 def _score(module: nn.Module, inputs: dict[str, Tensor]) -> Tensor:

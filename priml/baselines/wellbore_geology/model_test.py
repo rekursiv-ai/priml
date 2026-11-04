@@ -26,6 +26,8 @@ from priml.baselines.wellbore_geology.model import (
     SequenceModel,
     backbone_mlp,
     bilinear_cost,
+    finalize_heads,
+    mismatch_head,
     retained_stage_configs,
 )
 from priml.baselines.wellbore_geology.testing import tiny_model_config
@@ -39,7 +41,10 @@ from priml.model.pool import AvgPool2d
 from priml.model.sequential import Sequential
 from priml.model.special import Activation, Dropout
 from priml.model.swiglu import SwiGLU, gelu, relu, silu
-from priml.testing.bfb import host_agnostic_numerics, portable_half_precision
+from priml.testing.bfb import (
+    host_agnostic_numerics,
+    portable_half_precision,
+)
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_tensor_golden
 
@@ -489,27 +494,24 @@ def test_zero_input_linear_preserves_torch_output_and_constructor_rng(
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("override", [False, True])
-def test_zero_input_convolution_keeps_torch_constructor_draw_policy(
+def test_zero_input_convolution_initializes_bias_and_preserves_empty_output(
     bias: bool,
     override: bool,
 ) -> None:
     config = Conv2d.Config(channels_in=0, channels_out=5, bias=bias, init_bias=None)
     if override:
         config.init_bias = nn.init.ones_
-    torch.manual_seed(37)
-    with pytest.warns(UserWarning, match="zero-element tensors"):
-        expected = nn.Conv2d(0, 5, 3, padding=1, bias=bias)
-    expected_rng = torch.get_rng_state()
-    torch.manual_seed(37)
     with pytest.warns(UserWarning, match="zero-element tensors"):
         actual = config.make()
-    assert torch.equal(torch.get_rng_state(), expected_rng)
-    assert actual.weight.shape == expected.weight.shape
-    if override and actual.bias is not None:
-        assert torch.equal(actual.bias, torch.ones(5))
-    # Conv2d's zero-input branch writes no output values or default bias values.
+    assert actual.weight.shape == (5, 0, 3, 3)
+    if bias:
+        assert actual.bias is not None
+        assert torch.equal(actual.bias, torch.full((5,), float(override)))
+    else:
+        assert actual.bias is None
+    # Conv2d.forward returns zero channels for zero input channels.
     value = torch.empty(2, 0, 4, 6)
-    assert actual(value).shape == expected(value).shape
+    assert actual(value).shape == (2, 0, 4, 6)
 
 
 def test_bilinear_cost_counts_weighted_taps_and_scatter_add_gradients() -> None:
@@ -1230,6 +1232,33 @@ def test_channels_last_storage_applies_only_to_cuda_models_that_ask_for_it(
     assert calls == (
         [torch.channels_last] if device == "cuda" and channels_last else []
     )
+
+
+def test_a_single_linear_head_is_widened_like_the_first_of_a_list() -> None:
+    config = SequenceModel.Config(channels_hidden=3)
+    config.unet_gr_rmse_head = Sequential.Config(elements=Linear.Config())
+    finalize_heads(config)
+    head = config.unet_gr_rmse_head.elements
+    assert isinstance(head, Linear.Config)
+    assert head.channels_out == 6
+
+
+def test_an_empty_head_is_sized_without_a_first_element() -> None:
+    config = SequenceModel.Config(channels_hidden=3, dropout=0.5)
+    config.unet_gr_rmse_head = Sequential.Config(elements=[])
+    finalize_heads(config)
+    assert config.unet_gr_rmse_head.channels_in == 3
+
+
+def test_zero_dropout_reaches_every_head_dropout() -> None:
+    config = SequenceModel.Config(dropout=0.0)
+    config.unet_gr_rmse_head = mismatch_head()
+    elements = config.unet_gr_rmse_head.elements
+    assert isinstance(elements, list)
+    drop = next(e for e in elements if isinstance(e, Dropout.Config))
+    drop.p = 0.3
+    finalize_heads(config)
+    assert drop.p == 0.0
 
 
 if __name__ == "__main__":

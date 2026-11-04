@@ -21,6 +21,7 @@ from priml.baselines.mlsbench.dl.vision.model import (
     kaiming_normal_fan_out,
     sized_blocks,
 )
+from priml.math.probability import weyl_randn
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -375,7 +376,7 @@ def test_resnet_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="resnet",
         build_module=tiny().make,
-        build_input=lambda: torch.randn(BATCH, 3, HEIGHT, WIDTH),
+        build_input=lambda: weyl_randn(BATCH, 3, HEIGHT, WIDTH),
         seed=0,
     )
 

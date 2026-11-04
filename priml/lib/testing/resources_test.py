@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import patch
 
 import inspect
+import locale
 import os
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from priml.lib.testing import resources
 from priml.lib.testing.resources import (
     apply_golden_marker,
     apply_resource_markers,
+    ascii_locale,
     cap_math_threads,
     module_path,
     pytest_collection_modifyitems,
@@ -273,7 +275,9 @@ def test_call_through_a_from_imported_submodule_is_marked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = tmp_path / "pkg"
+    # A name no other test imports: a ``pkg`` already in ``sys.modules`` would
+    # resolve the submodule against that package's path instead.
+    package = tmp_path / "golden_records_pkg"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "records.py").write_text(
@@ -282,11 +286,12 @@ def test_call_through_a_from_imported_submodule_is_marked(
     )
     module = tmp_path / "submodule_test.py"
     module.write_text(
-        "from pkg import records\n"
+        "from golden_records_pkg import records\n"
         '\ndef test_submodule():\n    records.golden_path("g.pt")\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    monkeypatch.delitem(sys.modules, "golden_records_pkg", raising=False)
     monkeypatch.setattr(
         "priml.lib.testing.resources._CWD",
         tmp_path / "a" / "b",
@@ -631,6 +636,8 @@ def test_configure_declares_the_exported_opt_out_marker(
         ("gpu_cuda_runtime", False),
         ("slow and not cuda", True),
         ("not integration", False),
+        # Only a ``cuda`` test carrying both others is selected.
+        ("integration and slow", False),
     ],
 )
 def test_a_run_that_deselects_cuda_sees_no_gpu(
@@ -654,6 +661,8 @@ def test_isolation_does_not_scan_prior_test_directories(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Allocation alone: deleting the previous test's root walks only that root.
+    del request.config.stash[resources._LAST_ROOT]
     with patch("os.scandir", wraps=os.scandir) as scandir:
         root = _allocate(request, tmp_path_factory, monkeypatch)
 
@@ -688,12 +697,27 @@ def test_isolated_roots_are_unique_and_outside_tmp_path(
 
     assert isinstance(second, Path)
     assert first != second
-    assert first.is_dir()
     assert second.is_dir()
-    assert first.is_relative_to(tmp_path_factory.getbasetemp())
     assert second.is_relative_to(tmp_path_factory.getbasetemp())
     assert not (config_dir() / "rekursiv-ai").exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_next_tests_setup_removes_the_previous_root(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roots kept until exit made one serial delete of 420k dirs after the summary."""
+    first = _allocate(request, tmp_path_factory, monkeypatch)
+    assert isinstance(first, Path)
+    (first / "state" / "rekursiv-ai").mkdir()
+
+    second = _allocate(request, tmp_path_factory, monkeypatch)
+
+    assert isinstance(second, Path)
+    assert not first.exists()
+    assert second.is_dir()
 
 
 @pytest.mark.real_user_dirs
@@ -854,6 +878,232 @@ def test_the_recursion_limit_is_restored_on_exit() -> None:
         _depth(100)
 
     assert sys.getrecursionlimit() == before
+
+
+def _skip_reasons(item: _Item) -> list[str]:
+    return [cast(str, marker.kwargs["reason"]) for marker in item.iter_markers("skip")]
+
+
+@pytest.mark.parametrize(
+    ("env", "marks", "reasons"),
+    [
+        (
+            {},
+            ("cli_real_llm",),
+            ["cli_real_llm test skipped (set RUN_REAL_LLM=1 to run live model CLIs)"],
+        ),
+        ({"RUN_REAL_LLM": "1"}, ("cli_real_llm",), []),
+        ({}, ("network_github",), []),
+        (
+            {"CI": "1"},
+            ("gpu_nvidia",),
+            [
+                (
+                    "gpu_nvidia test skipped in CI (no live credentials/services/devices;"
+                    " set RUN_INTEGRATION=1 to opt in)"
+                ),
+            ],
+        ),
+        ({"CI": "1", "RUN_INTEGRATION": "1"}, ("gpu_nvidia",), []),
+        ({"CI": "1"}, ("network_github",), []),
+        ({}, ("gpu_nvidia",), []),
+    ],
+    ids=[
+        "live-llm-unset",
+        "live-llm-set",
+        "no-live-mark",
+        "ci",
+        "ci-opted-in",
+        "ci-unskipped-mark",
+        "not-ci",
+    ],
+)
+def test_a_skip_names_why_and_only_where_its_resource_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    marks: tuple[str, ...],
+    reasons: list[str],
+) -> None:
+    for name in ("RUN_REAL_LLM", "CI", "RUN_INTEGRATION"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    item = _Item(*marks)
+
+    apply_resource_markers([item], resource_markers=marks)
+
+    assert _skip_reasons(item) == reasons
+
+
+def test_a_timeout_the_test_sets_itself_is_kept() -> None:
+    item = _Item("network_github", "timeout")
+
+    apply_resource_markers([item], resource_markers=("network_github",))
+
+    assert [marker.name for marker in item.iter_markers("timeout")] == ["timeout"]
+    assert [marker.args for marker in item.iter_markers("timeout")] == [()]
+
+
+def test_registered_resource_markers_are_the_concrete_family_names() -> None:
+    config = _Config([])
+    config.markers = [
+        "network_github: one: two",
+        "compute_torch_compile: a",
+        "slow: no family",
+        "gpu: no specific name",
+        "foo_bar: not a family",
+        "db_postgres",
+    ]
+
+    assert resources.registered_resource_markers(
+        cast(pytest.Config, cast(object, config)),
+    ) == ("network_github", "compute_torch_compile", "db_postgres")
+
+
+@pytest.mark.parametrize(
+    ("marker", "message"),
+    [("network", r"^Expected separator\.$"), ("unknown_probe", r"^Expected family")],
+)
+def test_resource_marker_family_names_what_is_wrong(marker: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        resources.resource_marker_family(marker)
+
+
+def test_a_family_is_the_name_up_to_its_first_underscore() -> None:
+    assert resources.resource_marker_family("compute_torch_compile") == "compute"
+
+
+def test_an_unknown_marker_is_found_by_its_first_underscore() -> None:
+    with pytest.raises(pytest.UsageError, match="network_open_ai"):
+        resources._fail_on_unknown_resource_markers(
+            {"network_open_ai"},
+            resource_markers=set(),
+        )
+
+
+def test_a_family_name_alone_is_not_an_unknown_resource_marker() -> None:
+    resources._fail_on_unknown_resource_markers({"network"}, resource_markers=set())
+
+
+def test_an_item_without_a_module_file_or_test_name_is_not_marked() -> None:
+    nameless = _Item()
+    nameless.obj = SimpleNamespace()
+    unfiled = _Item()
+
+    apply_golden_marker([nameless, unfiled])
+
+    assert list(nameless.iter_markers()) == []
+    assert list(unfiled.iter_markers()) == []
+
+
+def _golden_item(tmp_path: Path, *marks: str) -> _Item:
+    module = tmp_path / "golden_test.py"
+    module.write_text(
+        "from numerics.testing.golden import assert_matches_golden\n"
+        "\ndef test_golden():\n    assert_matches_golden()\n",
+        encoding="utf-8",
+    )
+    item = _Item(*marks, test_name="test_golden")
+    item.module = type("Module", (), {"__file__": str(module)})
+    return item
+
+
+def test_a_golden_module_s_assertion_is_a_golden(tmp_path: Path) -> None:
+    item = _golden_item(tmp_path)
+
+    apply_golden_marker([item])
+
+    assert [marker.name for marker in item.iter_markers()] == ["golden"]
+
+
+def test_a_gpu_test_reaching_a_golden_is_not_marked(tmp_path: Path) -> None:
+    item = _golden_item(tmp_path, "gpu_nvidia")
+
+    apply_golden_marker([item])
+
+    assert [marker.name for marker in item.iter_markers()] == ["gpu_nvidia"]
+
+
+def test_a_test_already_marked_golden_is_not_marked_again(tmp_path: Path) -> None:
+    item = _golden_item(tmp_path, "golden")
+
+    apply_golden_marker([item])
+
+    assert [marker.name for marker in item.iter_markers()] == ["golden"]
+
+
+def test_expecting_a_golden_mismatch_is_a_golden(tmp_path: Path) -> None:
+    module = tmp_path / "mismatch_test.py"
+    module.write_text(
+        "from numerics.testing.golden import expect_golden_mismatch\n"
+        "\ndef test_mismatch():\n    expect_golden_mismatch()\n",
+        encoding="utf-8",
+    )
+
+    assert resources._function_facts(module, "test_mismatch") == (True, ())
+
+
+def test_a_call_into_a_module_with_no_function_named_is_no_edge(
+    tmp_path: Path,
+) -> None:
+    module = tmp_path / "module_call_test.py"
+    # ``resources`` is the one sibling every export ships beside this test.
+    module.write_text(
+        "import priml.lib.testing.resources\n"
+        "from priml.lib.testing import resources as helpers\n"
+        "\ndef test_calls():\n    resources()\n    helpers.smuggle(1, int)\n",
+        encoding="utf-8",
+    )
+
+    assert resources._function_facts(module, "test_calls") == (
+        False,
+        ((Path(resources.__file__), "smuggle"),),
+    )
+
+
+def test_a_dotted_import_is_known_by_its_last_name(tmp_path: Path) -> None:
+    module = tmp_path / "dotted_test.py"
+    module.write_text(
+        "import priml.lib.testing.resources\n\ndef test_dotted():\n    resources.smuggle()\n",
+        encoding="utf-8",
+    )
+
+    assert resources._function_facts(module, "test_dotted") == (
+        False,
+        ((Path(resources.__file__), "smuggle"),),
+    )
+
+
+def test_a_module_level_name_outside_testdata_marks_nothing(tmp_path: Path) -> None:
+    module = tmp_path / "names_test.py"
+    module.write_text(
+        'OTHER = 1\nGOLDEN: object = _CWD / "testdata" / "g.pt"\n'
+        "\ndef test_other():\n    print(OTHER)\n"
+        "\ndef test_golden():\n    print(GOLDEN)\n",
+        encoding="utf-8",
+    )
+
+    assert resources._function_facts(module, "test_other") == (False, ())
+    assert resources._function_facts(module, "test_golden") == (True, ())
+
+
+def test_ascii_locale_refuses_non_ascii_text_that_names_no_encoding(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "x.txt"
+    path.write_text("é", encoding="utf-8")
+
+    with ascii_locale(), pytest.raises(UnicodeDecodeError):
+        path.read_text()
+
+
+def test_ascii_locale_restores_the_locale_on_exit() -> None:
+    before = locale.setlocale(locale.LC_CTYPE)
+
+    with ascii_locale():
+        assert locale.setlocale(locale.LC_CTYPE) == "C"
+
+    assert locale.setlocale(locale.LC_CTYPE) == before
 
 
 if __name__ == "__main__":

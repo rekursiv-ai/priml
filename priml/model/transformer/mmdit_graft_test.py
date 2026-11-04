@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.embedding import Embedding
@@ -197,7 +198,7 @@ def test_graft_frozen_step_bfb() -> None:
 def _frozen_batch() -> tuple[Tensor, Tensor, Tensor]:
     """Draw a narrow-width batch: tokens, one modality stream, its conditioning."""
     tokens = torch.tensor([[1, 0], [0, 1], [1, 0]])
-    return tokens, torch.randn(3, 2, 4), torch.randn(3, 2)
+    return tokens, weyl_randn(3, 2, 4), weyl_randn(3, 2, salt=1)
 
 
 # The harness stores this model's pre-step state_dict whole, so the golden's size is

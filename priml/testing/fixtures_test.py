@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from typing import cast
+from importlib import util
+from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import MagicMock, patch
 
 import sys
@@ -15,6 +16,14 @@ from priml.testing.fixtures import (
     poison_free_pool,
     torch_compiler_isolation,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+    from types import ModuleType
+
+    from torch.overrides import TorchFunctionMode
 
 
 def test_the_testing_helpers_leave_device_choice_to_the_runtime() -> None:
@@ -327,6 +336,69 @@ def test_cleanup_cuda_rechecks_when_torch_arrives_during_the_test(
         next(gen)
 
     assert synchronize.call_count == expected_calls
+
+
+_UNPLACED: Final = {
+    "arange": "torch.arange(2)",
+    "empty": "torch.empty(2)",
+    "eye": "torch.eye(2)",
+    "full": "torch.full((2,), 1.0)",
+    "ones": "torch.ones(2)",
+    "rand": "torch.rand(2)",
+    "randint": "torch.randint(3, (2,))",
+    "randn": "torch.randn(2)",
+    "tensor": "torch.tensor(1.0)",
+    "zeros": "torch.zeros(2)",
+}
+"""Each factory the mode checks, called with no device."""
+
+
+def _module(directory: Path) -> ModuleType:
+    """Write and import a module calling each factory unplaced, at None, and placed."""
+    lines = ["import torch", ""]
+    lines += [f"def {name}():\n    return {call}\n" for name, call in _UNPLACED.items()]
+    lines += [
+        "def at_none():\n    return torch.zeros(2, device=None)\n",
+        "def placed():\n    return torch.zeros(2, device='cpu', dtype=torch.float64)\n",
+        "def plain_op():\n    return torch.add(torch.ones(2, device='cpu'), 1)\n",
+    ]
+    path = directory / "factories.py"
+    path.write_text("\n".join(lines))
+    spec = util.spec_from_file_location("factories", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("name", list(_UNPLACED))
+def test_placed_factories_fail_a_modules_factory_that_names_no_device(
+    name: str,
+    tmp_path: Path,
+    placed_factories: Callable[[ModuleType], TorchFunctionMode],
+) -> None:
+    module = _module(tmp_path)
+    call = getattr(module, name)
+    call()
+    with placed_factories(module), pytest.raises(ValueError, match="names no device"):
+        call()
+
+
+def test_placed_factories_pass_a_named_device_and_other_callers(
+    tmp_path: Path,
+    placed_factories: Callable[[ModuleType], TorchFunctionMode],
+) -> None:
+    module = _module(tmp_path)
+    with placed_factories(module):
+        with pytest.raises(ValueError, match=r"zeros.* names no device$"):
+            module.at_none()
+        placed = module.placed()
+        assert placed.device.type == "cpu"
+        assert placed.dtype == torch.float64
+        assert torch.equal(module.plain_op(), torch.full((2,), 2.0))
+        # The test is not the module: its own unplaced factories pass.
+        assert torch.zeros(2).device.type == "cpu"
 
 
 if __name__ == "__main__":

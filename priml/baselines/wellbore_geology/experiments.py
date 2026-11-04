@@ -9,6 +9,7 @@ from priml.baselines.wellbore_geology.inference import (
 )
 from priml.baselines.wellbore_geology.pipeline import WellboreStudy
 from priml.baselines.wellbore_geology.recipes import (
+    _model,
     family_0719_v1,
     family_0724_v1,
     family_0729_v3,
@@ -215,7 +216,7 @@ def exp_smoke() -> WellboreStudy.Config:
         family.training.max_epochs = 1
         family.cv.folds = 2
         family.cv.repeats = 1
-        shrink_model(family.training.step.model)
+        shrink_model(_model(family))
         family.training.dataset.loader.dataset.transform.features.target_rows = 64
         family.training.dataset.loader.dataset.transform.features.reference_columns = 32
         if family.particle is not None:

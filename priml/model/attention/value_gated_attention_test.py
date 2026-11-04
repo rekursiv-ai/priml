@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
@@ -291,7 +292,7 @@ def test_value_gated_attention_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
         run=lambda module, x: cast(ValueGatedAttention, module)(
             x,

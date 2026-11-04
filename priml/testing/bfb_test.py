@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from unittest.mock import Mock
 
 import ast
 import os
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 from treekle import from_plain
 
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
 from priml.testing import bfb, regenerate
@@ -40,7 +42,6 @@ from priml.testing.bfb import (
     _assert_equal,
     _assert_portable_output_dtype,
     _assert_portable_state_changes,
-    _assert_same_input,
     _byte_span,
     _compact_copies,
     _copy_back,
@@ -52,6 +53,7 @@ from priml.testing.bfb import (
     _module_device,
     _op_name,
     _ordered,
+    _plan,
     _replay_golden,
     _resolve_output,
     _run_unfused,
@@ -66,6 +68,7 @@ from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
     changed_state,
+    fill_parameters,
     first_tensor,
     host_agnostic_numerics,
     load_golden,
@@ -74,7 +77,7 @@ from priml.testing.bfb import (
     randomize_parameters,
     regenerate_golden,
     save_golden,
-    stale_post_states,
+    stored_pre_states,
 )
 from priml.testing.golden import expect_golden_mismatch, pack, tensor_bits_equal
 
@@ -312,7 +315,7 @@ class _WideMutated(nn.Module):
 
 
 def test_post_run_state_is_stored_whole(tmp_path: Path) -> None:
-    """A mutated tensor is stored twice: its pre-run copy and its post-run value."""
+    """A mutated tensor is stored once, whole: replay rebuilds its pre-run value."""
     sizes: list[int] = []
     for width in (4, 4_004):
         name = f"wide{width}"
@@ -331,7 +334,7 @@ def test_post_run_state_is_stored_whole(tmp_path: Path) -> None:
         sizes.append((tmp_path / f"{name}.pt").stat().st_size)
     growth = sizes[1] - sizes[0]
     one_copy = 4_000 * 4
-    assert 2 * one_copy <= growth < 2 * one_copy + 512
+    assert one_copy <= growth < one_copy + 512
 
 
 class _WideOutput(nn.Module):
@@ -728,7 +731,7 @@ def test_explicit_regeneration_of_an_existing_golden_returns_normally(
         build_input=_build_min_input,
     )
     path = tmp_path / "linear_min.pt"
-    before = _loaded_golden(path)["state_dict"]
+    before = load_golden(path)["output"]
     regenerate.override(monkeypatch, b4b=True)
 
     assert_bfb_against_golden(
@@ -739,7 +742,7 @@ def test_explicit_regeneration_of_an_existing_golden_returns_normally(
     )
 
     # The archive's internal name changes with the temp file; the payload does not.
-    assert not changed_state(before, _loaded_golden(path)["state_dict"])
+    assert tensor_bits_equal(before, load_golden(path)["output"])
 
 
 def test_default_runner_splats_a_tuple_input_and_requires_a_tensor(
@@ -912,7 +915,7 @@ def test_bfb_detects_a_changed_input(tmp_path: Path) -> None:
         seed=0,
     )
 
-    with pytest.raises(AssertionError, match="input") as error:
+    with pytest.raises(AssertionError, match="output") as error:
         assert_bfb_against_golden(
             golden_dir=tmp_path,
             golden_name="linear_input",
@@ -920,7 +923,7 @@ def test_bfb_detects_a_changed_input(tmp_path: Path) -> None:
             build_input=lambda: torch.randn(3, 4),
             seed=0,
         )
-    assert str(error.value) == "input: shape mismatch (3, 4) vs (2, 4)"
+    assert str(error.value) == "output: shape mismatch (3, 3) vs (2, 3)"
 
 
 def test_expect_golden_mismatch_blocks_bfb_regeneration(
@@ -1092,22 +1095,19 @@ def test_param_mutating_runner_captures_post_state(tmp_path: Path) -> None:
     )
 
 
-def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
-    """Every priml golden's post-run state holds only tensors the run changed.
+def test_no_checked_in_golden_stores_a_pre_run_state() -> None:
+    """Replay rebuilds the pre-run state, so no priml golden still stores one.
 
-    Gated rather than trusted because the omission arrived as a WRITER change
-    with no migration: nineteen goldens minted before it kept the copy, the
-    tolerant reader never went red, and 1.1 MiB sat unnoticed until someone
-    read a size diff. A guard that only stops new violations leaves the
-    existing ones invisible forever.
+    Gated rather than trusted: a golden minted before the fill keeps a copy the
+    reader ignores, and only a gate over the existing files makes it visible.
     """
     goldens = sorted(_CWD.parent.rglob("*.pt"))
     assert goldens, "no goldens found; the glob no longer matches the layout"
-    stale = stale_post_states(goldens)
-    assert not stale, f"goldens storing an unchanged post-state: {stale}"
+    stale = stored_pre_states(goldens)
+    assert not stale, f"goldens storing a pre-run state: {stale}"
 
 
-def test_stale_post_states_reports_then_clears_a_synthetic_golden(
+def test_stored_pre_states_reports_then_clears_a_synthetic_golden(
     tmp_path: Path,
 ) -> None:
     regenerate_golden(
@@ -1117,31 +1117,69 @@ def test_stale_post_states_reports_then_clears_a_synthetic_golden(
         build_input=_build_min_input,
     )
     path = tmp_path / "buffer_mutating.pt"
-    assert stale_post_states([path]) == []
-    payload = load_golden(path)
-    post = payload.get("post_state")
-    assert post is not None
-    payload["post_state"] = {**post, "lin.bias": payload["state_dict"]["lin.bias"]}
-    save_golden(path, payload)
-    assert stale_post_states([path]) == [path]
-
-
-# Only the state entries are returned: a golden also holds an input, an output digest,
-# and a seed, and typing those as state dicts to satisfy one reader would be a false
-# annotation.
-def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
-    """Read a golden's two state dicts; a file with none (not a bfb golden) is empty."""
-    raw = from_plain(
-        _torch_load(path, map_location="cpu", weights_only=False),
+    assert stored_pre_states([path]) == []
+    raw = cast(
         dict[str, object],
+        _torch_load(path, map_location="cpu", weights_only=False),
     )
-    if "state_dict" not in raw:
-        return {}
-    payload = load_golden(path)
-    states = {"state_dict": payload["state_dict"]}
-    if "post_state" in payload:
-        states["post_state"] = payload["post_state"]
-    return states
+    torch.save({**raw, "state_dict": {}}, path)
+    assert stored_pre_states([path]) == [path]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("std", [None, 0.3])
+def test_fill_parameters_values_scale_and_total(
+    dtype: torch.dtype,
+    std: float | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = nn.ParameterList(
+        nn.Parameter(torch.empty(shape, dtype=dtype)) for shape in ((2, 3), (4,), (5,))
+    )
+    sample = Mock(wraps=weyl_randn)
+    monkeypatch.setattr(bfb, "weyl_randn", sample)
+    count = fill_parameters(module) if std is None else fill_parameters(module, std=std)
+    sample.assert_called_once_with(15, dtype=torch.float64)
+    expected = (weyl_randn(15, dtype=torch.float64) * (1.0 if std is None else std)).to(
+        dtype,
+    )
+    assert count == 15
+    assert torch.equal(
+        torch.cat([parameter.detach().flatten() for parameter in module]),
+        expected,
+    )
+
+
+def test_fill_parameters_includes_only_explicit_random_buffers() -> None:
+    module = nn.Linear(3, 2)
+    module.register_buffer("latent", torch.randn(4, 5), persistent=False)
+    module.register_buffer("fixed", torch.tensor([2.0, 3.0]))
+    state = torch.get_rng_state()
+    count = fill_parameters(module, buffers=("latent",))
+    expected = weyl_randn(28, dtype=torch.float64).float()
+    assert count == 28
+    assert module.bias is not None
+    assert torch.equal(module.weight.flatten(), expected[:6])
+    assert torch.equal(module.bias, expected[6:8])
+    assert torch.equal(module.get_buffer("latent").flatten(), expected[8:])
+    assert torch.equal(module.get_buffer("fixed"), torch.tensor([2.0, 3.0]))
+    assert torch.equal(torch.get_rng_state(), state)
+
+
+def test_fill_parameters_draws_nothing_and_continues_across_parameters() -> None:
+    """The fill is the same whatever the generator holds, and no two weights repeat."""
+    module = nn.Linear(3, 2)
+    state = torch.get_rng_state()
+    fill_parameters(module, std=0.5)
+
+    assert torch.equal(torch.get_rng_state(), state)
+    assert module.bias is not None
+    values = torch.cat([module.weight.detach().flatten(), module.bias.detach()])
+    assert values.unique().numel() == 8
+    other = nn.Linear(3, 2)
+    torch.manual_seed(5)
+    fill_parameters(other, std=0.5)
+    assert torch.equal(other.weight, module.weight)
 
 
 def test_detects_post_state_drift(tmp_path: Path) -> None:
@@ -1234,11 +1272,9 @@ def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
         build_input=_build_min_input,
         seed=0,
     )
-    payload = _loaded_golden(tmp_path / "buffer_mutating.pt")
-    pre = payload["state_dict"]["running_sum"]
-    post = payload["post_state"]["running_sum"]
-    assert torch.equal(pre, torch.zeros(3))
-    assert not torch.equal(post, torch.zeros(3))
+    payload = load_golden(tmp_path / "buffer_mutating.pt")
+    assert "post_state" in payload
+    assert not torch.equal(payload["post_state"]["running_sum"], torch.zeros(3))
 
 
 def test_bfb_detects_forward_buffer_drift(tmp_path: Path) -> None:
@@ -1961,6 +1997,85 @@ def test_softmax_backward_rounds_like_separate_ops(
     assert torch.equal(got, want.float())
 
 
+@pytest.mark.parametrize(
+    ("op", "count", "scalars", "kwargs"),
+    [
+        (torch.ops.aten.lerp_.Scalar, 2, (0.25,), {}),
+        (torch.ops.aten.lerp_.Scalar, 2, (0.5,), {}),
+        (torch.ops.aten.lerp_.Scalar, 2, (-0.75,), {}),
+        (torch.ops.aten.addcmul_.default, 3, (), {"value": 0.3}),
+        (torch.ops.aten.addcdiv_.default, 3, (), {"value": 0.3}),
+        (torch.ops.aten.add_.Tensor, 2, (), {"alpha": 0.3}),
+    ],
+    ids=["lerp_low", "lerp_half", "lerp_negative", "addcmul", "addcdiv", "add"],
+)
+def test_unfused_updates_write_their_references_bits_into_self(
+    op: OpOverload[..., object],
+    count: int,
+    scalars: tuple[float, ...],
+    kwargs: dict[str, object],
+) -> None:
+    """An optimizer's in-place update matches torch's reference bit for bit, in place."""
+    generator = torch.Generator().manual_seed(0)
+    operands = list(torch.randn(count, 2, 3, generator=generator, dtype=torch.float64))
+    want = operands[0].clone()
+    decomposition_table[op](want, *operands[1:], *scalars, **kwargs)
+    got = operands[0].clone()
+    assert _run_unfused(op, (got, *operands[1:], *scalars), kwargs) is got
+    assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize(
+    ("op", "count", "scalars"),
+    [
+        (torch.ops.aten.lerp_.Scalar, 2, (0.25,)),
+        (torch.ops.aten.addcmul_.default, 3, ()),
+        (torch.ops.aten.addcdiv_.default, 3, ()),
+    ],
+    ids=["lerp", "addcmul", "addcdiv"],
+)
+def test_unfused_updates_run_in_place_of_the_reference_at_its_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    op: OpOverload[..., object],
+    count: int,
+    scalars: tuple[float, ...],
+) -> None:
+    """Operands like ``self`` take the update, not the reference, and match its bits."""
+    generator = torch.Generator().manual_seed(0)
+    operands = list(torch.randn(count, 2, 3, generator=generator, dtype=torch.float64))
+    want = operands[0].clone()
+    decomposition_table[op](want, *operands[1:], *scalars)
+    sentinel = torch.full((2,), 7.0)
+    monkeypatch.setitem(decomposition_table, op, _FixedResult(result=sentinel))
+    got = operands[0].clone()
+    assert _run_unfused(op, (got, *operands[1:], *scalars), {}) is got
+    assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        torch.ones(3, dtype=torch.float64),
+        torch.ones(2, 3, dtype=torch.float32),
+        torch.ones(2, 3, dtype=torch.float64, device="meta"),
+    ],
+    ids=["broadcast", "dtype", "device"],
+)
+def test_unfused_updates_leave_promotion_and_broadcast_to_the_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    other: Tensor,
+) -> None:
+    op = torch.ops.aten.addcmul_.default
+    sentinel = torch.full((2,), 7.0)
+    monkeypatch.setitem(decomposition_table, op, _FixedResult(result=sentinel))
+    self = torch.zeros(2, 3, dtype=torch.float64)
+    assert _run_unfused(op, (self, other, other), {"value": 0.5}) is sentinel
+    integers = torch.zeros(2, 3, dtype=torch.int64)
+    assert _run_unfused(op, (integers, integers, integers), {"value": 2}) is sentinel
+    keyword: dict[str, object] = {"tensor1": other, "tensor2": other, "value": 0.5}
+    assert _run_unfused(op, (self,), keyword) is sentinel
+
+
 def add_in_place(m: Tensor, x: Tensor) -> Tensor:
     return m.clone().add_(x, alpha=0.1)
 
@@ -2294,22 +2409,6 @@ def test_host_agnostic_dot_keeps_exact_integer_and_empty_sums(
     assert actual.item() == expected
 
 
-def test_stale_post_states_rejects_a_load_that_drops_the_post_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "golden.pt"
-    torch.save({"state_dict": {}, "post_state": {}}, path)
-
-    def drop_post_state(golden: Path) -> dict[str, object]:
-        del golden
-        return {"state_dict": {}}
-
-    monkeypatch.setattr(bfb, "load_golden", drop_post_state)
-    with pytest.raises(ValueError, match=r'^Expected "post_state" in payload\.$'):
-        stale_post_states([path])
-
-
 # A single output column takes x86's vector kernel, which adds to +0.0 too.
 def test_host_agnostic_matmul_by_a_single_column_adds_to_positive_zero() -> None:
     left = torch.tensor([[-1.0], [1.0]])
@@ -2397,7 +2496,7 @@ def test_host_agnostic_numerics_preserves_collectives(tmp_path: Path) -> None:
     try:
         gathered = torch.zeros(2)
         with host_agnostic_numerics():
-            dist.all_gather_into_tensor(gathered, torch.tensor([1.5, -2.0]))
+            dist.all_gather([gathered], torch.tensor([1.5, -2.0]))
     finally:
         dist.destroy_process_group()
     assert gathered.tolist() == [1.5, -2.0]
@@ -2765,6 +2864,28 @@ def test_host_agnostic_affine_rejects_mixed_operand_dtypes(
         op()
 
 
+def test_runner_randomness_is_independent_of_constructor_draws(tmp_path: Path) -> None:
+    def build_with_extra_draws() -> nn.Module:
+        module = _build_min_linear()
+        torch.rand(17)
+        return module
+
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="constructor_draws",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+        run=_stochastic_runner,
+    )
+    assert_bfb_against_golden(
+        golden_dir=tmp_path,
+        golden_name="constructor_draws",
+        build_module=build_with_extra_draws,
+        build_input=_build_min_input,
+        run=_stochastic_runner,
+    )
+
+
 def _stochastic_runner(module: nn.Module, value: Tensor) -> Tensor:
     del module
     return value + torch.rand_like(value)
@@ -2788,11 +2909,7 @@ def test_bfb_replays_random_and_mutated_inputs(
             build_input=lambda: torch.rand(2, 3),
             run=runner,
         )
-    torch.manual_seed(0)
-    assert torch.equal(
-        cast(Tensor, load_golden(tmp_path / "input_lifecycle.pt")["input"]),
-        torch.rand(2, 3),
-    )
+    assert "input" not in load_golden(tmp_path / "input_lifecycle.pt")
 
 
 @pytest.mark.parametrize("name", ["linspace", "logspace", "arange"])
@@ -2913,23 +3030,21 @@ class _CustomGoldenInput:
         self.value = value
 
 
-def test_load_golden_unpacks_state_and_post_state(tmp_path: Path) -> None:
+def test_load_golden_unpacks_the_post_state(tmp_path: Path) -> None:
     path = tmp_path / "packed.pt"
-    state = {"weight": torch.arange(6.0).reshape(2, 3)}
     post = {"weight": torch.full((2, 3), 4.0)}
     torch.save(
         {
-            "state_dict": pack(state),
             "input": torch.zeros(2, 3),
             "output": torch.ones(2, 3),
             "seed": 17,
+            "state_shapes": "",
             "post_state": pack(post),
         },
         path,
     )
     payload = load_golden(path)
     assert "post_state" in payload
-    assert torch.equal(payload["state_dict"]["weight"], state["weight"])
     assert torch.equal(payload["post_state"]["weight"], post["weight"])
     assert payload["seed"] == 17
 
@@ -2939,10 +3054,10 @@ def test_load_golden_accepts_custom_input_objects(tmp_path: Path) -> None:
     value = _CustomGoldenInput(23)
     torch.save(
         {
-            "state_dict": pack({}),
             "input": value,
             "output": torch.ones(2),
             "seed": 0,
+            "state_shapes": "",
         },
         path,
     )
@@ -3010,12 +3125,14 @@ def test_write_golden_copies_output_to_cpu_with_explicit_copy(
 
     def to_spy(
         tensor: Tensor,
-        device: str | torch.device | None = None,
+        device: str | torch.device | torch.dtype | None = None,
         *,
         copy: bool = False,
     ) -> Tensor:
         if tensor.untyped_storage().data_ptr() == output.untyped_storage().data_ptr():
             calls.append(((device,), {"copy": copy}))
+        if isinstance(device, torch.dtype):
+            return original_to(tensor, dtype=device, copy=copy)
         return original_to(tensor, device=device, copy=copy)
 
     def run(module: nn.Module, inp: Tensor) -> Tensor:
@@ -3045,10 +3162,10 @@ def test_load_golden_passes_explicit_weights_only_policy(
     save_golden(
         path,
         {
-            "state_dict": {},
             "input": torch.zeros(2),
             "output": torch.ones(2),
             "seed": 0,
+            "state_shapes": "",
         },
     )
     original_load = _torch_load
@@ -3074,7 +3191,7 @@ def test_load_golden_passes_explicit_weights_only_policy(
     assert calls == [((), {"weights_only": False})]
 
 
-def test_stale_post_states_uses_explicit_weights_only_policy(
+def test_stored_pre_states_uses_explicit_weights_only_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3082,10 +3199,10 @@ def test_stale_post_states_uses_explicit_weights_only_policy(
     save_golden(
         path,
         {
-            "state_dict": {},
             "input": _CustomGoldenInput(23),
             "output": torch.ones(2),
             "seed": 0,
+            "state_shapes": "",
             "post_state": {},
         },
     )
@@ -3107,8 +3224,8 @@ def test_stale_post_states_uses_explicit_weights_only_policy(
 
     monkeypatch.setattr(torch, "load", load_spy)
 
-    assert stale_post_states([path]) == []
-    assert calls == [((), {"weights_only": False})] * 2
+    assert stored_pre_states([path]) == []
+    assert calls == [((), {"weights_only": False})]
 
 
 def test_seed_bfb_constructs_default_generator(
@@ -3286,18 +3403,6 @@ def test_bfb_rejects_unrounded_or_complex_state(dtype: torch.dtype) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("live", "stored"),
-    [((torch.zeros(2),), [torch.zeros(2)]), (1, True), (1, 1.0)],
-)
-def test_input_validation_distinguishes_container_and_scalar_types(
-    live: object,
-    stored: object,
-) -> None:
-    with pytest.raises(AssertionError, match="input"):
-        _assert_same_input(live, stored, label="input")
-
-
 def test_regenerate_golden_preserves_existing_regenerate_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3316,19 +3421,6 @@ def test_regenerate_golden_preserves_existing_regenerate_flag(
         seed=0,
     )
     assert regenerate.b4b()
-
-
-def test_input_comparison_reports_nested_paths_and_container_lengths() -> None:
-    with pytest.raises(AssertionError, match=r"batch\['media'\]\[1\]:"):
-        _assert_same_input(
-            {"media": (torch.zeros(2), torch.ones(2))},
-            {"media": (torch.zeros(2), torch.zeros(2))},
-            label="batch",
-        )
-    with pytest.raises(AssertionError, match=r"batch: length 2 vs 1"):
-        _assert_same_input([1, 2], [1], label="batch")
-    with pytest.raises(AssertionError, match=r"batch: keys differ"):
-        _assert_same_input({"left": 1}, {"right": 1}, label="batch")
 
 
 def test_assert_equal_handles_tensor_and_non_tensor_mismatches() -> None:
@@ -3399,40 +3491,27 @@ def test_copy_back_recurses_and_ignores_non_narrow_targets() -> None:
     assert torch.equal(original[1], torch.zeros(2, dtype=torch.int64))
 
 
-def test_stale_post_states_skips_non_golden_and_scans_later_entries(
+def test_stored_pre_states_skips_non_goldens_and_scans_every_entry(
     tmp_path: Path,
 ) -> None:
     not_golden = tmp_path / "not-golden.pt"
     torch.save({"unrelated": torch.ones(2)}, not_golden)
-    incomplete = tmp_path / "incomplete.pt"
-    torch.save({"state_dict": {}}, incomplete)
+    legacy = tmp_path / "legacy.pt"
+    torch.save({"state_dict": {}}, legacy)
     non_mapping = tmp_path / "non-mapping.pt"
     torch.save([torch.ones(2)], non_mapping)
-    custom_input = tmp_path / "custom-input.pt"
+    current = tmp_path / "current.pt"
     save_golden(
-        custom_input,
+        current,
         {
-            "state_dict": {},
             "input": _CustomGoldenInput(5),
             "output": torch.zeros(2),
             "seed": 0,
+            "state_shapes": "",
             "post_state": {},
         },
     )
-    stale = tmp_path / "stale.pt"
-    save_golden(
-        stale,
-        {
-            "state_dict": {"weight": torch.zeros(2)},
-            "input": torch.zeros(2),
-            "output": torch.zeros(2),
-            "seed": 0,
-            "post_state": {"weight": torch.zeros(2)},
-        },
-    )
-    assert stale_post_states(
-        [not_golden, incomplete, non_mapping, custom_input, stale],
-    ) == [stale]
+    assert stored_pre_states([not_golden, legacy, non_mapping, current]) == [legacy]
 
 
 def test_assert_equal_reports_exact_mismatch_messages() -> None:
@@ -3651,6 +3730,50 @@ def test_scales_operand_reads_default_and_alpha_forms() -> None:
     assert not _scales_operand(add, (left, right, 1), {})
     assert _scales_operand(add, (left, right, 0.25), {})
     assert _scales_operand(add, (left, right), {"alpha": 0.25})
+
+
+def test_plan_records_what_each_op_alone_decides() -> None:
+    aten = torch.ops.aten
+    plans = {
+        str(func): _plan(func)
+        for func in (
+            aten.mul.Tensor,
+            aten.alias.default,
+            aten.add_.Tensor,
+            aten.exp.default,
+            aten.convolution_backward.default,
+            torch.ops.prims.mul.default,
+        )
+    }
+    # An alpha decides per call; a transcendental never passes through.
+    assert {
+        name: (plan.native, plan.passes_through, plan.aten, plan.name, plan.writes)
+        for name, plan in plans.items()
+    } == {
+        "aten.mul.Tensor": (True, True, True, "mul", False),
+        "aten.alias.default": (True, True, True, "alias", False),
+        "aten.add_.Tensor": (False, True, True, "add_", True),
+        "aten.exp.default": (False, False, True, "exp", False),
+        "aten.convolution_backward.default": (
+            False,
+            False,
+            True,
+            "convolution_backward",
+            False,
+        ),
+        "prims.mul.default": (False, False, False, "mul", False),
+    }
+    assert [name for name, plan in plans.items() if plan.convolution_backward] == [
+        "aten.convolution_backward.default",
+    ]
+
+
+@pytest.mark.parametrize(("alpha", "upcast"), [(1, False), (0.5, True)])
+def test_add_passes_through_unless_its_alpha_scales(alpha: float, upcast: bool) -> None:
+    left, right = torch.ones(2, 3), torch.full((2, 3), 0.25)
+    with OpsIssued() as issued, host_agnostic_numerics():
+        torch.add(left, right, alpha=alpha)
+    assert ("aten.to.dtype" in issued.names) is upcast
 
 
 def test_scales_or_fuses_distinguishes_add_sub_and_decomposed_ops() -> None:
@@ -3988,9 +4111,8 @@ def test_op_name_uses_final_namespace_component_before_overload() -> None:
     assert _op_name(cast("OpOverload[..., object]", NamedOp())) == "add"
 
 
-def test_replay_golden_moves_saved_input_to_module_device(
+def test_replay_golden_rebuilds_input_instead_of_loading_legacy_input(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class SmallModule(nn.Module):
         @override
@@ -3998,23 +4120,11 @@ def test_replay_golden_moves_saved_input_to_module_device(
             return value + 1
 
     path = tmp_path / "golden.pt"
+    stored = torch.arange(6.0).reshape(2, 3)
     save_golden(
         path,
-        {
-            "state_dict": {},
-            "input": torch.arange(6.0).reshape(2, 3),
-            "output": torch.arange(6.0).reshape(2, 3) + 1,
-            "seed": 17,
-        },
+        {"input": stored + 100, "output": stored + 1, "seed": 17, "state_shapes": ""},
     )
-    original_move = move_to_device
-    devices: list[str] = []
-
-    def move_spy(value: object, device: str) -> object:
-        devices.append(device)
-        return original_move(value, device)
-
-    monkeypatch.setattr("priml.testing.bfb.move_to_device", move_spy)
 
     def run(module: nn.Module, value: Tensor) -> Tensor:
         return cast(Tensor, module(value))
@@ -4032,7 +4142,6 @@ def test_replay_golden_moves_saved_input_to_module_device(
         )
     finally:
         _restore_torch_process_state(original)
-    assert devices == ["cpu"]
 
 
 def test_compact_copies_pins_empty_allocations_and_storage_copy(
@@ -4330,6 +4439,59 @@ _RUNNING_TIE: Final = (
     -0.8086782693862915,
 )
 _RUNNING_TIE_MEAN: Final = -0.03300672024488449
+
+
+@pytest.mark.parametrize(
+    ("func", "args", "kwargs", "routed"),
+    [
+        (torch.ops.aten.native_batch_norm.default, (0,) * 8, {}, True),
+        (torch.ops.aten._native_batch_norm_legit.default, (0,) * 8, {}, True),
+        (torch.ops.aten.native_batch_norm.default, (0,) * 7, {}, False),
+        (torch.ops.aten.native_batch_norm.default, (0,) * 8, {"eps": 0}, False),
+        (torch.ops.aten.native_layer_norm.default, (0,) * 8, {}, False),
+    ],
+    ids=["batch_norm", "legit", "seven_args", "keyword", "other_op"],
+)
+def test_run_unfused_routes_only_positional_training_batch_norms(
+    monkeypatch: pytest.MonkeyPatch,
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    *,
+    routed: bool,
+) -> None:
+    """Only a batch norm's eight positional arguments reach the unfused update.
+
+    The placeholder arguments are no valid input, so an op left to its native
+    kernel raises; the stub stands in for the routed update.
+    """
+    sentinel = torch.full((2,), 7.0)
+    monkeypatch.setattr(
+        "priml.testing.bfb._unfused_batch_norm",
+        _FixedResult(result=sentinel),
+    )
+    if routed:
+        assert _run_unfused(func, args, kwargs) is sentinel
+    else:
+        with pytest.raises((RuntimeError, TypeError)):
+            _run_unfused(func, args, kwargs)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [torch.ops.aten.dot.default, torch.ops.aten.vdot.default],
+)
+def test_run_unfused_routes_real_dots_to_the_pairwise_sum(
+    monkeypatch: pytest.MonkeyPatch,
+    func: OpOverload[..., object],
+) -> None:
+    sentinel = torch.full((), 7.0)
+    monkeypatch.setattr(
+        "priml.testing.bfb._pairwise_dot",
+        _FixedResult(result=sentinel),
+    )
+    vector = torch.ones(3)
+    assert _run_unfused(func, (vector, vector), {}) is sentinel
 
 
 @pytest.mark.parametrize(
@@ -4985,6 +5147,255 @@ def test_convolution_backward_out_preserves_complete_gradients_and_buffers() -> 
         assert tensor_bits_equal(got, b=want)
 
 
+def test_argument_reads_a_position_then_falls_back_to_its_keyword() -> None:
+    assert bfb._argument((2, 3), {"x": 5}, index=1, name="x") == 3
+    assert bfb._argument((2,), {"x": 5}, index=1, name="x") == 5
+    assert bfb._argument((2,), {}, index=1, name="x") is None
+
+
+def test_dtype_as_keyword_refuses_more_positionals_than_the_schema_names() -> None:
+    with pytest.raises(ValueError, match="longer"):
+        bfb._dtype_as_keyword(
+            torch.ops.aten.softmax.int,
+            args=(torch.ones(2, 3), -1, torch.float32, "extra"),
+            kwargs={},
+        )
+
+
+# The contraction of one is the case ``_one_term_mm`` exists for; two rows and
+# two columns are each its smallest accepted size.
+@pytest.mark.parametrize(("rows", "columns"), [(2, 3), (3, 2)])
+def test_one_term_mm_returns_the_outer_product(rows: int, columns: int) -> None:
+    left = torch.arange(2.0, 2.0 + rows).reshape(rows, 1)
+    right = torch.arange(5.0, 5.0 + columns).reshape(1, columns)
+    actual = bfb._one_term_mm(torch.ops.aten.mm.default, args=(left, right))
+    assert actual is not None
+    assert torch.equal(actual, left * right)
+
+
+def test_host_agnostic_mm_takes_the_one_term_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    products: list[Tensor | None] = []
+    one_term_mm = bfb._one_term_mm
+
+    def record(
+        func: OpOverload[..., object],
+        args: tuple[object, ...],
+    ) -> Tensor | None:
+        products.append(one_term_mm(func, args=args))
+        return products[-1]
+
+    monkeypatch.setattr(bfb, "_one_term_mm", record)
+    left = torch.tensor([[2.0], [3.0]])
+    right = torch.tensor([[5.0, 6.0, 7.0]])
+    with host_agnostic_numerics():
+        actual = torch.mm(left, right)
+    (product,) = products
+    assert product is not None
+    assert product.dtype == torch.float64
+    assert torch.equal(actual, left * right)
+
+
+def _refuse(*args: object, **kwargs: object) -> object:
+    del args, kwargs
+    raise AssertionError("called")
+
+
+_CONVOLUTION_BACKWARD: Final = torch.ops.aten.convolution_backward.default
+
+
+def _convolution_backward_arguments(
+    dtype: torch.dtype,
+) -> tuple[object, ...]:
+    """Return a weight-gradient request with every geometry argument off its default."""
+    # Stride (2, 1), padding (1, 0), dilation (1, 2) over a [6, 12] image and a
+    # [2, 4] kernel leave a [4, 6] output.
+    media = (torch.arange(2 * 3 * 6 * 12) % 7).reshape(2, 3, 6, 12).to(dtype)
+    weight = (torch.arange(5 * 3 * 2 * 4) % 5).reshape(5, 3, 2, 4).to(dtype)
+    grad = (torch.arange(2 * 5 * 4 * 6) % 3).reshape(2, 5, 4, 6).to(dtype)
+    return (grad, media, weight, [5], [2, 1], [1, 0], [1, 2], False, [0, 0], 1)
+
+
+def test_pairwise_convolution_backward_honors_stride_padding_and_dilation() -> None:
+    arguments = _convolution_backward_arguments(torch.float64)
+    mask = [False, True, False]
+    expected = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        _CONVOLUTION_BACKWARD(*arguments, mask),
+    )
+    actual = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        bfb._pairwise_convolution_backward(
+            _CONVOLUTION_BACKWARD,
+            (*arguments, mask),
+            {},
+        ),
+    )
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_pairwise_convolution_backward_reads_a_keyword_output_mask() -> None:
+    arguments = _convolution_backward_arguments(torch.float64)
+    mask = [False, True, False]
+    expected = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        _CONVOLUTION_BACKWARD(*arguments, output_mask=mask),
+    )
+    actual = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        bfb._pairwise_convolution_backward(
+            _CONVOLUTION_BACKWARD,
+            arguments,
+            {"output_mask": mask},
+        ),
+    )
+    assert actual[0] is None
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_pairwise_convolution_backward_leaves_float32_to_the_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bfb, "fixed_pairwise_sum", _refuse)
+    arguments = (*_convolution_backward_arguments(torch.float32), [False, True, False])
+    expected = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        _CONVOLUTION_BACKWARD(*arguments),
+    )
+    actual = cast(
+        tuple[Tensor | None, Tensor, Tensor | None],
+        bfb._pairwise_convolution_backward(_CONVOLUTION_BACKWARD, arguments, {}),
+    )
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_result_dtype_answers_one_dtype_without_the_promotion_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bfb, "elementwise_dtypes", _refuse)
+    tensors = [torch.ones(2, dtype=torch.float16), torch.ones(3, dtype=torch.float16)]
+    assert bfb._result_dtype(tensors) == torch.float16
+
+
+def test_set_deterministic_clears_warn_only_by_default() -> None:
+    state = bfb._capture_torch_process_state()
+    try:
+        bfb._set_deterministic(False, warn_only=True)
+        bfb._set_deterministic(True)
+        assert torch.is_deterministic_algorithms_warn_only_enabled() is False
+    finally:
+        bfb._restore_torch_process_state(state)
+
+
+def _batch_norm_arguments() -> tuple[object, ...]:
+    media = torch.arange(24.0).reshape(3, 2, 4) / 7
+    running = torch.tensor([1.0, 2.0]), torch.tensor([3.0, 5.0])
+    return (media, None, None, *running, True, 0.1, 1e-5)
+
+
+class _BatchNormCalls(TorchDispatchMode):
+    """Record the arguments reaching the native batch-norm kernel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[object, ...]] = []
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        if func is torch.ops.aten.native_batch_norm.default:
+            self.calls.append(args)
+        return func(*args, **(kwargs or {}))
+
+
+def test_unfused_batch_norm_runs_the_kernel_at_unit_momentum_on_fresh_buffers() -> None:
+    arguments = _batch_norm_arguments()
+    with _BatchNormCalls() as recorded:
+        bfb._unfused_batch_norm(
+            torch.ops.aten.native_batch_norm.default,
+            args=arguments,
+        )
+    (call,) = recorded.calls
+    assert call[6] == 1.0
+    assert call[3] is not arguments[3]
+    assert call[4] is not arguments[4]
+
+
+# The kernel refuses one running buffer without the other; the unfused update
+# would fail on the missing one first.
+@pytest.mark.parametrize("missing", [3, 4])
+def test_unfused_batch_norm_leaves_a_missing_running_buffer_to_the_kernel(
+    missing: int,
+) -> None:
+    arguments = list(_batch_norm_arguments())
+    arguments[missing] = None
+    with pytest.raises(ValueError, match="must either both be None"):
+        bfb._unfused_batch_norm(
+            torch.ops.aten.native_batch_norm.default,
+            args=tuple(arguments),
+        )
+
+
+def test_dispatch_writes_keyword_running_buffers_back() -> None:
+    media, _, _, running_mean, running_var, _, momentum, eps = _batch_norm_arguments()
+    assert isinstance(media, Tensor)
+    assert isinstance(running_mean, Tensor)
+    assert isinstance(running_var, Tensor)
+    expected_mean, expected_var = running_mean.double(), running_var.double()
+    _ = torch.ops.aten.native_batch_norm.default(
+        media.double(),
+        None,
+        None,
+        expected_mean,
+        expected_var,
+        True,
+        momentum,
+        eps,
+    )
+    _ = bfb._Float64Compute()._dispatch(
+        torch.ops.aten.native_batch_norm.default,
+        (media,),
+        {
+            "weight": None,
+            "bias": None,
+            "running_mean": running_mean,
+            "running_var": running_var,
+            "training": True,
+            "momentum": momentum,
+            "eps": eps,
+        },
+    )
+    assert not torch.equal(expected_mean.float(), torch.tensor([1.0, 2.0]))
+    assert torch.equal(running_mean, expected_mean.float())
+    assert torch.equal(running_var, expected_var.float())
+
+
+def test_dispatch_copies_running_buffers_back_for_batch_norm_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bfb, "_copy_back", _refuse)
+    media = torch.arange(30.0).reshape(2, 3, 5) / 7
+    with host_agnostic_numerics():
+        # ``ceil_mode=True`` puts a True at batch norm's ``training`` position.
+        pooled = torch.ops.aten.max_pool1d.default(media, [2], [2], [0], [1], True)
+    assert isinstance(pooled, Tensor)
+    assert torch.equal(pooled, torch.nn.functional.max_pool1d(media, 2, ceil_mode=True))
+
+
+def test_host_agnostic_arange_of_integers_stays_exact() -> None:
+    with host_agnostic_numerics():
+        actual = torch.arange(2**53, 2**53 + 3)
+    assert actual.dtype == torch.int64
+    assert actual.tolist() == [2**53, 2**53 + 1, 2**53 + 2]
+
+
 class BackwardRequests(TorchDispatchMode):
     """Observe the masks reaching the native convolution backend."""
 
@@ -5006,6 +5417,86 @@ class BackwardRequests(TorchDispatchMode):
             mask = args[10] if len(args) > 10 else kwargs["output_mask"]
             self.masks.append(tuple(cast(list[bool], mask)))
         return func(*args, **kwargs)
+
+
+class OpsIssued(TorchDispatchMode):
+    """Record the name of every op reaching the mode below the harness."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.names: list[str] = []
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        self.names.append(str(func))
+        return func(*args, **(kwargs or {}))
+
+
+class SampledBuffers(nn.Linear):
+    """Exercise parameters, a nonpersistent random buffer, and runtime randomness."""
+
+    def __init__(self) -> None:
+        super().__init__(3, 2)
+        self.latent = nn.Buffer(torch.empty(2), persistent=False)
+        nn.init.trunc_normal_(self.weight)
+        nn.init.trunc_normal_(self.latent)
+
+    @override
+    def forward(self, input: Tensor) -> Tensor:
+        output = super().forward(input) + self.latent
+        return output + torch.rand_like(output)
+
+
+def test_replay_ignores_constructor_sampler_values_and_draw_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="sampler",
+        build_module=SampledBuffers,
+        build_input=lambda: torch.arange(12.0).reshape(4, 3),
+        buffers=("latent",),
+    )
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            return tensor.fill_(0.125)
+
+    monkeypatch.setattr(nn.init, "_no_grad_trunc_normal_", different_sampler)
+    assert_bfb_against_golden(
+        golden_dir=tmp_path,
+        golden_name="sampler",
+        build_module=SampledBuffers,
+        build_input=lambda: torch.arange(12.0).reshape(4, 3),
+        buffers=("latent",),
+    )
+
+
+def test_a_golden_minted_before_the_fill_says_to_remint(tmp_path: Path) -> None:
+    path = tmp_path / "old.pt"
+    torch.save(
+        {"state_dict": {}, "input": torch.zeros(1), "output": torch.zeros(1)},
+        path,
+    )
+    with pytest.raises(
+        AssertionError,
+        match="remint it with --regenerate-b4b",
+    ) as error:
+        load_golden(path)
+    assert str(error.value) == (
+        f"{path} was minted before the harness filled parameters itself; "
+        "remint it with --regenerate-b4b."
+    )
 
 
 if __name__ == "__main__":

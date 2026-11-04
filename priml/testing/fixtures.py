@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import math
 import sys
+import traceback
 
 import pytest
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
+    from types import ModuleType
+
+    from torch.overrides import TorchFunctionMode
 
     import torch
 else:
@@ -42,11 +46,15 @@ def cleanup_cuda() -> Generator[None]:
 
     """
     torch_loaded_at_setup = "torch" in sys.modules
-    on_cuda_host = torch_loaded_at_setup and torch.cuda.is_available()
-    if on_cuda_host and _cuda_is_initialized():
+    reclaim = (
+        _cuda_reclaimer()
+        if torch_loaded_at_setup and torch.cuda.is_available()
+        else None
+    )
+    if reclaim is not None and _cuda_is_initialized():
         # Same gate as teardown: with no context there is nothing to reclaim,
         # and reaching `synchronize` would force the lazy init anyway.
-        _reclaim_cuda()
+        reclaim()
     yield
     if torch_loaded_at_setup:
         # All three are load-bearing: the setup snapshot, because a test faking
@@ -54,12 +62,12 @@ def cleanup_cuda() -> Generator[None]:
         # `_cuda_is_initialized()`, because forcing CUDA's lazy init on a host
         # the test never touched can raise; and a live `is_available()`, because
         # a test that faked CUDA away is still faked when this runs.
-        if on_cuda_host and _cuda_is_initialized() and torch.cuda.is_available():
-            _reclaim_cuda()
+        if reclaim is not None and _cuda_is_initialized() and torch.cuda.is_available():
+            reclaim()
     elif _cuda_is_initialized():
         # Torch first imported by the test body: no setup snapshot either way,
         # so reclaim only if that import path actually created a context.
-        _reclaim_cuda()
+        _cuda_reclaimer()()
 
 
 @contextmanager
@@ -121,12 +129,74 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
             del block
 
 
+@pytest.fixture
+def placed_factories() -> Callable[[ModuleType], TorchFunctionMode]:
+    """Return a mode, per module, failing each tensor factory it calls without a device.
+
+    A factory that names no device builds on the default one: the inputs' own
+    on a CPU-only host, so no CPU test sees a factory that forgot them. The
+    mode fails a factory call whose caller is ``module`` itself; a factory
+    torch's own Python code calls is torch's, not the module's. Opt-in: request
+    it by name.
+
+    Returns:
+      mode: Called with a module, the mode to enter around the code under test.
+
+    """
+    factories = frozenset(
+        (
+            torch.arange,
+            torch.empty,
+            torch.eye,
+            torch.full,
+            torch.ones,
+            torch.rand,
+            torch.randint,
+            torch.randn,
+            torch.tensor,
+            torch.zeros,
+        ),
+    )
+
+    class Placed(torch.overrides.TorchFunctionMode):
+        def __init__(self, module: ModuleType) -> None:
+            super().__init__()
+            self.path = module.__file__
+
+        @override
+        def __torch_function__(
+            self,
+            func: Callable[..., object],
+            types: object,
+            args: tuple[object, ...] = (),
+            kwargs: dict[str, object] | None = None,
+        ) -> object:
+            kwargs = kwargs or {}
+            if (
+                func in factories
+                and traceback.extract_stack(limit=2)[0].filename == self.path
+                and kwargs.get("device") is None
+            ):
+                raise ValueError(f"{func} names no device")
+            return func(*args, **kwargs)
+
+    return Placed
+
+
 def _cuda_is_initialized() -> bool:
     """Report whether a real CUDA context exists in this process."""
     return "torch" in sys.modules and torch.cuda.is_initialized()
 
 
-def _reclaim_cuda() -> None:
-    """Synchronize and empty the CUDA cache. Callers gate on CUDA being present."""
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+# Bound now because a test's `monkeypatch` of these is still in place at this fixture's
+# teardown, and a fake taking other arguments would fail the test on any host with an
+# initialized GPU.
+def _cuda_reclaimer() -> Callable[[], None]:
+    """Return what synchronizes and empties the CUDA cache; callers gate on CUDA."""
+    synchronize, empty_cache = torch.cuda.synchronize, torch.cuda.empty_cache
+
+    def reclaim() -> None:
+        synchronize()
+        empty_cache()
+
+    return reclaim

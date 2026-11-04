@@ -702,6 +702,10 @@ class TestRemap:
 
 
 @pytest.mark.network_huggingface
+# DeepSeek-V3's remote configuration_deepseek.py sets ``rope_scaling`` in its
+# ``__init__``, which transformers 5.22 deprecates for ``rope_parameters``; its
+# modeling code reads ``rope_scaling`` back, so the reference is set up the same.
+@pytest.mark.filterwarnings("ignore:`rope_scaling` is deprecated:FutureWarning")
 @pytest.mark.parametrize("q_lora_rank", [None, 16])
 @pytest.mark.parametrize("yarn", [False, True])
 @pytest.mark.parametrize("shared_experts", [1, 2])

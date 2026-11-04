@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import json
 
+from torch import Tensor
 from treekle import json_loads
 
 import numpy as np
@@ -18,22 +19,52 @@ from priml.baselines.sudoku.search import run_search
 from priml.baselines.sudoku.testing import (
     FIXTURE_GROUPS,
     FIXTURES,
+    FilledDenoisingVerifier,
+    FilledHypotheses,
+    FilledRecursion,
+    FilledVerifier,
     Harness,
-    load_golden,
     metric_tensors,
     replay,
     sudoku_solution,
-    tiny_recursion,
+    tiny_recursion_config,
     train_fixture,
-    weight_tensors,
     write_dataset,
 )
-from priml.baselines.sudoku.verifier_fit import VerifierLoss
-from priml.testing.golden import assert_tensor_golden_part, read_tensors
+from priml.baselines.sudoku.verifier_fit import DenoisingLoss, VerifierLoss
+from priml.testing import regenerate
+from priml.testing.golden import (
+    assert_tensor_golden_part,
+    mismatches,
+    read_tensors,
+)
 
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("group", FIXTURE_GROUPS)
+def test_owned_record_ignores_constructor_sampler_changes(
+    group: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known = read_tensors(FIXTURES)
+    expected = train_fixture(group, tmp_path / "original", known=known)
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            return tensor.uniform_(-0.1, 0.1)
+
+    monkeypatch.setattr(
+        "priml.model.init.fill_truncated_normal",
+        different_sampler,
+    )
+    actual = train_fixture(group, tmp_path / "altered", known=known)
+    assert not mismatches(expected, actual)
 
 
 @pytest.mark.parametrize("group", FIXTURE_GROUPS)
@@ -49,10 +80,14 @@ def test_a_stored_fixture_is_what_training_writes(group: str, tmp_path: Path) ->
     )
 
 
+@pytest.mark.parametrize("regenerating", [False, True])
 def test_a_stored_harvest_publishes_the_manifest_a_harvest_writes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    regenerating: bool,
 ) -> None:
     """The stored shard's manifest names its source and rows, as a harvest's does."""
+    regenerate.override(monkeypatch, b4b=regenerating)
     harness = Harness(tmp_path, train=False)
     write_dataset(harness.data)
     source = harness.generator("gen_a", seed=0)
@@ -92,7 +127,11 @@ def test_the_harness_search_runs_on_the_tiny_generator(tmp_path: Path) -> None:
     }
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
-        result = run_search(tiny_recursion(), batch, harness.search())
+        result = run_search(
+            tiny_recursion_config().make().eval(),
+            batch,
+            harness.search(),
+        )
     assert result.final_predictions.shape == (2, 81)
     assert int(result.nodes.max()) <= harness.search().search_budget
 
@@ -111,11 +150,35 @@ def test_dumps_split_packed_rows_into_scores_and_grids(tmp_path: Path) -> None:
     assert dumps["x.npz/rows/grids"].shape == (2, 2 * 81)
 
 
-def test_weights_are_prefixed_and_metrics_keep_only_numbers() -> None:
-    assert weight_tensors("w", {"a": torch.tensor([1.0])}).keys() == {"w/a"}
+def test_metrics_keep_only_numbers() -> None:
     metrics = metric_tensors({"eval/n": 2, "eval/seconds": 1.5, "eval/name": "x"})
     assert metrics.keys() == {"metrics/eval/n"}
     assert metrics["metrics/eval/n"].dtype == torch.float64
+
+
+@pytest.mark.parametrize("denoising", [False, True])
+def test_custom_verifier_architectures_train_instead_of_loading_a_fixture(
+    tmp_path: Path,
+    denoising: bool,
+) -> None:
+    harness = Harness(tmp_path, train=False)
+    write_dataset(harness.data)
+    harness.harvest(harness.generator("gen_a", seed=0))
+    model = (
+        FilledDenoisingVerifier.Config().update(harness.verifier_model())
+        if denoising
+        else harness.verifier_model()
+    )
+    path = harness.verifier(
+        0,
+        model=model,
+        loss=DenoisingLoss.Config() if denoising else None,
+    )
+    trained = load_eval_weights(path)
+    initial = model.make().state_dict()
+    assert (path.parents[1] / "metrics.json").is_file()
+    assert trained.keys() == initial.keys()
+    assert mismatches(trained, initial)
 
 
 def test_a_verifier_with_its_own_objective_trains_even_when_one_is_stored(
@@ -125,7 +188,9 @@ def test_a_verifier_with_its_own_objective_trains_even_when_one_is_stored(
     harness = Harness(tmp_path, train=False)
     write_dataset(harness.data)
     harness.harvest(harness.generator("gen_a", seed=0))
-    path = harness.verifier(0, loss=VerifierLoss.Config())
+    loss = VerifierLoss.Config()
+    loss.cell_weight = 0.0
+    path = harness.verifier(0, loss=loss)
     trained = load_eval_weights(path)
     stored = harness._stored("verifier_s0/")
     assert trained.keys() == stored.keys()
@@ -150,15 +215,80 @@ def test_a_known_fixture_is_written_not_retrained(tmp_path: Path) -> None:
     assert torch.equal(load_eval_weights(path)["head.weight"], weights["head.weight"])
 
 
-def test_replay_narrows_and_loads_what_a_recorder_returns(tmp_path: Path) -> None:
-    """``replay`` stores each record, and ``load_golden`` reads a stored golden."""
+def test_replay_narrows_what_a_recorder_returns(tmp_path: Path) -> None:
     out = replay(lambda _: {"grid": torch.tensor([3, 4])}, tmp_path)
     assert out["grid"].dtype == torch.uint8
-    assert set(load_golden("staircase")) >= {"metrics/eval/n_correct"}
+
+
+@pytest.mark.parametrize("train", [False, True])
+def test_replay_preserves_rng_and_passes_the_requested_harness(
+    tmp_path: Path,
+    train: bool,
+) -> None:
+    def record(harness: Harness) -> dict[str, Tensor]:
+        assert harness.scratch == tmp_path
+        assert harness.train is train
+        return {"draws": torch.rand(3)}
+
+    state = torch.random.get_rng_state()
+    actual = replay(record, tmp_path, train=train)
+    assert torch.equal(torch.random.get_rng_state(), state)
+    generator = torch.Generator().manual_seed(0)
+    assert torch.equal(actual["draws"], torch.rand(3, generator=generator))
+    for split, rows in (("train", 9), ("test", 2)):
+        path = tmp_path / "data" / split / "all__inputs.npy"
+        assert np.load(path).shape == (rows, 81)
+
+
+@pytest.mark.parametrize("kind", ["recursion", "hypotheses", "verifier", "denoising"])
+def test_fixture_construction_ignores_sampler_bits_and_preserves_rng(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(tmp_path)
+    if kind == "recursion":
+        config = harness.model()
+        expected_type = FilledRecursion
+    elif kind == "hypotheses":
+        config = harness.hypothesis_model()
+        expected_type = FilledHypotheses
+    elif kind == "verifier":
+        config = harness.verifier_model()
+        expected_type = FilledVerifier
+    else:
+        config = FilledDenoisingVerifier.Config().update(harness.verifier_model())
+        expected_type = FilledDenoisingVerifier
+    state = torch.random.get_rng_state()
+    original = config.make()
+    assert isinstance(original, expected_type)
+    assert torch.equal(state, torch.random.get_rng_state())
+
+    def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        with torch.no_grad():
+            torch.rand(17)
+            values = torch.arange(
+                tensor.numel(),
+                device=tensor.device,
+                dtype=tensor.dtype,
+            )
+            return tensor.copy_(values.sin().reshape_as(tensor))
+
+    monkeypatch.setattr(
+        "priml.model.init.fill_truncated_normal",
+        different_sampler,
+    )
+    altered = config.make()
+    assert torch.equal(state, torch.random.get_rng_state())
+    assert not mismatches(original.state_dict(), altered.state_dict())
+    for name in ("slow_init", "fast_init"):
+        if kind in ("recursion", "hypotheses"):
+            assert torch.equal(original.get_buffer(name), altered.get_buffer(name))
 
 
 def test_the_tiny_recursion_is_frozen_and_the_solution_is_a_sudoku() -> None:
-    model = tiny_recursion()
+    model = tiny_recursion_config().make().eval()
     assert not model.training
     assert model.config.channels_in == 4
     # sudoku_group_indices uses SudokuSpec's 9x9 row and column geometry.

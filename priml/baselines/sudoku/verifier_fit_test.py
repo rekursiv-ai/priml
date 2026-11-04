@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 from torch import Tensor
@@ -9,13 +10,11 @@ import torch
 
 from priml.baselines.sudoku import puzzle_data
 from priml.baselines.sudoku.testing import (
+    FilledDenoisingVerifier,
     Harness,
-    load_golden,
     replay,
-    weight_tensors,
 )
 from priml.baselines.sudoku.verifier import (
-    DenoisingVerifier,
     SudokuVerifier,
     row_column_positions,
 )
@@ -25,12 +24,13 @@ from priml.baselines.sudoku.verifier_fit import (
     VerifierLoss,
 )
 from priml.testing.bfb import portable_half_precision
-from priml.testing.golden import mismatches
+from priml.testing.golden import assert_tensor_golden
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def test_verifier_fit_needs_a_positive_step_budget() -> None:
@@ -40,7 +40,7 @@ def test_verifier_fit_needs_a_positive_step_budget() -> None:
 
 def _record_denoising_fit(h: Harness) -> dict[str, Tensor]:
     h.harvest(h.generator("gen_a", seed=0))
-    model = DenoisingVerifier.Config()
+    model = FilledDenoisingVerifier.Config()
     model.channels_hidden = 4
     model.num_layers = 1
     model.heads = 2
@@ -53,7 +53,10 @@ def _record_denoising_fit(h: Harness) -> dict[str, Tensor]:
             weights_only=True,
         ),
     )
-    return weight_tensors("model", state["step"]["model"])
+    return {
+        f"model/{name}": value.detach().clone()
+        for name, value in state["step"]["model"].items()
+    }
 
 
 def test_denoising_loss_adds_masked_cross_entropy_on_correct_cells() -> None:
@@ -99,8 +102,7 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
     actual = replay(_RECORDERS[case], tmp_path, train=False)
-    report = mismatches(load_golden(case), actual)
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
+    assert_tensor_golden(_CWD / "testdata" / f"{case}.pt", actual)
 
 
 def test_verifier_fit_needs_a_positive_clip_norm() -> None:

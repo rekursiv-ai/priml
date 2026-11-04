@@ -18,6 +18,7 @@ from priml.baselines.mlsbench.dl.vision.mobilenet import (
     sized_blocks,
 )
 from priml.baselines.mlsbench.dl.vision.model import Activation
+from priml.math.probability import weyl_randn
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -221,7 +222,7 @@ def test_mobilenetv2_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="mobilenetv2",
         build_module=tiny().make,
-        build_input=lambda: torch.randn(BATCH, 3, SIDE, SIDE),
+        build_input=lambda: weyl_randn(BATCH, 3, SIDE, SIDE),
         seed=0,
     )
 

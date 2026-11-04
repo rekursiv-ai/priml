@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
 Time a joint learner epoch at experiments.exp003's geometry with a 20-layer world model.
 
 exp003's policy, objective and optimizer, the policy reading a projection of
@@ -412,7 +412,7 @@ def _window_stats(
 
 def _tokens(plan: ReplayPlan) -> tuple[int, int]:
     """Return a plan's tokens of passes, and of bins with their padding."""
-    real = sum(int((batch.kind != Kind.PAD).sum()) for batch in plan.batches)
+    real = sum(int((batch.kind != Kind.PAD.value).sum()) for batch in plan.batches)
     return real, sum(batch.kind.numel() for batch in plan.batches)
 
 
@@ -430,7 +430,7 @@ def _dense_flops(model: WorldModel, plan: ReplayPlan, *, layers: int) -> float:
         p.numel() for block in blocks for p in block.parameters() if p.ndim >= 2
     )
     keys = sum(
-        float((batch.positions + 1)[batch.kind != Kind.PAD].sum())
+        float((batch.positions + 1)[batch.kind != Kind.PAD.value].sum())
         for batch in plan.batches
     )
     encoder = model.encoder

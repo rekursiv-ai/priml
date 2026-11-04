@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, cast
 
 import functools
 import math
@@ -19,6 +19,86 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from priml.math.custom_types import Tensorable, TensorableFn
+
+
+_SQRT_2: Final = cast("float", 2.0**0.5)
+
+
+def weyl_randn(
+    *size: int,
+    dtype: torch.dtype = torch.float32,
+    salt: int = 0,
+    requires_grad: bool = False,
+) -> Tensor:
+    """Return the golden-ratio Weyl sequence of ``size`` as standard normal quantiles.
+
+    The sequence is equidistributed, so through the normal inverse CDF it looks
+    like ``torch.randn`` while drawing nothing: the same whatever the generator
+    holds or an initializer drew.
+
+    Args:
+      *size: Shape of the result.
+      dtype: Floating dtype of the result.
+      salt: Distinguishes results of one size, so ``q`` and ``k`` differ.
+      requires_grad: Whether the result records gradients.
+
+    Returns:
+      values: Weyl values distributed as a standard normal.
+
+    """
+    values = (
+        (torch.erfinv(_weyl_unit((salt << 20), math.prod(size)) * 2 - 1) * _SQRT_2)
+        .to(dtype)
+        .reshape(size)
+    )
+    return values.requires_grad_(requires_grad)
+
+
+def weyl_rand(
+    *size: int,
+    dtype: torch.dtype = torch.float32,
+    salt: int = 0,
+    requires_grad: bool = False,
+) -> Tensor:
+    """Return the golden-ratio Weyl sequence of ``size`` on ``[0, 1)``, like ``torch.rand``.
+
+    Args:
+      *size: Shape of the result.
+      dtype: Floating dtype of the result.
+      salt: Distinguishes results of one size.
+      requires_grad: Whether the result records gradients.
+
+    Returns:
+      values: Weyl values, uniform on ``[0, 1)``.
+
+    """
+    values = _weyl_unit(salt << 20, math.prod(size)).to(dtype).reshape(size)
+    return values.requires_grad_(requires_grad)
+
+
+def weyl_randint(
+    low: int,
+    high: int,
+    size: tuple[int, ...],
+    *,
+    dtype: torch.dtype = torch.int64,
+    salt: int = 0,
+) -> Tensor:
+    """Return the golden-ratio Weyl sequence of ``size`` floored onto ``[low, high)``.
+
+    Args:
+      low: Least value.
+      high: One past the greatest value.
+      size: Shape of the result.
+      dtype: Integer dtype of the result.
+      salt: Distinguishes results of one size.
+
+    Returns:
+      values: Every integer in range, evenly spread, for indices and masks.
+
+    """
+    unit = _weyl_unit(salt << 20, math.prod(size))
+    return (torch.floor(unit * (high - low)) + low).to(dtype).reshape(size)
 
 
 # Adapted from tensorflow/probability.
@@ -343,9 +423,12 @@ def log_cdf_truncated_normal(
     interior = (x > torch.minimum(low, high)) & (x < torch.maximum(low, high))
     # Mask all operands, not only the result: logsubexp(a, a) has an
     # infinite derivative that would leak through the unselected branch.
+    # pragma: no mutate start -- the fills feed only the branch the last where drops,
+    # and where routes no gradient to a dropped entry: any fill gives the same bits.
     std_x = torch.where(interior, (x - loc) / scale, 0.5)
     std_low = torch.where(interior, (low - loc) / scale, 0.0)
     std_high = torch.where(interior, (high - loc) / scale, 1.0)
+    # pragma: no mutate end
     log_cdf = logsubexp(
         torch.special.log_ndtr(std_x),
         torch.special.log_ndtr(std_low),
@@ -389,6 +472,43 @@ def quantile_truncated_normal(
     std_high = (high - loc) / scale
     y = ndtri(ndtr(std_low) + safe_p * _normal_cdf_difference(std_high, std_low))
     return torch.where(in_domain, y * scale + loc, math.nan)
+
+
+def quantile_student_t(p: Tensorable, *, df: int) -> Tensor:
+    """Quantile function of Student's t-distribution with integer degrees of freedom.
+
+    Bisects the exact finite-series CDF in ``theta = atan(|t| / sqrt(df))``
+    until every midpoint stops moving, so the result is as exact as ``p``'s
+    dtype allows.
+
+    Args:
+      p: Cumulative probability in (0, 1).
+      df: Degrees of freedom; at least one.
+
+    Returns:
+      quantile: Value at which the CDF equals p.
+
+    Raises:
+      ValueError: ``df`` is below one.
+
+    References:
+      https://personal.math.ubc.ca/~cbm/aands/page_948.htm
+        Abramowitz and Stegun (1964), 26.7.3 and 26.7.4.
+
+    """
+    if df < 1:
+        raise ValueError(f"df must be at least 1; got {df}.")
+    p = convert_to_tensor(p)
+    centered = 2 * p - 1
+    target = centered.abs()
+    low = torch.zeros_like(target)
+    high = torch.full_like(target, math.pi / 2)
+    while bool(((low < (middle := (low + high) / 2)) & (middle < high)).any()):
+        cdf = _student_t_two_sided_cdf(middle, df=df)
+        below = cdf < target  # pragma: no mutate -- A tie needs bit-equal floats.
+        low = torch.where(below, middle, low)
+        high = torch.where(below, high, middle)
+    return centered.sign() * (df * middle.tan().square()).sqrt()
 
 
 def pdf_logit_distribution(
@@ -799,7 +919,7 @@ def log_gamma_correction(x: Tensorable) -> Tensor:
             -0.165322962780713e-02,
         ],
         dtype=x.dtype,
-        device=x.device,
+        device=x.device,  # pragma: no mutate -- read only as 0-dim scalars.
     )
     inv_x = x.reciprocal()
     inv_x2 = inv_x * inv_x
@@ -882,6 +1002,13 @@ def lbeta(x: Tensorable, y: Tensorable) -> Tensor:
     )
 
 
+def _weyl_unit(offset: int, count: int) -> Tensor:
+    """Return ``frac(i * (phi - 1))`` for ``offset < i <= offset + count``."""
+    index = torch.arange(offset + 1, offset + count + 1, dtype=torch.float64)
+    golden_ratio_minus_one = (5**0.5 - 1) / 2
+    return torch.remainder(index * golden_ratio_minus_one, 1.0)
+
+
 def _unpack_size(*samples_size: int | Sequence[int]) -> tuple[int, ...]:
     if len(samples_size) == 1:
         size = samples_size[0]
@@ -909,3 +1036,19 @@ def _normal_cdf_difference(a: Tensorable, b: Tensorable) -> Tensor:
     hi = torch.where(flip, -b, a)
     lo = torch.where(flip, -a, b)
     return ndtr(hi) - ndtr(lo)
+
+
+def _student_t_two_sided_cdf(theta: Tensor, *, df: int) -> Tensor:
+    """Return ``P(|T| <= sqrt(df) tan(theta))`` by its finite series."""
+    cos_squared = theta.cos().square()
+    if df % 2:
+        term, total = theta.cos(), torch.zeros_like(theta)
+        for k in range(1, df // 2 + 1):
+            total = total + term
+            term = term * cos_squared * (2 * k / (2 * k + 1))
+        return 2 / math.pi * (theta + theta.sin() * total)
+    term, total = torch.ones_like(theta), torch.zeros_like(theta)
+    for k in range(df // 2):
+        total = total + term
+        term = term * cos_squared * ((2 * k + 1) / (2 * k + 2))
+    return theta.sin() * total

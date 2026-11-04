@@ -3,12 +3,12 @@
 Pattern:
 
 1. **Build** a module at minimum size: every dim at least 2, pairwise distinct.
-2. **Randomize** every parameter with seeded ``torch.randn`` so structurally-zero
-   inits (q-head bias, etc.) don't hide a regression.
-3. **Snapshot** to ``<test_file_dir>/testdata/`` the pre-run state, input,
-   output, and every post-run tensor the run changed, all whole.
-4. **Assert** on subsequent runs that loading the golden state and applying it
-   to the same input reproduces the output and post-run state bit for bit.
+2. **Fill** every parameter and explicitly named random buffer with Weyl values.
+   Construction runs in an isolated RNG scope; execution never inherits its draws.
+3. **Snapshot** to ``<test_file_dir>/testdata/`` the output, state layout,
+   and every post-run tensor the run changed, all whole.
+4. **Rebuild** the input and filled state, then compare the output and post-run
+   state bit for bit. Reconstructible inputs and initial weights are not stored.
 
 Regenerate (after an intentional numeric change)::
 
@@ -57,9 +57,9 @@ Cross-architecture portability (the whole point):
 
 Determinism is required: the harness enables deterministic Torch algorithms
 and seeds the CPU default generator before any tensor allocation. Every step --
-building the module, randomizing it, building the input, and running -- sits
-inside one ``host_agnostic_numerics``, so an initializer or input drawn with
-``randn`` is as portable as the forward.
+building the input, constructing and filling the module, and running -- sits
+inside one ``host_agnostic_numerics``. Inputs use literals or Weyl factories;
+seeding alone does not insulate a random input factory from sampler changes.
 
 Usage::
 
@@ -71,7 +71,7 @@ Usage::
             golden_dir=Path(__file__).parent.resolve() / "testdata",
             golden_name="mymodule_min",
             build_module=lambda: cfg.make(),
-            build_input=lambda: torch.randn(2, 4, 8),
+            build_input=lambda: weyl_randn(2, 4, 8),
             seed=0,
         )
 
@@ -140,6 +140,7 @@ from treekle import from_plain
 import torch
 
 from priml.math.numeric import fixed_pairwise_sum
+from priml.math.probability import weyl_randn
 from priml.testing import regenerate
 from priml.testing.golden import pack, tensor_bits_equal, unpack
 
@@ -442,6 +443,37 @@ def randomize_parameters(
             p.data.copy_(sample)
 
 
+def fill_parameters(
+    module: nn.Module,
+    *,
+    std: float = 1.0,
+    buffers: tuple[str, ...] = (),
+) -> int:
+    """Fill parameters and named random buffers with deterministic normal values.
+
+    Each tensor continues one Weyl sequence; no generator is read or advanced.
+    Unlisted buffers retain their configuration-derived values.
+
+    Args:
+      module: Module whose parameters to fill, in place.
+      std: Standard deviation of the values.
+      buffers: Randomly initialized buffers to fill after the parameters.
+
+    Returns:
+      offset: Total number of values filled.
+
+    """
+    tensors = [*module.parameters(), *(module.get_buffer(name) for name in buffers)]
+    values = weyl_randn(sum(tensor.numel() for tensor in tensors), dtype=torch.float64)
+    offset = 0
+    with torch.no_grad():
+        for tensor in tensors:
+            count = tensor.numel()
+            tensor.copy_((values[offset : offset + count] * std).reshape(tensor.shape))
+            offset += count
+    return offset
+
+
 def assert_bfb_against_golden[InputT](
     *,
     golden_dir: Path,
@@ -450,16 +482,16 @@ def assert_bfb_against_golden[InputT](
     build_input: Callable[[], InputT],
     seed: int = 0,
     run: Callable[[nn.Module, InputT], Tensor] | None = None,
+    buffers: tuple[str, ...] = (),
 ) -> None:
     """Assert that running ``module(input)`` reproduces the saved golden.
 
     First call (no golden file present, or ``--regenerate-b4b`` passed):
-      - Builds the module, builds the input, randomizes parameters under
-        ``seed``, runs ``module(input)``, and writes ``{golden_name}.pt``
-        containing the pre-run state_dict, input, output, and every post-run
-        tensor the run changed, all whole. ``randomize_parameters`` uses its own
-        seeded generator, so it is independent of the global RNG ``build_input``
-        may consume.
+      - Builds the module, builds the input, fills the parameters with
+        :func:`fill_parameters`, runs ``module(input)``, and writes
+        ``{golden_name}.pt`` containing the output, state layout, and every post-run
+        tensor the run changed, all whole. The fill draws nothing, so the
+        golden does not depend on what the initializer drew.
       - Immediately reloads the just-written golden, reruns, and asserts
         it round-trips bit-exactly. Regeneration fails loudly otherwise, so a
         non-reproducible golden is never committed.
@@ -468,9 +500,9 @@ def assert_bfb_against_golden[InputT](
         after the same round-trip check.
 
     Subsequent calls:
-      - Builds the module fresh, loads the pre-run state_dict, runs the
-        module on the input, and asserts the output and every post-run
-        tensor match the golden bit-for-bit.
+      - Rebuilds the input and module, fills the parameters and named buffers,
+        then asserts the output and every post-run tensor match the golden
+        bit-for-bit.
 
     The post-run state is captured unconditionally: a non-mutating
     ``forward`` may still mutate registered buffers (BatchNorm
@@ -486,11 +518,12 @@ def assert_bfb_against_golden[InputT](
       build_input: Callable returning the input tensor (or a dict of
         tensors / tuple of tensors). Called once per replay, and once more
         to capture a new golden.
-      seed: Manual seed for module init randomization and input
-        generation.
+      seed: CPU execution seed, set before input construction. Module
+        construction does not advance this stream.
       run: Optional callable ``(module, input) -> Tensor``. Defaults to
         ``module(input)`` for tensor inputs, ``module(**input)`` for
         dict inputs, and ``module(*input)`` for tuple inputs.
+      buffers: Randomly initialized buffer names included in the deterministic fill.
 
     """
     state = _capture_torch_process_state()
@@ -506,6 +539,7 @@ def assert_bfb_against_golden[InputT](
                 build_input=build_input,
                 seed=seed,
                 run=_default_runner if run is None else run,
+                buffers=buffers,
             )
     finally:
         _restore_torch_process_state(state)
@@ -519,6 +553,7 @@ def regenerate_golden[InputT](
     build_input: Callable[[], InputT],
     seed: int = 0,
     run: Callable[[nn.Module, InputT], Tensor] | None = None,
+    buffers: tuple[str, ...] = (),
 ) -> None:
     """Force-regenerate a golden, ignoring any existing file.
 
@@ -532,6 +567,7 @@ def regenerate_golden[InputT](
       build_input: Input factory.
       seed: Manual seed.
       run: Optional custom runner.
+      buffers: Randomly initialized buffer names included in the deterministic fill.
 
     """
     with regenerate.forced(), suppress(_MissingGoldenError):
@@ -542,6 +578,7 @@ def regenerate_golden[InputT](
             build_input=build_input,
             seed=seed,
             run=run,
+            buffers=buffers,
         )
 
 
@@ -549,13 +586,15 @@ class _Golden(TypedDict):
     """What a golden file stores.
 
     ``post_state`` holds only the tensors the run changed; every other entry's
-    expectation is its ``state_dict`` value. It is absent when nothing changed.
+    expectation is its value after :func:`fill_parameters`, which replay rebuilds.
+    It is absent when nothing changed. ``state_shapes`` lists every state entry,
+    one ``name shape dtype`` line each, so a renamed, added, or reshaped one fails.
     """
 
-    state_dict: dict[str, Tensor]
-    input: object
+    input: NotRequired[object]
     output: Tensor
     seed: int
+    state_shapes: str
     post_state: NotRequired[dict[str, Tensor]]
 
 
@@ -571,7 +610,7 @@ def save_golden(path: Path, payload: _Golden) -> None:
       payload: The golden, records as plain name-to-tensor mappings.
 
     """
-    stored: dict[str, object] = {**payload, "state_dict": pack(payload["state_dict"])}
+    stored: dict[str, object] = {**payload}
     if "post_state" in payload:
         stored["post_state"] = pack(payload["post_state"])
     torch.save(stored, path)
@@ -588,39 +627,33 @@ def load_golden(path: Path) -> _Golden:
 
     """
     payload = cast(_Golden, torch.load(path, weights_only=False))
-    payload["state_dict"] = unpack(payload["state_dict"])
+    if "state_shapes" not in payload:
+        raise AssertionError(
+            f"{path} was minted before the harness filled parameters itself; "
+            "remint it with --regenerate-b4b.",
+        )
     if "post_state" in payload:
         payload["post_state"] = unpack(payload["post_state"])
     return payload
 
 
-def stale_post_states(paths: Iterable[Path]) -> list[Path]:
-    """Return the bfb goldens whose post-run state repeats an unchanged tensor.
+def stored_pre_states(paths: Iterable[Path]) -> list[Path]:
+    """Return the bfb goldens that still store a pre-run ``state_dict``.
 
-    Replay reads an absent post-run entry as "equal to the pre-run state", so a
-    stored copy of an unchanged tensor asserts nothing and only costs bytes.
+    Replay rebuilds the pre-run state with :func:`fill_parameters`, so a stored
+    copy is a golden minted before the fill: it replays nothing it holds.
 
     Args:
-      paths: Candidate ``.pt`` files; ones that are not bfb goldens are skipped.
+      paths: Candidate ``.pt`` files; ones that are not mappings are skipped.
 
     Returns:
-      stale: The goldens storing at least one unchanged post-run tensor.
+      stale: The goldens still storing a ``state_dict``.
 
     """
     stale: list[Path] = []
     for path in paths:
         loaded = torch.load(path, weights_only=False)
-        if not isinstance(loaded, dict):
-            continue
-        typed_loaded = cast(dict[str, object], loaded)
-        raw = from_plain(typed_loaded, dict[str, object])
-        if "post_state" not in raw or "state_dict" not in raw:
-            continue
-        payload = load_golden(path)
-        if "post_state" not in payload:
-            raise ValueError('Expected "post_state" in payload.')
-        post = payload["post_state"]
-        if len(changed_state(payload["state_dict"], post)) < len(post):
+        if isinstance(loaded, dict) and "state_dict" in cast(dict[str, object], loaded):
             stale.append(path)
     return stale
 
@@ -674,20 +707,13 @@ def _replay_golden[InputT](
     build_input: Callable[[], InputT],
     seed: int,
     run: Callable[[nn.Module, InputT], Tensor],
+    buffers: tuple[str, ...] = (),
 ) -> None:
     """Load a golden, rerun, and assert output and post-run state match."""
-    _set_deterministic(True)
-    _seed_bfb(seed)
-    module = build_module()
-    device = _module_device(module)
-    if device != "cpu":
-        raise ValueError("The BFB harness is CPU-only.")
+    module, inp = _golden_case(build_module, build_input, seed=seed, buffers=buffers)
     payload = load_golden(golden_path)
-    # Construction consumes RNG in the same order as minting, even though the
-    # runner uses the saved input. Also detect an input builder that has drifted.
-    _assert_same_input(_to_cpu(build_input()), payload["input"], label="input")
-    module.load_state_dict(payload["state_dict"])
-    inp = cast(InputT, move_to_device(payload["input"], device))
+    pre_state = _cpu_state_dict(module.state_dict())
+    _assert_same_state_shapes(_state_shapes(pre_state), payload["state_shapes"])
     output = run(module, inp)
     # Checked on replay too, not only at mint: a runner changed to return float64
     # after the golden was minted is reported by cause, not as a last-bit
@@ -696,10 +722,8 @@ def _replay_golden[InputT](
     _assert_equal(output, payload["output"], label="output")
     # An entry the run did not change is expected to equal its pre-run copy, so a
     # mutation introduced later fails against it.
-    expected = {**payload["state_dict"], **payload.get("post_state", {})}
-    _assert_portable_state_changes(
-        changed_state(payload["state_dict"], module.state_dict()),
-    )
+    expected = {**pre_state, **payload.get("post_state", {})}
+    _assert_portable_state_changes(changed_state(pre_state, module.state_dict()))
     _assert_state_match(module, expected)
 
 
@@ -820,38 +844,6 @@ def _byte_span(tensor: Tensor) -> tuple[int, int]:
 
 def _cpu_state_dict(state_dict: Mapping[str, Tensor]) -> dict[str, Tensor]:
     return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
-
-
-def _assert_same_input(live: object, stored: object, *, label: str) -> None:
-    """Assert a rebuilt input equals the recorded one, recursing into containers."""
-    live_type: type = type(live)
-    stored_type: type = type(stored)
-    if live_type != stored_type:
-        raise AssertionError(f"{label}: type mismatch {live_type} vs {stored_type}")
-    if live_type is dict:
-        live_map = cast(dict[str, object], live)
-        stored_map = cast(dict[str, object], stored)
-        if live_map.keys() != stored_map.keys():
-            raise AssertionError(
-                f"{label}: keys differ {sorted(live_map)} vs {sorted(stored_map)}",
-            )
-        for key, value in live_map.items():
-            _assert_same_input(value, stored_map[key], label=f"{label}[{key!r}]")
-    elif live_type in {list, tuple}:
-        live_seq = cast("Sequence[object]", live)
-        stored_seq = cast("Sequence[object]", stored)
-        if len(live_seq) != len(stored_seq):
-            raise AssertionError(
-                f"{label}: length {len(live_seq)} vs {len(stored_seq)}",
-            )
-        for index in range(len(live_seq)):
-            _assert_same_input(
-                live_seq[index],
-                stored_seq[index],
-                label=f"{label}[{index}]",
-            )
-    else:
-        _assert_equal(live, stored, label=label)
 
 
 def _ints(values: object) -> list[int]:
@@ -1167,6 +1159,44 @@ def _passes_through(func: OpOverload[..., object]) -> bool:
     )
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _OpPlan:
+    """What the harness decides from an op alone, so each dispatch reads it once."""
+
+    native: bool
+    """Runs as called on every call: it passes through and takes no ``alpha``,
+    whose value alone could make :func:`_scales_operand` upcast it."""
+
+    passes_through: bool
+    """Runs as called unless its ``alpha`` scales; see :func:`_passes_through`."""
+
+    aten: bool
+    """Lives in the ``aten`` namespace."""
+
+    name: str
+    """Its packet name, :func:`_op_name`."""
+
+    writes: bool
+    """Mutates an argument; see :func:`_writes`."""
+
+    convolution_backward: bool
+    """Is ``aten.convolution_backward.default``."""
+
+
+@cache
+def _plan(func: OpOverload[..., object]) -> _OpPlan:
+    """Return ``func``'s plan."""
+    passes_through = _passes_through(func)
+    return _OpPlan(
+        native=passes_through and _alpha_index(func) is None,
+        passes_through=passes_through,
+        aten=func.namespace == "aten",
+        name=_op_name(func),
+        writes=_writes(func),
+        convolution_backward=func is torch.ops.aten.convolution_backward.default,
+    )
+
+
 # A view moves no bytes, so it is exact, and its result must alias its input: upcast,
 # it returns a float64 copy narrowed back, and every write through it lands on that
 # copy. ``x[:, :n]`` over a whole dimension issues ``alias``, not ``slice``, so a
@@ -1194,9 +1224,10 @@ def _scales_operand(
 ) -> bool:
     """Whether an allowlisted op carries a non-unit ``alpha`` multiplier."""
     index = _alpha_index(func)
-    if index is None:
-        return False
-    return kwargs.get("alpha", args[index] if index < len(args) else 1) != 1
+    return (
+        index is not None
+        and kwargs.get("alpha", args[index] if index < len(args) else 1) != 1
+    )
 
 
 @cache
@@ -1256,7 +1287,8 @@ def _one_term_mm(
     args: tuple[object, ...],
 ) -> Tensor | None:
     """Return a one-term ``mm`` as its plain product, or ``None`` for any other op."""
-    if func.namespace != "aten" or _op_name(func) != "mm" or len(args) != 2:
+    plan = _plan(func)
+    if not plan.aten or plan.name != "mm" or len(args) != 2:
         return None
     left, right = args
     if not isinstance(left, Tensor) or not isinstance(right, Tensor):
@@ -1272,11 +1304,12 @@ def _run_unfused(
     kwargs: dict[str, object],
 ) -> object:
     """Run ``func``, through its decomposition when its kernel may fuse an FMA."""
-    if func.namespace != "aten":
+    plan = _plan(func)
+    if not plan.aten:
         return func(*args, **kwargs)
-    name = _op_name(func)
+    name = plan.name
     base = name.removesuffix("_")
-    if str(func) == "aten.convolution_backward.default":
+    if plan.convolution_backward:
         return _pairwise_convolution_backward(func, args, kwargs)
     if name in {"dot", "vdot"} and _real_vectors(args):
         return cast("Callable[..., Tensor]", _pairwise_dot)(*args, **kwargs)
@@ -1335,8 +1368,8 @@ def _run_unfused(
         and not kwargs
     ):
         return _unfused_batch_norm(func, args=args)
-    if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
-        return decomposition_table[func](*args, **kwargs)
+    if name in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
+        return _decomposition(func, args, kwargs)(*args, **kwargs)
     return func(*args, **kwargs)
 
 
@@ -1373,7 +1406,7 @@ def _pairwise_convolution_backward(
     groups = cast(int, args[9])
     patches = torch.nn.functional.unfold(
         media,
-        kernel_size=weight.shape[-2:],
+        kernel_size=weight.shape[-2:],  # pragma: no mutate -- 4-D: media.ndim == 4.
         dilation=dilation,
         padding=padding,
         stride=stride,
@@ -1390,7 +1423,9 @@ def _pairwise_convolution_backward(
 # wrong rank or length raises there, and integers sum exactly anyway.
 def _real_vectors(args: tuple[object, ...]) -> bool:
     """Whether ``args`` open with two equal-length nonempty real float vectors."""
+    # pragma: no mutate start -- dot/vdot take two positionals; out is kwarg-only.
     left, right = cast(tuple[Tensor, Tensor], args[:2])
+    # pragma: no mutate end
     return (
         left.ndim == 1
         and left.shape == right.shape
@@ -1509,6 +1544,80 @@ def _unfused_addbmm(
     return result if beta == 0 else result + beta * self
 
 
+# An optimizer or EMA step issues one in-place update per parameter, and torch's
+# reference for each costs ~180 us in its promotion and ``out=`` wrappers. Each
+# body is its reference's arithmetic, op for op, written into ``self`` as the
+# reference's ``out=self`` does, so the bits are the reference's.
+def _lerp_scalar_(self: Tensor, end: Tensor, weight: float) -> Tensor:
+    """Return ``torch._refs.lerp_`` for a scalar weight."""
+    scalar = self.new_full((), weight)
+    upper = scalar.abs() >= 0.5
+    coefficient = torch.where(upper, scalar - 1, scalar)
+    base = torch.where(upper, end, self)
+    return self.copy_(coefficient * (end - self) + base)
+
+
+def _addcmul_(
+    self: Tensor,
+    tensor1: Tensor,
+    tensor2: Tensor,
+    *,
+    value: float = 1,
+) -> Tensor:
+    """Return ``torch._refs.addcmul_``."""
+    return self.copy_(self + value * tensor1 * tensor2)
+
+
+def _addcdiv_(
+    self: Tensor,
+    tensor1: Tensor,
+    tensor2: Tensor,
+    *,
+    value: float = 1,
+) -> Tensor:
+    """Return ``torch._refs.addcdiv_``."""
+    return self.copy_(self + value * tensor1 / tensor2)
+
+
+def _add_(self: Tensor, other: Tensor, *, alpha: float) -> Tensor:
+    """Return ``torch._refs.add_``."""
+    return self.copy_(self + other * alpha)
+
+
+_UNFUSED_UPDATES: Final[dict[object, Callable[..., Tensor]]] = {
+    torch.ops.aten.lerp_.Scalar: _lerp_scalar_,
+    torch.ops.aten.addcmul_.default: _addcmul_,
+    torch.ops.aten.addcdiv_.default: _addcdiv_,
+    torch.ops.aten.add_.Tensor: _add_,
+}
+
+
+# The references promote mixed dtypes and broadcast; the updates do neither, so any
+# argument unlike ``self`` in dtype, device or shape takes the reference.
+def _decomposition(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> Callable[..., object]:
+    """Return ``func``'s separate-op form: its in-place update, else torch's reference."""
+    update = _UNFUSED_UPDATES.get(func)
+    first = args[0] if args else None
+    if (
+        update is None
+        or not isinstance(first, Tensor)
+        or not first.dtype.is_floating_point
+        or not all(
+            value.dtype == first.dtype
+            and value.device == first.device
+            and value.shape == first.shape
+            for value in (*args, *kwargs.values())
+            if isinstance(value, Tensor)
+        )
+    ):
+        return decomposition_table[func]
+    return update
+
+
 def _scales_or_fuses(
     func: OpOverload[..., object],
     args: tuple[object, ...],
@@ -1574,7 +1683,10 @@ class _Float64Compute(TorchDispatchMode):
         kwargs: dict[str, object],
     ) -> object:
         """Upcast, run, and narrow one op; see the class docstring."""
-        if _passes_through(func) and not _scales_operand(func, args, kwargs):
+        plan = _plan(func)
+        if plan.native or (
+            plan.passes_through and not _scales_operand(func, args, kwargs)
+        ):
             return func(*args, **kwargs)
         args, kwargs = _dtype_as_keyword(func, args=args, kwargs=kwargs)
         input_tensors: list[Tensor] = []
@@ -1583,23 +1695,16 @@ class _Float64Compute(TorchDispatchMode):
         explicit_dtype = kwargs.get("dtype")
         # A tensorless sampler's width is its dtype kwarg or the process default;
         # see the note above ``_EXACT_F32_OPS``.
-        factory = (
-            func.namespace == "aten"
-            and _op_name(func) in _FLOAT_FACTORIES
-            and not input_tensors
-        )
-        factory_dtype = (
-            torch.int64
-            if _op_name(func) == "arange"
-            and not any(isinstance(value, float) for value in (*args, *kwargs.values()))
-            else torch.get_default_dtype()
-        )
+        factory = plan.aten and plan.name in _FLOAT_FACTORIES and not input_tensors
         target = (
             explicit_dtype
             if isinstance(explicit_dtype, torch.dtype)
             else _result_dtype(input_tensors)
             if input_tensors
-            else factory_dtype
+            else torch.int64
+            if plan.name == "arange"
+            and not any(isinstance(value, float) for value in (*args, *kwargs.values()))
+            else torch.get_default_dtype()
         )
         narrow = any(_is_narrow_float(value.dtype) for value in input_tensors) or (
             factory and _is_narrow_float(target)
@@ -1617,8 +1722,8 @@ class _Float64Compute(TorchDispatchMode):
             result = _run_unfused(func, up_args, up_kwargs)
         # The legacy batch-norm schema omits its running-buffer mutations.
         if (
-            func.namespace == "aten"
-            and _op_name(func) == "native_batch_norm"
+            plan.aten
+            and plan.name == "native_batch_norm"
             and _argument(args, kwargs=kwargs, index=5, name="training") is True
         ):
             for index, name in ((3, "running_mean"), (4, "running_var")):
@@ -1631,7 +1736,7 @@ class _Float64Compute(TorchDispatchMode):
                         name=name,
                     ),
                 )
-        if _writes(func):
+        if plan.writes:
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
             # the caller's originals. Narrow each back and return the originals
             # in the op's own return shape.
@@ -1671,8 +1776,10 @@ def _dtype_as_keyword(
 ) -> tuple[tuple[object, ...], dict[str, object]]:
     """Pass a positional ``dtype``, and every argument after it, by name."""
     index = _dtype_index(func)
+    # pragma: no mutate start -- at index == len(args) the slice below names nothing.
     if index is None or index >= len(args):
         return args, kwargs
+    # pragma: no mutate end
     schema = func._schema  # noqa: SLF001 -- The harness reads the op schema to name positional arguments.
     names = [argument.name for argument in schema.arguments[index : len(args)]]
     return args[:index], {**kwargs, **dict(zip(names, args[index:], strict=True))}
@@ -1727,6 +1834,45 @@ def _seed_bfb(seed: int) -> None:
     torch.set_rng_state(generator.get_state())
 
 
+def _state_shapes(state: Mapping[str, Tensor]) -> str:
+    """Return one ``name shape dtype`` line per state entry, in order."""
+    return "\n".join(
+        f"{key} {list(value.shape)} {value.dtype}" for key, value in state.items()
+    )
+
+
+def _assert_same_state_shapes(actual: str, expected: str) -> None:
+    """Fail naming every state line added or removed, a reshape being both."""
+    if actual == expected:
+        return
+    now, then = set(actual.splitlines()), set(expected.splitlines())
+    raise AssertionError(
+        f"state entries differ from the golden: new {sorted(now - then)}, "
+        f"gone {sorted(then - now)}",
+    )
+
+
+# The input is built first, from a fresh seed: its integer draws then cannot depend
+# on how much the module's construction drew.
+def _golden_case[InputT](
+    build_module: Callable[[], nn.Module],
+    build_input: Callable[[], InputT],
+    *,
+    seed: int,
+    buffers: tuple[str, ...] = (),
+) -> tuple[nn.Module, InputT]:
+    """Build the input then the module, and fill the module's parameters."""
+    _set_deterministic(True)
+    _seed_bfb(seed)
+    inp = build_input()
+    with torch.random.fork_rng(devices=[]):
+        module = build_module()
+        if _module_device(module) != "cpu":
+            raise ValueError("The BFB harness is CPU-only.")
+        _ = fill_parameters(module, buffers=buffers)
+    return module, inp
+
+
 def _write_golden[InputT](
     *,
     golden_path: Path,
@@ -1734,28 +1880,20 @@ def _write_golden[InputT](
     build_input: Callable[[], InputT],
     seed: int,
     run: Callable[[nn.Module, InputT], Tensor],
+    buffers: tuple[str, ...] = (),
 ) -> None:
-    """Build, randomize, run; store the pre-run state, input, output, and changes."""
-    _set_deterministic(True)
-    _seed_bfb(seed)
-    module = build_module()
-    device = _module_device(module)
-    if device != "cpu":
-        raise ValueError("The BFB harness is CPU-only.")
-    inp = build_input()
-    randomize_parameters(module, seed=seed)
+    """Rebuild inputs and weights; store outputs and state changed by execution."""
+    module, inp = _golden_case(build_module, build_input, seed=seed, buffers=buffers)
     pre_state = _cpu_state_dict(module.state_dict())
-    pre_input = _to_cpu(inp)
     output = run(module, inp)
     _assert_portable_output_dtype(output)
     payload: _Golden = {
-        "state_dict": pre_state,
-        "input": pre_input,
+        "state_shapes": _state_shapes(pre_state),
         "output": output.detach().to("cpu", copy=True),
         "seed": seed,
     }
-    # Unchanged entries are asserted against the pre-run copy, so storing only
-    # the changed ones is not a weaker check.
+    # Unchanged entries are asserted against the rebuilt fill, so storing only the
+    # changed ones is not a weaker check.
     if post_state := changed_state(pre_state, module.state_dict()):
         _assert_portable_state_changes(post_state)
         payload["post_state"] = post_state
@@ -1770,6 +1908,7 @@ def _assert_bfb[InputT](
     build_input: Callable[[], InputT],
     seed: int,
     run: Callable[[nn.Module, InputT], Tensor],
+    buffers: tuple[str, ...] = (),
 ) -> None:
     """Mint or replay a golden; the caller holds ``host_agnostic_numerics``."""
     golden_dir.mkdir(parents=True, exist_ok=True)
@@ -1789,6 +1928,7 @@ def _assert_bfb[InputT](
                 build_input=build_input,
                 seed=seed,
                 run=run,
+                buffers=buffers,
             )
             _replay_golden(
                 golden_path=candidate_path,
@@ -1796,6 +1936,7 @@ def _assert_bfb[InputT](
                 build_input=build_input,
                 seed=seed,
                 run=run,
+                buffers=buffers,
             )
             candidate_path.replace(golden_path)
         if missing:
@@ -1811,4 +1952,5 @@ def _assert_bfb[InputT](
         build_input=build_input,
         seed=seed,
         run=run,
+        buffers=buffers,
     )

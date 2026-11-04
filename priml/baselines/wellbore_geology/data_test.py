@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, cast, override
 
 import csv
 import math
+import os
 import random
 
 from configgle import InlineConfig
@@ -20,6 +21,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.wellbore_geology import data
 from priml.baselines.wellbore_geology.data import (
     FORMATIONS,
     AugmentedFeatures,
@@ -53,6 +55,7 @@ from priml.baselines.wellbore_geology.data import (
     _smooth,
     collate_features,
     discover_wells,
+    image_probability,
     initialize_worker,
     load_raw,
     load_split,
@@ -61,6 +64,7 @@ from priml.baselines.wellbore_geology.data import (
     probability_image,
     read_centroids,
     read_numeric_csv,
+    shift_probability_axis,
     trajectory,
 )
 from priml.baselines.wellbore_geology.folds import GeographicPrior, RelativeSurface
@@ -90,6 +94,8 @@ from priml.testing.golden import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from numpy.typing import NDArray
 
     from priml.baselines.wellbore_geology.custom_types import Batch
@@ -399,6 +405,160 @@ def test_rotation_moves_probability_rows_and_their_paths_by_the_fitted_shift() -
     assert numpy.get_state()[2] == reference.get_state()[2]
 
 
+def _rotated(
+    *,
+    channels: list[str],
+    target: Sequence[float],
+    valid: Sequence[bool] | None = None,
+    planes: NDArray[np.float32] | None = None,
+    target_stats: tuple[float, float] = (0, 1),
+) -> tuple[FeatureItem, np.random.RandomState]:
+    """Rotate one item with no jitter or shift bound; return it and its generator."""
+    features = ImageFeatures.Config()
+    features.channels = channels
+    features.target_stats = target_stats
+    features.reference_columns = 4
+    config = ImageAugmentation.Config()
+    config.rotate_probability = 1
+    config.ratio_jitter = 0
+    config.maximum_shift = math.inf
+    config.channel_probability = config.sequence_probability = 0
+    rows = len(target)
+    item = FeatureItem(
+        arrays={
+            "unet_static": (
+                np.ones((len(channels), rows, 4), dtype=np.float32)
+                if planes is None
+                else planes
+            ),
+            "target": np.asarray(target, dtype=np.float32),
+            "target_mask": np.ones(rows, dtype=bool)
+            if valid is None
+            else np.asarray(valid, dtype=bool),
+            "suffix_mask": np.ones(rows, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    numpy = np.random.RandomState(7)
+    config.make()(
+        item,
+        features=features,
+        numpy=numpy,
+        python=InlineConfig(random.Random, 11).make(),
+    )
+    return item, numpy
+
+
+def _drew_one_ratio(numpy: np.random.RandomState) -> bool:
+    """Report whether rotation got as far as drawing its ratio."""
+    reference = np.random.RandomState(7)
+    reference.uniform(1, 1)
+    return np.array_equal(numpy.get_state()[1], reference.get_state()[1])
+
+
+@pytest.mark.parametrize(
+    "prior",
+    ["pf_prob", "pf_prob_ffbsi", "pf_tvt", "pf_tvt_ffbsi"],
+)
+def test_each_particle_channel_alone_turns_rotation_on(prior: str) -> None:
+    _, numpy = _rotated(channels=["gr", prior], target=[0, 1, 2])
+
+    assert _drew_one_ratio(numpy)
+
+
+def test_two_targets_are_enough_to_fit_a_rotation() -> None:
+    _, numpy = _rotated(channels=["pf_tvt"], target=[0, 1])
+
+    assert _drew_one_ratio(numpy)
+
+
+def test_rotation_works_in_physical_depth_about_the_first_target() -> None:
+    """Standardized targets, a nonzero first target, and a row the mask leaves out.
+
+    Physical targets 2.5, 4.5 and 6.5 fit slope 1.75 through the first, so the
+    rows move by 0, 3.5 and 7; the masked row keeps its path.
+    """
+    item, _ = _rotated(
+        channels=["pf_tvt"],
+        target=[1, 2, 3, 9],
+        valid=[True, True, True, False],
+        target_stats=(0.5, 2),
+    )
+
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"][0],
+        np.broadcast_to(np.asarray([1, 2.75, 4.5, 1], np.float32)[:, None], (4, 4)),
+        strict=True,
+    )
+
+
+def test_a_path_is_rewritten_in_float32() -> None:
+    """The first target's row does not move, yet its path is computed anew."""
+    planes = np.full((2, 3, 4), 0.1, dtype=np.float32)
+    item, _ = _rotated(
+        channels=["pf_tvt", "pf_tvt_ffbsi"],
+        target=[0, 1, 2],
+        planes=planes,
+        target_stats=(0.7, 3),
+    )
+
+    depth = np.float32(0.1) * np.float32(3) + np.float32(0.7)
+    assert item.arrays["unet_static"][0, 0, 0] == (depth - 0.7) / 3
+    assert item.arrays["unet_static"][1, 0, 0] == (depth - 0.7) / 3
+
+
+def test_probabilities_shift_on_a_float32_candidate_axis() -> None:
+    """Three candidates in a unit window sit at -2/3, 0 and 2/3, inexact in float32.
+
+    A float64 axis moves the interpolated mass by an ulp, so the axis's dtype is
+    part of the contract.
+    """
+    features = ImageFeatures.Config()
+    features.channels = ["pf_prob"]
+    features.target_stats = (0, 0.1)
+    features.reference_columns = 3
+    features.reference_window = 1
+    config = ImageAugmentation.Config()
+    config.rotate_probability = 1
+    config.ratio_jitter = 0
+    config.maximum_shift = math.inf
+    config.channel_probability = config.sequence_probability = 0
+    planes = probability_image(
+        np.asarray([[0.2, 0.5, 0.3]] * 3, dtype=np.float32),
+        columns=3,
+    )
+    item = FeatureItem(
+        arrays={
+            "unet_static": planes[None].copy(),
+            "target": np.asarray([0, 1, 2], dtype=np.float32),
+            "target_mask": np.ones(3, dtype=bool),
+            "suffix_mask": np.ones(3, dtype=bool),
+        },
+        auxiliary={},
+        metadata={},
+    )
+    config.make()(
+        item,
+        features=features,
+        numpy=np.random.RandomState(7),
+        python=InlineConfig(random.Random, 11).make(),
+    )
+
+    axis = np.asarray([-2 / 3, 0, 2 / 3], dtype=np.float32)
+    delta = np.asarray([0, 0.1, 0.2], dtype=np.float32)
+    shifted = shift_probability_axis(
+        normalize_probability(image_probability(planes, columns=3)),
+        delta=delta,
+        axis=axis,
+    )
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"][0],
+        probability_image(shifted, columns=3),
+        strict=True,
+    )
+
+
 def test_rotation_scales_the_fitted_slope_by_one_uniform_ratio() -> None:
     features = ImageFeatures.Config()
     features.channels = ["pf_tvt", "pf_tvt_ffbsi"]
@@ -573,6 +733,80 @@ def test_numeric_csv_preserves_complete_rows_and_requested_column_order(
         values.size == 0
         for values in read_numeric_csv(path, columns=("X", "Y")).values()
     )
+
+
+def test_a_csv_read_again_parses_once_and_hands_out_its_own_arrays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each fold rebuilt its wells from disk, so a run read every CSV 3.5 times."""
+    parsed: list[str] = []
+    real = data._csv_float
+
+    def counted(value: str) -> float:
+        parsed.append(value)
+        return real(value)
+
+    monkeypatch.setattr(data, "_csv_float", counted)
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n2\n")
+
+    first = read_numeric_csv(path, columns=("X",))
+    first["X"][0] = 9.0
+    second = read_numeric_csv(path, columns=("X",))
+
+    assert parsed == ["1", "2"]
+    np.testing.assert_array_equal(second["X"], [1.0, 2.0])
+
+
+@pytest.mark.parametrize(
+    ("edited", "keep_mtime"),
+    [("X\n7\n", False), ("X\n1\n2\n", True)],
+    ids=["same-size", "same-mtime"],
+)
+def test_an_edited_csv_is_read_again(
+    tmp_path: Path,
+    edited: str,
+    *,
+    keep_mtime: bool,
+) -> None:
+    """Either half of the file's identity, alone, marks an edit."""
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n")
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    first = read_numeric_csv(path, columns=("X",))["X"].tolist()
+
+    path.write_text(edited)
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000 if keep_mtime else 2_000_000_000))
+
+    assert first == [1.0]
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [
+        float(value) for value in edited.split()[1:]
+    ]
+
+
+def test_a_csv_edited_to_the_same_size_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n")
+    os.utime(path, ns=(1_000, 1_000))
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0]
+
+    path.write_text("X\n2\n")
+    os.utime(path, ns=(2_000, 2_000))
+
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [2.0]
+
+
+def test_a_csv_edited_within_one_timestamp_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("X\n1\n")
+    os.utime(path, ns=(1_000, 1_000))
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0]
+
+    path.write_text("X\n1\n2\n")
+    os.utime(path, ns=(1_000, 1_000))
+
+    assert read_numeric_csv(path, columns=("X",))["X"].tolist() == [1.0, 2.0]
 
 
 def test_csv_precision_and_missing_values(tmp_path: Path) -> None:
@@ -919,7 +1153,13 @@ def test_worker_seed_uses_modulo_of_the_complete_torch_seed() -> None:
         torch.manual_seed(2**32 + 19)
         initialize_worker(
             0,
-            information=partial(WorkerInfo, dataset=dataset),
+            information=partial(
+                WorkerInfo,
+                id=0,
+                num_workers=1,
+                seed=torch.initial_seed(),
+                dataset=dataset,
+            ),
         )
     expected = full_rng_record(
         numpy=np.random.RandomState(19),
@@ -957,7 +1197,16 @@ def test_a_seeded_worker_keeps_its_streams_for_every_later_item() -> None:
     dataset = WorkerProbe(length=1)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(23)
-        initialize_worker(0, information=partial(WorkerInfo, dataset=dataset))
+        initialize_worker(
+            0,
+            information=partial(
+                WorkerInfo,
+                id=0,
+                num_workers=1,
+                seed=torch.initial_seed(),
+                dataset=dataset,
+            ),
+        )
     numpy = np.random.RandomState(23)
     for _ in range(3):
         np.testing.assert_array_equal(
@@ -1196,6 +1445,277 @@ def test_short_visible_context_retains_original_rows_and_owns_output_storage() -
     assert len(indices) == 95
     for name, values in horizontal.items():
         np.testing.assert_array_equal(values, before[name])
+
+
+def test_reference_interpolation_includes_endpoints_and_rejects_exterior() -> None:
+    well = feature_well()
+    anchor = np.float32(well.horizontal["TVT_input"][31])
+    well = replace(
+        well,
+        reference_depth=anchor + np.asarray([-4, 0, 4], dtype=np.float32),
+        reference_gamma=np.asarray([10, 20, 30], dtype=np.float32),
+    )
+    config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=7)
+    config.reference_window = 7
+    item = config.make()(well, training=False)
+    np.testing.assert_array_equal(
+        item.arrays["typewell_aux"],
+        np.asarray(
+            [[0, 10, 15, 20, 25, 30, 0], [1, 0, 0, 0, 0, 0, 1]],
+            dtype=np.float32,
+        ),
+        strict=True,
+    )
+    penalty = item.auxiliary["GR_penalty_error"]
+    np.testing.assert_array_equal(penalty[:3, (0, 6)], np.full((3, 2), 25, np.float32))
+    np.testing.assert_array_equal(penalty[3], np.zeros(7, dtype=np.float32))
+    assert item.arrays["typewell_target_probs"].dtype == np.float32
+    assert item.arrays["typewell_target_probs"].shape == (0,)
+
+
+def test_alignment_targets_clip_both_tails_before_gaussian_normalization() -> None:
+    well = feature_well()
+    anchor = np.float32(well.horizontal["TVT_input"][31])
+    truth = well.horizontal["TVT"].copy()
+    truth[32:64] = anchor - 10
+    truth[64:96] = anchor + 10
+    well = replace(well, horizontal={**well.horizontal, "TVT": truth})
+    config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=5)
+    config.reference_window = 5
+    item = config.make()(well, training=True)
+    axis = np.asarray([-4, -2, 0, 2, 4], dtype=np.float64)
+    masses = np.exp(-0.5 * ((axis[None, :] - np.asarray([-4, 4])[:, None]) / 1.25) ** 2)
+    masses /= masses.sum(axis=1, keepdims=True)
+    expected = np.zeros((4, 5), dtype=np.float32)
+    expected[1:3] = masses.astype(np.float32)
+    np.testing.assert_array_equal(
+        item.arrays["typewell_target_probs"],
+        expected,
+        strict=True,
+    )
+
+
+def test_particle_paths_normalize_separately_and_mask_their_own_empty_rows() -> None:
+    well = feature_well()
+    assert well.particle is not None
+    cache = {name: values.copy() for name, values in well.particle.items()}
+    cache["pf_prob"][1] = 0
+    cache["pf_prob_ffbsi"][2] = 0
+    well = replace(well, particle=cache)
+    config = ImageFeatures.Config(prefix_rows=32, target_rows=64, reference_columns=7)
+    config.channels = ["pf_tvt", "pf_tvt_ffbsi"]
+    config.target_stats = (0.7, 3)
+    config.particle = ParticleFeatures.Config()
+    item = config.make()(well, training=True)
+    depth = well.horizontal["TVT"]
+    anchor = np.float32(depth[31])
+    relative = np.asarray(
+        [
+            np.mean(depth[:32] - anchor),
+            np.mean(depth[32:64] - anchor),
+            np.mean(depth[64:96] - anchor),
+        ],
+        dtype=np.float32,
+    )
+    paths = np.zeros((2, 4), dtype=np.float32)
+    paths[0, (0, 2)] = (relative[[0, 2]] + np.asarray([0, -0.5], np.float32) - 0.7) / 3
+    paths[1, :2] = (relative[:2] + np.asarray([0, 0.5], np.float32) - 0.7) / 3
+    np.testing.assert_array_equal(
+        item.arrays["unet_static"],
+        np.broadcast_to(paths[:, :, None], (2, 4, 7)),
+        strict=True,
+    )
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_feature_planes_keep_float32_statistics_and_clip_slopes(direction: int) -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=2,
+        target_rows=4,
+        downsample=2,
+        reference_columns=5,
+    )
+    config.feature_clip = 0.25
+    builder = config.make()
+    window = builder._window(feature_well())
+    window.raw["gamma"][:] = np.asarray([1, 1, 2, 4, 9, np.nan], np.float32) * direction
+    window.raw["md"][:] = [0, 0.5, 0, 0.5, 0, 1]
+    window.raw["z"][:] = np.arange(6, dtype=np.float32) / 2
+    gamma = np.asarray([1, 3, 9, 8], dtype=np.float32) * direction
+    nan_rate = np.asarray([0, 0, 0, 1], dtype=np.float32)
+    reference = np.asarray([1, 2, np.nan, 4, 5], dtype=np.float32)
+    axis = np.asarray([-4, -2, 0, 2, 4], dtype=np.float32)
+    planes = builder._planes(
+        window,
+        gamma=gamma,
+        nan_rate=nan_rate,
+        reference=reference,
+        axis=axis,
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    assert all(plane.dtype == np.float32 for plane in planes.values())
+    np.testing.assert_array_equal(
+        planes["gr_std"][:, 0],
+        np.asarray([0, 1, 0, 0], np.float32) / config.gamma_stats[1],
+        strict=True,
+    )
+    np.testing.assert_array_equal(planes["gr_slope"][:, 0], [0, direction * 0.25, 0, 0])
+    np.testing.assert_array_equal(planes["gr_abs_diff"][3], np.zeros(5, np.float32))
+    np.testing.assert_array_equal(planes["gr_abs_diff"][:, 2], np.zeros(4, np.float32))
+    expected_step = (
+        np.float32(0.5) - config.vertical_step_stats[0]
+    ) / config.vertical_step_stats[1]
+    np.testing.assert_array_equal(
+        planes["z_diff"][:, 0],
+        np.asarray([expected_step, expected_step, expected_step, 0], np.float32),
+        strict=True,
+    )
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_quadratic_feature_planes_clip_each_normalized_coefficient(
+    direction: int,
+) -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=8,
+        target_rows=16,
+        downsample=8,
+        reference_columns=5,
+    )
+    config.gamma_stats = (0, 1)
+    config.quadratic_stats = ((0, 1),) * 4
+    config.feature_clip = 0.25
+    builder = config.make()
+    window = builder._window(feature_well())
+    x = np.linspace(-1, 1, 8, dtype=np.float32)
+    window.raw["gamma"][:] = np.tile(direction * (2 * x**2 + 3 * x + 5), 3)
+    planes = builder._planes(
+        window,
+        gamma=np.ones(4, dtype=np.float32),
+        nan_rate=np.zeros(4, dtype=np.float32),
+        reference=np.ones(5, dtype=np.float32),
+        axis=np.arange(5, dtype=np.float32),
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    for name in ("gr_quadratic_a", "gr_quadratic_b", "gr_quadratic_c"):
+        np.testing.assert_array_equal(
+            planes[name][:3],
+            np.full((3, 5), direction * 0.25, np.float32),
+        )
+
+
+def test_feature_statistics_round_before_normalization() -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=4,
+        target_rows=8,
+        downsample=2,
+        reference_columns=5,
+    )
+    builder = config.make()
+    window = builder._window(feature_well())
+    pairs = np.asarray(
+        [[0.1, 0.7], [1.3, 7.8], [-6.3, 1.1], [0.2, 0.9], [0.01, 9.3], [1.7, 13.9]],
+        dtype=np.float32,
+    )
+    window.raw["gamma"][:] = pairs.ravel()
+    planes = builder._planes(
+        window,
+        gamma=np.zeros(7, dtype=np.float32),
+        nan_rate=np.zeros(7, dtype=np.float32),
+        reference=np.zeros(5, dtype=np.float32),
+        axis=np.arange(5, dtype=np.float32),
+        seen=np.zeros(7, dtype=np.float32),
+    )
+    expected_std = pairs.astype(np.float64).std(axis=1).astype(np.float32)
+    expected_delta = pairs[:, 1] - pairs[:, 0]
+    for name, expected in (
+        ("gr_std", expected_std),
+        ("gr_first_last_delta", expected_delta),
+    ):
+        np.testing.assert_array_equal(
+            planes[name][:6, 0],
+            expected / config.gamma_stats[1],
+            strict=True,
+        )
+
+
+def test_feature_slope_rejects_nearly_coincident_depths() -> None:
+    config = ImageFeatures.Config(
+        prefix_rows=2,
+        target_rows=4,
+        downsample=2,
+        reference_columns=5,
+    )
+    builder = config.make()
+    window = builder._window(feature_well())
+    window.raw["gamma"][:] = [1, 2, 3, 5, 7, 11]
+    window.raw["md"][:] = [0, 1e-7, 0, 0.5, 0, 0.25]
+    planes = builder._planes(
+        window,
+        gamma=np.zeros(4, dtype=np.float32),
+        nan_rate=np.zeros(4, dtype=np.float32),
+        reference=np.zeros(5, dtype=np.float32),
+        axis=np.arange(5, dtype=np.float32),
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    expected = np.asarray([0, 4, 16, 0], dtype=np.float32)
+    np.testing.assert_array_equal(
+        planes["gr_slope"][:, 0],
+        expected * config.downsample / config.gamma_stats[1],
+        strict=True,
+    )
+
+
+def test_feature_slope_excludes_the_exact_denominator_boundary() -> None:
+    numerator, denominator = (1e-12).as_integer_ratio()
+    assert denominator == 2**92
+    config = ImageFeatures.Config(
+        prefix_rows=128,
+        target_rows=256,
+        downsample=128,
+        reference_columns=3,
+    )
+    builder = config.make()
+    window = builder._window(feature_well())
+    window.valid[:] = True
+    window.raw["md"][:] = 0
+    for index, offset in enumerate((-1, 0, 1)):
+        remaining = numerator + offset
+        roots = []
+        while remaining:
+            root = min(math.isqrt(remaining), 2**24)
+            roots.extend((root, -root))
+            remaining -= root * root
+        depths = np.zeros(config.downsample, dtype=np.float32)
+        # Small squares precede large squares so bincount loses no low bits.
+        depths[: len(roots)] = np.asarray(roots[::-1], dtype=np.float32) / np.float32(
+            2**50,
+        )
+        widened = depths.astype(np.float64)
+        sums = np.bincount(
+            np.zeros(config.downsample, dtype=np.int64),
+            weights=widened * widened,
+        )
+        assert widened.sum() == 0
+        assert config.downsample * sums[0] == math.nextafter(
+            1e-12,
+            (-math.inf, 1e-12, math.inf)[index],
+        )
+        start = index * config.downsample
+        window.raw["md"][start : start + config.downsample] = depths
+    window.raw["gamma"][:] = window.raw["md"] * np.float32(2**24)
+    planes = builder._planes(
+        window,
+        gamma=np.zeros(4, dtype=np.float32),
+        nan_rate=np.zeros(4, dtype=np.float32),
+        reference=np.zeros(3, dtype=np.float32),
+        axis=np.arange(3, dtype=np.float32),
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        planes["gr_slope"][:, 0],
+        [0, 0, config.feature_clip, 0],
+    )
 
 
 def feature_well() -> WellRecord:
@@ -1697,12 +2217,8 @@ def test_particle_slot_attaches_each_well_cache(tmp_path: Path) -> None:
     particle.downsample = 2
     particle.reference_columns = 7
     particle.reference_window = 100.0
-    records = prepare_particles(
-        raw,
-        config=particle,
-        directory=cache,
-        has_target=True,
-    )
+    prepare_particles(raw, config=particle, directory=cache, has_target=True)
+    records = {name: read_particle_cache(cache / f"{name}.npz") for name in raw}
     config = FoldObservations.Config()
     config.directory = tmp_path / "train"
     config.geography = GeographicPrior.Config()

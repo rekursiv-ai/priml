@@ -7,10 +7,14 @@ gate's id, so ``pre-commit run GATE`` selects both; a gate whose spool was never
 written fails rather than check nothing. The type checkers and the pytest gates
 are their own commands; these are the generic ones.
 
+A module a gate runs gets the files as one ``@argfile``, never on its command
+line: ``--all-files`` is ~1 MB of paths, past macOS's 1 MiB ``ARG_MAX``. Its
+parser takes ``fromfile_prefix_chars="@"``.
+
 Commands:
   spool GATE     Add pre-commit's files to GATE's spool.
   run GATE       A module once over GATE's files: ``-m MODULE ... --workers N
-                 -- FILES``.
+                 -- @FILES``.
   threaded NAME  A command, each ``{workers}`` in it set to the count.
 
 Examples:
@@ -22,7 +26,8 @@ Examples:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
@@ -97,7 +102,7 @@ def context() -> Context:
         root=Path.cwd(),
         environ=os.environ,
         run=run_argv,
-        output=_output,
+        output=output_argv,
         installed=_installed,
         which=shutil.which,
     )
@@ -124,17 +129,58 @@ def run(
         the spool was never written.
 
     """
-    files = spool.drain(context.directory, gate=name, key=context.key)
-    if when is not None and not positive(context.environ.get(when, "")):
+    files = drained(name, context=context)
+    if when is not None and not positive(context.environ.get(when)):
         return 0
     if files is None:
         return unspooled(name)
     if not files:
         return 0
     count = workers(name, environ=context.environ)
-    return context.run(
-        [sys.executable, "-m", *command, "--workers", str(count), "--", *files],
-    )
+    with argfile(files) as named:
+        return context.run(
+            [sys.executable, "-m", *command, "--workers", str(count), "--", named],
+        )
+
+
+@contextmanager
+def argfile(args: Sequence[str]) -> Generator[str]:
+    """Yield ``@PATH``, a file holding ``args`` one per line, removed afterwards.
+
+    Args:
+      args: The arguments, as argparse's and pytest's ``@`` prefix reads them.
+
+    Yields:
+      argument: ``@PATH``, which the tool expands back into ``args``.
+
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="gate-",  # pragma: no mutate -- any name serves.
+    ) as temp:
+        path = Path(temp) / "args"
+        path.write_text("".join(f"{arg}\n" for arg in args))
+        yield f"@{path}"
+
+
+def drained(name: str, *, context: Context) -> list[str] | None:
+    """Return spool ``name``'s paths for this run that still exist, removing the spool.
+
+    A file spooled and then deleted before its gate ran -- another process's
+    probe, in a shared worktree -- made ty report an I/O error and the pyrefly
+    fixer raise; no gate can check a file that is gone.
+
+    Args:
+      name: The spool.
+      context: What the gate reads; paths are relative to its root.
+
+    Returns:
+      paths: The surviving paths, in order; None when nothing was ever spooled.
+
+    """
+    spooled = spool.drain(context.directory, gate=name, key=context.key)
+    if spooled is None:
+        return None
+    return [path for path in spooled if (context.root / path).exists()]
 
 
 def threaded(name: str, *, context: Context, command: Sequence[str]) -> int:
@@ -167,11 +213,13 @@ def workers(name: str, *, environ: Mapping[str, str]) -> int:
       workers: At least 1.
 
     """
-    override = environ.get(f"WORKERS_{name.replace('-', '_').upper()}", "")
-    return worker_count(override) if override else default_workers(environ=environ)
+    override = f"WORKERS_{name.replace('-', '_').upper()}"
+    if flagged(environ, override):
+        return worker_count(environ[override])
+    return default_workers(environ=environ)
 
 
-def positive(value: str) -> int:
+def positive(value: str | None) -> int:
     """Return ``value`` as a positive integer, or 0 for anything else.
 
     An allowlist: only a positive integer without a leading zero counts. The
@@ -179,19 +227,49 @@ def positive(value: str) -> int:
     as on.
 
     Args:
-      value: The variable's value.
+      value: The variable's value; None when it is unset.
 
     Returns:
       count: The value, or 0.
 
     """
-    return int(value) if re.fullmatch(r"[1-9][0-9]*", value) else 0
+    if value is None or not re.fullmatch(r"[1-9][0-9]*", value):
+        return 0
+    return int(value)
+
+
+def flagged(environ: Mapping[str, str], name: str) -> bool:
+    """Return whether variable ``name`` is set to anything but the empty string.
+
+    Any non-empty value is on, ``0`` included; unset and empty are off. A
+    switch that must not turn on by mistake reads :func:`positive` instead.
+
+    Args:
+      environ: The environment.
+      name: The variable.
+
+    Returns:
+      on: Whether it holds a non-empty value.
+
+    """
+    return environ.get(name, "") != ""
 
 
 def run_argv(argv: Sequence[str]) -> int:
-    """Run ``argv``; return its exit code, or 127 and a message when not installed."""
+    """Run ``argv``; return its exit code, or 127 and a message when not installed.
+
+    Args:
+      argv: The command.
+
+    Returns:
+      exit_code: The command's, or 127.
+
+    """
     try:
-        return subprocess.run(argv, check=False).returncode  # noqa: S603 -- gate argv.
+        return subprocess.run(  # noqa: S603 -- gate argv.
+            argv,
+            check=False,  # pragma: no mutate -- the default, stated for ruff.
+        ).returncode
     except FileNotFoundError:
         return _missing(argv[0])
 
@@ -230,21 +308,22 @@ def walk(
     """
     if not files or not hops or dependents is None:
         return []
-    found = context.output(
-        [
-            sys.executable,
-            "-m",
-            dependents,
-            "--emit",
-            emit,
-            "--depth",
-            str(hops),
-            "--workers",
-            str(workers),
-            "--",
-            *files,
-        ],
-    )
+    with argfile(files) as named:
+        found = context.output(
+            [
+                sys.executable,
+                "-m",
+                dependents,
+                "--emit",
+                emit,
+                "--depth",
+                str(hops),
+                "--workers",
+                str(workers),
+                "--",
+                named,
+            ],
+        )
     return [] if found is None else found.splitlines()
 
 
@@ -268,6 +347,57 @@ class Flags(Protocol):
     argv: list[str]
 
 
+def output_argv(argv: Sequence[str]) -> str | None:
+    """Run ``argv``; return its stdout, or None when it failed or is not installed.
+
+    Stderr is the tool's diagnostics and reaches the hook's own: capturing it
+    hid why a widened gate fell back to its floor.
+
+    Args:
+      argv: The command.
+
+    Returns:
+      stdout: The command's output on exit 0; None otherwise.
+
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 -- gate argv.
+            argv,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=False,  # pragma: no mutate -- the default, stated for ruff.
+        )
+    except FileNotFoundError:
+        _missing(argv[0])
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _missing(tool: str) -> int:
+    """Report a tool that is not installed; return the shell's status for it."""
+    sys.stderr.write(f"{tool}: command not found\n")
+    return 127
+
+
+def _installed(module: str) -> bool:
+    try:
+        return util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def _process(pid: int) -> tuple[int, str] | None:
+    """Return ``pid``'s parent and command line, from ``ps``."""
+    done = subprocess.run(  # noqa: S603 -- fixed command, numeric pid.
+        ["ps", "-o", "ppid=,command=", "-p", str(pid)],  # noqa: S607 -- system ps.
+        capture_output=True,
+        text=True,
+        check=False,  # pragma: no mutate -- the default, stated for ruff.
+    )
+    parent, _, command = done.stdout.strip().partition(" ")
+    return (int(parent), command) if parent.isdigit() else None
+
+
 def _parse_args(
     parser: argparse.ArgumentParser,
     argv: Sequence[str] | None = None,
@@ -275,10 +405,9 @@ def _parse_args(
     """Register the commands and parse ``argv``; a command follows ``--``."""
     _add_arguments(parser)
     flags = cast(Flags, parser.parse_args(argv))
-    if flags.command in {"run", "threaded"}:
-        flags.argv = flags.argv[flags.argv[:1] == ["--"] :]
-        if not flags.argv:
-            parser.error(f"{flags.command}: name the command after --")
+    # Argparse drops the ``--`` itself, so ``argv`` is the command alone.
+    if flags.command in {"run", "threaded"} and not flags.argv:
+        parser.error(f"{flags.command}: name the command after --")
     return flags
 
 
@@ -323,42 +452,3 @@ def _run_once(flags: Flags, context: Context) -> int:
 
 def _run_threaded(flags: Flags, context: Context) -> int:
     return threaded(flags.gate, context=context, command=flags.argv)
-
-
-def _output(argv: Sequence[str]) -> str | None:
-    try:
-        done = subprocess.run(  # noqa: S603 -- gate argv.
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        _missing(argv[0])
-        return None
-    return done.stdout if done.returncode == 0 else None
-
-
-def _missing(tool: str) -> int:
-    """Report a tool that is not installed; return the shell's status for it."""
-    sys.stderr.write(f"{tool}: command not found\n")
-    return 127
-
-
-def _installed(module: str) -> bool:
-    try:
-        return util.find_spec(module) is not None
-    except ModuleNotFoundError:
-        return False
-
-
-def _process(pid: int) -> tuple[int, str] | None:
-    """Return ``pid``'s parent and command line, from ``ps``."""
-    done = subprocess.run(  # noqa: S603 -- fixed command, numeric pid.
-        ["ps", "-o", "ppid=,command=", "-p", str(pid)],  # noqa: S607 -- system ps.
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    parent, _, command = done.stdout.strip().partition(" ")
-    return (int(parent), command) if parent.isdigit() else None

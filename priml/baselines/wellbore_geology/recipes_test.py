@@ -9,6 +9,7 @@ from priml.baselines.wellbore_geology.data import FoldObservations
 from priml.baselines.wellbore_geology.metrics import PooledRMSE
 from priml.baselines.wellbore_geology.recipes import (
     Family,
+    _model,
     _paths,
     _stopping as family_stopping,
     family_0719_v1,
@@ -18,6 +19,7 @@ from priml.baselines.wellbore_geology.recipes import (
     family_0801_v2,
     family_0803_v2,
 )
+from priml.baselines.wellbore_geology.testing import ProbeModel
 from priml.baselines.wellbore_geology.train_step import WellboreTrainStep
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr_schedule import RecursiveCosine
@@ -79,10 +81,10 @@ def test_family_geometry_reaches_every_native_consumer() -> None:
     features.reference_window = 24
     features.target_stats = (2, 7)
     config = config.finalized()
-    assert config.training.step.model.channels_in == len(features.channels)
-    assert config.training.step.model.reference_columns == 20
-    assert config.training.step.model.reference_window == 24
-    assert config.training.step.model.target_stats == (2, 7)
+    assert _model(config).channels_in == len(features.channels)
+    assert _model(config).reference_columns == 20
+    assert _model(config).reference_window == 24
+    assert _model(config).target_stats == (2, 7)
     assert config.particle is not None
     assert config.particle.prefix_rows == 12
     assert config.particle.target_rows == 54
@@ -102,14 +104,14 @@ def test_family_geometry_never_overwrites_a_declared_consumer_value() -> None:
     config = family_0803_v2()
     assert config.particle is not None
     config.particle.downsample = 5
-    config.training.step.model.reference_columns = 9
+    _model(config).reference_columns = 9
     config.prediction.expansion.target_stats = (3, 4)
     config = config.finalized()
     assert config.particle is not None
     assert config.particle.downsample == 5
     assert config.particle.prefix_rows == 1024
-    assert config.training.step.model.reference_columns == 9
-    assert config.training.step.model.reference_window == 100
+    assert _model(config).reference_columns == 9
+    assert _model(config).reference_window == 100
     assert config.prediction.expansion.target_stats == (3, 4)
     assert config.prediction.expansion.downsample == 32
 
@@ -158,6 +160,15 @@ def test_published_family_helpers_reject_a_missing_rule() -> None:
     paths.training.dataset.loader.dataset.transform.paths = None
     with pytest.raises(TypeError, match="path simulation"):
         _paths(paths)
+    model = family_0803_v2()
+    model.training.step.model = ProbeModel.Config()
+    with pytest.raises(
+        TypeError,
+        match=r"^Every published family declares the complete",
+    ):
+        _model(model)
+    # A model without the posterior geometry is left as it was declared.
+    assert isinstance(model.finalized().training.step.model, ProbeModel.Config)
 
 
 def test_family_without_held_out_observations_still_resolves_its_inputs() -> None:

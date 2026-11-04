@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, override
+from functools import partial
+from typing import TYPE_CHECKING
 
 import inspect
 import math
@@ -21,6 +21,7 @@ from priml.model.init import (
     call_init,
     dirac,
     fan_in_truncated_normal,
+    fill_truncated_normal,
     kaiming_normal,
     kaiming_uniform,
     mup_output,
@@ -34,7 +35,6 @@ from priml.model.linear import EnsembleLinear, Linear
 from priml.model.moe import MoE, SoftmaxRouter
 from priml.model.norm import CenteredRMSNorm
 from priml.model.transformer.block import TransformerBlock
-from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.golden import assert_text_golden
 
 
@@ -42,33 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from priml.model.custom_types import DepthIndex
-
-
-_CWD: Final = Path(__file__).resolve().parent
-
-
-class _InitModule(nn.Module):
-    @override
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        initialized: list[torch.Tensor] = []
-        for initializer in (
-            kaiming_uniform,
-            kaiming_normal,
-            xavier_uniform,
-            xavier_normal,
-            normal,
-            truncated_normal,
-            unit_fan_in_uniform,
-            mup_output,
-        ):
-            tensor = torch.empty_like(input)
-            call_init(initializer, tensor, depth_index=((3, 4),))
-            initialized.append(tensor.flatten())
-        # Dirac requires the 3x3 convolution to retain its center pixel.
-        convolution = input.new_empty(2, 2, 3, 3)
-        call_init(dirac, convolution, depth_index=((3, 4),))
-        initialized.append(convolution.flatten())
-        return torch.cat(initialized)
 
 
 def test_init_api_text() -> None:
@@ -94,14 +67,40 @@ def test_init_api_text() -> None:
     )
 
 
-def test_init_bfb() -> None:
-    assert_bfb_against_golden(
-        golden_dir=_CWD / "testdata",
-        golden_name="init",
-        build_module=_InitModule,
-        build_input=lambda: torch.arange(6, dtype=torch.float32).reshape(2, 3),
-        seed=0,
-    )
+@pytest.mark.parametrize(
+    ("initializer", "reference"),
+    [
+        (kaiming_uniform, partial(nn.init.kaiming_uniform_, a=5**0.5)),
+        (kaiming_normal, partial(nn.init.kaiming_normal_, a=5**0.5)),
+        (xavier_uniform, nn.init.xavier_uniform_),
+        (xavier_normal, nn.init.xavier_normal_),
+        (normal, partial(nn.init.normal_, std=0.02)),
+        (truncated_normal, partial(fill_truncated_normal, std=0.02, a=-0.04, b=0.04)),
+        (
+            unit_fan_in_uniform,
+            partial(nn.init.uniform_, a=-(3**0.5 * 3**-0.5), b=3**0.5 * 3**-0.5),
+        ),
+        (mup_output, partial(nn.init.normal_, std=1 / 3)),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("depth_index", [(), ((3, 4),)])
+def test_initializers_preserve_their_distribution_and_depth_scaling(
+    initializer: Callable[..., object],
+    reference: Callable[[torch.Tensor], object],
+    dtype: torch.dtype,
+    depth_index: DepthIndex,
+) -> None:
+    actual = torch.empty(2, 3, dtype=dtype)
+    expected = torch.empty_like(actual)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(37)
+        reference(expected)
+        if depth_index and initializer is not unit_fan_in_uniform:
+            expected.div_(2)
+        torch.manual_seed(37)
+        call_init(initializer, actual, depth_index=depth_index)
+    assert torch.equal(actual, expected)
 
 
 def test_call_init_with_depth():
@@ -272,7 +271,7 @@ def test_truncated_normal_variance_correction_passes_closed_form_parameters(
         calls.append((tensor, std, a, b))
         return tensor
 
-    monkeypatch.setattr(nn.init, "trunc_normal_", trunc_normal_)
+    monkeypatch.setattr("priml.model.init.fill_truncated_normal", trunc_normal_)
     weight = torch.empty(2, 3)
     requested_std = 0.75
     lower, upper = -1.25, 2.0
@@ -317,6 +316,18 @@ def test_truncated_normal_variance_correction_realizes_requested_std():
     assert uncorrected.std().item() < 0.92
 
 
+def test_fill_truncated_normal_is_the_inverse_cdf_of_the_seeds_uniforms() -> None:
+    """One seed gives the weights torch 2.11 gave; rejection sampling would not."""
+    torch.manual_seed(0)
+    drawn = fill_truncated_normal(torch.empty(32, dtype=torch.float64), std=0.5)
+
+    torch.manual_seed(0)
+    bound = math.erf(2.0 / 0.5 / 2**0.5)
+    uniform = torch.empty(32, dtype=torch.float64).uniform_(-bound, bound)
+    assert torch.allclose(drawn, torch.erfinv(uniform) * 0.5 * 2**0.5)
+    assert drawn.abs().max() <= 2.0
+
+
 def test_truncated_normal_default_is_uncorrected():
     """The flag defaults off, so existing callers keep their init unchanged."""
     torch.manual_seed(0)
@@ -359,7 +370,7 @@ def test_fan_in_truncated_normal_is_truncated_normal_at_fan_in_std(width: int) -
     )
     assert torch.equal(
         drawn(lambda w: fan_in_truncated_normal(w, absolute_bounds=True)),
-        drawn(lambda w: nn.init.trunc_normal_(w, std=std)),
+        drawn(lambda w: fill_truncated_normal(w, std=std)),
     )
 
 

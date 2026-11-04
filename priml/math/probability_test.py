@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fractions import Fraction
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest.mock import Mock, call
@@ -44,6 +45,7 @@ from priml.math.probability import (
     quantile_logit_distribution,
     quantile_logit_normal,
     quantile_normal,
+    quantile_student_t,
     quantile_truncated_normal,
     quantile_uniform,
     random_categorical,
@@ -52,6 +54,9 @@ from priml.math.probability import (
     random_gumbel,
     random_logit_normal,
     random_student_t,
+    weyl_rand,
+    weyl_randint,
+    weyl_randn,
 )
 from priml.memory import convert_to_tensor
 
@@ -427,6 +432,40 @@ def test_quantile_truncated_normal_sanitizes_out_of_domain_gradient() -> None:
     assert p.grad is not None
     assert torch.isfinite(p.grad[1])
     torch.testing.assert_close(result[1], torch.tensor(-0.24158715), atol=1e-6, rtol=0)
+
+
+@pytest.mark.parametrize(
+    ("p", "df", "quantile"),
+    [
+        # scipy.stats.t.ppf(p, df).
+        (0.975, 1, 12.706204736174694),
+        (0.975, 2, 4.302652729749462),
+        (0.975, 3, 3.1824463052837078),
+        (0.975, 5, 2.5705818356363146),
+        (0.975, 6, 2.4469118511449786),
+        (0.975, 30, 2.0422724563012378),
+        (0.995, 4, 4.604094871349992),
+        (0.6, 7, 0.2631668613520229),
+    ],
+)
+def test_quantile_student_t_matches_scipy_in_both_tails(
+    p: float,
+    df: int,
+    quantile: float,
+) -> None:
+    got = quantile_student_t(torch.tensor([p, 1 - p], dtype=torch.float64), df=df)
+    expected = torch.tensor([quantile, -quantile], dtype=torch.float64)
+    torch.testing.assert_close(got, expected, rtol=1e-11, atol=0)
+
+
+def test_quantile_student_t_is_zero_at_the_median() -> None:
+    median = quantile_student_t(torch.tensor(0.5, dtype=torch.float64), df=3)
+    assert torch.equal(median, torch.zeros((), dtype=torch.float64))
+
+
+def test_quantile_student_t_rejects_zero_degrees_of_freedom() -> None:
+    with pytest.raises(ValueError, match="df must be at least 1; got 0"):
+        quantile_student_t(0.975, df=0)
 
 
 def test_random_categorical_all_neg_inf_logits_propagate_nan():
@@ -1489,6 +1528,143 @@ def test_quantile_fullgraph(function: Callable[..., Tensor]) -> None:
     compiled = torch.compile(function, backend="eager", fullgraph=True)
     p = torch.tensor([0.25, 0.75])
     torch.testing.assert_close(compiled(p), function(p))
+
+
+def test_gumbel_max_adds_float32_noise_and_picks_along_the_last_axis() -> None:
+    logits = torch.randn(4, 3, 5, generator=torch.Generator().manual_seed(1))
+    ours, theirs = torch.Generator().manual_seed(6), torch.Generator().manual_seed(6)
+    noise = random_gumbel(4, 3, 5, generator=theirs, dtype=torch.float32)
+    expected = (logits + noise).argmax(-1)
+    # A float64 default would draw float64 noise unless the noise names float32.
+    default = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        actual = gumbel_max(logits, generator=ours)
+    finally:
+        torch.set_default_dtype(default)
+    assert torch.equal(actual, expected)
+
+
+def test_gumbel_draws_on_the_requested_device_and_dtype() -> None:
+    noise = random_gumbel(2, 3, dtype=torch.float64, device=torch.device("meta"))
+    assert (noise.dtype, noise.device.type) == (torch.float64, "meta")
+    index = gumbel_max(torch.zeros(2, 3, device="meta"))
+    assert (index.shape, index.device.type) == ((2,), "meta")
+
+
+def test_log_gamma_correction_is_its_six_term_series() -> None:
+    coefficients = (
+        Fraction(0.833333333333333e-01),
+        Fraction(-0.277777777760991e-02),
+        Fraction(0.793650666825390e-03),
+        Fraction(-0.595202931351870e-03),
+        Fraction(0.837308034031215e-03),
+        Fraction(-0.165322962780713e-02),
+    )
+    # `sum` c_k / x^(2k + 1), exactly; Horner's rounding stays within a few ULP.
+    series = sum(c / Fraction(8) ** (2 * k + 1) for k, c in enumerate(coefficients))
+    actual = log_gamma_correction(torch.tensor([8.0], dtype=torch.float64))
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([float(series)], dtype=torch.float64),
+        rtol=1e-14,
+        atol=0.0,
+    )
+
+
+def test_log_cdf_truncated_normal_is_flat_at_and_beyond_its_bounds() -> None:
+    x = torch.tensor([-3.0, -1.0, 2.0, 4.0], dtype=torch.float64, requires_grad=True)
+    loc = torch.tensor(0.5, dtype=torch.float64, requires_grad=True)
+    scale = torch.tensor(1.5, dtype=torch.float64, requires_grad=True)
+    low = torch.tensor(-1.0, dtype=torch.float64, requires_grad=True)
+    high = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    result = log_cdf_truncated_normal(x, loc=loc, scale=scale, low=low, high=high)
+    assert result.tolist() == [-math.inf, -math.inf, 0.0, 0.0]
+    result[1:].sum().backward()
+    for value in (x.grad, loc.grad, scale.grad, low.grad, high.grad):
+        assert value is not None
+        assert torch.equal(value, torch.zeros_like(value))
+
+
+def test_log_cdf_of_reversed_bounds_is_one_at_and_below_high() -> None:
+    result = log_cdf_truncated_normal(torch.tensor([-2.0, -1.0]), low=1.0, high=-1.0)
+    assert result.tolist() == [0.0, 0.0]
+
+
+def test_quantile_truncated_normal_past_one_is_nan_even_in_a_far_tail() -> None:
+    # ndtr(-10) + 1.5 (ndtr(-5) - ndtr(-10)) is still far under 1.
+    assert torch.isnan(
+        quantile_truncated_normal(torch.tensor(1.5), low=-10.0, high=-5.0),
+    )
+
+
+def test_quantile_truncated_normal_keeps_location_and_scale_gradients_finite() -> None:
+    loc = torch.tensor(0.5, requires_grad=True)
+    scale = torch.tensor(1.5, requires_grad=True)
+    result = quantile_truncated_normal(
+        torch.tensor([0.3, 2.0]),
+        loc=loc,
+        scale=scale,
+        low=-2.0,
+        high=2.0,
+    )
+    result[0].backward()
+    assert loc.grad is not None
+    assert scale.grad is not None
+    assert torch.isfinite(loc.grad)
+    assert torch.isfinite(scale.grad)
+
+
+@pytest.mark.parametrize("salt", [0, 3])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_weyl_uniform_values_and_options(
+    salt: int,
+    dtype: torch.dtype,
+    requires_grad: bool,
+) -> None:
+    offset = salt * 1_048_576
+    expected = torch.tensor(
+        [(index * 0.6180339887498949) % 1 for index in range(offset + 1, offset + 7)],
+        dtype=dtype,
+    ).reshape(2, 3)
+    actual = weyl_rand(2, 3, salt=salt, dtype=dtype, requires_grad=requires_grad)
+    assert actual.dtype == dtype
+    assert actual.requires_grad is requires_grad
+    assert torch.equal(actual, expected)
+
+
+def test_weyl_uniform_defaults() -> None:
+    actual = weyl_rand(2, 3)
+    assert actual.dtype == torch.float32
+    assert not actual.requires_grad
+    assert torch.equal(actual, weyl_rand(2, 3, salt=0))
+
+
+def test_weyl_sequences_draw_nothing_and_match_their_distribution() -> None:
+    """Normal like ``randn``, uniform like ``rand``, every integer like ``randint``."""
+    state = torch.get_rng_state()
+    normal = weyl_randn(4096, requires_grad=True)
+    other = weyl_randn(4096, salt=1)
+    uniform = weyl_rand(4096)
+    integers = weyl_randint(2, 7, (6, 3), dtype=torch.int32)
+
+    assert torch.equal(torch.get_rng_state(), state)
+    assert (normal.shape, normal.dtype, normal.requires_grad) == (
+        (4096,),
+        torch.float32,
+        True,
+    )
+    assert abs(normal.mean().item()) < 0.02
+    assert abs(normal.std().item() - 1) < 0.02
+    assert not torch.equal(normal.detach(), other)
+    assert bool((uniform >= 0).all())
+    assert bool((uniform < 1).all())
+    assert abs(uniform.mean().item() - 0.5) < 0.01
+    assert integers.dtype == torch.int32
+    assert set(integers.flatten().tolist()) == {2, 3, 4, 5, 6}
+    torch.manual_seed(1)
+    assert torch.equal(weyl_randn(4096), normal.detach())
 
 
 if __name__ == "__main__":

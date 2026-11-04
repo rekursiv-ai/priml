@@ -822,9 +822,9 @@ def _inputs(model: WorldModel, frames: Tensor, batch: PassBatch) -> Tensor:
     obs = frames[batch.frame]
     # Clamped as the actor clamps the action it embeds.
     action = batch.action.clamp(0, model.action_embedding.weight.shape[0] - 1)
-    act = model.action_embedding(action) * (kind == Kind.ACT)
-    x = torch.where(kind == Kind.OBS, obs, act)
-    return torch.where(kind == Kind.START, model.start, x)
+    act = model.action_embedding(action) * (kind == Kind.ACT.value)
+    x = torch.where(kind == Kind.OBS.value, obs, act)
+    return torch.where(kind == Kind.START.value, model.start, x)
 
 
 class _RowEnsemble(nn.Module):

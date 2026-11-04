@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.math.probability import weyl_randn
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -65,7 +66,7 @@ def test_mlp_mixer_block_bfb() -> None:
             token_mixer=SwiGLU.Config(channels_hidden=4, round_to=1),
             channel_mixer=SwiGLU.Config(channels_hidden=4, round_to=1),
         ).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

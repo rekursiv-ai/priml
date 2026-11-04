@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import logging
@@ -17,19 +18,19 @@ from priml.baselines.sudoku.search import HpsSearch, SearchResult
 from priml.baselines.sudoku.search_dump import learned_hps_output_width
 from priml.baselines.sudoku.testing import (
     Harness,
-    load_golden,
     metric_tensors,
     replay,
     write_dataset,
 )
 from priml.baselines.sudoku.views import NINE_VIEWS
-from priml.testing.golden import mismatches
+from priml.testing.golden import assert_tensor_golden, read_tensors
 from priml.train.train_loop import EvalTimeLimitError
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
 
 
 def test_hps_eval_requires_a_name_and_a_checkpoint() -> None:
@@ -161,6 +162,8 @@ def test_search_pass_skips_padding_and_rejects_an_empty_split(
 
 
 def _record_hps(h: Harness) -> dict[str, Tensor]:
+    # Reference outputs require the source-trained weights, not reminted fixtures.
+    h.fixtures = read_tensors(_CWD / "testdata" / "search_inputs.pt")
     checkpoint = h.generator("gen_a", seed=0)
     cfg = HpsEval.Config()
     cfg.experiment_name = "hps"
@@ -281,8 +284,7 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
     actual = replay(_RECORDERS[case], tmp_path, train=False)
-    report = mismatches(load_golden(case), actual)
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
+    assert_tensor_golden(_CWD / "testdata" / f"{case}.pt", actual)
 
 
 if __name__ == "__main__":

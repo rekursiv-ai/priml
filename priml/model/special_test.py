@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
@@ -299,7 +300,7 @@ def test_identity_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="identity",
         build_module=lambda: Identity.Config(channels_in=4).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 
@@ -309,7 +310,7 @@ def test_skip_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="skip",
         build_module=lambda: Skip.Config(inner=Linear.Config(4, 4)).make(),
-        build_input=lambda: torch.randn(2, 3, 4),
+        build_input=lambda: weyl_randn(2, 3, 4),
         seed=0,
     )
 

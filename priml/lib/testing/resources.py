@@ -30,6 +30,7 @@ nothing.
   imports run before any fixture.
 - Threads: ``cap_math_threads`` gives each process one math thread.
 - Stack depth: ``recursion_headroom`` caps how deep a test may recurse.
+- Encoding: ``ascii_locale`` makes the default text encoding ASCII.
 - Time and services: ``pytest_collection_modifyitems`` turns each resource
   marker into a timeout, family markers, and a skip where the resource is
   absent.
@@ -48,8 +49,10 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
 import inspect
+import locale
 import os
 import re
+import shutil
 import sys
 import tempfile
 import traceback
@@ -72,6 +75,10 @@ _IDENT: Final = re.compile(r"[A-Za-z_][\w:.+-]*")
 
 _KEYWORDS: Final = frozenset(("and", "or", "not", "True", "False"))
 """Words a ``-m`` expression reserves, which name no marker."""
+
+
+_LAST_ROOT: Final = pytest.StashKey[Path]()
+"""The XDG root ``isolate_user_dirs`` made for this process's previous test."""
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -112,7 +119,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # not marked may not reach a GPU: hidden, its stray CUDA use fails here as
     # it does in CI, instead of passing or not on whatever else holds the GPU.
     # Set before any test imports torch, and inherited by xdist workers.
-    markexpr = str(config.getoption("markexpr", default=""))
+    markexpr = str(config.getoption("markexpr"))
     if markexpr and not _selects_any(markexpr, marker="cuda"):
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -123,7 +130,7 @@ def isolate_user_dirs(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path | None:
-    """Point every XDG base directory at a per-test tmp root.
+    """Point every XDG base directory at a per-test tmp root; drop the last one.
 
     Sets the environment rather than patching the ``userdirs`` functions: the
     env var is the seam production reads, so a test exercises the real
@@ -150,6 +157,14 @@ def isolate_user_dirs(
         ``userdirs`` helper instead.
 
     """
+    # Kept until exit, every root joined the basetemp the controller deletes
+    # serially after the summary: 5 dirs per test made that the run's longest
+    # step. Not a teardown: it runs before the test's own monkeypatch undo, so
+    # a test that patched ``os.lstat`` or ``shutil.rmtree`` broke the delete.
+    # A tree a test made undeletable is left to the exit sweep, which can.
+    stale = request.config.stash.get(_LAST_ROOT, None)
+    if stale is not None:
+        shutil.rmtree(stale, ignore_errors=True)
     # FixtureRequest.node is an un-annotated abstract property upstream
     # (_pytest.fixtures); function scope makes it the test Item.
     node = cast(pytest.Item, request.node)
@@ -170,6 +185,7 @@ def isolate_user_dirs(
         (root / leaf).mkdir(mode=0o700)
         variable = f"XDG_{leaf.upper()}_HOME"  # house-ignore[xdg-literal] -- This IS the fixture that repoints userdirs, so it spells the variables.
         monkeypatch.setenv(variable, str(root / leaf))
+    request.config.stash[_LAST_ROOT] = root
     return root
 
 
@@ -278,6 +294,25 @@ def recursion_headroom(frames: int) -> Generator[None]:
         sys.setrecursionlimit(before)
 
 
+@contextmanager
+def ascii_locale() -> Generator[None]:
+    """Make the process's default text encoding ASCII, as an ``LC_ALL=C`` host's is.
+
+    Inside, a text open that names no encoding cannot read or write non-ASCII
+    text, so a test can tell a stated ``encoding="utf-8"`` from the default.
+
+    Yields:
+      None: The locale is restored on exit.
+
+    """
+    before = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, before)
+
+
 class MarkedItem(Protocol):
     """The marker surface the rollup reads and writes on a collected test.
 
@@ -370,7 +405,7 @@ def pytest_collection_modifyitems(
     # The mark exists only for ``-m`` selection, and the call-graph walk costs
     # tens of seconds over the whole tree, so a run that cannot select on it
     # skips it.
-    if "golden" in str(config.getoption("markexpr", default="")):
+    if "golden" in str(config.getoption("markexpr")):
         apply_golden_marker(cast(Sequence[GoldenMarkedItem], items))
 
 
@@ -504,7 +539,6 @@ def resource_marker_aliases(
         ("network_searxng", ("integration",)),
         ("network_gpu_cloud", ("cluster",)),
         ("network_slack", ("integration",)),
-        ("network_together", ("cluster",)),
         ("network_wandb", ("integration",)),
     ),
 ) -> tuple[str, ...]:
@@ -560,7 +594,6 @@ def resource_marker_timeout(
         ("compute_torch_compile", 900),
         ("db_pglite", 180),
         ("network_gpu_cloud", 300),
-        ("network_together", 4800),
     ),
 ) -> int:
     """Return a marker's specific timeout, falling back to its category.
@@ -600,7 +633,6 @@ def apply_resource_markers(
         "gpu_torch_cuda",
         "gpu_triton",
         "network_gpu_cloud",
-        "network_together",
     ),
     live_llm_marks: tuple[str, ...] = ("cli_real_llm",),
     live_llm_env_var: str = "RUN_REAL_LLM",
@@ -728,7 +760,7 @@ def _apply_skip_policy(
 ) -> None:
     """Skip an item whose resource is unavailable in this environment."""
     for mark in live_llm_marks:
-        if mark in names and not os.environ.get(live_llm_env_var, ""):
+        if mark in names and os.environ.get(live_llm_env_var, "") == "":
             item.add_marker(
                 pytest.mark.skip(
                     reason=(
@@ -738,7 +770,7 @@ def _apply_skip_policy(
                 ),
             )
             return
-    if os.environ.get("CI", "") and not os.environ.get("RUN_INTEGRATION", ""):
+    if os.environ.get("CI", "") != "" and os.environ.get("RUN_INTEGRATION", "") == "":
         for mark in ci_skipped_marks:
             if mark in names:
                 item.add_marker(
@@ -853,7 +885,7 @@ def _imports_golden_support(path: Path) -> bool:
             continue
         seen.add(current)
         for module_name, _symbol in _module_source(current).imports.values():
-            if module_name.rsplit(".", 1)[-1] in {"golden", "bfb"}:
+            if module_name.rpartition(".")[2] in {"golden", "bfb"}:
                 return True
             target_path = module_path(module_name)
             if target_path is not None:
@@ -866,8 +898,6 @@ def _call_target(
     module: _ModuleSource,
 ) -> tuple[Path | None, str, bool] | None:
     function = call.func
-    module_name: str | None = None
-    symbol: str | None = None
     if isinstance(function, ast.Name):
         if function.id in module.functions:
             return module.path, function.id, False
@@ -882,7 +912,7 @@ def _call_target(
         parent, submodule = imported
         # ``from pkg import mod`` binds a module; its attribute is a function there.
         module_name = parent if submodule is None else f"{parent}.{submodule}"
-        symbol = function.attr
+        symbol: str | None = function.attr
     else:
         return None
     if symbol is not None and _is_golden_symbol(module_name, symbol):
@@ -913,6 +943,6 @@ def _reads_checked_in_testdata(
 
 
 def _is_golden_symbol(module_name: str, symbol: str) -> bool:
-    return module_name.rsplit(".", 1)[-1] in {"golden", "bfb"} and (
+    return module_name.rpartition(".")[2] in {"golden", "bfb"} and (
         symbol.startswith("assert_") or symbol == "expect_golden_mismatch"
     )

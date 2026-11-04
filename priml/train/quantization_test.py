@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from importlib import util
 from importlib.machinery import ModuleSpec
+from typing import TYPE_CHECKING
 
 import dataclasses
 import logging
+import sys
 
 from torch import Tensor, nn
-from torchao.float8.float8_linear import Float8Linear
+from torch._library import opaque_object
+from torch.utils import _pytree
 
 import pytest
 import torch
@@ -22,10 +26,101 @@ from priml.train.quantization import (
 )
 
 
+if TYPE_CHECKING:
+    from torchao.float8.float8_linear import Float8Linear
+else:
+    from wrapt import lazy_import
+
+    Float8Linear = lazy_import("torchao.float8.float8_linear", "Float8Linear")
+
+
 def test_no_quantization_is_identity() -> None:
     model = nn.Linear(16, 16)
     out = NoModelQuantization.Config().make()(model)
     assert out is model
+
+
+def test_disabled_quantization_does_not_import_torchao(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as isolated:
+        for name in tuple(sys.modules):
+            if name == "torchao" or name.startswith("torchao."):
+                isolated.setitem(sys.modules, name, None)
+        isolated.setitem(sys.modules, "torchao", None)
+        spec = util.spec_from_file_location(
+            f"{quantization.__name__}_isolated",
+            quantization.__file__,
+        )
+        assert spec is not None
+        assert spec.loader is not None
+        module = util.module_from_spec(spec)
+        isolated.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+        model = nn.Linear(2, 3)
+        assert NoModelQuantization.Config().make()(model) is model
+        strategy = Float8ModelQuantization.Config().make()
+        assert strategy.enabled is False
+        assert strategy(model) is model
+        assert _check_float8_available() == (False, "torchao not installed")
+
+
+class _Preference(Enum):
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_torchao_registration_preserves_native_enum_support(
+    monkeypatch: pytest.MonkeyPatch,
+    native: bool,
+) -> None:
+    calls: list[type[object]] = []
+
+    def is_custom_class(cls: type[object]) -> bool:
+        return native and issubclass(cls, Enum)
+
+    monkeypatch.setattr(
+        opaque_object,
+        "is_custom_class",
+        is_custom_class,
+        raising=False,
+    )
+    monkeypatch.setattr(_pytree, "register_constant", calls.append)
+    quantization._prepare_torchao()
+    prepared = _pytree.register_constant
+    quantization._prepare_torchao()
+    assert _pytree.register_constant is prepared
+    _pytree.register_constant(_Preference)
+    _pytree.register_constant(str)
+    assert calls == ([str] if native else [_Preference, str])
+
+
+def test_torchao_registration_supports_older_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[type[object]] = []
+    monkeypatch.delattr(opaque_object, "is_custom_class", raising=False)
+    monkeypatch.setattr(_pytree, "register_constant", calls.append)
+    quantization._prepare_torchao()
+    _pytree.register_constant(_Preference)
+    assert calls == [_Preference]
+
+
+def test_native_enum_registration_is_quiet_and_compilable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    quantization._prepare_torchao()
+    _pytree.register_constant(_Preference)
+    assert not any("register_constant()" in record.message for record in caplog.records)
+
+    def apply(value: Tensor, preference: _Preference) -> Tensor:
+        return value + 1 if preference is _Preference.AUTO else value - 1
+
+    value = torch.arange(2, dtype=torch.float32)
+    compiled = torch.compile(apply, backend="eager", fullgraph=True)
+    assert torch.equal(compiled(value, _Preference.AUTO), value + 1)
+    assert torch.equal(compiled(value, _Preference.MANUAL), value - 1)
 
 
 def _force_enabled() -> Float8ModelQuantization:
@@ -125,11 +220,13 @@ def test_availability_reports_old_compute_capability(
     assert reason == "Float8 requires SM89+ (H100, 5090). Found SM80"
 
 
-def test_availability_accepts_hopper_class_devices(
+@pytest.mark.parametrize("capability", [(8, 9), (9, 0)])
+def test_availability_accepts_supported_devices(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     assert _check_float8_available() == (True, "")
 
 
@@ -191,9 +288,10 @@ def test_float8_linear_forward_keeps_autocast_enabled(
         observed.append(torch.is_autocast_enabled("cpu"))
         return input
 
+    strategy = Float8ModelQuantization.Config().make()
     monkeypatch.setattr(Float8Linear, "forward", _spy_forward)
     model = nn.Sequential(nn.Linear(16, 16, bias=False))
-    quantized = Float8ModelQuantization.Config().make()(model)
+    quantized = strategy(model)
 
     with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
         quantized(torch.randn(2, 16))

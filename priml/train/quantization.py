@@ -9,20 +9,37 @@ Requires torchao>=0.9.0 and compute capability >= 8.9 (H100, 5090, etc.).
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import Enum
+from functools import partial
 from importlib import util
+from typing import TYPE_CHECKING, cast
 
 import dataclasses
 import logging
 
 from configgle import Fig
 from torch import nn
-from torchao.float8 import convert_to_float8_training
-from torchao.float8.config import (
-    Float8LinearConfig,
-    Float8LinearRecipeName,
-)
+from torch._library import opaque_object
+from torch.utils import _pytree
 
 import torch
+
+
+if TYPE_CHECKING:
+    from torchao.float8 import convert_to_float8_training
+    from torchao.float8.config import Float8LinearConfig, Float8LinearRecipeName
+else:
+    from wrapt import lazy_import
+
+    convert_to_float8_training = lazy_import(
+        "torchao.float8",
+        "convert_to_float8_training",
+    )
+    Float8LinearConfig = lazy_import("torchao.float8.config", "Float8LinearConfig")
+    Float8LinearRecipeName = lazy_import(
+        "torchao.float8.config",
+        "Float8LinearRecipeName",
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +91,7 @@ class Float8ModelQuantization:
             logger.warning("Float8 disabled: %s", reason)
             return
 
+        _prepare_torchao()
         recipe_map = {
             "tensorwise": Float8LinearRecipeName.TENSORWISE,
             "rowwise": Float8LinearRecipeName.ROWWISE,
@@ -171,3 +189,25 @@ def _check_float8_available() -> tuple[bool, str]:
         )
 
     return True, ""
+
+
+def _prepare_torchao() -> None:
+    """Avoid TorchAO's obsolete registration of Torch-native enum constants."""
+    register = _pytree.register_constant
+    if not (isinstance(register, partial) and register.func is _register_constant):
+        _pytree.register_constant = partial(_register_constant, register=register)
+
+
+def _register_constant(
+    cls: type[object],
+    *,
+    register: Callable[[type[object]], None],
+) -> None:
+    native = getattr(opaque_object, "is_custom_class", None)
+    if (
+        issubclass(cls, Enum)
+        and callable(native)
+        and cast(Callable[[type[object]], bool], native)(cls)
+    ):
+        return
+    register(cls)

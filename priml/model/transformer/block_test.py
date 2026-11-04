@@ -23,6 +23,7 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.math.probability import weyl_randn
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache, alloc_layer_cache
@@ -430,7 +431,7 @@ def test_transformer_block_bfb(device: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name="transformer_block",
         build_module=lambda: config.make().to(device),
-        build_input=lambda: move_to_device(torch.randn(2, 3, 4), device),
+        build_input=lambda: move_to_device(weyl_randn(2, 3, 4), device),
         seed=0,
     )
 
