@@ -5,7 +5,6 @@ for efficient speculative decoding with quantized models.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -19,12 +18,12 @@ class FP4KVCache:
     """
 
     # Quantized keys: [num_layers, batch, num_heads, seq_len, head_dim]
-    keys: Optional[torch.Tensor] = None
+    keys: torch.Tensor | None = None
     # Quantized values: [num_layers, batch, num_heads, seq_len, head_dim]
-    values: Optional[torch.Tensor] = None
+    values: torch.Tensor | None = None
     # Scale factors for dequantization
-    key_scales: Optional[torch.Tensor] = None
-    value_scales: Optional[torch.Tensor] = None
+    key_scales: torch.Tensor | None = None
+    value_scales: torch.Tensor | None = None
     # Block size for NVFP4 format (16 for block quantization, 1 for per-tensor)
     block_size: int = 1
     # FP4 format: "e2m1" or "nvfp4_block16"
