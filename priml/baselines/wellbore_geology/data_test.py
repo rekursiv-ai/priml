@@ -1666,6 +1666,58 @@ def test_feature_slope_rejects_nearly_coincident_depths() -> None:
     )
 
 
+def test_feature_slope_excludes_the_exact_denominator_boundary() -> None:
+    numerator, denominator = (1e-12).as_integer_ratio()
+    assert denominator == 2**92
+    config = ImageFeatures.Config(
+        prefix_rows=128,
+        target_rows=256,
+        downsample=128,
+        reference_columns=3,
+    )
+    builder = config.make()
+    window = builder._window(feature_well())
+    window.valid[:] = True
+    window.raw["md"][:] = 0
+    for index, offset in enumerate((-1, 0, 1)):
+        remaining = numerator + offset
+        roots = []
+        while remaining:
+            root = min(math.isqrt(remaining), 2**24)
+            roots.extend((root, -root))
+            remaining -= root * root
+        depths = np.zeros(config.downsample, dtype=np.float32)
+        # Small squares precede large squares so bincount loses no low bits.
+        depths[: len(roots)] = np.asarray(roots[::-1], dtype=np.float32) / np.float32(
+            2**50,
+        )
+        widened = depths.astype(np.float64)
+        sums = np.bincount(
+            np.zeros(config.downsample, dtype=np.int64),
+            weights=widened * widened,
+        )
+        assert widened.sum() == 0
+        assert config.downsample * sums[0] == math.nextafter(
+            1e-12,
+            (-math.inf, 1e-12, math.inf)[index],
+        )
+        start = index * config.downsample
+        window.raw["md"][start : start + config.downsample] = depths
+    window.raw["gamma"][:] = window.raw["md"] * np.float32(2**24)
+    planes = builder._planes(
+        window,
+        gamma=np.zeros(4, dtype=np.float32),
+        nan_rate=np.zeros(4, dtype=np.float32),
+        reference=np.zeros(3, dtype=np.float32),
+        axis=np.arange(3, dtype=np.float32),
+        seen=np.zeros(4, dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        planes["gr_slope"][:, 0],
+        [0, 0, config.feature_clip, 0],
+    )
+
+
 def feature_well() -> WellRecord:
     """Build the deterministic paths of the feature tests."""
     row = np.arange(97, dtype=np.float32)
