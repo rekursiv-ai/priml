@@ -143,6 +143,12 @@ cuda = [
     "flash-attn-4>=4.0.0b37 ; sys_platform == 'linux'",
     "flash-linear-attention>=0.6.0",
 ]
+# Feynman Symbolic Regression baseline (exp000). Opt-in for SRSD benchmark.
+feynman_sr = [
+    "sympy>=1.12",
+    "deap>=1.4",
+    "requests>=2.31",
+]
 
 [project.scripts]
 priml = "priml.launch:main"
@@ -488,6 +494,10 @@ extend-safe-fixes = [
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
+"priml/baselines/feynman_sr/**" = [
+    "T201",    # Print statements allowed in baseline scripts.
+]
+
 "{*_test.py,**/tests/test*.py}" = [
     "ANN201",  # Missing return type annotation for public function.
     "ANN202",  # Missing return type annotation for private function.
@@ -753,6 +763,12 @@ include = ["*_test.py"]
 [tool.ty.overrides.rules]
 invalid-key = "ignore"
 
+[[tool.ty.overrides]]
+include = ["priml/baselines/feynman_sr/**"]
+
+[tool.ty.overrides.rules]
+all = "ignore"
+
 [tool.ty.terminal]
 error-on-warning = true
 output-format = "concise"   # Choices: full concise gitlab github junit
@@ -774,6 +790,7 @@ project-excludes = [
     "typings/",
     "**/.export/typings/",
     "website/rekursiv-ai.github.io/_site/",
+    "**/priml/baselines/feynman_sr/**",
 ]
 search-path = ["typings"]
 # Pinned beside the config: an interpreter found through a symlinked home splits
