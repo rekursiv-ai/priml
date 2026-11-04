@@ -5,22 +5,25 @@ exp000: Baseline Genetic Algorithm with dimensional constraints.
 
 from __future__ import annotations
 
-import random
-import re
-import warnings
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-import numpy as np
-import sympy as sp
+import random
+import re
+import warnings
+
 from deap import algorithms, base, creator, tools
 from scipy.optimize import least_squares
+
+import numpy as np
+import sympy as sp
 
 from priml.baselines.feynman_sr.exp000.data import (
     FeynmanDataset,
     FeynmanEquation,
     generate_data_for_equation,
 )
+
 
 # =============================================================================
 # DIMENSIONAL GRAMMAR (from feynman_sr/grammar.py)
@@ -703,6 +706,7 @@ def fit_constants(
     expr: TypedExpr,
     variables: dict[str, np.ndarray],
     target_values: np.ndarray,
+    *,
     max_iter: int = 50,
     ftol: float = 1e-8,
     xtol: float = 1e-8,
@@ -918,8 +922,8 @@ def crossover(
         return individual1, individual2
 
     for _ in range(10):
-        path1 = random.choice(paths1)
-        path2 = random.choice(paths2)
+        path1 = random.choice(paths1)  # noqa: S311
+        path2 = random.choice(paths2)  # noqa: S311
         sub1 = get_subexpr_at_path(expr1, path1)
         sub2 = get_subexpr_at_path(expr2, path2)
         if sub1.dim == sub2.dim:
@@ -976,7 +980,7 @@ def mutate(
             return (individual,)
 
     # Standard subtree replacement
-    path = random.choice(paths)
+    path = random.choice(paths)  # noqa: S311
     subexpr = get_subexpr_at_path(expr, path)
     replacements = grammar.generate_dimension(
         subexpr.dim,
@@ -986,7 +990,7 @@ def mutate(
     )
     if not replacements:
         return (individual,)
-    replacement = random.choice(replacements)
+    replacement = random.choice(replacements)  # noqa: S311
     new_expr = replace_subexpr_at_path(expr, path, replacement, max_nodes)
     if new_expr is None:
         return (individual,)
@@ -1059,6 +1063,7 @@ def run_ga_search(
     target_dim: DimVec,
     variables: dict[str, np.ndarray],
     target_values: np.ndarray,
+    *,
     config: GAConfig,
 ) -> tuple[TypedExpr, float, dict]:
     """Run GA search for a single equation.
@@ -1079,7 +1084,7 @@ def run_ga_search(
 
     # Set seeds for reproducibility
     random.seed(config.seed)
-    np.random.seed(config.seed)
+    np.random.seed(config.seed)  # noqa: NPY002
 
     toolbox = base.Toolbox()
     toolbox.register(
@@ -1195,7 +1200,7 @@ class FeynmanSRModel:
             target_dim,
             variables,
             target_values,
-            self.ga_config,
+            config=self.ga_config,
         )
 
     def evaluate_on_dataset(
@@ -1291,7 +1296,7 @@ class FeynmanSRModel:
         except (ValueError, RuntimeError):
             return False
 
-    def _to_sympy(self, expr: TypedExpr):
+    def _to_sympy(self, expr: TypedExpr) -> sp.Expr:
         """Convert TypedExpr to sympy expression.
 
         Args:
@@ -1301,8 +1306,6 @@ class FeynmanSRModel:
             Sympy expression
 
         """
-        import sympy as sp
-
         if expr.op.op_name == "const":
             return sp.nsimplify(expr.value, [sp.pi, sp.E])
         if expr.op.op_name == "var":

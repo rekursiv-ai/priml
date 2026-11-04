@@ -1,13 +1,13 @@
 """Test script for exp000 baseline - verifies bit-for-bit reproducibility."""
 
-import os
+from pathlib import Path
+
 import sys
+
 
 sys.path.insert(
     0,
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    ),
+    Path(__file__).resolve().parents[4],
 )
 
 from priml.baselines.feynman_sr.exp000.experiments import exp000

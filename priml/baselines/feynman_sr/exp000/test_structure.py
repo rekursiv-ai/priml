@@ -1,15 +1,16 @@
 """Structure test for exp000 baseline - verifies imports and config structure.
+
 Run this for quick CI verification without full GA execution.
 """
 
-import os
+from pathlib import Path
+
 import sys
+
 
 sys.path.insert(
     0,
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    ),
+    Path(__file__).resolve().parents[4],
 )
 
 from priml.baselines.feynman_sr.exp000.data import (
@@ -30,8 +31,9 @@ from priml.baselines.feynman_sr.exp000.model import (
 )
 from priml.baselines.feynman_sr.exp000.train_step import check_exact_recovery
 
+
 dataset = load_feynman_10()
-for eq in dataset:
+for _ in dataset:
     pass
 
 eq = dataset[0]  # feynman-i.12.1

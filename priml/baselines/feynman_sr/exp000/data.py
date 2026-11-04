@@ -5,11 +5,12 @@ Downloads and caches the 120 Feynman equations from SRSD benchmark.
 
 from __future__ import annotations
 
-import ast
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import ast
+import json
 
 import numpy as np
 import requests
@@ -249,7 +250,7 @@ def _eval_formula(formula: str, variables: dict[str, np.ndarray]) -> np.ndarray:
         tree = ast.parse(formula_py, mode="eval")
         _validate_ast(tree)
         # Evaluate with restricted globals
-        return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, local_dict)
+        return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, local_dict)  # noqa: S307
     except (ValueError, SyntaxError):
         # Fallback: return zeros
         n = len(next(iter(variables.values())))

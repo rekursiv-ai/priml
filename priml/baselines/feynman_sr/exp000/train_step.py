@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+
+if TYPE_CHECKING:
+    from .model import TypedExpr
 
 import numpy as np
+import sympy as sp
 
 
 @dataclass
@@ -19,6 +24,7 @@ class EvaluationMetrics:
     true_formula: str
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert metrics to dictionary."""
         return {
             "nmse": self.nmse,
             "exact_recovery": self.exact_recovery,
@@ -52,11 +58,10 @@ def check_exact_recovery(
     tolerance: float = 0.01,
 ) -> bool:
     """Check if predicted expression matches true formula.
+
     Uses sympy for symbolic equality with constant tolerance.
     """
     try:
-        import sympy as sp
-
         # Parse both expressions
         pred_expr = sp.sympify(expr_str.replace("^", "**"))
         true_expr = sp.sympify(true_formula.replace("^", "**"))
@@ -71,12 +76,12 @@ def check_exact_recovery(
 
         # If structure matches but constants differ within tolerance
         pred_structure = pred_expr.replace(
-            lambda x: x.is_Number,
-            lambda x: sp.Symbol("C"),
+            lambda _: _.is_Number,
+            lambda _: sp.Symbol("C"),
         )
         true_structure = true_expr.replace(
-            lambda x: x.is_Number,
-            lambda x: sp.Symbol("C"),
+            lambda _: _.is_Number,
+            lambda _: sp.Symbol("C"),
         )
 
         if pred_structure == true_structure:
@@ -98,7 +103,7 @@ def check_exact_recovery(
 
 
 def evaluate_expression(
-    expr,
+    expr: TypedExpr,
     variables: dict[str, np.ndarray],
     target: np.ndarray,
     true_formula: str,
