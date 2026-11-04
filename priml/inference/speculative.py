@@ -42,7 +42,8 @@ class FP4Quantizer:
 
     @staticmethod
     def quantize_e2m1(
-        weight: torch.Tensor, block_size: int = 1,
+        weight: torch.Tensor,
+        block_size: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize to e2m1 FP4.
 
@@ -66,7 +67,9 @@ class FP4Quantizer:
         weight_flat = weight.flatten()
         n_blocks = (weight_flat.numel() + block_size - 1) // block_size
         padded = torch.zeros(
-            n_blocks * block_size, device=weight.device, dtype=weight.dtype,
+            n_blocks * block_size,
+            device=weight.device,
+            dtype=weight.dtype,
         )
         padded[: weight_flat.numel()] = weight_flat
         blocks = padded.view(n_blocks, block_size)
@@ -82,7 +85,10 @@ class FP4Quantizer:
 
     @staticmethod
     def dequantize_e2m1(
-        qweight: torch.Tensor, scale: torch.Tensor, block_size: int = 1, orig_shape=None,
+        qweight: torch.Tensor,
+        scale: torch.Tensor,
+        block_size: int = 1,
+        orig_shape: tuple[int, ...] | torch.Size | None = None,
     ) -> torch.Tensor:
         """Dequantize e2m1 FP4 back to float."""
         # Unpack
@@ -130,7 +136,7 @@ class EagleDrafter(nn.Module):
         self,
         hidden_dim: int,
         vocab_size: int,
-        num_layers: int = 1,
+        _num_layers: int = 1,
         fp4_quantize: bool = False,
         fp4_format: Literal["e2m1", "nvfp4_block16"] = "e2m1",
     ):
@@ -148,9 +154,9 @@ class EagleDrafter(nn.Module):
         if fp4_quantize:
             self._quantize_weights()
 
-    def _quantize_weights(self):
+    def _quantize_weights(self) -> None:
         """Quantize drafter weights to FP4."""
-        for module, name in [
+        for module, _name in [
             (self.ar_head, "ar_head"),
             (self.output_proj, "output_proj"),
         ]:
@@ -169,7 +175,10 @@ class EagleDrafter(nn.Module):
         scale = module.fp4_scale
         orig_shape = module.orig_shape.tolist()
         return FP4Quantizer.dequantize_e2m1(
-            qweight, scale, self.block_size, tuple(orig_shape),
+            qweight,
+            scale,
+            self.block_size,
+            tuple(orig_shape),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -248,7 +257,9 @@ class EagleDrafter(nn.Module):
                     new_tokens_list.append(child_tokens)
                     new_probs_list.append(child_probs)
                     new_parents.append(
-                        torch.full((branching,), len(all_tokens) - 1 + i, device=device),
+                        torch.full(
+                            (branching,), len(all_tokens) - 1 + i, device=device
+                        ),
                     )
                     new_depths.append(torch.full((branching,), depth, device=device))
 
@@ -314,10 +325,10 @@ class MedusaDrafter(nn.Module):
         if fp4_quantize:
             self._quantize_heads()
 
-    def _quantize_heads(self):
+    def _quantize_heads(self) -> None:
         """Quantize all head weights to FP4."""
-        for head_idx, head in enumerate(self.heads):
-            for layer_idx, layer in enumerate(head):
+        for _head_idx, head in enumerate(self.heads):
+            for _layer_idx, layer in enumerate(head):
                 if isinstance(layer, nn.Linear):
                     weight = layer.weight.data
                     qweight, scale = FP4Quantizer.quantize_e2m1(weight, self.block_size)
@@ -332,7 +343,10 @@ class MedusaDrafter(nn.Module):
         scale = layer.fp4_scale
         orig_shape = layer.orig_shape.tolist()
         return FP4Quantizer.dequantize_e2m1(
-            qweight, scale, self.block_size, tuple(orig_shape),
+            qweight,
+            scale,
+            self.block_size,
+            tuple(orig_shape),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -380,7 +394,10 @@ class MedusaDrafter(nn.Module):
                 [
                     torch.zeros(batch_size, 1, dtype=torch.long, device=device),  # Root
                     torch.zeros(
-                        batch_size, self.num_heads - 1, dtype=torch.long, device=device,
+                        batch_size,
+                        self.num_heads - 1,
+                        dtype=torch.long,
+                        device=device,
                     ),  # All from root
                 ],
                 dim=1,
@@ -389,7 +406,10 @@ class MedusaDrafter(nn.Module):
                 [
                     torch.zeros(batch_size, 1, dtype=torch.long, device=device),
                     torch.ones(
-                        batch_size, self.num_heads - 1, dtype=torch.long, device=device,
+                        batch_size,
+                        self.num_heads - 1,
+                        dtype=torch.long,
+                        device=device,
                     ),
                 ],
                 dim=1,
@@ -495,7 +515,8 @@ class TokenTreeVerifier:
 
         # Prepare input for target: input_ids + draft tokens
         target_input = torch.cat(
-            [input_ids, draft_tokens], dim=1,
+            [input_ids, draft_tokens],
+            dim=1,
         )  # [batch, seq_len + tree_size]
 
         # Single target forward pass with tree mask
@@ -563,14 +584,20 @@ class TokenTreeVerifier:
         max_accepted = max(accepted_counts) if accepted_counts else 0
         if max_accepted > 0:
             accepted_padded = torch.full(
-                (batch_size, max_accepted), -1, dtype=torch.long, device=device,
+                (batch_size, max_accepted),
+                -1,
+                dtype=torch.long,
+                device=device,
             )
             for b, tokens in enumerate(accepted_tokens_list):
                 if len(tokens) > 0:
                     accepted_padded[b, : len(tokens)] = tokens
         else:
             accepted_padded = torch.empty(
-                batch_size, 0, dtype=torch.long, device=device,
+                batch_size,
+                0,
+                dtype=torch.long,
+                device=device,
             )
 
         stats = {
@@ -592,8 +619,9 @@ def speculative_decode_step(
     verifier: TokenTreeVerifier,
     input_ids: torch.Tensor,
     fp4_kv_cache: FP4KVCache,
+    *,
     max_spec_tokens: int,
-    acceptance_threshold: float,
+    _acceptance_threshold: float,
     drafter_type: Literal["eagle", "medusa"] = "eagle",
     tree_depth: int = 3,
     tree_branching: int = 2,
@@ -618,7 +646,9 @@ def speculative_decode_step(
     # 2. Drafter generates tree/parallel tokens
     if drafter_type == "eagle":
         drafter_output = drafter.generate_tree(
-            hidden_states, tree_depth, tree_branching,
+            hidden_states,
+            tree_depth,
+            tree_branching,
         )
     else:
         drafter_output = drafter.generate_parallel(hidden_states)
@@ -675,7 +705,7 @@ class SpeculativeDecodeEngine:
                 curr_ids,
                 self.kv_cache,
                 max_spec_tokens=min(self.config.get("max_spec_tokens", 8), remaining),
-                acceptance_threshold=self.config.get("acceptance_threshold", 0.9),
+                _acceptance_threshold=self.config.get("acceptance_threshold", 0.9),
                 drafter_type=self.config.get("drafter_type", "eagle"),
                 tree_depth=self.config.get("tree_depth", 3),
                 tree_branching=self.config.get("tree_branching", 2),
@@ -685,7 +715,9 @@ class SpeculativeDecodeEngine:
                 # Fallback: single token from target
                 with torch.no_grad():
                     logits = self.target(
-                        curr_ids, past_key_values=self.kv_cache, use_cache=True,
+                        curr_ids,
+                        past_key_values=self.kv_cache,
+                        use_cache=True,
                     ).logits
                 next_token = logits[:, -1:].argmax(dim=-1)
                 accepted = next_token

@@ -16,6 +16,7 @@ from priml.baselines.inference.experiments import (
     exp004_smoke,
 )
 from priml.inference.speculative import (
+    DrafterOutput,
     EagleDrafter,
     FP4Quantizer,
     MedusaDrafter,
@@ -28,7 +29,11 @@ class TinyTransformer(nn.Module):
     """Tiny transformer for CPU testing."""
 
     def __init__(
-        self, vocab: int = 1000, dim: int = 128, n_layers: int = 2, n_heads: int = 4,
+        self,
+        vocab: int = 1000,
+        dim: int = 128,
+        n_layers: int = 2,
+        n_heads: int = 4,
     ):
         super().__init__()
         self.vocab = vocab
@@ -45,11 +50,11 @@ class TinyTransformer(nn.Module):
 
     def forward(
         self,
-        input_ids,
-        attention_mask=None,
-        past_key_values=None,
-        use_cache=False,
-        output_hidden_states=False,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: tuple[torch.Tensor, ...] | None = None,
+        use_cache: bool = False,  # noqa: ARG002
+        output_hidden_states: bool = False,
     ):
         x = self.embed(input_ids)
         hidden_states = []
@@ -84,7 +89,10 @@ class TestFP4Quantizer:
 
         qweight, scale = FP4Quantizer.quantize_e2m1(weight, block_size=1)
         dequant = FP4Quantizer.dequantize_e2m1(
-            qweight, scale, block_size=1, orig_shape=weight.shape,
+            qweight,
+            scale,
+            block_size=1,
+            orig_shape=weight.shape,
         )
 
         # Should be close (quantization error expected)
@@ -111,7 +119,10 @@ class TestFP4Quantizer:
 
         qweight, scale = FP4Quantizer.quantize_e2m1(weight, block_size=16)
         dequant = FP4Quantizer.dequantize_e2m1(
-            qweight, scale, block_size=16, orig_shape=weight.shape,
+            qweight,
+            scale,
+            block_size=16,
+            orig_shape=weight.shape,
         )
 
         assert dequant.shape == weight.shape
@@ -213,7 +224,7 @@ class TestTokenTreeVerifier:
         kv_cache = type("KV", (), {})()  # Dummy KV cache
 
         class DummyVerifier(TokenTreeVerifier):
-            def verify(self, drafter_output, input_ids):
+            def verify(self, drafter_output: DrafterOutput, _input_ids: torch.Tensor):
                 # Simplified: just return drafter tokens
                 return drafter_output.draft_tokens, {
                     "accepted": [drafter_output.draft_tokens.shape[1]],
@@ -292,7 +303,7 @@ class TestSpeculativeDecodeStep:
         kv_cache = type("KV", (), {})()
 
         class SimpleVerifier(TokenTreeVerifier):
-            def verify(self, drafter_output, input_ids):
+            def verify(self, drafter_output: DrafterOutput, _input_ids: torch.Tensor):
                 return drafter_output.draft_tokens, {
                     "accepted": [drafter_output.draft_tokens.shape[1]],
                     "spec_depth": drafter_output.draft_tokens.shape[1],
@@ -346,10 +357,9 @@ class TestExp004QualityMetrics:
 
     def test_acceptance_rate_calculation(self):
         """Acceptance rate calculated correctly."""
-        from priml.inference.speculative import TokenTreeVerifier
 
         class MockVerifier(TokenTreeVerifier):
-            def verify(self, drafter_output, input_ids):
+            def verify(self, drafter_output: DrafterOutput, _input_ids: torch.Tensor):
                 batch, tree_size = drafter_output.draft_tokens.shape
                 # Accept first 3 of 7 nodes
                 accepted = drafter_output.draft_tokens[:, :3]
