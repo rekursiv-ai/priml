@@ -3,23 +3,23 @@ revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra == 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra == 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra == 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra == 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
-    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra == 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
-    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra == 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
     "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra == 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra == 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra == 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra == 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra == 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra == 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra == 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
+    "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
+    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra == 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
+    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra == 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
+    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra == 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
+    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra == 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra == 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
+    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
+    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra == 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
+    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra == 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
+    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra == 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
+    "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra == 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra == 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "sys_platform == 'linux' and extra == 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
-    "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
-    "python_full_version == '3.13.*' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
     "python_full_version < '3.13' and sys_platform == 'linux' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
     "sys_platform == 'darwin' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra != 'extra-5-priml-cu132' and extra == 'extra-5-priml-cu134' and extra != 'group-5-priml-cuda'",
     "sys_platform == 'darwin' and extra != 'extra-5-priml-cpu' and extra != 'extra-5-priml-cu126' and extra != 'extra-5-priml-cu128' and extra != 'extra-5-priml-cu130' and extra == 'extra-5-priml-cu132' and extra != 'extra-5-priml-cu134'",
@@ -559,6 +559,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/91/82/d176b1832e6632c5ebdabbbb943655902f3ff867a18262a0b6cb0e9bf560/cwevals-0.0.1b1.tar.gz", hash = "sha256:2ae997369ff44941925e4db1bd07eb4e13c05de412e615636fd12881d63f8a13", size = 258563, upload-time = "2026-09-28T18:21:23.442Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/96/b3b348954f88915e60e2f1fbe6d09250584e53a20d949e55786f31dbaeb0/cwevals-0.0.1b1-py3-none-any.whl", hash = "sha256:6936baf0ccdc5d9092abd5c2ab628cedcdae9bb72edfdf730f7aaac19118855a", size = 176544, upload-time = "2026-09-28T18:21:21.957Z" },
+]
+
+[[package]]
+name = "deap"
+version = "1.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "moocore" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/74/31d2dc3bfcf36257ef4ef2d00a9451696d43d10284bf1495340b2e62aecc/deap-1.4.4.tar.gz", hash = "sha256:50d4bd924fca5a16a3dba8bfdb1140a55e9c24ce50816ab4f5683d2f31c2d734", size = 1053722, upload-time = "2026-04-17T21:03:12.548Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/6e/4ba2e2e45fde8483b67e7bee7401a7f132e02c4058d31b6db301f546089a/deap-1.4.4-py3-none-any.whl", hash = "sha256:06c2fcf2e9f870da035c1372c9156ee817c2c31659ee70aae2dcc0849d2c8c49", size = 93078, upload-time = "2026-04-17T21:03:10.952Z" },
 ]
 
 [[package]]
@@ -1356,6 +1369,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/72/f7/9a5edede28f73185fd51d75030ef7f11d76997bab3a92427d986e54fe2eb/ml_dtypes-0.6.0-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:e25bb3b0ad1217b60626e4ed45b10ca170c41d99fbe44a12bebc1e07ec4aad55", size = 589877, upload-time = "2026-08-13T14:14:33.695Z" },
     { url = "https://files.pythonhosted.org/packages/fd/81/d5924a141b850b606eb027493c9c3ca3c665cca5163af3f5b6e5e3345503/ml_dtypes-0.6.0-cp315-cp315t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:31f1ce979d31a357e95aa81812f20412c8c954fa43c44ee3ead1e1c8a78575ef", size = 362788, upload-time = "2026-08-13T14:14:34.996Z" },
     { url = "https://files.pythonhosted.org/packages/59/8f/3298e3f334832bc28dd144af6b99cdc93502a8687e71922ea68b0a319929/ml_dtypes-0.6.0-cp315-cp315t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e2d6149f3a57f405bcad5fb41e03218b8373936253f23e1ca84c0108abbc3392", size = 430823, upload-time = "2026-08-13T14:14:36.44Z" },
+]
+
+[[package]]
+name = "moocore"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+    { name = "numpy" },
+    { name = "platformdirs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bc/bc/4c24093162ae638e165b58f531401318a846ff05b327fcab4ed7104febc5/moocore-0.3.2.tar.gz", hash = "sha256:118f546d27f93e814bf84cc8007ea8e0a2ec2b3e761fe4e54f864165c45e392d", size = 425993, upload-time = "2026-07-12T14:55:03.309Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/7d/f62b2dd8f944dc47e8693d58778020c89713e3407e1aedf7099365297395/moocore-0.3.2-cp310-abi3-macosx_10_9_universal2.whl", hash = "sha256:19b10372a867e35e34f7816d49909182a2b2290d98289521d3584d5770d05a29", size = 635045, upload-time = "2026-07-12T14:54:53.339Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/23/04b8fcd0a13b6b1e51d0ae921f826887fa9220ef24d1afe440e1d7f09971/moocore-0.3.2-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f9bdc963ac4efb0f1e06d290b019950c3d526e5b1499f0f821180d10712a14e8", size = 887600, upload-time = "2026-07-12T14:54:55.013Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/c7/94409509ade3775b4fe3e2af98c143ffbd8ee9d757f096a970ed191d41b3/moocore-0.3.2-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8557a411c1b3f9fee90263701ad3fe58dbbcdc8e2b695696358fda5f968accfb", size = 879476, upload-time = "2026-07-12T14:54:56.278Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/97/a800055a171e04fc030d0a034c0d30c1f27e052a459bfc2f08bf7bfd32f3/moocore-0.3.2-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:6a11c219157b5c22e596eaef25aec654683573dc6cc953a03f2a2d92d4ce872e", size = 880401, upload-time = "2026-07-12T14:54:57.661Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/90/c378337af1f44f8d4224a7d86b4b9ae6a326ffff77266bf1311af8db4e17/moocore-0.3.2-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:9d8040d3b2c19ca27e24869efdfb94eb2f4e749283f95d4aa5ebdab7bd8d566c", size = 873696, upload-time = "2026-07-12T14:54:59.04Z" },
 ]
 
 [[package]]
@@ -2231,6 +2262,11 @@ cuda = [
     { name = "flash-attn-4", marker = "sys_platform == 'linux'" },
     { name = "flash-linear-attention" },
 ]
+feynman-sr = [
+    { name = "deap" },
+    { name = "requests" },
+    { name = "sympy" },
+]
 hub = [
     { name = "accelerate" },
     { name = "hf-transfer" },
@@ -2314,6 +2350,7 @@ typecheck = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'hub'", specifier = ">=1.15.0" },
     { name = "configgle", specifier = ">=1.4.4" },
+    { name = "deap", marker = "extra == 'feynman-sr'", specifier = ">=1.4" },
     { name = "einops", specifier = ">=0.8.2" },
     { name = "einshape", specifier = ">=1.0" },
     { name = "flash-attn-4", marker = "sys_platform == 'linux' and extra == 'cuda'", specifier = ">=4.0.0b37" },
@@ -2337,9 +2374,11 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=26.0.0" },
     { name = "pygame-ce", specifier = ">=2.5.8" },
     { name = "pyturbojpeg", specifier = ">=2.6.1" },
+    { name = "requests", marker = "extra == 'feynman-sr'", specifier = ">=2.31" },
     { name = "rustbpe", specifier = ">=0.1.0" },
     { name = "safetensors", marker = "extra == 'hub'", specifier = ">=0.8.0" },
     { name = "scipy", specifier = ">=1.16.3" },
+    { name = "sympy", marker = "extra == 'feynman-sr'", specifier = ">=1.12" },
     { name = "tiktoken", specifier = ">=0.14.0" },
     { name = "tokenizers", specifier = ">=0.23.3" },
     { name = "torch", specifier = ">=2.11.0" },
@@ -2380,7 +2419,7 @@ requires-dist = [
     { name = "wrapt", specifier = ">=2.5.2" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
-provides-extras = ["cpu", "cu126", "cu128", "cu130", "cu132", "cu134", "hub", "cuda"]
+provides-extras = ["cpu", "cu126", "cu128", "cu130", "cu132", "cu134", "hub", "cuda", "feynman-sr"]
 
 [package.metadata.requires-dev]
 cuda = [
