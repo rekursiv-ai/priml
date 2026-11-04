@@ -55,6 +55,6 @@ jobs:
       - name: Validate package
         # The same for every package; a package's own checks are its tests.
         run: |
-          uv sync --frozen --all-groups --compile-bytecode
+          uv sync --frozen --all-groups --compile-bytecode --extra feynman_sr
           SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit
           uv run pre-commit run --all-files --hook-stage pre-push
