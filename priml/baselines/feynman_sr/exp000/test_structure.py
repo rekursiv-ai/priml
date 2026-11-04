@@ -16,7 +16,8 @@ except ImportError:
     import pytest
 
     pytest.skip(
-        "feynman_sr optional dependencies not installed", allow_module_level=True
+        "feynman_sr optional dependencies not installed",
+        allow_module_level=True,
     )
 
 sys.path.insert(
