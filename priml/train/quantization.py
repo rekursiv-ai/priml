@@ -10,19 +10,32 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from importlib import util
+from typing import TYPE_CHECKING
 
 import dataclasses
 import logging
 
 from configgle import Fig
 from torch import nn
-from torchao.float8 import convert_to_float8_training
-from torchao.float8.config import (
-    Float8LinearConfig,
-    Float8LinearRecipeName,
-)
 
 import torch
+
+
+if TYPE_CHECKING:
+    from torchao.float8 import convert_to_float8_training
+    from torchao.float8.config import Float8LinearConfig, Float8LinearRecipeName
+else:
+    from wrapt import lazy_import
+
+    convert_to_float8_training = lazy_import(
+        "torchao.float8",
+        "convert_to_float8_training",
+    )
+    Float8LinearConfig = lazy_import("torchao.float8.config", "Float8LinearConfig")
+    Float8LinearRecipeName = lazy_import(
+        "torchao.float8.config",
+        "Float8LinearRecipeName",
+    )
 
 
 logger = logging.getLogger(__name__)

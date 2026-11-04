@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from importlib import util
 from importlib.machinery import ModuleSpec
+from typing import TYPE_CHECKING
 
 import dataclasses
 import logging
+import sys
 
 from torch import Tensor, nn
-from torchao.float8.float8_linear import Float8Linear
 
 import pytest
 import torch
@@ -22,10 +23,43 @@ from priml.train.quantization import (
 )
 
 
+if TYPE_CHECKING:
+    from torchao.float8.float8_linear import Float8Linear
+else:
+    from wrapt import lazy_import
+
+    Float8Linear = lazy_import("torchao.float8.float8_linear", "Float8Linear")
+
+
 def test_no_quantization_is_identity() -> None:
     model = nn.Linear(16, 16)
     out = NoModelQuantization.Config().make()(model)
     assert out is model
+
+
+def test_disabled_quantization_does_not_import_torchao(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as isolated:
+        for name in tuple(sys.modules):
+            if name == "torchao" or name.startswith("torchao."):
+                isolated.setitem(sys.modules, name, None)
+        isolated.setitem(sys.modules, "torchao", None)
+        spec = util.spec_from_file_location(
+            f"{quantization.__name__}_isolated",
+            quantization.__file__,
+        )
+        assert spec is not None
+        assert spec.loader is not None
+        module = util.module_from_spec(spec)
+        isolated.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+        model = nn.Linear(2, 3)
+        assert NoModelQuantization.Config().make()(model) is model
+        strategy = Float8ModelQuantization.Config().make()
+        assert strategy.enabled is False
+        assert strategy(model) is model
+        assert _check_float8_available() == (False, "torchao not installed")
 
 
 def _force_enabled() -> Float8ModelQuantization:
@@ -125,11 +159,13 @@ def test_availability_reports_old_compute_capability(
     assert reason == "Float8 requires SM89+ (H100, 5090). Found SM80"
 
 
-def test_availability_accepts_hopper_class_devices(
+@pytest.mark.parametrize("capability", [(8, 9), (9, 0)])
+def test_availability_accepts_supported_devices(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     assert _check_float8_available() == (True, "")
 
 
