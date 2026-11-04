@@ -2,6 +2,7 @@
 
 Following priml pattern: one change per fork, frozen baselines.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

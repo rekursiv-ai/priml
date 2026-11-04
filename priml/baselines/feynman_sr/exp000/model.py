@@ -2,6 +2,7 @@
 
 exp000: Baseline Genetic Algorithm with dimensional constraints.
 """
+
 from __future__ import annotations
 
 import random
@@ -195,9 +196,7 @@ class OpType:
         "abs": "|·|",
     }
 
-    def __init__(
-        self, name: str, arity: int, dim_rule: callable
-    ) -> None:
+    def __init__(self, name: str, arity: int, dim_rule: callable) -> None:
         self.op_name = name
         self.arity = arity
         self.dim_rule = dim_rule
@@ -235,7 +234,9 @@ class TypedExpr:
         return cls(OpType.from_name("var"), (), dim, var_name=name)
 
     @classmethod
-    def binary(cls, op_name: str, left: "TypedExpr", right: "TypedExpr") -> Optional["TypedExpr"]:
+    def binary(
+        cls, op_name: str, left: "TypedExpr", right: "TypedExpr"
+    ) -> Optional["TypedExpr"]:
         """Create binary operation expression."""
         op = OpType.from_name(op_name)
         dim = op.dim_rule(left.dim, right.dim)
@@ -742,7 +743,10 @@ if "Individual" not in creator.__dict__:
 
 
 def evaluate_individual(
-    individual, grammar: Grammar, variables: dict[str, np.ndarray], target_values: np.ndarray
+    individual,
+    grammar: Grammar,
+    variables: dict[str, np.ndarray],
+    target_values: np.ndarray,
 ) -> tuple[float]:
     """Evaluate fitness of an individual expression.
 
@@ -895,7 +899,11 @@ def crossover(individual1, individual2, max_nodes: int = 30):
 
 
 def mutate(
-    individual, grammar: Grammar, target_dim: DimVec, max_nodes: int = 30, seed: Optional[int] = None
+    individual,
+    grammar: Grammar,
+    target_dim: DimVec,
+    max_nodes: int = 30,
+    seed: Optional[int] = None,
 ):
     """Mutate an individual by replacing a random subtree.
 
@@ -963,7 +971,9 @@ def clone_individual(individual):
     return clone
 
 
-def generate_individual(grammar: Grammar, target_dim: DimVec, seed: Optional[int] = None):
+def generate_individual(
+    grammar: Grammar, target_dim: DimVec, seed: Optional[int] = None
+):
     """Generate a random individual.
 
     Args:
