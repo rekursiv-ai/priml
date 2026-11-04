@@ -254,7 +254,9 @@ class EagleDrafter(nn.Module):
                     new_probs_list.append(child_probs)
                     new_parents.append(
                         torch.full(
-                            (branching,), len(all_tokens) - 1 + i, device=device
+                            (branching,),
+                            len(all_tokens) - 1 + i,
+                            device=device,
                         ),
                     )
                     new_depths.append(torch.full((branching,), depth, device=device))
