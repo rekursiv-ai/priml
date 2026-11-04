@@ -1,33 +1,53 @@
-"""
-Structure test for exp000 baseline - verifies imports and config structure
+"""Structure test for exp000 baseline - verifies imports and config structure
 Run this for quick CI verification without full GA execution.
 """
-import sys
+
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+import sys
+
+
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ),
+)
 
 print("Testing imports...")
 from priml.baselines.feynman_sr.exp000.data import (
-    FeynmanEquation, FeynmanDataset, load_feynman_10,
-    generate_data_for_equation, FeynmanDataConfig
+    generate_data_for_equation,
+    load_feynman_10,
 )
+
+
 print("✓ data.py imports OK")
 
 from priml.baselines.feynman_sr.exp000.model import (
-    DimVec, TypedExpr, OpType, Grammar, GAConfig,
-    FeynmanSRModel, fit_constants, run_ga_search
+    DimVec,
+    FeynmanSRModel,
+    GAConfig,
+    Grammar,
 )
+
+
 print("✓ model.py imports OK")
 
 from priml.baselines.feynman_sr.exp000.train_step import (
-    compute_nmse, check_exact_recovery, evaluate_expression, aggregate_results
+    check_exact_recovery,
 )
+
+
 print("✓ train_step.py imports OK")
 
 from priml.baselines.feynman_sr.exp000.experiments import (
-    FeynmanTrainStep, FeynmanTrainLoop, exp000, exp001, exp002, exp003,
-    ALL_EXPERIMENTS
+    ALL_EXPERIMENTS,
+    exp000,
+    exp001,
+    exp002,
+    exp003,
 )
+
+
 print("✓ experiments.py imports OK")
 
 print("\nTesting data loading...")
@@ -55,16 +75,16 @@ for e in exprs[:3]:
     print(f"  - {e} (nodes={e.count_nodes()}, dim={e.dim})")
 
 print("\nTesting model...")
-model = FeynmanSRModel(ga_config=GAConfig(
-    population_size=10,
-    max_generations=2,
-    seed=42
-))
-print(f"✓ Model created with GAConfig")
+model = FeynmanSRModel(
+    ga_config=GAConfig(population_size=10, max_generations=2, seed=42),
+)
+print("✓ Model created with GAConfig")
 
 print("\nTesting experiment configs...")
 cfg000 = exp000()
-print(f"✓ exp000: split={cfg000.dataset_split}, pop={cfg000.step.model.ga_config.population_size}")
+print(
+    f"✓ exp000: split={cfg000.dataset_split}, pop={cfg000.step.model.ga_config.population_size}",
+)
 
 cfg001 = exp001()
 print(f"✓ exp001: generations={cfg001.step.model.ga_config.max_generations}")
@@ -78,13 +98,13 @@ print(f"✓ exp003: split={cfg003.dataset_split}")
 print(f"\n✓ All {len(ALL_EXPERIMENTS)} experiment configs registered")
 
 print("\nTesting exact recovery check...")
-from priml.baselines.feynman_sr.exp000.train_step import check_exact_recovery
-assert check_exact_recovery("x0 * x1", "x0*x1") == True
-assert check_exact_recovery("x0 * x1", "x0 * x2") == False
+
+assert check_exact_recovery("x0 * x1", "x0*x1")
+assert not check_exact_recovery("x0 * x1", "x0 * x2")
 print("✓ Exact recovery check works")
 
-print("\n" + "="*50)
+print("\n" + "=" * 50)
 print("ALL STRUCTURE TESTS PASSED!")
-print("="*50)
+print("=" * 50)
 print("\nThe exp000 baseline structure is correctly set up.")
 print("For full GA run, use: python -m priml.baselines.feynman_sr.exp000.experiments")

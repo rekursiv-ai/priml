@@ -13,29 +13,37 @@ Key finding from survey (arXiv:2401.07851):
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
+
+from torch import nn
+
 import torch
-import torch.nn as nn
+
 from priml.inference.kv_cache import FP4KVCache
 
 
 @dataclass
 class DrafterOutput:
     """Output from a drafter model."""
-    draft_tokens: torch.Tensor      # [batch, spec_len] or [batch, tree_size]
-    draft_probs: torch.Tensor       # [batch, spec_len, vocab] or [batch, tree_size, vocab]
-    drafter_kv: Optional[FP4KVCache]
-    tree_structure: Optional[dict] = None  # For token tree: parent indices, depths
+
+    draft_tokens: torch.Tensor  # [batch, spec_len] or [batch, tree_size]
+    draft_probs: torch.Tensor  # [batch, spec_len, vocab] or [batch, tree_size, vocab]
+    drafter_kv: FP4KVCache | None
+    tree_structure: dict | None = None  # For token tree: parent indices, depths
 
 
 class FP4Quantizer:
     """FP4 quantization utilities for e2m1 and NVFP4 formats."""
 
     # e2m1: 1 sign, 2 exponent, 1 mantissa → values: ±6, ±4, ±3, ±2, ±1.5, ±1, ±0.5, 0
-    E2M1_VALUES = torch.tensor([-6, -4, -3, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 3, 4, 6])
+    E2M1_VALUES = torch.tensor(
+        [-6, -4, -3, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 3, 4, 6],
+    )
 
     @staticmethod
-    def quantize_e2m1(weight: torch.Tensor, block_size: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
+    def quantize_e2m1(
+        weight: torch.Tensor, block_size: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize to e2m1 FP4.
 
         Args:
@@ -45,6 +53,7 @@ class FP4Quantizer:
         Returns:
             qweight: Quantized uint8 tensor (packed 2 values per byte)
             scale: Scale factors per block
+
         """
         if block_size == 1:
             # Per-tensor quantization
@@ -53,36 +62,39 @@ class FP4Quantizer:
             # Pack 2 values per byte
             qweight_packed = FP4Quantizer._pack_uint4(qweight)
             return qweight_packed, scale.unsqueeze(0)
-        else:
-            # Block quantization (NVFP4 style)
-            orig_shape = weight.shape
-            weight_flat = weight.flatten()
-            n_blocks = (weight_flat.numel() + block_size - 1) // block_size
-            padded = torch.zeros(n_blocks * block_size, device=weight.device, dtype=weight.dtype)
-            padded[:weight_flat.numel()] = weight_flat
-            blocks = padded.view(n_blocks, block_size)
+        # Block quantization (NVFP4 style)
+        weight_flat = weight.flatten()
+        n_blocks = (weight_flat.numel() + block_size - 1) // block_size
+        padded = torch.zeros(
+            n_blocks * block_size, device=weight.device, dtype=weight.dtype,
+        )
+        padded[: weight_flat.numel()] = weight_flat
+        blocks = padded.view(n_blocks, block_size)
 
-            scales = blocks.abs().max(dim=1).values / 6.0
-            scales = scales.clamp_min(1e-8)
-            qblocks = (blocks / scales.unsqueeze(1)).round().clamp(-6, 6)
-            qweight_packed = FP4Quantizer._pack_uint4(qblocks.flatten()[:weight_flat.numel()])
+        scales = blocks.abs().max(dim=1).values / 6.0
+        scales = scales.clamp_min(1e-8)
+        qblocks = (blocks / scales.unsqueeze(1)).round().clamp(-6, 6)
+        qweight_packed = FP4Quantizer._pack_uint4(
+            qblocks.flatten()[: weight_flat.numel()],
+        )
 
-            return qweight_packed, scales
+        return qweight_packed, scales
 
     @staticmethod
-    def dequantize_e2m1(qweight: torch.Tensor, scale: torch.Tensor, block_size: int = 1, orig_shape=None) -> torch.Tensor:
+    def dequantize_e2m1(
+        qweight: torch.Tensor, scale: torch.Tensor, block_size: int = 1, orig_shape=None,
+    ) -> torch.Tensor:
         """Dequantize e2m1 FP4 back to float."""
         # Unpack
         unpacked = FP4Quantizer._unpack_uint4(qweight)
         if block_size == 1:
             return unpacked.to(torch.float) * scale
-        else:
-            n_blocks = scale.numel()
-            blocks = unpacked[:n_blocks * block_size].view(n_blocks, block_size)
-            dequant = blocks.to(torch.float) * scale.unsqueeze(1)
-            if orig_shape:
-                return dequant.flatten()[:orig_shape.numel()].view(orig_shape)
-            return dequant.flatten()
+        n_blocks = scale.numel()
+        blocks = unpacked[: n_blocks * block_size].view(n_blocks, block_size)
+        dequant = blocks.to(torch.float) * scale.unsqueeze(1)
+        if orig_shape:
+            return dequant.flatten()[: orig_shape.numel()].view(orig_shape)
+        return dequant.flatten()
 
     @staticmethod
     def _pack_uint4(tensor: torch.Tensor) -> torch.Tensor:
@@ -138,22 +150,27 @@ class EagleDrafter(nn.Module):
 
     def _quantize_weights(self):
         """Quantize drafter weights to FP4."""
-        for module, name in [(self.ar_head, "ar_head"), (self.output_proj, "output_proj")]:
+        for module, name in [
+            (self.ar_head, "ar_head"),
+            (self.output_proj, "output_proj"),
+        ]:
             weight = module.weight.data
             qweight, scale = FP4Quantizer.quantize_e2m1(weight, self.block_size)
-            module.register_buffer(f"fp4_weight", qweight)
-            module.register_buffer(f"fp4_scale", scale)
+            module.register_buffer("fp4_weight", qweight)
+            module.register_buffer("fp4_scale", scale)
             # Store original shape for dequantization
-            module.register_buffer(f"orig_shape", torch.tensor(weight.shape))
+            module.register_buffer("orig_shape", torch.tensor(weight.shape))
 
     def _dequantize_weight(self, module: nn.Linear) -> torch.Tensor:
         """Dequantize weight for computation."""
         if not self.fp4_quantize:
             return module.weight
-        qweight = getattr(module, "fp4_weight")
-        scale = getattr(module, "fp4_scale")
-        orig_shape = getattr(module, "orig_shape").tolist()
-        return FP4Quantizer.dequantize_e2m1(qweight, scale, self.block_size, tuple(orig_shape))
+        qweight = module.fp4_weight
+        scale = module.fp4_scale
+        orig_shape = module.orig_shape.tolist()
+        return FP4Quantizer.dequantize_e2m1(
+            qweight, scale, self.block_size, tuple(orig_shape),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Generate next-token logits from target hidden states."""
@@ -198,7 +215,9 @@ class EagleDrafter(nn.Module):
         # Build tree breadth-first
         all_tokens = [root_tokens]
         all_probs = [root_probs]
-        tree_parents = [torch.zeros(batch_size, 1, dtype=torch.long, device=device)]  # Root has no parent
+        tree_parents = [
+            torch.zeros(batch_size, 1, dtype=torch.long, device=device),
+        ]  # Root has no parent
         tree_depths = [torch.zeros(batch_size, 1, dtype=torch.long, device=device)]
 
         current_hidden = hidden_states
@@ -219,7 +238,7 @@ class EagleDrafter(nn.Module):
             for b in range(batch_size):
                 for i in range(num_prev):
                     # Get hidden state for this node (simplified: reuse last)
-                    node_hidden = current_hidden[b:b+1, -1:]
+                    node_hidden = current_hidden[b : b + 1, -1:]
 
                     # Generate branching children
                     child_logits = self.forward(node_hidden).repeat(branching, 1, 1)
@@ -228,7 +247,9 @@ class EagleDrafter(nn.Module):
 
                     new_tokens_list.append(child_tokens)
                     new_probs_list.append(child_probs)
-                    new_parents.append(torch.full((branching,), len(all_tokens) - 1 + i, device=device))
+                    new_parents.append(
+                        torch.full((branching,), len(all_tokens) - 1 + i, device=device),
+                    )
                     new_depths.append(torch.full((branching,), depth, device=device))
 
             if new_tokens_list:
@@ -279,13 +300,16 @@ class MedusaDrafter(nn.Module):
         self.fp4_format = fp4_format
         self.block_size = 16 if fp4_format == "nvfp4_block16" else 1
 
-        self.heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, vocab_size)
-            ) for _ in range(num_heads)
-        ])
+        self.heads = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.SiLU(),
+                    nn.Linear(hidden_dim, vocab_size),
+                )
+                for _ in range(num_heads)
+            ],
+        )
 
         if fp4_quantize:
             self._quantize_heads()
@@ -297,24 +321,26 @@ class MedusaDrafter(nn.Module):
                 if isinstance(layer, nn.Linear):
                     weight = layer.weight.data
                     qweight, scale = FP4Quantizer.quantize_e2m1(weight, self.block_size)
-                    layer.register_buffer(f"fp4_weight", qweight)
-                    layer.register_buffer(f"fp4_scale", scale)
-                    layer.register_buffer(f"orig_shape", torch.tensor(weight.shape))
+                    layer.register_buffer("fp4_weight", qweight)
+                    layer.register_buffer("fp4_scale", scale)
+                    layer.register_buffer("orig_shape", torch.tensor(weight.shape))
 
     def _dequantize_layer(self, layer: nn.Linear) -> torch.Tensor:
         if not self.fp4_quantize:
             return layer.weight
-        qweight = getattr(layer, "fp4_weight")
-        scale = getattr(layer, "fp4_scale")
-        orig_shape = getattr(layer, "orig_shape").tolist()
-        return FP4Quantizer.dequantize_e2m1(qweight, scale, self.block_size, tuple(orig_shape))
+        qweight = layer.fp4_weight
+        scale = layer.fp4_scale
+        orig_shape = layer.orig_shape.tolist()
+        return FP4Quantizer.dequantize_e2m1(
+            qweight, scale, self.block_size, tuple(orig_shape),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Generate logits from all heads.
 
         Returns: [batch, num_heads, vocab] — each head predicts next token
         """
-        batch_size = hidden_states.shape[0]
+        hidden_states.shape[0]
         last_hidden = hidden_states[:, -1:]  # [batch, 1, hidden]
 
         all_logits = []
@@ -350,14 +376,24 @@ class MedusaDrafter(nn.Module):
         device = hidden_states.device
 
         tree_structure = {
-            "parents": torch.cat([
-                torch.zeros(batch_size, 1, dtype=torch.long, device=device),  # Root
-                torch.zeros(batch_size, self.num_heads - 1, dtype=torch.long, device=device)  # All from root
-            ], dim=1),
-            "depths": torch.cat([
-                torch.zeros(batch_size, 1, dtype=torch.long, device=device),
-                torch.ones(batch_size, self.num_heads - 1, dtype=torch.long, device=device)
-            ], dim=1),
+            "parents": torch.cat(
+                [
+                    torch.zeros(batch_size, 1, dtype=torch.long, device=device),  # Root
+                    torch.zeros(
+                        batch_size, self.num_heads - 1, dtype=torch.long, device=device,
+                    ),  # All from root
+                ],
+                dim=1,
+            ),
+            "depths": torch.cat(
+                [
+                    torch.zeros(batch_size, 1, dtype=torch.long, device=device),
+                    torch.ones(
+                        batch_size, self.num_heads - 1, dtype=torch.long, device=device,
+                    ),
+                ],
+                dim=1,
+            ),
             "num_nodes": self.num_heads,
         }
 
@@ -404,14 +440,16 @@ class TokenTreeVerifier:
         """
         num_nodes = tree_structure["num_nodes"]
         parents = tree_structure["parents"]  # [num_nodes]
-        depths = tree_structure["depths"]    # [num_nodes]
+        tree_structure["depths"]  # [num_nodes]
 
         # Total sequence = input + tree nodes
         total_len = seq_len + num_nodes
         mask = torch.zeros(total_len, total_len, dtype=torch.bool)
 
         # Input attends to input (causal)
-        mask[:seq_len, :seq_len] = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        mask[:seq_len, :seq_len] = torch.tril(
+            torch.ones(seq_len, seq_len, dtype=torch.bool),
+        )
 
         # Tree nodes attend to input + their ancestors
         for i in range(num_nodes):
@@ -443,39 +481,48 @@ class TokenTreeVerifier:
         Returns:
             accepted_tokens: [batch, accepted_len]
             stats: {accepted, spec_depth, acceptance_rate, target_calls, tree_size}
+
         """
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
         tree_structure = drafter_output.tree_structure
         draft_tokens = drafter_output.draft_tokens  # [batch, tree_size]
-        draft_probs = drafter_output.draft_probs    # [batch, tree_size, vocab]
         num_nodes = tree_structure["num_nodes"]
 
         # Build tree attention mask
         attn_mask = self._build_tree_attention_mask(tree_structure, seq_len).to(device)
 
         # Prepare input for target: input_ids + draft tokens
-        target_input = torch.cat([input_ids, draft_tokens], dim=1)  # [batch, seq_len + tree_size]
+        target_input = torch.cat(
+            [input_ids, draft_tokens], dim=1,
+        )  # [batch, seq_len + tree_size]
 
         # Single target forward pass with tree mask
         with torch.no_grad():
             target_logits = self.target(
                 target_input,
-                attention_mask=attn_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1),
+                attention_mask=attn_mask.unsqueeze(0)
+                .unsqueeze(0)
+                .expand(batch_size, 1, -1, -1),
                 past_key_values=self.kv_cache,
                 use_cache=True,
             ).logits
 
         # Target probs for tree nodes only
         target_probs = torch.softmax(
-            target_logits[:, seq_len-1:seq_len-1+num_nodes] / self.temperature, dim=-1
+            target_logits[:, seq_len - 1 : seq_len - 1 + num_nodes] / self.temperature,
+            dim=-1,
         )  # [batch, tree_size, vocab]
 
         # Verify each node: target_prob[draft_token] > threshold
         # Gather target probs at draft token positions
-        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_nodes)
-        node_indices = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, -1)
+        batch_indices = (
+            torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_nodes)
+        )
+        node_indices = (
+            torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, -1)
+        )
         target_at_draft = target_probs[batch_indices, node_indices, draft_tokens]
 
         # Accept if prob > threshold
@@ -502,8 +549,7 @@ class TokenTreeVerifier:
                 for i in range(num_nodes):
                     if accepted_mask[b, i]:
                         depth = tree_structure["depths"][i].item()
-                        if depth > max_depth:
-                            max_depth = depth
+                        max_depth = max(max_depth, depth)
                 # Get all nodes up to max_depth
                 depth_mask = tree_structure["depths"] <= max_depth
                 accepted = draft_tokens[b, depth_mask]
@@ -516,17 +562,23 @@ class TokenTreeVerifier:
         # Pad to same length
         max_accepted = max(accepted_counts) if accepted_counts else 0
         if max_accepted > 0:
-            accepted_padded = torch.full((batch_size, max_accepted), -1, dtype=torch.long, device=device)
+            accepted_padded = torch.full(
+                (batch_size, max_accepted), -1, dtype=torch.long, device=device,
+            )
             for b, tokens in enumerate(accepted_tokens_list):
                 if len(tokens) > 0:
-                    accepted_padded[b, :len(tokens)] = tokens
+                    accepted_padded[b, : len(tokens)] = tokens
         else:
-            accepted_padded = torch.empty(batch_size, 0, dtype=torch.long, device=device)
+            accepted_padded = torch.empty(
+                batch_size, 0, dtype=torch.long, device=device,
+            )
 
         stats = {
             "accepted": accepted_counts,
             "spec_depth": max_accepted,
-            "acceptance_rate": sum(accepted_counts) / (batch_size * num_nodes) if num_nodes > 0 else 0,
+            "acceptance_rate": sum(accepted_counts) / (batch_size * num_nodes)
+            if num_nodes > 0
+            else 0,
             "target_calls": 1,
             "tree_size": num_nodes,
         }
@@ -551,6 +603,7 @@ def speculative_decode_step(
     Returns:
         next_tokens: Accepted tokens [batch, accepted_len]
         stats: {accepted, spec_depth, acceptance_rate, target_calls}
+
     """
     # 1. Target forward on input → get hidden states
     with torch.no_grad():
@@ -565,7 +618,7 @@ def speculative_decode_step(
     # 2. Drafter generates tree/parallel tokens
     if drafter_type == "eagle":
         drafter_output = drafter.generate_tree(
-            hidden_states, tree_depth, tree_branching
+            hidden_states, tree_depth, tree_branching,
         )
     else:
         drafter_output = drafter.generate_parallel(hidden_states)
@@ -631,7 +684,9 @@ class SpeculativeDecodeEngine:
             if accepted.shape[1] == 0:
                 # Fallback: single token from target
                 with torch.no_grad():
-                    logits = self.target(curr_ids, past_key_values=self.kv_cache, use_cache=True).logits
+                    logits = self.target(
+                        curr_ids, past_key_values=self.kv_cache, use_cache=True,
+                    ).logits
                 next_token = logits[:, -1:].argmax(dim=-1)
                 accepted = next_token
                 stats["accepted"] = [1] * curr_ids.shape[0]
@@ -654,7 +709,9 @@ class SpeculativeDecodeEngine:
             "total_accepted": total_accepted,
             "total_target_calls": total_target_calls,
             "avg_acceptance_rate": total_accepted / max(total_spec, 1),
-            "speedup_estimate": total_accepted / total_target_calls if total_target_calls > 0 else 1.0,
+            "speedup_estimate": total_accepted / total_target_calls
+            if total_target_calls > 0
+            else 1.0,
             "steps": len(self.stats_history),
         }
 

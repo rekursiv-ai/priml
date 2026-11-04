@@ -9,7 +9,8 @@ Search space: 480 configs for agent swarm campaign.
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
+
 from configgle import Fig, field
 
 
@@ -44,52 +45,53 @@ class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
 
     # Token tree (EAGLE only) - key for acceptance rate
     tree_depth: int = field(
-        default=3, ge=1, le=5,
-        description="Token tree depth (EAGLE). 3=~7 nodes, 4=~15, 5=~31 (branching=2)"
+        default=3,
+        ge=1,
+        le=5,
+        description="Token tree depth (EAGLE). 3=~7 nodes, 4=~15, 5=~31 (branching=2)",
     )
     tree_branching: int = field(
-        default=2, ge=2, le=4,
-        description="Branching factor per tree node"
+        default=2, ge=2, le=4, description="Branching factor per tree node",
     )
 
     # Acceptance criteria
     acceptance_threshold: float = field(
-        default=0.9, ge=0.5, le=1.0,
-        description="Min target prob to accept draft token"
+        default=0.9, ge=0.5, le=1.0, description="Min target prob to accept draft token",
     )
     max_spec_tokens: int = field(
-        default=8, ge=1, le=16,
-        description="Max speculative tokens per step"
+        default=8, ge=1, le=16, description="Max speculative tokens per step",
     )
 
     # Training/calibration (for Medusa/EAGLE heads)
     calibration_data: Literal["c4", "wikitext", "sharegpt", "ultrachat"] = field(
         default="sharegpt",
-        description="Calibration data for drafter knowledge distillation"
+        description="Calibration data for drafter knowledge distillation",
     )
     kd_temperature: float = field(
-        default=0.5, ge=0.1, le=2.0,
-        description="KD temperature for drafter-target alignment"
+        default=0.5,
+        ge=0.1,
+        le=2.0,
+        description="KD temperature for drafter-target alignment",
     )
     kd_loss_weight: float = field(
-        default=0.5, ge=0.1, le=1.0,
-        description="KD loss weight vs LM loss for drafter training"
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        description="KD loss weight vs LM loss for drafter training",
     )
 
     # Verification mode
     verify_mode: Literal["token_tree", "n_gram", "standard"] = field(
         default="token_tree",
-        description="Token tree (EAGLE), n-gram (code), standard (single token)"
+        description="Token tree (EAGLE), n-gram (code), standard (single token)",
     )
 
     # FP4-specific: does quantization hurt acceptance?
     quantize_drafter: bool = field(
-        default=True,
-        description="Also quantize drafter to FP4 (vs FP32 drafter)"
+        default=True, description="Also quantize drafter to FP4 (vs FP32 drafter)",
     )
     drafter_fp4_format: Literal["e2m1", "nvfp4_block16"] = field(
-        default="e2m1",
-        description="FP4 format for drafter weights"
+        default="e2m1", description="FP4 format for drafter weights",
     )
 
     # Workload
@@ -97,18 +99,15 @@ class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
     input_len: int = field(default=2048, ge=128, le=8192)
     output_len: int = field(default=256, ge=32, le=2048)
     prompt_type: Literal["chat", "code", "summary", "long_context"] = field(
-        default="chat",
-        description="Prompt type affects speculative effectiveness"
+        default="chat", description="Prompt type affects speculative effectiveness",
     )
 
     # Model config (for drafter sizing)
     target_model: Literal["llama-3.2-1b", "llama-3.2-3b", "llama-3.1-8b"] = field(
-        default="llama-3.2-1b",
-        description="Target model for speculative decoding"
+        default="llama-3.2-1b", description="Target model for speculative decoding",
     )
-    drafter_model: Optional[str] = field(
-        default=None,
-        description="Drafter model path (for tiny_llama type)"
+    drafter_model: str | None = field(
+        default=None, description="Drafter model path (for tiny_llama type)",
     )
 
     # Reproducibility
@@ -118,6 +117,7 @@ class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
 @dataclass
 class Exp004Result:
     """Result metrics for exp004."""
+
     tokens_per_sec: float
     acceptance_rate: float
     spec_tokens_per_step: float

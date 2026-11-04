@@ -5,46 +5,73 @@ Critical: speculative decoding in FP32 MUST match autoregressive exactly
 (per survey paper arXiv:2401.07851).
 """
 
+from torch import nn
+
 import pytest
 import torch
-import torch.nn as nn
+
 from priml.baselines.inference.experiments import (
-    exp004, exp004_smoke, SpeculativeFP4Config, Exp004Result
+    SpeculativeFP4Config,
+    exp004,
+    exp004_smoke,
 )
 from priml.inference.speculative import (
-    EagleDrafter, MedusaDrafter, TokenTreeVerifier, FP4Quantizer,
-    speculative_decode_step, SpeculativeDecodeEngine
+    EagleDrafter,
+    FP4Quantizer,
+    MedusaDrafter,
+    TokenTreeVerifier,
+    speculative_decode_step,
 )
 
 
 class TinyTransformer(nn.Module):
     """Tiny transformer for CPU testing."""
 
-    def __init__(self, vocab: int = 1000, dim: int = 128, n_layers: int = 2, n_heads: int = 4):
+    def __init__(
+        self, vocab: int = 1000, dim: int = 128, n_layers: int = 2, n_heads: int = 4,
+    ):
         super().__init__()
         self.vocab = vocab
         self.dim = dim
         self.embed = nn.Embedding(vocab, dim)
-        self.layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(dim, n_heads, dim * 4, batch_first=True)
-            for _ in range(n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(dim, n_heads, dim * 4, batch_first=True)
+                for _ in range(n_layers)
+            ],
+        )
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, vocab, bias=False)
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, output_hidden_states=False):
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=False,
+        output_hidden_states=False,
+    ):
         x = self.embed(input_ids)
         hidden_states = []
         for layer in self.layers:
-            x = layer(x, src_key_padding_mask=~attention_mask.bool() if attention_mask is not None else None)
+            x = layer(
+                x,
+                src_key_padding_mask=~attention_mask.bool()
+                if attention_mask is not None
+                else None,
+            )
             hidden_states.append(x)
         x = self.norm(x)
         logits = self.head(x)
-        return type('Output', (), {
-            'logits': logits,
-            'hidden_states': hidden_states if output_hidden_states else None,
-            'past_key_values': past_key_values,
-        })()
+        return type(
+            "Output",
+            (),
+            {
+                "logits": logits,
+                "hidden_states": hidden_states if output_hidden_states else None,
+                "past_key_values": past_key_values,
+            },
+        )()
 
 
 class TestFP4Quantizer:
@@ -56,7 +83,9 @@ class TestFP4Quantizer:
         weight = torch.randn(256, 128) * 0.1
 
         qweight, scale = FP4Quantizer.quantize_e2m1(weight, block_size=1)
-        dequant = FP4Quantizer.dequantize_e2m1(qweight, scale, block_size=1, orig_shape=weight.shape)
+        dequant = FP4Quantizer.dequantize_e2m1(
+            qweight, scale, block_size=1, orig_shape=weight.shape,
+        )
 
         # Should be close (quantization error expected)
         rel_error = (weight - dequant).abs().max() / weight.abs().max()
@@ -81,7 +110,9 @@ class TestFP4Quantizer:
         weight = torch.randn(1024, 512) * 0.1
 
         qweight, scale = FP4Quantizer.quantize_e2m1(weight, block_size=16)
-        dequant = FP4Quantizer.dequantize_e2m1(qweight, scale, block_size=16, orig_shape=weight.shape)
+        dequant = FP4Quantizer.dequantize_e2m1(
+            qweight, scale, block_size=16, orig_shape=weight.shape,
+        )
 
         assert dequant.shape == weight.shape
         rel_error = (weight - dequant).abs().max() / weight.abs().max()
@@ -179,12 +210,14 @@ class TestTokenTreeVerifier:
 
         # Speculative with FP32 drafter + high threshold (force accept)
         drafter = EagleDrafter(64, 500, fp4_quantize=False)
-        kv_cache = type('KV', (), {})()  # Dummy KV cache
+        kv_cache = type("KV", (), {})()  # Dummy KV cache
 
         class DummyVerifier(TokenTreeVerifier):
             def verify(self, drafter_output, input_ids):
                 # Simplified: just return drafter tokens
-                return drafter_output.draft_tokens, {"accepted": [drafter_output.draft_tokens.shape[1]]}
+                return drafter_output.draft_tokens, {
+                    "accepted": [drafter_output.draft_tokens.shape[1]],
+                }
 
         verifier = DummyVerifier(target, kv_cache, acceptance_threshold=0.0)
         verifier.temperature = 1.0
@@ -217,7 +250,7 @@ class TestExp004Integration:
 
     def test_exp004_config_finalization(self):
         """Config finalizes without error."""
-        config = SpeculativeFP4Config()
+        SpeculativeFP4Config()
         experiment = exp004()
         finalized = experiment
         assert finalized is not None
@@ -230,16 +263,18 @@ class TestExp004Integration:
 
     def test_search_space_size(self):
         """Verify search space has expected size."""
-        config = SpeculativeFP4Config()
+        SpeculativeFP4Config()
 
         # Count combinations (rough estimate)
         drafter_types = 3  # eagle, medusa, tiny_llama
-        tree_depths = 5    # 1-5
-        thresholds = 6     # 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
-        calibrations = 4   # c4, wikitext, sharegpt, ultrachat
+        tree_depths = 5  # 1-5
+        thresholds = 6  # 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+        calibrations = 4  # c4, wikitext, sharegpt, ultrachat
         drafter_quant = 2  # true, false
 
-        estimated = drafter_types * tree_depths * thresholds * calibrations * drafter_quant
+        estimated = (
+            drafter_types * tree_depths * thresholds * calibrations * drafter_quant
+        )
         assert estimated >= 480, f"Search space too small: {estimated}"
 
 
@@ -254,7 +289,7 @@ class TestSpeculativeDecodeStep:
         target.eval()
 
         drafter = EagleDrafter(64, 500, fp4_quantize=False)
-        kv_cache = type('KV', (), {})()
+        kv_cache = type("KV", (), {})()
 
         class SimpleVerifier(TokenTreeVerifier):
             def verify(self, drafter_output, input_ids):
@@ -272,9 +307,16 @@ class TestSpeculativeDecodeStep:
         input_ids = torch.randint(0, 500, (1, 16))
 
         accepted, stats = speculative_decode_step(
-            target, drafter, verifier, input_ids, kv_cache,
-            max_spec_tokens=4, acceptance_threshold=0.9,
-            drafter_type="eagle", tree_depth=2, tree_branching=2
+            target,
+            drafter,
+            verifier,
+            input_ids,
+            kv_cache,
+            max_spec_tokens=4,
+            acceptance_threshold=0.9,
+            drafter_type="eagle",
+            tree_depth=2,
+            tree_branching=2,
         )
 
         assert accepted.shape[0] == 1
@@ -289,7 +331,7 @@ class TestDeterminism:
         """Same config + same seed = identical tokens."""
         torch.manual_seed(42)
 
-        config = SpeculativeFP4Config(seed=42)
+        SpeculativeFP4Config(seed=42)
         experiment = exp004_smoke()
 
         # Note: Full run requires model loading, so we test config determinism
@@ -320,7 +362,7 @@ class TestExp004QualityMetrics:
                 }
 
         # This validates the stats structure
-        verifier = MockVerifier(None, None, 0.9)
+        MockVerifier(None, None, 0.9)
         assert True  # Placeholder for actual integration test
 
 

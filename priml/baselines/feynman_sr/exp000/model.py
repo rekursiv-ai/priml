@@ -1,37 +1,49 @@
-"""
-Feynman SR Model: Dimensional GA + Levenberg-Marquardt Constant Optimization
+"""Feynman SR Model: Dimensional GA + Levenberg-Marquardt Constant Optimization
 exp000: Baseline Genetic Algorithm with dimensional constraints
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any, Callable
-import numpy as np
+
 import random
-import math
-from deap import base, creator, tools, algorithms
+
+from deap import algorithms, base, creator, tools
+
+import numpy as np
+
 
 # =============================================================================
 # DIMENSIONAL GRAMMAR (from feynman_sr/grammar.py)
 # =============================================================================
 
+
 class Dim:
-    M = 0; L = 1; T = 2; Q = 3; THETA = 4
+    M = 0
+    L = 1
+    T = 2
+    Q = 3
+    THETA = 4
     NAMES = ["M", "L", "T", "Q", "THETA"]
 
     @classmethod
     def from_str(cls, s: str):
-        s = s.upper().replace('[', '').replace(']', '')
-        if not s or s == '1':
+        s = s.upper().replace("[", "").replace("]", "")
+        if not s or s == "1":
             return None
         mapping = {
-            'M': cls.M, 'L': cls.L, 'T': cls.T, 'Q': cls.Q,
-            'THETA': cls.THETA, 'Θ': cls.THETA
+            "M": cls.M,
+            "L": cls.L,
+            "T": cls.T,
+            "Q": cls.Q,
+            "THETA": cls.THETA,
+            "Θ": cls.THETA,
         }
         # Parse compound dimensions like "M L^-1 T^-2"
         vec = [0, 0, 0, 0, 0]
         import re
-        for match in re.finditer(r'(THETA|[MLTQΘ])(?:\^(-?\d+))?', s):
+
+        for match in re.finditer(r"(THETA|[MLTQΘ])(?:\^(-?\d+))?", s):
             dim_str, exp = match.group(1), int(match.group(2) or 1)
             vec[mapping[dim_str]] = exp
         return tuple(vec)
@@ -39,7 +51,7 @@ class Dim:
 
 @dataclass(frozen=True)
 class DimVec:
-    vec: Tuple[int, int, int, int, int]
+    vec: tuple[int, int, int, int, int]
 
     @classmethod
     def zero(cls):
@@ -82,26 +94,88 @@ class OpType:
     POW2 = ("pow2", 1, lambda a: a + a)
     POW3 = ("pow3", 1, lambda a: a + a + a)
     POW_NEG1 = ("pow_neg1", 1, lambda a: DimVec(tuple(-v for v in a.vec)))
-    POW_HALF = ("pow_half", 1, lambda a: DimVec(tuple(v // 2 for v in a.vec)) if all(v % 2 == 0 for v in a.vec) else None)
+    POW_HALF = (
+        "pow_half",
+        1,
+        lambda a: (
+            DimVec(tuple(v // 2 for v in a.vec))
+            if all(v % 2 == 0 for v in a.vec)
+            else None
+        ),
+    )
     NEG = ("neg", 1, lambda a: a)
-    SQRT = ("sqrt", 1, lambda a: DimVec(tuple(v // 2 for v in a.vec)) if all(v % 2 == 0 for v in a.vec) else None)
+    SQRT = (
+        "sqrt",
+        1,
+        lambda a: (
+            DimVec(tuple(v // 2 for v in a.vec))
+            if all(v % 2 == 0 for v in a.vec)
+            else None
+        ),
+    )
     SIN = ("sin", 1, lambda a: a if a.is_dimensionless() else None)
     COS = ("cos", 1, lambda a: a if a.is_dimensionless() else None)
     EXP = ("exp", 1, lambda a: a if a.is_dimensionless() else None)
     LOG = ("log", 1, lambda a: a if a.is_dimensionless() else None)
     ABS = ("abs", 1, lambda a: a)
 
-    ALL_OPS = [CONST, VAR, ADD, SUB, MUL, DIV, POW, POW2, POW3, POW_NEG1, POW_HALF,
-           NEG, SQRT, SIN, COS, EXP, LOG, ABS]
+    ALL_OPS = [
+        CONST,
+        VAR,
+        ADD,
+        SUB,
+        MUL,
+        DIV,
+        POW,
+        POW2,
+        POW3,
+        POW_NEG1,
+        POW_HALF,
+        NEG,
+        SQRT,
+        SIN,
+        COS,
+        EXP,
+        LOG,
+        ABS,
+    ]
 
-    OPS = [ADD, SUB, MUL, DIV, POW, POW2, POW3, POW_NEG1, POW_HALF,
-           NEG, SQRT, SIN, COS, EXP, LOG, ABS]
+    OPS = [
+        ADD,
+        SUB,
+        MUL,
+        DIV,
+        POW,
+        POW2,
+        POW3,
+        POW_NEG1,
+        POW_HALF,
+        NEG,
+        SQRT,
+        SIN,
+        COS,
+        EXP,
+        LOG,
+        ABS,
+    ]
 
     SYMBOLS = {
-        'add': '+', 'sub': '-', 'mul': '*', 'div': '/', 'pow': '^',
-        'pow2': '^2', 'pow3': '^3', 'pow_neg1': '^-1', 'pow_half': '^0.5',
-        'neg': '-', 'sqrt': '√', 'sin': 'sin', 'cos': 'cos',
-        'exp': 'exp', 'log': 'log', 'abs': '|·|',
+        "add": "+",
+        "sub": "-",
+        "mul": "*",
+        "div": "/",
+        "pow": "^",
+        "pow2": "^2",
+        "pow3": "^3",
+        "pow_neg1": "^-1",
+        "pow_half": "^0.5",
+        "neg": "-",
+        "sqrt": "√",
+        "sin": "sin",
+        "cos": "cos",
+        "exp": "exp",
+        "log": "log",
+        "abs": "|·|",
     }
 
     def __init__(self, name, arity, dim_rule):
@@ -120,22 +194,22 @@ class OpType:
 @dataclass
 class TypedExpr:
     op: OpType
-    children: Tuple['TypedExpr', ...]
+    children: tuple["TypedExpr", ...]
     dim: DimVec
-    value: Optional[float] = None
-    var_name: Optional[str] = None
-    const_id: Optional[int] = None
+    value: float | None = None
+    var_name: str | None = None
+    const_id: int | None = None
 
     @classmethod
     def constant(cls, value: float, dim: DimVec = DIMENSIONLESS, const_id: int = None):
-        return cls(OpType.from_name('const'), (), dim, value=value, const_id=const_id)
+        return cls(OpType.from_name("const"), (), dim, value=value, const_id=const_id)
 
     @classmethod
     def variable(cls, name: str, dim: DimVec):
-        return cls(OpType.from_name('var'), (), dim, var_name=name)
+        return cls(OpType.from_name("var"), (), dim, var_name=name)
 
     @classmethod
-    def binary(cls, op_name: str, left: 'TypedExpr', right: 'TypedExpr'):
+    def binary(cls, op_name: str, left: TypedExpr, right: TypedExpr):
         op = OpType.from_name(op_name)
         dim = op.dim_rule(left.dim, right.dim)
         if dim is None:
@@ -143,7 +217,7 @@ class TypedExpr:
         return cls(op, (left, right), dim)
 
     @classmethod
-    def unary(cls, op_name: str, child: 'TypedExpr'):
+    def unary(cls, op_name: str, child: TypedExpr):
         op = OpType.from_name(op_name)
         dim = op.dim_rule(child.dim)
         if dim is None:
@@ -151,26 +225,24 @@ class TypedExpr:
         return cls(op, (child,), dim)
 
     def __str__(self):
-        if self.op.op_name == 'const':
+        if self.op.op_name == "const":
             return f"{self.value:.6g}"
-        elif self.op.op_name == 'var':
-            return self.var_name or 'x'
-        elif self.op.arity == 1:
+        if self.op.op_name == "var":
+            return self.var_name or "x"
+        if self.op.arity == 1:
             sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
             child_str = str(self.children[0])
-            if self.op.op_name in ('pow2', 'pow3', 'pow_neg1', 'pow_half'):
+            if self.op.op_name in ("pow2", "pow3", "pow_neg1", "pow_half"):
                 return f"{child_str}{sym}"
-            else:
-                return f"{sym}({child_str})"
-        else:
-            sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
-            return f"({str(self.children[0])} {sym} {str(self.children[1])})"
+            return f"{sym}({child_str})"
+        sym = OpType.SYMBOLS.get(self.op.op_name, self.op.op_name)
+        return f"({self.children[0]!s} {sym} {self.children[1]!s})"
 
     def __deepcopy__(self, memo):
         return self
 
     def get_constants(self):
-        if self.op.op_name == 'const':
+        if self.op.op_name == "const":
             return [self]
         consts = []
         for child in self.children:
@@ -182,68 +254,78 @@ class TypedExpr:
             return 1
         return 1 + sum(c.count_nodes() for c in self.children)
 
-    def set_constants(self, new_values: list) -> 'TypedExpr':
+    def set_constants(self, new_values: list) -> TypedExpr:
         """Create new expression with updated constant values (in order of get_constants)"""
         const_iter = iter(new_values)
+
         def replace_consts(expr):
-            if expr.op.op_name == 'const':
+            if expr.op.op_name == "const":
                 return TypedExpr.constant(next(const_iter), expr.dim, expr.const_id)
             if not expr.children:
                 return expr
             new_children = tuple(replace_consts(c) for c in expr.children)
             return TypedExpr(expr.op, new_children, expr.dim, var_name=expr.var_name)
+
         return replace_consts(self)
 
-    def evaluate(self, variables: Dict[str, np.ndarray]) -> np.ndarray:
-        if self.op.op_name == 'const':
+    def evaluate(self, variables: dict[str, np.ndarray]) -> np.ndarray:
+        if self.op.op_name == "const":
             return np.full_like(next(iter(variables.values())), self.value)
-        elif self.op.op_name == 'var':
+        if self.op.op_name == "var":
             return variables[self.var_name]
 
         child_vals = [c.evaluate(variables) for c in self.children]
 
-        if self.op.op_name == 'add':
+        if self.op.op_name == "add":
             return child_vals[0] + child_vals[1]
-        elif self.op.op_name == 'sub':
+        if self.op.op_name == "sub":
             return child_vals[0] - child_vals[1]
-        elif self.op.op_name == 'mul':
+        if self.op.op_name == "mul":
             return child_vals[0] * child_vals[1]
-        elif self.op.op_name == 'div':
-            with np.errstate(divide='ignore', invalid='ignore'):
+        if self.op.op_name == "div":
+            with np.errstate(divide="ignore", invalid="ignore"):
                 denom = child_vals[1]
-                safe = np.where(np.abs(denom) < 1e-12, np.sign(denom) * 1e-12 + (denom == 0) * 1e-12, denom)
+                safe = np.where(
+                    np.abs(denom) < 1e-12,
+                    np.sign(denom) * 1e-12 + (denom == 0) * 1e-12,
+                    denom,
+                )
                 return np.where(np.abs(denom) >= 1e-12, child_vals[0] / safe, np.inf)
-        elif self.op.op_name == 'pow':
-            with np.errstate(over='ignore', invalid='ignore'):
+        elif self.op.op_name == "pow":
+            with np.errstate(over="ignore", invalid="ignore"):
                 return np.power(child_vals[0], child_vals[1])
-        elif self.op.op_name == 'pow2':
+        elif self.op.op_name == "pow2":
             return child_vals[0] * child_vals[0]
-        elif self.op.op_name == 'pow3':
+        elif self.op.op_name == "pow3":
             return child_vals[0] * child_vals[0] * child_vals[0]
-        elif self.op.op_name == 'pow_neg1':
-            with np.errstate(divide='ignore', invalid='ignore'):
+        elif self.op.op_name == "pow_neg1":
+            with np.errstate(divide="ignore", invalid="ignore"):
                 denom = child_vals[0]
-                safe = np.where(np.abs(denom) < 1e-12, np.sign(denom) * 1e-12 + (denom == 0) * 1e-12, denom)
+                safe = np.where(
+                    np.abs(denom) < 1e-12,
+                    np.sign(denom) * 1e-12 + (denom == 0) * 1e-12,
+                    denom,
+                )
                 return np.where(np.abs(denom) >= 1e-12, 1.0 / safe, np.inf)
-        elif self.op.op_name == 'pow_half':
-            with np.errstate(invalid='ignore'):
+        elif self.op.op_name == "pow_half":
+            with np.errstate(invalid="ignore"):
                 return np.where(child_vals[0] >= 0, np.sqrt(child_vals[0]), np.nan)
-        elif self.op.op_name == 'neg':
+        elif self.op.op_name == "neg":
             return -child_vals[0]
-        elif self.op.op_name == 'sqrt':
-            with np.errstate(invalid='ignore'):
+        elif self.op.op_name == "sqrt":
+            with np.errstate(invalid="ignore"):
                 return np.where(child_vals[0] >= 0, np.sqrt(child_vals[0]), np.nan)
-        elif self.op.op_name == 'sin':
+        elif self.op.op_name == "sin":
             return np.sin(child_vals[0])
-        elif self.op.op_name == 'cos':
+        elif self.op.op_name == "cos":
             return np.cos(child_vals[0])
-        elif self.op.op_name == 'exp':
-            with np.errstate(over='ignore'):
+        elif self.op.op_name == "exp":
+            with np.errstate(over="ignore"):
                 return np.exp(child_vals[0])
-        elif self.op.op_name == 'log':
-            with np.errstate(divide='ignore', invalid='ignore'):
+        elif self.op.op_name == "log":
+            with np.errstate(divide="ignore", invalid="ignore"):
                 return np.where(child_vals[0] > 0, np.log(child_vals[0]), np.nan)
-        elif self.op.op_name == 'abs':
+        elif self.op.op_name == "abs":
             return np.abs(child_vals[0])
         raise ValueError(f"Unknown operator: {self.op.op_name}")
 
@@ -251,7 +333,12 @@ class TypedExpr:
 class Grammar:
     """Fast dimensional grammar for generating valid expressions - SIMPLIFIED"""
 
-    def __init__(self, variables: Dict[str, DimVec], target_dim: DimVec, max_depth: int = 10):
+    def __init__(
+        self,
+        variables: dict[str, DimVec],
+        target_dim: DimVec,
+        max_depth: int = 10,
+    ):
         self.variables = variables
         self.target_dim = target_dim
         self.max_depth = max_depth
@@ -287,20 +374,24 @@ class Grammar:
             # For sqrt: child = target * 2
             # For pow2: child = target / 2 (if even)
             # For pow_neg1: child = -target
-            if op == OpType.from_name('sqrt'):
+            if op == OpType.from_name("sqrt"):
                 child = self.target_dim + self.target_dim
                 all_dims.add(child)
-            elif op == OpType.from_name('pow2'):
+            elif op == OpType.from_name("pow2"):
                 if all(v % 2 == 0 for v in self.target_dim.vec):
                     child = DimVec(tuple(v // 2 for v in self.target_dim.vec))
                     all_dims.add(child)
-            elif op == OpType.from_name('pow_neg1'):
+            elif op == OpType.from_name("pow_neg1"):
                 child = DimVec(tuple(-v for v in self.target_dim.vec))
                 all_dims.add(child)
-            elif op == OpType.from_name('neg'):
+            elif op == OpType.from_name("neg"):
                 all_dims.add(self.target_dim)
-            elif op in [OpType.from_name('sin'), OpType.from_name('cos'),
-                       OpType.from_name('exp'), OpType.from_name('log')]:
+            elif op in [
+                OpType.from_name("sin"),
+                OpType.from_name("cos"),
+                OpType.from_name("exp"),
+                OpType.from_name("log"),
+            ]:
                 if self.target_dim.is_dimensionless():
                     all_dims.add(self.target_dim)
 
@@ -319,7 +410,7 @@ class Grammar:
         # Add simple binary combinations of variables that make sense
         for d1 in self.var_dims:
             for d2 in self.var_dims:
-                for op in [OpType.from_name('mul'), OpType.from_name('div')]:
+                for op in [OpType.from_name("mul"), OpType.from_name("div")]:
                     res = op.dim_rule(d1, d2)
                     if res and res in all_dims:
                         priority_targets.append(res)
@@ -332,14 +423,14 @@ class Grammar:
                 for d2 in self.var_dims:
                     if d1 == target and d2 == target:
                         continue
-                    for op in [OpType.from_name('mul'), OpType.from_name('div')]:
+                    for op in [OpType.from_name("mul"), OpType.from_name("div")]:
                         res = op.dim_rule(d1, d2)
                         if res == target:
                             candidates.append((op, d1, d2))
 
             # PRIORITY 2: Variable + dimensionless
             for d1 in self.var_dims:
-                for op in [OpType.from_name('mul'), OpType.from_name('div')]:
+                for op in [OpType.from_name("mul"), OpType.from_name("div")]:
                     if op.dim_rule(d1, DIMENSIONLESS) == target:
                         candidates.append((op, d1, DIMENSIONLESS))
                     if op.dim_rule(DIMENSIONLESS, d1) == target:
@@ -350,10 +441,10 @@ class Grammar:
                 for d1 in all_dims:
                     d2_mul = target - d1
                     if d2_mul in all_dims:
-                        candidates.append((OpType.from_name('mul'), d1, d2_mul))
+                        candidates.append((OpType.from_name("mul"), d1, d2_mul))
                     d2_div = d1 - target
                     if d2_div in all_dims:
-                        candidates.append((OpType.from_name('div'), d1, d2_div))
+                        candidates.append((OpType.from_name("div"), d1, d2_div))
 
             # Deduplicate and limit
             seen = set()
@@ -365,9 +456,14 @@ class Grammar:
                     unique.append(c)
             self.binary_candidates[target] = unique[:20]
 
-    def generate_random_expr(self, target_dim: DimVec = None, depth: int = 0,
-                             rng: np.random.Generator = None, max_nodes: int = 20,
-                             _call_count: list = None) -> Optional[TypedExpr]:
+    def generate_random_expr(
+        self,
+        target_dim: DimVec = None,
+        depth: int = 0,
+        rng: np.random.Generator = None,
+        max_nodes: int = 20,
+        _call_count: list = None,
+    ) -> TypedExpr | None:
         if _call_count is None:
             _call_count = [0]
         _call_count[0] += 1
@@ -385,10 +481,17 @@ class Grammar:
             if matching_vars and rng.random() < 0.6:
                 return TypedExpr.variable(rng.choice(matching_vars), target)
             if rng.random() < 0.3:
-                return TypedExpr.constant(rng.choice([0.5, 1.0, 2.0, 2*np.pi]), target)
+                return TypedExpr.constant(
+                    rng.choice([0.5, 1.0, 2.0, 2 * np.pi]),
+                    target,
+                )
             if depth < 3 and rng.random() < 0.3:
-                for op in [OpType.from_name('sin'), OpType.from_name('cos'),
-                          OpType.from_name('exp'), OpType.from_name('log')]:
+                for op in [
+                    OpType.from_name("sin"),
+                    OpType.from_name("cos"),
+                    OpType.from_name("exp"),
+                    OpType.from_name("log"),
+                ]:
                     if matching_vars:
                         child = TypedExpr.variable(rng.choice(matching_vars), target)
                         return TypedExpr.unary(op.op_name, child)
@@ -411,11 +514,17 @@ class Grammar:
                 d2_is_dimless = d2.is_dimensionless()
 
                 # Prefer: var * var, var * dimless, dimless * var
-                if (d1_is_var and d2_is_var) or (d1_is_var and d2_is_dimless) or (d1_is_dimless and d2_is_var):
+                if (
+                    (d1_is_var and d2_is_var)
+                    or (d1_is_var and d2_is_dimless)
+                    or (d1_is_dimless and d2_is_var)
+                ):
                     # For var * var, use the actual variables directly
                     if d1_is_var and d2_is_var:
                         left_var = next(v for v, d in self.variables.items() if d == d1)
-                        right_var = next(v for v, d in self.variables.items() if d == d2)
+                        right_var = next(
+                            v for v, d in self.variables.items() if d == d2
+                        )
                         left = TypedExpr.variable(left_var, d1)
                         right = TypedExpr.variable(right_var, d2)
                     elif d1_is_var and d2_is_dimless:
@@ -424,7 +533,9 @@ class Grammar:
                         right = TypedExpr.constant(rng.choice([0.5, 1.0, 2.0]), d2)
                     elif d1_is_dimless and d2_is_var:
                         left = TypedExpr.constant(rng.choice([0.5, 1.0, 2.0]), d1)
-                        right_var = next(v for v, d in self.variables.items() if d == d2)
+                        right_var = next(
+                            v for v, d in self.variables.items() if d == d2
+                        )
                         right = TypedExpr.variable(right_var, d2)
                     else:
                         continue
@@ -442,8 +553,20 @@ class Grammar:
                 if d1 == target or d2 == target:
                     continue
                 # Recursively generate sub-expressions
-                left = self.generate_random_expr(d1, depth+1, rng, max_nodes, _call_count)
-                right = self.generate_random_expr(d2, depth+1, rng, max_nodes, _call_count)
+                left = self.generate_random_expr(
+                    d1,
+                    depth + 1,
+                    rng,
+                    max_nodes,
+                    _call_count,
+                )
+                right = self.generate_random_expr(
+                    d2,
+                    depth + 1,
+                    rng,
+                    max_nodes,
+                    _call_count,
+                )
                 if left and right:
                     expr = TypedExpr.binary(op.op_name, left, right)
                     if expr and expr.count_nodes() <= max_nodes:
@@ -454,7 +577,9 @@ class Grammar:
             for op in self.valid_unary[target]:
                 child_dim = op.dim_rule(target)
                 if child_dim and child_dim in var_dims:
-                    child_var = next(v for v, d in self.variables.items() if d == child_dim)
+                    child_var = next(
+                        v for v, d in self.variables.items() if d == child_dim
+                    )
                     child = TypedExpr.variable(child_var, child_dim)
                     expr = TypedExpr.unary(op.op_name, child)
                     if expr and expr.count_nodes() <= max_nodes:
@@ -470,13 +595,23 @@ class Grammar:
 
         return None
 
-    def generate_dimension(self, target_dim: DimVec, max_depth: int = None,
-                           max_nodes: int = 20, n_samples: int = 10, seed: int = None) -> List[TypedExpr]:
+    def generate_dimension(
+        self,
+        target_dim: DimVec,
+        max_depth: int = None,
+        max_nodes: int = 20,
+        n_samples: int = 10,
+        seed: int = None,
+    ) -> list[TypedExpr]:
         results = []
         rng = np.random.default_rng(seed)
-        depth_limit = max_depth or self.max_depth
         for _ in range(n_samples):
-            expr = self.generate_random_expr(target_dim, depth=0, rng=rng, max_nodes=max_nodes)
+            expr = self.generate_random_expr(
+                target_dim,
+                depth=0,
+                rng=rng,
+                max_nodes=max_nodes,
+            )
             if expr:
                 results.append(expr)
         return results
@@ -486,9 +621,15 @@ class Grammar:
 # CONSTANT OPTIMIZATION (Levenberg-Marquardt via scipy)
 # =============================================================================
 
-def fit_constants(expr: TypedExpr, variables: Dict[str, np.ndarray],
-                  target_values: np.ndarray, max_iter: int = 50,
-                  ftol: float = 1e-8, xtol: float = 1e-8) -> Tuple[TypedExpr, Dict[int, float]]:
+
+def fit_constants(
+    expr: TypedExpr,
+    variables: dict[str, np.ndarray],
+    target_values: np.ndarray,
+    max_iter: int = 50,
+    ftol: float = 1e-8,
+    xtol: float = 1e-8,
+) -> tuple[TypedExpr, dict[int, float]]:
     """Optimize constants in expression using Levenberg-Marquardt"""
     try:
         from scipy.optimize import least_squares
@@ -499,7 +640,7 @@ def fit_constants(expr: TypedExpr, variables: Dict[str, np.ndarray],
     if not consts:
         return expr, {}
 
-    n_consts = len(consts)
+    len(consts)
     x0 = np.array([c.value for c in consts])
     const_ids = [c.const_id for c in consts]
 
@@ -512,8 +653,15 @@ def fit_constants(expr: TypedExpr, variables: Dict[str, np.ndarray],
         return pred - target_values
 
     try:
-        result = least_squares(residuals, x0, method='lm', max_nfev=max_iter,
-                               ftol=ftol, xtol=xtol, verbose=0)
+        result = least_squares(
+            residuals,
+            x0,
+            method="lm",
+            max_nfev=max_iter,
+            ftol=ftol,
+            xtol=xtol,
+            verbose=0,
+        )
         optimized_expr = expr.set_constants(result.x.tolist())
         const_values = dict(zip(const_ids, result.x.tolist()))
         return optimized_expr, const_values
@@ -526,43 +674,52 @@ def fit_constants(expr: TypedExpr, variables: Dict[str, np.ndarray],
 # =============================================================================
 
 # DEAP singleton
-if 'FitnessMin' not in creator.__dict__:
-    creator.create('FitnessMin', base.Fitness, weights=(1.0,))
-if 'Individual' not in creator.__dict__:
-    creator.create('Individual', list, fitness=creator.FitnessMin)
+if "FitnessMin" not in creator.__dict__:
+    creator.create("FitnessMin", base.Fitness, weights=(1.0,))
+if "Individual" not in creator.__dict__:
+    creator.create("Individual", list, fitness=creator.FitnessMin)
 
 
 def evaluate_individual(individual, grammar, variables, target_values):
     expr = individual[0]
     try:
-        has_consts = any(c.op.op_name == 'const' for c in expr.get_constants())
+        has_consts = any(c.op.op_name == "const" for c in expr.get_constants())
         if has_consts:
-            optimized_expr, const_values = fit_constants(expr, variables, target_values, max_iter=20)
+            optimized_expr, const_values = fit_constants(
+                expr,
+                variables,
+                target_values,
+                max_iter=20,
+            )
         else:
             optimized_expr, const_values = expr, {}
 
         pred = optimized_expr.evaluate(variables)
         if not np.all(np.isfinite(pred)):
-            return (-float('inf'),)
+            return (-float("inf"),)
         pred = pred.flatten() if pred.ndim > 1 else pred
         if pred.shape != target_values.shape:
-            return (-float('inf'),)
+            return (-float("inf"),)
 
         mse = np.mean((pred - target_values) ** 2)
         var = np.var(target_values)
         if var == 0:
-            return (-float('inf'),)
+            return (-float("inf"),)
         nmse = mse / var
 
         individual.optimized_expr = optimized_expr
         individual.const_values = const_values
         return (-nmse,)
     except Exception:
-        return (-float('inf'),)
+        return (-float("inf"),)
 
 
-def collect_subtree_paths(expr: TypedExpr, path: Tuple[int, ...] = (),
-                          visited: Optional[set] = None, max_depth: int = 15) -> List[Tuple[int, ...]]:
+def collect_subtree_paths(
+    expr: TypedExpr,
+    path: tuple[int, ...] = (),
+    visited: set | None = None,
+    max_depth: int = 15,
+) -> list[tuple[int, ...]]:
     if visited is None:
         visited = set()
     expr_id = id(expr)
@@ -577,19 +734,28 @@ def collect_subtree_paths(expr: TypedExpr, path: Tuple[int, ...] = (),
     return paths
 
 
-def get_subexpr_at_path(expr: TypedExpr, path: Tuple[int, ...]) -> TypedExpr:
+def get_subexpr_at_path(expr: TypedExpr, path: tuple[int, ...]) -> TypedExpr:
     for idx in path:
         expr = expr.children[idx]
     return expr
 
 
-def replace_subexpr_at_path(expr: TypedExpr, path: Tuple[int, ...],
-                            replacement: TypedExpr, max_nodes: int = 30) -> Optional[TypedExpr]:
+def replace_subexpr_at_path(
+    expr: TypedExpr,
+    path: tuple[int, ...],
+    replacement: TypedExpr,
+    max_nodes: int = 30,
+) -> TypedExpr | None:
     if not path:
         return replacement if replacement.count_nodes() <= max_nodes else None
     idx = path[0]
     new_children = list(expr.children)
-    replaced = replace_subexpr_at_path(expr.children[idx], path[1:], replacement, max_nodes)
+    replaced = replace_subexpr_at_path(
+        expr.children[idx],
+        path[1:],
+        replacement,
+        max_nodes,
+    )
     if replaced is None:
         return None
     new_children[idx] = replaced
@@ -634,8 +800,12 @@ def mutate(individual, grammar, target_dim, max_nodes: int = 30, seed: int = Non
         subexpr = get_subexpr_at_path(expr, path)
         # Multiply by a constant (dimensionless)
         const = TypedExpr.constant(random.uniform(0.1, 5.0), DIMENSIONLESS)
-        new_expr = replace_subexpr_at_path(expr, path,
-                                           TypedExpr.binary('mul', subexpr, const), max_nodes)
+        new_expr = replace_subexpr_at_path(
+            expr,
+            path,
+            TypedExpr.binary("mul", subexpr, const),
+            max_nodes,
+        )
         if new_expr:
             individual[0] = new_expr
             del individual.fitness.values
@@ -644,7 +814,13 @@ def mutate(individual, grammar, target_dim, max_nodes: int = 30, seed: int = Non
     # Standard subtree replacement
     path = random.choice(paths)
     subexpr = get_subexpr_at_path(expr, path)
-    replacements = grammar.generate_dimension(subexpr.dim, max_depth=4, n_samples=10, max_nodes=max_nodes, seed=seed)
+    replacements = grammar.generate_dimension(
+        subexpr.dim,
+        max_depth=4,
+        n_samples=10,
+        max_nodes=max_nodes,
+        seed=seed,
+    )
     if not replacements:
         return (individual,)
     replacement = random.choice(replacements)
@@ -658,16 +834,26 @@ def mutate(individual, grammar, target_dim, max_nodes: int = 30, seed: int = Non
 
 def clone_individual(individual):
     clone = creator.Individual(list(individual))
-    clone.fitness = creator.FitnessMin(individual.fitness.values) if individual.fitness.valid else creator.FitnessMin()
+    clone.fitness = (
+        creator.FitnessMin(individual.fitness.values)
+        if individual.fitness.valid
+        else creator.FitnessMin()
+    )
     return clone
 
 
 def generate_individual(grammar: Grammar, target_dim: DimVec, seed: int = None):
-    exprs = grammar.generate_dimension(target_dim, max_depth=6, n_samples=5, max_nodes=20, seed=seed)
+    exprs = grammar.generate_dimension(
+        target_dim,
+        max_depth=6,
+        n_samples=5,
+        max_nodes=20,
+        seed=seed,
+    )
     if exprs:
         expr = random.choice(exprs)
     else:
-        expr = TypedExpr.constant(0.5, DimVec.parse('1'))
+        expr = TypedExpr.constant(0.5, DimVec.parse("1"))
     return creator.Individual([expr])
 
 
@@ -683,26 +869,47 @@ class GAConfig:
     max_nodes: int = 30
 
 
-def run_ga_search(equation_name: str, grammar: Grammar, target_dim: DimVec,
-                  variables: Dict[str, np.ndarray], target_values: np.ndarray,
-                  config: GAConfig) -> Tuple[TypedExpr, float, Dict]:
+def run_ga_search(
+    equation_name: str,
+    grammar: Grammar,
+    target_dim: DimVec,
+    variables: dict[str, np.ndarray],
+    target_values: np.ndarray,
+    config: GAConfig,
+) -> tuple[TypedExpr, float, dict]:
     """Run GA search for a single equation. Returns (best_expr, best_nmse, info_dict)"""
     import warnings
-    warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     # Set seeds for reproducibility
     random.seed(config.seed)
     np.random.seed(config.seed)
 
     toolbox = base.Toolbox()
-    toolbox.register('individual', lambda: generate_individual(grammar, target_dim, seed=config.seed))
-    toolbox.register('population', tools.initRepeat, list, toolbox.individual)
-    toolbox.register('mate', crossover, max_nodes=config.max_nodes)
-    toolbox.register('mutate', mutate, grammar=grammar, target_dim=target_dim, max_nodes=config.max_nodes, seed=config.seed)
-    toolbox.register('evaluate', evaluate_individual, grammar=grammar,
-                     variables=variables, target_values=target_values)
-    toolbox.register('select', tools.selTournament, tournsize=config.tournsize)
-    toolbox.register('clone', clone_individual)
+    toolbox.register(
+        "individual",
+        lambda: generate_individual(grammar, target_dim, seed=config.seed),
+    )
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("mate", crossover, max_nodes=config.max_nodes)
+    toolbox.register(
+        "mutate",
+        mutate,
+        grammar=grammar,
+        target_dim=target_dim,
+        max_nodes=config.max_nodes,
+        seed=config.seed,
+    )
+    toolbox.register(
+        "evaluate",
+        evaluate_individual,
+        grammar=grammar,
+        variables=variables,
+        target_values=target_values,
+    )
+    toolbox.register("select", tools.selTournament, tournsize=config.tournsize)
+    toolbox.register("clone", clone_individual)
 
     population = toolbox.population(n=config.population_size)
 
@@ -713,21 +920,25 @@ def run_ga_search(equation_name: str, grammar: Grammar, target_dim: DimVec,
                 fit = toolbox.evaluate(ind)
                 ind.fitness.values = fit
             except Exception:
-                ind.fitness.values = (-float('inf'),)
+                ind.fitness.values = (-float("inf"),)
 
     hall_of_fame = tools.HallOfFame(config.hall_of_fame_size)
     hall_of_fame.update(population)
 
     population, logbook = algorithms.eaSimple(
-        population, toolbox,
-        cxpb=config.cxpb, mutpb=config.mutpb,
+        population,
+        toolbox,
+        cxpb=config.cxpb,
+        mutpb=config.mutpb,
         ngen=config.max_generations,
         halloffame=hall_of_fame,
-        verbose=False
+        verbose=False,
     )
 
-    best_individual = hall_of_fame[0] if hall_of_fame else tools.selBest(population, k=1)[0]
-    best_expr = getattr(best_individual, 'optimized_expr', best_individual[0])
+    best_individual = (
+        hall_of_fame[0] if hall_of_fame else tools.selBest(population, k=1)[0]
+    )
+    best_expr = getattr(best_individual, "optimized_expr", best_individual[0])
 
     best_fitness = best_individual.fitness.values
     if len(best_fitness) == 0:
@@ -736,38 +947,69 @@ def run_ga_search(equation_name: str, grammar: Grammar, target_dim: DimVec,
     best_nmse = -float(best_fitness[0])
     complexity = best_expr.count_nodes()
 
-    return best_expr, best_nmse, {
-        'complexity': complexity,
-        'generations': config.max_generations,
-        'equation': equation_name
-    }
+    return (
+        best_expr,
+        best_nmse,
+        {
+            "complexity": complexity,
+            "generations": config.max_generations,
+            "equation": equation_name,
+        },
+    )
 
 
 # =============================================================================
 # HIGH-LEVEL MODEL INTERFACE
 # =============================================================================
 
+
 @dataclass
 class FeynmanSRModel:
     """Main model interface for priml experiments"""
+
     ga_config: GAConfig = field(default_factory=GAConfig)
 
-    def solve_equation(self, eq, variables, target_values) -> Tuple[TypedExpr, float, Dict]:
+    def solve_equation(
+        self,
+        eq,
+        variables,
+        target_values,
+    ) -> tuple[TypedExpr, float, dict]:
         """Solve a single Feynman equation"""
         # Build grammar
         var_dims = {name: DimVec.parse(dim) for name, dim in eq.variables.items()}
         target_dim = DimVec.parse(eq.target_dim)
-        grammar = Grammar(var_dims, target_dim, max_depth=self.ga_config.max_generations // 5 + 5)
+        grammar = Grammar(
+            var_dims,
+            target_dim,
+            max_depth=self.ga_config.max_generations // 5 + 5,
+        )
 
-        return run_ga_search(eq.eq_id, grammar, target_dim, variables, target_values, self.ga_config)
+        return run_ga_search(
+            eq.eq_id,
+            grammar,
+            target_dim,
+            variables,
+            target_values,
+            self.ga_config,
+        )
 
-    def evaluate_on_dataset(self, dataset, n_samples: int = 1000, seed: int = 42) -> Dict:
+    def evaluate_on_dataset(
+        self,
+        dataset,
+        n_samples: int = 1000,
+        seed: int = 42,
+    ) -> dict:
         """Evaluate model on a dataset split. Returns metrics dict."""
         results = []
         exact_recoveries = 0
 
         for eq in dataset:
-            variables, target = generate_data_for_equation(eq, n_samples=n_samples, seed=seed)
+            variables, target = generate_data_for_equation(
+                eq,
+                n_samples=n_samples,
+                seed=seed,
+            )
             best_expr, nmse, info = self.solve_equation(eq, variables, target)
 
             # Check exact recovery (symbolic equality with 1% constant tolerance)
@@ -775,30 +1017,38 @@ class FeynmanSRModel:
             if exact:
                 exact_recoveries += 1
 
-            results.append({
-                'eq_id': eq.eq_id,
-                'formula': eq.formula,
-                'predicted': str(best_expr),
-                'nmse': nmse,
-                'exact': exact,
-                'complexity': info['complexity']
-            })
+            results.append(
+                {
+                    "eq_id": eq.eq_id,
+                    "formula": eq.formula,
+                    "predicted": str(best_expr),
+                    "nmse": nmse,
+                    "exact": exact,
+                    "complexity": info["complexity"],
+                },
+            )
 
         recovery_rate = exact_recoveries / len(dataset) if dataset else 0.0
         return {
-            'recovery_rate': recovery_rate,
-            'exact_recoveries': exact_recoveries,
-            'total': len(dataset),
-            'results': results
+            "recovery_rate": recovery_rate,
+            "exact_recoveries": exact_recoveries,
+            "total": len(dataset),
+            "results": results,
         }
 
-    def _check_exact_recovery(self, expr: TypedExpr, true_formula: str, variables: Dict) -> bool:
+    def _check_exact_recovery(
+        self,
+        expr: TypedExpr,
+        true_formula: str,
+        variables: dict,
+    ) -> bool:
         """Check if expression matches true formula (symbolic + constant tolerance)"""
         try:
             import sympy as sp
+
             # Convert our expression to sympy
             expr_sympy = self._to_sympy(expr)
-            true_sympy = sp.sympify(true_formula.replace('^', '**'))
+            true_sympy = sp.sympify(true_formula.replace("^", "**"))
             # Check structural equality
             if sp.simplify(expr_sympy - true_sympy) == 0:
                 return True
@@ -809,40 +1059,41 @@ class FeynmanSRModel:
 
     def _to_sympy(self, expr: TypedExpr):
         import sympy as sp
-        if expr.op.op_name == 'const':
+
+        if expr.op.op_name == "const":
             return sp.nsimplify(expr.value, [sp.pi, sp.E])
-        elif expr.op.op_name == 'var':
+        if expr.op.op_name == "var":
             return sp.symbols(expr.var_name)
-        elif expr.op.op_name == 'add':
+        if expr.op.op_name == "add":
             return self._to_sympy(expr.children[0]) + self._to_sympy(expr.children[1])
-        elif expr.op.op_name == 'sub':
+        if expr.op.op_name == "sub":
             return self._to_sympy(expr.children[0]) - self._to_sympy(expr.children[1])
-        elif expr.op.op_name == 'mul':
+        if expr.op.op_name == "mul":
             return self._to_sympy(expr.children[0]) * self._to_sympy(expr.children[1])
-        elif expr.op.op_name == 'div':
+        if expr.op.op_name == "div":
             return self._to_sympy(expr.children[0]) / self._to_sympy(expr.children[1])
-        elif expr.op.op_name == 'pow':
+        if expr.op.op_name == "pow":
             return self._to_sympy(expr.children[0]) ** self._to_sympy(expr.children[1])
-        elif expr.op.op_name == 'pow2':
+        if expr.op.op_name == "pow2":
             return self._to_sympy(expr.children[0]) ** 2
-        elif expr.op.op_name == 'pow3':
+        if expr.op.op_name == "pow3":
             return self._to_sympy(expr.children[0]) ** 3
-        elif expr.op.op_name == 'pow_neg1':
+        if expr.op.op_name == "pow_neg1":
             return 1 / self._to_sympy(expr.children[0])
-        elif expr.op.op_name == 'pow_half':
+        if expr.op.op_name == "pow_half":
             return sp.sqrt(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == 'neg':
+        if expr.op.op_name == "neg":
             return -self._to_sympy(expr.children[0])
-        elif expr.op.op_name == 'sqrt':
+        if expr.op.op_name == "sqrt":
             return sp.sqrt(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == 'sin':
+        if expr.op.op_name == "sin":
             return sp.sin(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == 'cos':
+        if expr.op.op_name == "cos":
             return sp.cos(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == 'exp':
+        if expr.op.op_name == "exp":
             return sp.exp(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == 'log':
+        if expr.op.op_name == "log":
             return sp.log(self._to_sympy(expr.children[0]))
-        elif expr.op.op_name == 'abs':
+        if expr.op.op_name == "abs":
             return sp.Abs(self._to_sympy(expr.children[0]))
-        return sp.symbols('x')
+        return sp.symbols("x")
