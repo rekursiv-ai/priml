@@ -3,8 +3,10 @@
 Run this for quick CI verification without full GA execution.
 """
 
-import sys
 from pathlib import Path
+
+import sys
+
 
 sys.path.insert(
     0,
@@ -28,6 +30,7 @@ from priml.baselines.feynman_sr.exp000.model import (
     Grammar,
 )
 from priml.baselines.feynman_sr.exp000.train_step import check_exact_recovery
+
 
 dataset = load_feynman_10()
 for _ in dataset:

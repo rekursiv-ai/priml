@@ -17,6 +17,7 @@ from .data import (
 )
 from .model import FeynmanSRModel, GAConfig
 
+
 # =============================================================================
 # BASE CONFIG CLASSES
 # =============================================================================
@@ -50,7 +51,7 @@ class FeynmanTrainStep:
             self.target_values,
         )
         # Check exact recovery using model's method
-        exact = self.model._check_exact_recovery(
+        exact = self.model._check_exact_recovery(  # noqa: SLF001
             best_expr,
             self.equation.formula,
         )

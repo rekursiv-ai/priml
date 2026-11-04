@@ -1,7 +1,9 @@
 """Test script for exp000 baseline - verifies bit-for-bit reproducibility."""
 
-import sys
 from pathlib import Path
+
+import sys
+
 
 sys.path.insert(
     0,

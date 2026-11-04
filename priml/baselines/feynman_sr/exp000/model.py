@@ -5,23 +5,29 @@ exp000: Baseline Genetic Algorithm with dimensional constraints.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, ClassVar
+
 import random
 import re
 import warnings
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import ClassVar
+
+from deap import algorithms, base, creator, tools
+from scipy.optimize import least_squares
 
 import numpy as np
 import sympy as sp
-from deap import algorithms, base, creator, tools
-from scipy.optimize import least_squares
 
 from priml.baselines.feynman_sr.exp000.data import (
     FeynmanDataset,
     FeynmanEquation,
     generate_data_for_equation,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 # =============================================================================
 # DIMENSIONAL GRAMMAR (from feynman_sr/grammar.py)
@@ -982,8 +988,8 @@ def crossover(
         return individual1, individual2
 
     for _ in range(10):
-        path1 = random.choice(paths1)
-        path2 = random.choice(paths2)
+        path1 = random.choice(paths1)  # noqa: S311
+        path2 = random.choice(paths2)  # noqa: S311
         sub1 = get_subexpr_at_path(expr1, path1)
         sub2 = get_subexpr_at_path(expr2, path2)
         if sub1.dim == sub2.dim:
@@ -1024,7 +1030,7 @@ def mutate(
     rng = np.random.default_rng(seed)
     # With 20% probability, insert a constant instead of replacing subtree
     if rng.random() < 0.2:
-        path = random.choice(paths)
+        path = random.choice(paths)  # noqa: S311
         subexpr = get_subexpr_at_path(expr, path)
         # Multiply by a constant (dimensionless)
         const = TypedExpr.constant(rng.uniform(0.1, 5.0), DIMENSIONLESS)
@@ -1042,7 +1048,7 @@ def mutate(
                 return (individual,)
 
     # Standard subtree replacement
-    path = random.choice(paths)
+    path = random.choice(paths)  # noqa: S311
     subexpr = get_subexpr_at_path(expr, path)
     replacements = grammar.generate_dimension(
         subexpr.dim,
@@ -1052,7 +1058,7 @@ def mutate(
     )
     if not replacements:
         return (individual,)
-    replacement = random.choice(replacements)
+    replacement = random.choice(replacements)  # noqa: S311
     new_expr = replace_subexpr_at_path(expr, path, replacement, max_nodes)
     if new_expr is None:
         return (individual,)
@@ -1100,7 +1106,7 @@ def generate_individual(
         n_samples=5,
         seed=seed,
     )
-    expr = random.choice(exprs) if exprs else TypedExpr.constant(0.5, DimVec.parse("1"))
+    expr = random.choice(exprs) if exprs else TypedExpr.constant(0.5, DimVec.parse("1"))  # noqa: S311
     return creator.Individual([expr])
 
 
@@ -1145,7 +1151,7 @@ def run_ga_search(
 
     # Set seeds for reproducibility
     random.seed(config.seed)
-    np.random.seed(config.seed)
+    np.random.seed(config.seed)  # noqa: NPY002
 
     toolbox = base.Toolbox()
     toolbox.register(
