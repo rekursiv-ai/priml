@@ -190,7 +190,7 @@ class ImageFeatures:
         suffix_mask = (
             _finish(
                 _bin_mean(
-                    window.suffix.astype(np.float32),
+                    window.suffix,
                     np.ones_like(window.valid),
                     cfg.downsample,
                     bins,
@@ -208,7 +208,7 @@ class ImageFeatures:
         row_mask = (
             _finish(
                 _bin_mean(
-                    window.valid.astype(np.float32),
+                    window.valid,
                     np.ones_like(window.valid),
                     cfg.downsample,
                     bins,
@@ -223,7 +223,7 @@ class ImageFeatures:
         surface = _finish(_bin_mean(raw["geo"], window.suffix, cfg.downsample, bins))
         gamma = _bin_mean(raw["gamma"], window.valid, cfg.downsample, bins)
         nan_rate = _bin_mean(
-            (~np.isfinite(raw["gamma"])).astype(np.float32),
+            ~np.isfinite(raw["gamma"]),
             window.valid,
             cfg.downsample,
             bins,
@@ -245,7 +245,7 @@ class ImageFeatures:
             candidate_depth[supported],
             well.reference_depth,
             well.reference_gamma,
-        ).astype(np.float32)
+        )
         planes = self._planes(
             window,
             gamma=gamma,
@@ -256,19 +256,16 @@ class ImageFeatures:
         )
         geo_depth = surface - z_relative
         geo_step = np.zeros(bins, dtype=np.float32)
-        active = np.flatnonzero(suffix_mask & np.isfinite(surface))
+        active = np.flatnonzero(suffix_mask)
         if len(active) >= 2:
-            geo_step[active[1:]] = np.diff(surface[active]) / (
-                np.maximum(np.diff(active), 1).astype(np.float32)
-                * np.float32(cfg.downsample)
-            )
-        geo_difference = (
-            geo_step - z_step - cfg.surface_step_stats[0]
-        ) / cfg.surface_step_stats[1]
+            geo_step[active[1:]] = np.diff(surface[active]) / np.float32(cfg.downsample)
+        geo_difference = _finish(
+            (geo_step - z_step - cfg.surface_step_stats[0]) / cfg.surface_step_stats[1],
+        )
         geo_difference[~suffix_mask] = 0
         planes.update(
             geo_tvt_diff=np.broadcast_to(
-                _finish(geo_difference)[:, None],
+                geo_difference[:, None],
                 (bins, len(axis)),
             ),
             geo_tvt_rel=np.broadcast_to(
@@ -322,9 +319,10 @@ class ImageFeatures:
                 ("pf_tvt", "pf_tvt_rel_pred"),
                 ("pf_tvt_ffbsi", "pf_tvt_rel_pred_ffbsi"),
             ):
-                values = (
-                    (particle[key] - cfg.target_stats[0]) / cfg.target_stats[1]
-                ).astype(np.float32, copy=False)
+                values = cast(
+                    "NDArray[np.float32]",
+                    (particle[key] - cfg.target_stats[0]) / cfg.target_stats[1],
+                )
                 valid = (
                     particle[
                         "pf_prob_ffbsi" if name.endswith("ffbsi") else "pf_prob"
@@ -351,14 +349,14 @@ class ImageFeatures:
             delta = axis.astype(np.float64)[None, :] - relative[:, None]
             masses = np.exp(-0.5 * np.square(delta / cfg.alignment_sigma))
             masses /= masses.sum(axis=1, keepdims=True)
-            probabilities[target_mask] = masses.astype(np.float32)
-        penalty = np.square(
-            ((reference[None, :] - gamma[:, None]) / cfg.gamma_stats[1]).astype(
-                np.float32,
+            probabilities[target_mask] = masses
+        penalty = _finish(
+            np.minimum(
+                np.square((reference[None, :] - gamma[:, None]) / cfg.gamma_stats[1]),
+                np.float32(cfg.gamma_penalty_clip),
             ),
         )
-        penalty = np.minimum(penalty, np.float32(cfg.gamma_penalty_clip))
-        valid_gamma = np.isfinite(gamma) & (nan_rate < 1)
+        valid_gamma = np.isfinite(gamma)
         penalty[~valid_gamma] = 0
         penalty[valid_gamma[:, None] & ~np.isfinite(reference)[None, :]] = np.float32(
             cfg.gamma_penalty_clip,
@@ -384,7 +382,7 @@ class ImageFeatures:
                 "row_mask": row_mask,
                 "suffix_mask": suffix_mask,
             },
-            auxiliary={"GR_penalty_error": _finish(penalty)},
+            auxiliary={"GR_penalty_error": penalty},
             metadata=metadata,
         )
 
@@ -463,10 +461,10 @@ class ImageFeatures:
         selected = index[finite]
         counts = np.bincount(selected, minlength=bins)
         sums = np.bincount(selected, weights=values, minlength=bins)
-        square_sums = np.bincount(selected, weights=values * values, minlength=bins)
+        square_sums = np.bincount(selected, weights=values * values)
         mean = np.zeros(bins, dtype=np.float64)
         mean_square = np.zeros_like(mean)
-        active = counts > 0
+        active = np.flatnonzero(counts)
         mean[active], mean_square[active] = (
             sums[active] / counts[active],
             square_sums[active] / counts[active],
@@ -474,7 +472,7 @@ class ImageFeatures:
         deviation = np.full(bins, np.nan, dtype=np.float32)
         deviation[active] = np.sqrt(
             np.maximum(mean_square[active] - mean[active] * mean[active], 0),
-        ).astype(np.float32)
+        )
         unique, first, count = np.unique(
             selected,
             return_index=True,
@@ -491,11 +489,9 @@ class ImageFeatures:
         eligible = (counts >= 2) & (np.abs(denominator) > 1e-12)
         slope = np.full(bins, np.nan, dtype=np.float32)
         slope[eligible] = (
-            (counts[eligible] * sxy[eligible] - sx[eligible] * sums[eligible])
-            / denominator[eligible]
-        ).astype(np.float32)
-        vertical_step = np.full_like(window.raw["z"], np.nan)
-        vertical_step[1:] = np.diff(window.raw["z"])
+            counts[eligible] * sxy[eligible] - sx[eligible] * sums[eligible]
+        ) / denominator[eligible]
+        vertical_step = np.diff(window.raw["z"], prepend=np.float32(np.nan))
         scalars = {
             "gr": _finish((gamma - cfg.gamma_stats[0]) / cfg.gamma_stats[1]),
             "gr_isnan_rate": nan_rate,
@@ -551,15 +547,17 @@ class ImageFeatures:
             shape,
         )
         planes["tw_tvt_rel"] = np.broadcast_to(
-            (axis / cfg.depth_axis_scale).astype(np.float32, copy=False)[None, :],
+            cast("NDArray[np.float32]", axis / cfg.depth_axis_scale)[None, :],
             shape,
         )
-        absolute_gamma = np.abs(
-            (gamma[:, None] - reference[None, :]) / np.float32(cfg.gamma_stats[1]),
+        absolute_gamma = _finish(
+            np.abs(
+                (gamma[:, None] - reference[None, :]) / np.float32(cfg.gamma_stats[1]),
+            ),
         )
         absolute_gamma[nan_rate >= 1] = 0
         absolute_gamma[:, ~np.isfinite(reference)] = 0
-        planes["gr_abs_diff"] = _finish(absolute_gamma)
+        planes["gr_abs_diff"] = absolute_gamma
         planes["tw_seen_tvt_abs_diff"] = _finish(
             np.minimum(
                 np.abs(axis[None, :] - _finish(seen)[:, None]),
@@ -751,7 +749,7 @@ def _finish(values: NDArray[np.generic]) -> NDArray[np.float32]:
 
 
 def _bin_mean(
-    values: NDArray[np.float32],
+    values: NDArray[np.float32] | NDArray[np.bool_],
     valid: NDArray[np.bool_],
     downsample: int,
     bins: int,
@@ -762,7 +760,7 @@ def _bin_mean(
     sums = np.bincount(rows, weights=values[selected], minlength=bins)
     result = np.full(bins, np.nan, dtype=np.float32)
     active = counts > 0
-    result[active] = (sums[active] / counts[active]).astype(np.float32)
+    result[active] = sums[active] / counts[active]
     return result
 
 

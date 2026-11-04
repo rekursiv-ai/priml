@@ -148,28 +148,58 @@ def test_default_filter_is_pure() -> None:
 
 def test_disabled_instance_has_consistent_attributes(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """T-027: a disabled instance must not leave attributes unset."""
     monkeypatch.setattr(
         "priml.train.quantization._check_float8_available",
         lambda: (False, "forced-disabled"),
     )
-    quant = Float8ModelQuantization.Config().make()
+    config = Float8ModelQuantization.Config()
+    quant = config.make()
 
+    assert quant.config == config.finalized()
     assert quant.enabled is False
-    # These must exist even on the disabled path (no AttributeError on access).
-    assert hasattr(quant, "converted_count")
-    assert hasattr(quant, "module_filter")
+    assert quant.converted_count == 0
+    assert quant.module_filter is None
+    assert caplog.records[-1].getMessage() == "Float8 disabled: forced-disabled"
     # And a disabled strategy is an identity transform.
     model = nn.Linear(16, 16)
     assert quant(model) is model
 
 
+@pytest.mark.parametrize("recipe", ["tensorwise", "rowwise", "rowwise_gw_hp"])
+def test_enabled_quantization_preserves_recipe_and_initial_state(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    recipe: str,
+) -> None:
+    monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
+    caplog.set_level(logging.INFO, logger=quantization.__name__)
+    config = Float8ModelQuantization.Config(recipe=recipe)
+    strategy = config.make()
+    recipes = {
+        "tensorwise": quantization.Float8LinearRecipeName.TENSORWISE,
+        "rowwise": quantization.Float8LinearRecipeName.ROWWISE,
+        "rowwise_gw_hp": quantization.Float8LinearRecipeName.ROWWISE_WITH_GW_HP,
+    }
+    expected = quantization.Float8LinearConfig.from_recipe_name(recipes[recipe])
+    assert strategy.config == config.finalized()
+    assert strategy.enabled is True
+    assert strategy.converted_count == 0
+    assert strategy.float8_config == expected
+    assert caplog.records[-1].getMessage() == (
+        f"Float8Linear enabled: recipe={recipe}, fsdp_all_gather=False"
+    )
+
+
 def test_fsdp_all_gather_uses_dataclass_replace(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """T-028: enabling FSDP all-gather must produce a valid Float8 config."""
     monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
+    caplog.set_level(logging.INFO, logger=quantization.__name__)
 
     quant = Float8ModelQuantization.Config(
         recipe="tensorwise",
@@ -178,6 +208,9 @@ def test_fsdp_all_gather_uses_dataclass_replace(
 
     assert dataclasses.is_dataclass(quant.float8_config)
     assert quant.float8_config.enable_fsdp_float8_all_gather is True
+    assert caplog.records[-1].getMessage() == (
+        "Float8Linear enabled: recipe=tensorwise, fsdp_all_gather=True"
+    )
 
 
 def test_unknown_recipe_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,7 +223,10 @@ def test_fsdp_all_gather_requires_tensorwise_recipe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
-    with pytest.raises(ValueError, match="only works with recipe='tensorwise'"):
+    with pytest.raises(
+        ValueError,
+        match=r"^enable_fsdp_float8_all_gather only works with recipe='tensorwise'$",
+    ):
         Float8ModelQuantization.Config(
             recipe="rowwise",
             enable_fsdp_float8_all_gather=True,
