@@ -20,6 +20,11 @@ All notable priml changes are documented here. This project follows
   `name_that_llm.testing.frame_for` is `code_frame`; and
   `wellbore_geology.model`'s `format_for` is `format_backbone`.
 
+### Removed
+
+- `einops`, `einshape`, and `pygame-ce` from the dependencies, and
+  `hf-transfer` from the `hub` extra. priml imports none of them.
+
 ## 0.1.8 - 2026-10-26
 
 ### Changed
