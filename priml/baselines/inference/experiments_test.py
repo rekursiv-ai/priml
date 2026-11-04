@@ -29,7 +29,11 @@ class TinyTransformer(nn.Module):
     """Tiny transformer for CPU testing."""
 
     def __init__(
-        self, vocab: int = 1000, dim: int = 128, n_layers: int = 2, n_heads: int = 4
+        self,
+        vocab: int = 1000,
+        dim: int = 128,
+        n_layers: int = 2,
+        n_heads: int = 4,
     ):
         super().__init__()
         self.vocab = vocab
@@ -39,7 +43,7 @@ class TinyTransformer(nn.Module):
             [
                 nn.TransformerEncoderLayer(dim, n_heads, dim * 4, batch_first=True)
                 for _ in range(n_layers)
-            ]
+            ],
         )
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, vocab, bias=False)
@@ -85,7 +89,10 @@ class TestFP4Quantizer:
 
         qweight, scale = FP4Quantizer.quantize_e2m1(weight, block_size=1)
         dequant = FP4Quantizer.dequantize_e2m1(
-            qweight, scale, block_size=1, orig_shape=weight.shape
+            qweight,
+            scale,
+            block_size=1,
+            orig_shape=weight.shape,
         )
 
         # Should be close (quantization error expected)
@@ -112,7 +119,10 @@ class TestFP4Quantizer:
 
         qweight, scale = FP4Quantizer.quantize_e2m1(weight, block_size=16)
         dequant = FP4Quantizer.dequantize_e2m1(
-            qweight, scale, block_size=16, orig_shape=weight.shape
+            qweight,
+            scale,
+            block_size=16,
+            orig_shape=weight.shape,
         )
 
         assert dequant.shape == weight.shape
@@ -221,7 +231,7 @@ class TestTokenTreeVerifier:
             ) -> tuple[torch.Tensor, dict]:
                 # Simplified: just return drafter tokens
                 return drafter_output.draft_tokens, {
-                    "accepted": [drafter_output.draft_tokens.shape[1]]
+                    "accepted": [drafter_output.draft_tokens.shape[1]],
                 }
 
         verifier = DummyVerifier(target, kv_cache, acceptance_threshold=0.0)

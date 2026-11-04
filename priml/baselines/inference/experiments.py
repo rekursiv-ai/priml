@@ -51,15 +51,24 @@ class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
         description="Token tree depth (EAGLE). 3=~7 nodes, 4=~15, 5=~31 (branching=2)",
     )
     tree_branching: int = field(
-        default=2, ge=2, le=4, description="Branching factor per tree node"
+        default=2,
+        ge=2,
+        le=4,
+        description="Branching factor per tree node",
     )
 
     # Acceptance criteria
     acceptance_threshold: float = field(
-        default=0.9, ge=0.5, le=1.0, description="Min target prob to accept draft token"
+        default=0.9,
+        ge=0.5,
+        le=1.0,
+        description="Min target prob to accept draft token",
     )
     max_spec_tokens: int = field(
-        default=8, ge=1, le=16, description="Max speculative tokens per step"
+        default=8,
+        ge=1,
+        le=16,
+        description="Max speculative tokens per step",
     )
 
     # Training/calibration (for Medusa/EAGLE heads)
@@ -88,10 +97,12 @@ class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
 
     # FP4-specific: does quantization hurt acceptance?
     quantize_drafter: bool = field(
-        default=True, description="Also quantize drafter to FP4 (vs FP32 drafter)"
+        default=True,
+        description="Also quantize drafter to FP4 (vs FP32 drafter)",
     )
     drafter_fp4_format: Literal["e2m1", "nvfp4_block16"] = field(
-        default="e2m1", description="FP4 format for drafter weights"
+        default="e2m1",
+        description="FP4 format for drafter weights",
     )
 
     # Workload
@@ -99,15 +110,18 @@ class SpeculativeFP4Config(Fig["SpeculativeFP4Config"]):
     input_len: int = field(default=2048, ge=128, le=8192)
     output_len: int = field(default=256, ge=32, le=2048)
     prompt_type: Literal["chat", "code", "summary", "long_context"] = field(
-        default="chat", description="Prompt type affects speculative effectiveness"
+        default="chat",
+        description="Prompt type affects speculative effectiveness",
     )
 
     # Model config (for drafter sizing)
     target_model: Literal["llama-3.2-1b", "llama-3.2-3b", "llama-3.1-8b"] = field(
-        default="llama-3.2-1b", description="Target model for speculative decoding"
+        default="llama-3.2-1b",
+        description="Target model for speculative decoding",
     )
     drafter_model: str | None = field(
-        default=None, description="Drafter model path (for tiny_llama type)"
+        default=None,
+        description="Drafter model path (for tiny_llama type)",
     )
 
     # Reproducibility
