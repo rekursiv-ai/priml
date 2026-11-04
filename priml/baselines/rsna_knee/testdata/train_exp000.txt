@@ -1451,7 +1451,7 @@ ColdRun.Config(
         │   │   │   │   │   ),
         │   │   │   │   │   drop_path=0.1,
         │   │   │   │   │   drop_path_schedule=priml.baselines.rsna_knee.model.tiny_drop_path,
-        │   │   │   │   │   init_weight=functools.partial(torch.nn.init.trunc_normal_, std=0.02),
+        │   │   │   │   │   init_weight=functools.partial(priml.model.init.fill_truncated_normal, std=0.02),
         │   │   │   │   │   init_bias=torch.nn.init.zeros_
         │   │   │   │   ),
         │   │   │   │   base_dir='/opt/scratch',
@@ -1509,7 +1509,7 @@ ColdRun.Config(
         │   │   │   │       linear_fn=<built-in function linear>,
         │   │   │   │       shard=None
         │   │   │   │   ),
-        │   │   │   │   init_weight=functools.partial(torch.nn.init.trunc_normal_, std=0.02),
+        │   │   │   │   init_weight=functools.partial(priml.model.init.fill_truncated_normal, std=0.02),
         │   │   │   │   init_bias=torch.nn.init.zeros_
         │   │   │   ),
         │   │   │   chunk_size=inf

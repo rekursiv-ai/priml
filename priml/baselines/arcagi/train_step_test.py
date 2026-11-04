@@ -522,7 +522,7 @@ def test_owned_record_ignores_constructor_sampler_changes(
             torch.rand(17)
             return tensor.uniform_(-0.1, 0.1)
 
-    monkeypatch.setattr(nn.init, "_no_grad_trunc_normal_", different_sampler)
+    monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
     assert not mismatches(expected, run_port(recipe))
 
 
@@ -613,7 +613,7 @@ def test_the_original_implementations_trajectory_replays_bit_for_bit(
             return tensor.uniform_(-0.1, 0.1)
 
     if alter_constructor:
-        monkeypatch.setattr(nn.init, "_no_grad_trunc_normal_", different_sampler)
+        monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
         subject = PortSubject("exp000")

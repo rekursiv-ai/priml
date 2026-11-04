@@ -17,7 +17,7 @@ from priml.model.grid_embedding import (
     GridEmbedding,
     PredictionFeedback,
 )
-from priml.model.init import scaled_normal
+from priml.model.init import fill_truncated_normal, scaled_normal
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -46,7 +46,7 @@ def test_scaled_normal_matches_truncated_normal_at_inverse_sqrt_width() -> None:
     expected = torch.empty(2, 3)
     actual = torch.empty_like(expected)
     torch.manual_seed(0)
-    torch.nn.init.trunc_normal_(expected, std=1.0 / 3**0.5)
+    fill_truncated_normal(expected, std=1.0 / 3**0.5)
     torch.manual_seed(0)
     scaled_normal(actual)
     assert torch.equal(actual, expected)

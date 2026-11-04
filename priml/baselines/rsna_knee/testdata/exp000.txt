@@ -775,7 +775,7 @@ PublicRecipe.Config(
         │   │   │       linear_fn=<built-in function linear>,
         │   │   │       shard=None
         │   │   │   ),
-        │   │   │   init_weight=functools.partial(torch.nn.init.trunc_normal_, std=0.02),
+        │   │   │   init_weight=functools.partial(priml.model.init.fill_truncated_normal, std=0.02),
         │   │   │   init_bias=torch.nn.init.zeros_
         │   │   ),
         │   │   chunk_size=16
@@ -1288,7 +1288,7 @@ PublicRecipe.Config(
         │   │   │       linear_fn=<built-in function linear>,
         │   │   │       shard=None
         │   │   │   ),
-        │   │   │   init_weight=functools.partial(torch.nn.init.trunc_normal_, std=0.02),
+        │   │   │   init_weight=functools.partial(priml.model.init.fill_truncated_normal, std=0.02),
         │   │   │   init_bias=torch.nn.init.zeros_
         │   │   ),
         │   │   chunk_size=inf

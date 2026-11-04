@@ -30,6 +30,7 @@ from priml.model.attention.rope import (
     rotate_conjugate,
     rotation_cost,
 )
+from priml.model.init import fill_truncated_normal
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden
@@ -1349,7 +1350,7 @@ def test_rope_mixed_reset_parameters_scales_every_active_axis() -> None:
     active = [base for base in mixed._base_inv_freqs if base.numel()]
     torch.manual_seed(194)
     expected_directions = torch.nn.functional.normalize(
-        torch.nn.init.trunc_normal_(torch.empty(len(active), heads, 1), std=1.0),
+        fill_truncated_normal(torch.empty(len(active), heads, 1), std=1.0),
         dim=0,
     )
     torch.manual_seed(194)

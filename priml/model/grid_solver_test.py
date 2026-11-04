@@ -39,7 +39,12 @@ from priml.model.grid_solver import (
     _latent_init,
     lattice_positions,
 )
-from priml.model.init import kaiming_uniform, truncated_normal, unit_normal
+from priml.model.init import (
+    fill_truncated_normal,
+    kaiming_uniform,
+    truncated_normal,
+    unit_normal,
+)
 from priml.model.linear import Linear
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
@@ -1468,7 +1473,7 @@ def test_two_latent_refine_forwards_rotary_factors_to_every_mix() -> None:
 def test_unit_normal_matches_torch_truncated_normal() -> None:
     expected = torch.empty(2, 3, 4)
     torch.manual_seed(0)
-    torch.nn.init.trunc_normal_(expected, std=1.0)
+    fill_truncated_normal(expected, std=1.0)
     actual = torch.empty_like(expected)
     torch.manual_seed(0)
     unit_normal(actual)
