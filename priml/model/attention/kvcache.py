@@ -42,8 +42,8 @@ class KVCache:
     __slots__ = ("k", "length", "seen", "v")
 
     def __init__(self, k: Tensor, v: Tensor, length: int | None = None) -> None:
-        self.k = k
-        self.v = v
+        self.k: Tensor = k
+        self.v: Tensor = v
         self.length = length if length is not None else k.shape[-2]
         # Total tokens ever written. Unlike ``length`` (capped at
         # ``max_seq`` by FIFO eviction) ``seen`` grows monotonically, so

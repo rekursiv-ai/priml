@@ -474,7 +474,7 @@ def test_compact_bitmap_packs_active_row_indices(dtype: torch.dtype) -> None:
     assert cumsum.call_count == 1
     cumsum_args = cumsum.call_args
     assert cumsum_args is not None
-    flags = cumsum_args.args[0]
+    flags = cast(object, cumsum_args.args[0])
     assert isinstance(flags, Tensor)
     assert torch.equal(flags, bitmap != 0)
     assert cumsum_args.kwargs == {"dim": 0}
@@ -510,7 +510,7 @@ def test_sparse_cpu_reference_receives_int64_indices() -> None:
     assert reference.call_count == 1
     call_args = reference.call_args
     assert call_args is not None
-    rows = call_args.args[3]
+    rows = cast(object, call_args.args[3])
     assert isinstance(rows, Tensor)
     assert rows.dtype == torch.int64
     assert rows.tolist() == [1]
@@ -627,12 +627,12 @@ def test_sparse_cuda_launcher_passes_all_buffers_and_fixed_grid() -> None:
     index = torch.zeros(3, dtype=torch.int32)
     count = torch.zeros((), dtype=torch.int32)
     scalars = {name: torch.zeros(()) for name in ("step", "lr", "beta2", "eps")}
-    inactive_kernel = MagicMock()
-    sparse_kernel = MagicMock()
-    inactive_launch: MagicMock = MagicMock()
-    sparse_launch: MagicMock = MagicMock()
-    inactive_kernel.__getitem__.return_value = inactive_launch
-    sparse_kernel.__getitem__.return_value = sparse_launch
+    inactive_launch = MagicMock()
+    sparse_launch = MagicMock()
+    inactive_grid = MagicMock(return_value=inactive_launch)
+    sparse_grid = MagicMock(return_value=sparse_launch)
+    inactive_kernel = MagicMock(__getitem__=inactive_grid)
+    sparse_kernel = MagicMock(__getitem__=sparse_grid)
     with (
         patch.object(
             optimizers,
@@ -659,14 +659,14 @@ def test_sparse_cuda_launcher_passes_all_buffers_and_fixed_grid() -> None:
         )
     assert compiled_inactive.call_count == 1
     assert compiled_sparse.call_count == 1
-    inactive_kernel.__getitem__.assert_called_once_with((1,))
+    inactive_grid.assert_called_once_with((1,))
     inactive_launch.assert_called_once_with(
         buffers=(moment, bitmap, scalars["beta2"]),
         n_rows=3,
         block=optimizers.INACTIVE_BLOCK,
         num_warps=optimizers.SPARSE_WARPS,
     )
-    sparse_kernel.__getitem__.assert_called_once_with((8192,))
+    sparse_grid.assert_called_once_with((8192,))
     sparse_launch.assert_called_once_with(
         buffers=(
             parameter,
@@ -725,7 +725,8 @@ def test_sparse_rmsprop_requires_fp32_moment_per_row(
 @pytest.mark.parametrize(("rows", "grid"), [(1024, 1), (1025, 2)])
 def test_sparse_cuda_inactive_grid_covers_row_boundaries(rows: int, grid: int) -> None:
     parameter = torch.ones(rows, 2)
-    inactive_kernel = MagicMock()
+    inactive_grid = MagicMock()
+    inactive_kernel = MagicMock(__getitem__=inactive_grid)
     sparse_kernel = MagicMock()
     with (
         patch.object(
@@ -748,7 +749,7 @@ def test_sparse_cuda_inactive_grid_covers_row_boundaries(rows: int, grid: int) -
             torch.zeros((), dtype=torch.int32),
             *(torch.zeros(()) for _ in range(4)),
         )
-    inactive_kernel.__getitem__.assert_called_once_with((grid,))
+    inactive_grid.assert_called_once_with((grid,))
 
 
 @pytest.mark.parametrize(

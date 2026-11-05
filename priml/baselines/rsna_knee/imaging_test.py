@@ -82,7 +82,7 @@ def test_two_agreeing_candidates_average_by_tissue_mass() -> None:
     assert first.affines is not None
     translated = first.affines.copy()
     translated[:, 0, 2] += 10
-    lighter = []
+    lighter: list[tuple[int, NDArray[np.float32]]] = []
     for index, probability in first.probabilities:
         trimmed = probability.copy()
         trimmed[1:4, -2:] = 0
@@ -1304,7 +1304,7 @@ def test_fluid_volume_opens_bright_masks_in_the_lowest_median_sagittal_series() 
     result = FluidMeasure.Config().make()(
         RenderedStudy(pixels=pixels, metadata=metadata, blocks=blocks, removed=0),
     )
-    slice_mm = float(np.float32(np.expm1(np.float32(0.75))))
+    slice_mm = float(np.float32(cast(np.float32, np.expm1(np.float32(0.75)))))
     assert result.status == "ok"
     assert (result.series, result.count, result.slices, result.median) == (
         "9",
@@ -1859,7 +1859,13 @@ def test_anatomy_input_is_normalized_flipped_and_restored_per_orientation(
     expected = expected[:, ::-1] if flip_y else expected
     assert [index for index, _ in result] == [0, 1, 2]
     assert all(
-        torch.equal(inputs, torch.from_numpy(expected[index].copy())[None, None])
+        torch.equal(
+            inputs,
+            torch.from_numpy(cast("NDArray[np.float32]", expected[index]).copy())[
+                None,
+                None,
+            ],
+        )
         for index, inputs in enumerate(prediction.inputs)
     )
     restored = np.zeros((4, 16, 32), dtype=np.float32)
@@ -2025,7 +2031,14 @@ def test_resize_keeps_seventh_weights_in_float64_until_one_rounding() -> None:
 def test_resize_subtracts_pixels_in_float64_before_one_rounding() -> None:
     # 1 + 2**-23 and 2**-24 - 1 average to 3 * 2**-25, but their float32
     # difference rounds to -2. Columns 4 -> 2 and rows 2 -> 3 take midpoints.
-    high, low = 1 + 2**-23, 2**-24 - 1
+    assert (
+        np.array([1 + 2**-23, 2**-24 - 1], dtype=np.float64).tobytes()
+        == np.array(
+            [1 + 2.0**-23, 2.0**-24 - 1],
+            dtype=np.float64,
+        ).tobytes()
+    )
+    high, low = 1 + 2.0**-23, 2.0**-24 - 1
     image = np.array([[high, low, high, high], [0.0, 0.0, low, low]], dtype=np.float32)
     assert np.array_equal(
         _resize_input(image, size=(3, 2)),

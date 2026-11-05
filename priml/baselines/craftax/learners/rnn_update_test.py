@@ -488,7 +488,7 @@ def _fill_portable(model: ActorCriticRNN) -> None:
             parameter.copy_(
                 portable_uniform(
                     *parameter.shape,
-                    bound=parameter.shape[-1] ** -0.5,
+                    bound=cast(float, parameter.shape[-1] ** -0.5),
                     generator=generator,
                 ),
             )

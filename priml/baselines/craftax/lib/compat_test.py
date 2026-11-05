@@ -129,7 +129,11 @@ def test_the_exact_muon_reproduces_its_golden() -> None:
     }
     generator = torch.Generator().manual_seed(0)
     masters = {
-        name: portable_uniform(*shape, bound=shape[-1] ** -0.5, generator=generator)
+        name: portable_uniform(
+            *shape,
+            bound=cast(float, shape[-1] ** -0.5),
+            generator=generator,
+        )
         for name, shape in shapes.items()
     }
     parameters = {

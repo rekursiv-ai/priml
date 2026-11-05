@@ -39,7 +39,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import field, replace
-from typing import Self, override
+from typing import Self, cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -634,7 +634,7 @@ class _RelativeAttention(nn.Module):
             -1,
             source[None, None].expand(relative_weights.shape),
         )
-        weights = (weights + relative_weights) / self.channels_head**0.5
+        weights = (weights + relative_weights) / cast(float, self.channels_head**0.5)
         weights = torch.where(mask, weights, -1e30).softmax(-1)
         attended = (weights @ value.transpose(1, 2)).transpose(1, 2)
         return self.out(attended.flatten(-2))

@@ -118,7 +118,7 @@ class ImageShapeStatistics:
                 self.pixel_densities.append(pixel_density)
 
                 # Track effective resolution (sqrt of pixel density, rounded)
-                effective_res = round((pixel_density) ** 0.5)
+                effective_res = round(cast(float, pixel_density**0.5))
                 self.effective_resolutions.append(effective_res)
 
                 # Track aspect ratio (width / height)
@@ -408,7 +408,7 @@ class CalcResizeDimensions:
         for resolution in self.square_resolutions:
             buckets: list[tuple[int, int]] = []
             for aspect in self.aspects:
-                aspect_sqrt = aspect**0.5
+                aspect_sqrt = cast(float, aspect**0.5)
                 height = round(resolution / aspect_sqrt)
                 width = round(resolution * aspect_sqrt)
                 if height < 1 or width < 1:

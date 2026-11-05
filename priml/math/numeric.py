@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 import math
 
@@ -281,7 +281,7 @@ def log1psquare(x: Tensorable) -> Tensor:
 
     """
     x = convert_to_tensor(x)
-    threshold = torch.finfo(x.dtype).eps ** -0.5
+    threshold = cast(float, torch.finfo(x.dtype).eps ** -0.5)
     is_large = x.abs() > threshold
     return torch.where(
         is_large,

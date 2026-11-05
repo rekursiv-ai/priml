@@ -93,7 +93,7 @@ def test_generated_assets_retain_every_input_and_full_fingerprint(
         _column(output, "mass"),
         [46.041864812, float("nan"), 46.041864812],
     )
-    packed: NDArray[np.uint8] = np.load(output / "raw_fp.npy")
+    packed = cast("NDArray[np.uint8]", np.load(output / "raw_fp.npy"))
     assert packed.shape == (3, (prepare_data.RAW_BITS + 7) // 8)
     bits = np.unpackbits(packed, axis=1)
     np.testing.assert_array_equal(

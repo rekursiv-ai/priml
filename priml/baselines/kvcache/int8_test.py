@@ -108,7 +108,7 @@ def test_update_answers_in_the_incoming_dtype() -> None:
 
 
 def test_float64_encoding_uses_the_rounded_stored_scale() -> None:
-    row = torch.tensor([127.0, 62.5, -62.5, 1.0], dtype=torch.float64) * (1 + 2**-25)
+    row = torch.tensor([127.0, 62.5, -62.5, 1.0], dtype=torch.float64) * (1 + 2.0**-25)
     incoming = row.expand(2, 3, 5, 4)
 
     actual, _ = _cache().update(incoming, incoming)

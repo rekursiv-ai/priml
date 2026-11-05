@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 import inspect
 import math
@@ -149,7 +149,7 @@ def fill_truncated_normal(
       w: The filled tensor.
 
     """
-    sqrt2 = 2.0**0.5
+    sqrt2 = cast(float, 2.0**0.5)
     lower = (1.0 + math.erf(a / std / sqrt2)) / 2.0
     upper = (1.0 + math.erf(b / std / sqrt2)) / 2.0
     with torch.no_grad():
@@ -194,14 +194,19 @@ def truncated_normal(
         if std == 0:
             nn.init.zeros_(w)
             return
-        sqrt2 = 2.0**0.5
+        sqrt2 = cast(float, 2.0**0.5)
         z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
-        inv_sqrt_2pi = 1.0 / (2.0 * math.pi) ** 0.5
+        inv_sqrt_2pi = 1.0 / cast(float, (2.0 * math.pi) ** 0.5)
         pdf_u = inv_sqrt_2pi * math.exp(-0.5 * upper * upper)
         pdf_l = inv_sqrt_2pi * math.exp(-0.5 * lower * lower)
         # Std of N(0,1) truncated to [lower, upper].
         ratio = (pdf_u - pdf_l) / z
-        std /= float((1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5)
+        std /= float(
+            cast(
+                float,
+                (1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5,
+            ),
+        )
     fill_truncated_normal(w, std=std, a=lower * std, b=upper * std)
     _depth_index_scale(w, depth_index)
 
@@ -228,7 +233,7 @@ def fan_in_truncated_normal(
 
     """
     del depth_index
-    std = w.shape[-1] ** -0.5
+    std = cast(float, w.shape[-1] ** -0.5)
     bound = 2.0 / std if absolute_bounds else 2.0
     truncated_normal(
         w,
@@ -273,7 +278,7 @@ def unit_fan_in_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
 
     """
     del depth_index
-    bound = 3**0.5 * w.shape[-1] ** -0.5
+    bound = cast(float, 3**0.5 * w.shape[-1] ** -0.5)
     nn.init.uniform_(w, -bound, bound)
 
 

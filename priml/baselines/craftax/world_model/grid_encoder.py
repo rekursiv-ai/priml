@@ -13,7 +13,7 @@ that memory, normed.
 
 from collections.abc import Mapping
 from functools import partial
-from typing import override
+from typing import cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -256,7 +256,10 @@ def grid_encode(
     memory = _norm(torch.cat([board.flatten(1, 2), aux], dim=1), params["final"], eps)
     keys = memory.unflatten(-1, (heads, -1))
     query = params["query"].unflatten(-1, (heads, -1))
-    weights = torch.einsum("nshd,hd->nhs", keys, query) * keys.shape[-1] ** -0.5
+    weights = torch.einsum("nshd,hd->nhs", keys, query) * cast(
+        float,
+        keys.shape[-1] ** -0.5,
+    )
     pooled = torch.einsum("nhs,nshd->nhd", weights.softmax(-1), keys).flatten(-2)
     pooled = _norm(pooled, params["pooled_norm"], eps)
     return pooled.reshape(*lead, width), memory.reshape(*lead, -1, width)

@@ -16,7 +16,7 @@ and one row's reset leaves the other rows' features bit for bit (G3a, G3b).
 from __future__ import annotations
 
 from functools import cache, partial
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import copy
 import itertools
@@ -676,30 +676,37 @@ def test_after_new_weights_a_rebuilt_engine_reads_every_context_under_them(
     *,
     sliding: bool,
 ) -> None:
-    """The weights change before step 7, and the engine rebuilds.
+    """The weights change before step 5, and the engine rebuilds.
 
-    Then row 0's context is cached (``Refill``: 7 anchored decisions, which
-    re-prefill at step 8) or slides; row 1's is a window begun at step 5, and
+    Then row 0's context is cached (``Refill``: 5 anchored decisions, which
+    re-prefill at step 6) or slides; row 1's is a window begun at step 3, and
     row 2's next step begins one.
     """
-    config = _sliding_config() if sliding else _config(layers=2)
+    config = _config(layers=2)
+    config.history = (
+        Sliding.Config(decisions=3, fallback_rows=2)
+        if sliding
+        else Refill.Config(t_max=12, keep=2)
+    )
+    config.hook_interval = 3
     config.weights = _TwoLayerWeights.Config()
     config.joint = True
     source = config.make()
-    rows, steps, changed = 3, 9, 7
+    rows, steps, changed = 3, 7, 5
     cells, aux, actions = _frames(rows, steps)
     engine = _engine(source, rows=rows)
-    assert engine.ring == (DECISIONS if sliding else T_MAX // 2)
+    assert engine.ring == source.context_decisions
     old = copy.deepcopy(source.model)
     got, decisions, anchored = _drive(
         engine,
         engine,
         obs=decode(cells, aux),
         actions=actions,
-        starts=[{}, {5: False}, {7: False}],
+        starts=[{}, {3: False}, {5: False}],
+        hook=source.hook_interval,
         before={changed: partial(_publish, source.model, engine)},
     )
-    held = DECISIONS if sliding else 7
+    held = min(source.context_decisions, changed)
     assert decisions[:, changed - 1].tolist() == [held, 2, held]
     firsts = torch.arange(steps) - decisions + 1
     windows = [
@@ -1381,7 +1388,11 @@ def _bottom_right_causal(
             .transpose(0, 1)
             for t in (k, v)
         )
-        logits = q[row].transpose(0, 1) @ keys.transpose(-1, -2) * q.shape[-1] ** -0.5
+        logits = (
+            q[row].transpose(0, 1)
+            @ keys.transpose(-1, -2)
+            * cast(float, q.shape[-1] ** -0.5)
+        )
         allowed = torch.arange(used) <= torch.arange(used - queries, used)[:, None]
         weights = logits.masked_fill(~allowed, float("-inf")).softmax(-1)
         out[row] = (weights @ values).transpose(0, 1)

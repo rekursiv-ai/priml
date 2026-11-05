@@ -7,7 +7,7 @@ frame axis in front of the channels for the call and back after.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import math
 import random
@@ -101,8 +101,8 @@ class GetRandomResizedCropBoxFromDimensions:
                 target_area = area * random.uniform(self.scale[0], self.scale[1])  # noqa: S311 -- These draws randomize augmentation, not security-sensitive behavior.
                 aspect_ratio = math.exp(random.uniform(log_ratio[0], log_ratio[1]))  # noqa: S311 -- These draws randomize augmentation, not security-sensitive behavior.
 
-                w = round((target_area * aspect_ratio) ** 0.5)
-                h = round((target_area / aspect_ratio) ** 0.5)
+                w = round(cast(float, (target_area * aspect_ratio) ** 0.5))
+                h = round(cast(float, (target_area / aspect_ratio) ** 0.5))
 
                 if 0 < w <= width and 0 < h <= height:
                     x = random.randint(0, width - w)  # noqa: S311 -- These draws randomize augmentation, not security-sensitive behavior.
@@ -525,7 +525,7 @@ class MixupCutmix:
 
                 # Generate random box (handle both (B,C,H,W) and (B,C,F,H,W))
                 *_, h, w = images.shape
-                cut_ratio = (1.0 - lam) ** 0.5
+                cut_ratio = cast(float, (1.0 - lam) ** 0.5)
                 cut_h = int(h * cut_ratio)
                 cut_w = int(w * cut_ratio)
                 cx = random.randint(0, w)  # noqa: S311 -- These draws randomize augmentation, not security-sensitive behavior.

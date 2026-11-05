@@ -38,9 +38,12 @@ from priml.baselines.wellbore_geology.inference import (
 from priml.baselines.wellbore_geology.model import (
     DepthPosterior,
     SequenceModel,
+    _rename_legacy_head,
     depth_logits,
     finalize_heads,
     mismatch_head,
+    posterior_parameters,
+    posterior_prediction,
 )
 from priml.baselines.wellbore_geology.particles import ParticlePrior, ParticleWell
 from priml.baselines.wellbore_geology.pipeline import (
@@ -75,6 +78,7 @@ from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.train.budget import WallBudget
 from priml.train.epoch_loop import EarlyStopping, first_periodic_and_last
+from priml.train.profiler import PhaseTimer
 
 
 if TYPE_CHECKING:
@@ -392,10 +396,15 @@ def test_repeated_folds_average_each_row_and_look_its_curves_up_again(
 ) -> None:
     _selecting(monkeypatch, None)
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, rows=13, test_wells=0)
     output = tmp_path / "trained"
     output.mkdir()
     family = tiny_family(particle=False)
+    family.training.step.model = SmokeModel.Config()
+    family.training.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
+    features = family.training.dataset.loader.dataset.transform.features
+    features.target_rows = 8
+    features.reference_columns = 8
     family.cv.repeats = 2
     family.dataset_directory = dataset
     trained = train_family(
@@ -404,7 +413,7 @@ def test_repeated_folds_average_each_row_and_look_its_curves_up_again(
         output_directory=output,
     )
     table = read_table(trained.oof)
-    assert len(table.rows.tvt) == 4 * 29
+    assert len(table.rows.tvt) == 4 * (13 - features.prefix_rows)
     lookups = [name for name in table.diagnostics if name.endswith("_lookup_GR")]
     assert lookups
     for name in lookups:
@@ -824,7 +833,22 @@ class SmokeModel(DepthPosterior):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self._build_posterior(config)
+        self.proj_out, raw_axis, axis, mismatch = posterior_parameters(config)
+        self.register_buffer("typewell_tvt_axis_raw", raw_axis, persistent=False)
+        self.typewell_tvt_axis: torch.Tensor
+        self.register_buffer("typewell_tvt_axis", axis, persistent=False)
+        self.unet_gr_rmse_head = mismatch
+        self.register_load_state_dict_pre_hook(_rename_legacy_head)
+
+    @override
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return the real posterior heads applied directly to the input planes."""
+        return posterior_prediction(
+            self.features(x),
+            projection=self.proj_out,
+            depth_axis=self.typewell_tvt_axis,
+            mismatch_head=self.unet_gr_rmse_head,
+        )
 
     @override
     def features(self, x: torch.Tensor) -> torch.Tensor:

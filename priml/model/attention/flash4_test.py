@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from types import ModuleType
-from typing import TYPE_CHECKING, Final, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import functools
 import math
@@ -794,7 +794,7 @@ def _opaque_segment_attention(
     )
     mask = segment_mask(cu_seqlens, rows=1, length=len(q), window=window)[0]
     keys = k.repeat_interleave(q.shape[-2] // k.shape[-2], dim=-2)
-    logit_scale = float(q.shape[-1] ** -0.5) if scale is None else scale
+    logit_scale = float(cast(float, q.shape[-1] ** -0.5)) if scale is None else scale
     scores = torch.einsum("qhd,khd->hqk", q, keys) * logit_scale
     lse = scores.masked_fill(~mask, float("-inf")).logsumexp(-1)
     return out[0].detach(), lse.detach()

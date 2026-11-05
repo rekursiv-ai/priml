@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import math
 
@@ -782,7 +782,7 @@ def test_conv_reset_uses_torch_bias_draw_when_initializer_is_none(
     module.reset_parameters()
     assert module.bias is not None
     fan_in = module.weight.shape[1] * math.prod(module.weight.shape[2:])
-    bound = fan_in**-0.5
+    bound = cast(float, fan_in**-0.5)
 
     assert module.weight.ndim == ndim + 2
     assert torch.all(module.bias >= -bound)

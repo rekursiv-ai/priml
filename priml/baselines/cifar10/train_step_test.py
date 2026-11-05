@@ -213,7 +213,7 @@ def test_an_arbitrary_callable_serves_as_a_schedule() -> None:
     config.schedule = PartialConfig(constant_half)
     step = config.make()
     _ = step.train_step(**tiny_batch())
-    group = step.optimizer.param_groups[0]
+    group = cast(dict[str, float], step.optimizer.param_groups[0])
     assert group["lr"] == pytest.approx(0.5 * group["initial_lr"])
 
 

@@ -43,6 +43,23 @@ else:
     save_file = lazy_import("safetensors.torch", "save_file")
 
 
+class _AutoModelMock:
+    def __init__(self) -> None:
+        self.from_pretrained = MagicMock()
+
+
+class _HubConfigMock:
+    def __init__(self) -> None:
+        self.to_dict = MagicMock()
+
+
+class _HubModelMock:
+    def __init__(self) -> None:
+        self.to = MagicMock()
+        self.state_dict = MagicMock()
+        self.config = _HubConfigMock()
+
+
 @contextmanager
 def _mock_transformers(mock_auto_model: object) -> Generator[MagicMock]:
     """Inject a fake transformers module to avoid the ~3s real import."""
@@ -91,9 +108,9 @@ def test_load_transformers_model_with_class(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test load_transformers_model with string class name."""
-    mock_model = MagicMock()
+    mock_model = _HubModelMock()
     mock_model.to = MagicMock(return_value=mock_model)
-    mock_auto_model = MagicMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
@@ -124,8 +141,8 @@ def test_load_transformers_model_with_class(
 
 def test_load_transformers_model_with_revision():
     """Test load_transformers_model with specific revision."""
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
@@ -143,8 +160,8 @@ def test_load_transformers_model_with_revision():
 
 def test_load_transformers_model_with_trust_remote_code():
     """Test load_transformers_model with trust_remote_code."""
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
@@ -162,8 +179,8 @@ def test_load_transformers_model_with_trust_remote_code():
 
 def test_load_transformers_model_with_device():
     """Test load_transformers_model moves to device."""
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
@@ -180,8 +197,8 @@ def test_load_transformers_model_with_device():
 
 def test_load_transformers_model_extra_kwargs():
     """Test load_transformers_model passes extra kwargs."""
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
@@ -205,7 +222,7 @@ def test_dtype_uses_the_current_transformers_spelling() -> None:
     transformers deprecated ``torch_dtype`` and warns on every call that uses
     it; the declared floor already accepts the new name.
     """
-    mock_auto_model = MagicMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = MagicMock()
 
     with (
@@ -239,7 +256,7 @@ def test_load_transformers_model_no_global_env_mutation() -> None:
         observed["level"] = transformers_logger.level
         return MagicMock()
 
-    mock_auto_model = MagicMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.side_effect = _capture
 
     with (
@@ -260,8 +277,8 @@ def test_load_transformers_model_cache_miss_falls_back_online(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """On cache miss, retries with local_files_only=False (no env toggling)."""
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.side_effect = [
         OSError("cache miss"),
         mock_model,
@@ -293,8 +310,8 @@ def test_load_transformers_model_cache_miss_falls_back_online(
 def test_load_transformers_model_force_redownload_skips_the_cache(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
@@ -411,7 +428,7 @@ def test_load_hf_checkpoint_does_not_treat_config_file_as_directory(
     checkpoint = tmp_path / "checkpoint"
     checkpoint.write_text("not a directory")
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "tiny"}))
-    hf_model = MagicMock()
+    hf_model = _HubModelMock()
     hf_model.config.to_dict.return_value = {"model_type": "remote"}
     hf_model.state_dict.return_value = dict[str, torch.Tensor]()
     load = Mock(return_value=hf_model)
@@ -442,7 +459,7 @@ def test_load_hf_checkpoint_downloads_a_repo_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-directory goes through transformers and lands on CPU, detached."""
-    hf_model = MagicMock()
+    hf_model = _HubModelMock()
     hf_model.config.to_dict.return_value = {"model_type": "tiny"}
     hf_model.state_dict.return_value = {"w": torch.ones(2, requires_grad=True)}
     load = Mock(return_value=hf_model)
@@ -468,7 +485,7 @@ def test_load_hf_checkpoint_downloads_a_repo_id(
 def test_load_hf_checkpoint_rejects_a_non_object_remote_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hf_model = MagicMock()
+    hf_model = _HubModelMock()
     hf_model.config.to_dict.return_value = ["not", "an", "object"]
     monkeypatch.setattr(hub, "load_transformers_model", Mock(return_value=hf_model))
 
@@ -479,7 +496,7 @@ def test_load_hf_checkpoint_rejects_a_non_object_remote_config(
 def test_load_hf_checkpoint_defaults_to_no_remote_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hf_model = MagicMock()
+    hf_model = _HubModelMock()
     hf_model.config.to_dict.return_value = dict[str, object]()
     hf_model.state_dict.return_value = dict[str, torch.Tensor]()
     load = Mock(return_value=hf_model)
@@ -900,9 +917,9 @@ def test_load_torch_hub_distributed_broadcasts_rank_zero_failure() -> None:
 
 
 def test_load_transformers_model_forwards_options_on_forced_download() -> None:
-    mock_model = MagicMock()
+    mock_model = _HubModelMock()
     mock_model.to.return_value = mock_model
-    mock_auto_model = MagicMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with _mock_transformers(mock_auto_model):
@@ -931,8 +948,8 @@ def test_load_transformers_model_forwards_options_on_forced_download() -> None:
 
 
 def test_load_transformers_model_fallback_keeps_caller_options() -> None:
-    mock_model = MagicMock()
-    mock_auto_model = MagicMock()
+    mock_model = _HubModelMock()
+    mock_auto_model = _AutoModelMock()
     mock_auto_model.from_pretrained.side_effect = [OSError("offline miss"), mock_model]
 
     with _mock_transformers(mock_auto_model):

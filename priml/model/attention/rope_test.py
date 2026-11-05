@@ -1222,7 +1222,7 @@ def test_yarn_formulas_pin_frequency_ramp_and_scale() -> None:
 def test_rope_split_and_recommended_base_values() -> None:
     assert _split_dim(14, 3) == [6, 4, 4]
     assert _split_dim(10, 2) == [6, 4]
-    expected = ((1024 - 1) / (2 * math.pi)) ** (64 / (64 - 2))
+    expected = cast(float, ((1024 - 1) / (2 * math.pi)) ** (64 / (64 - 2)))
     base = RoPE.smallest_recommended_base(64, 1024)
     small_base = RoPE.smallest_recommended_base(4, 2)
     assert isinstance(base, float)

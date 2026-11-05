@@ -18,7 +18,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Final, Self, override
+from typing import TYPE_CHECKING, Final, Self, cast, override
 
 import math
 
@@ -1129,7 +1129,7 @@ class _Attention(nn.Module):
         if self.divide:
             scores = scores / math.sqrt(self.channels_head)  # noqa: TID251 -- The reference's correctly rounded root; ``** 0.5`` goes through ``pow``, which need not round the same.
         else:
-            scores = scores * self.channels_head**-0.5
+            scores = scores * cast(float, self.channels_head**-0.5)
         context = torch.matmul(functional.softmax(scores, dim=-1), value)
         context = context.transpose(1, 2).contiguous()
         return self.out(context.reshape(*context.shape[:-2], -1))

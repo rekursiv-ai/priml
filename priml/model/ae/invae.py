@@ -16,7 +16,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Self, override
+from typing import TYPE_CHECKING, Final, Self, cast, override
 
 import re
 
@@ -715,7 +715,7 @@ class _Attention(nn.Module):
         # The reference's products and its scale, a multiply by ``c ** -0.5``:
         # ``scaled_dot_product_attention`` divides and rounds differently.
         scores = torch.bmm(q.reshape(b, c, -1).permute(0, 2, 1), k.reshape(b, c, -1))
-        weights = functional.softmax(scores * (c ** (-0.5)), dim=2)
+        weights = functional.softmax(scores * cast(float, c ** (-0.5)), dim=2)
         attended = torch.bmm(v.reshape(b, c, -1), weights.permute(0, 2, 1))
         return x + self.to_out(attended.reshape(b, c, height, width))
 

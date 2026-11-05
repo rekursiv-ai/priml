@@ -563,7 +563,7 @@ def test_a_tall_matrix_orthogonalizes_over_its_shorter_side() -> None:
     before = params[0].detach().clone()
     NorMuon(params, lr=1.0, momentum=0.0, weight_decay=0.0, compile=False).step()
     update = before - params[0].detach()
-    singular = torch.linalg.svdvals(update) / (16 / 8) ** 0.5
+    singular = torch.linalg.svdvals(update) / cast(float, (16 / 8) ** 0.5)
     assert singular.shape == (8,)
     assert float(singular.min()) > 0.7
     assert float(singular.max()) < 1.4

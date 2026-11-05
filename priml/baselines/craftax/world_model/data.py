@@ -280,26 +280,26 @@ class ReplayStream:
             "rank": self.rank,
             "world": world,
         }
-        validation = config.validation
         self.validation: EvalSpans | StratifiedWindows
-        if isinstance(validation, EvalSpans.Config):
-            self.validation = EvalSpans(
-                validation,
-                indexes=indexes[1],
-                cache=self.eval_cache,
-                **geometry,
-            )
-        else:
-            self.validation = StratifiedWindows(
-                validation,
-                sampler=self.eval_sampler,
-                cache=self.eval_cache,
-                seed=config.sampler_seed,
-                rank=self.rank,
-                windows=config.windows,
-                t_g=config.t_g,
-                s_max=config.s_max,
-            )
+        match config.validation:
+            case EvalSpans.Config() as validation:
+                self.validation = EvalSpans(
+                    validation,
+                    indexes=indexes[1],
+                    cache=self.eval_cache,
+                    **geometry,
+                )
+            case StratifiedWindows.Config() as validation:
+                self.validation = StratifiedWindows(
+                    validation,
+                    sampler=self.eval_sampler,
+                    cache=self.eval_cache,
+                    seed=config.sampler_seed,
+                    rank=self.rank,
+                    windows=config.windows,
+                    t_g=config.t_g,
+                    s_max=config.s_max,
+                )
         # Its own cache: sharing the stream's would evict the episodes the
         # prefetch thread is packing.
         self.train_spans = (

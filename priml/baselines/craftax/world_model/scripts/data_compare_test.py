@@ -1,6 +1,7 @@
 """Check that seeded data_eval reports compare against a control with pooled noise."""
 
 from pathlib import Path
+from typing import cast
 
 import json
 import sys
@@ -38,7 +39,7 @@ def test_compare_pools_seed_noise_and_scores_each_difference() -> None:
         "once": [{"nats": 11.0}],
     }
     rows = data_compare.compare(groups)["nats"]
-    noise = ((2.0 + 0.08) / 2) ** 0.5
+    noise = cast(float, ((2.0 + 0.08) / 2) ** 0.5)
     assert rows["ctrl"]["mean"] == pytest.approx(11.0)
     assert rows["ctrl"]["sd"] == pytest.approx(2**0.5)
     assert rows["arm"]["delta"] == pytest.approx(-2.8)

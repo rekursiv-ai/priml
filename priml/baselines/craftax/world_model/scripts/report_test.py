@@ -112,7 +112,7 @@ def test_summarize_reads_every_step_and_spreads_over_checkpoints(
         7.0,
     ]
     # Variances 4.5 on v0 (4 and 7) and 0.5 on v1 (5 and 6) pool to 2.5.
-    assert sigma["same_windows_pooled_seed_sd"] == pytest.approx(2.5**0.5)
+    assert sigma["same_windows_pooled_seed_sd"] == pytest.approx(cast(float, 2.5**0.5))
     assert sigma["window_set_sd_of_means"] == pytest.approx(0.0)
     board = sigma["common_natural_tiles"]["nll"]["board"]
     # 0.01 bits per canonical byte of a cell's 8 fields.

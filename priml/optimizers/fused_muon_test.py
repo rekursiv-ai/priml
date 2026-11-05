@@ -69,7 +69,7 @@ def test_the_norm_spans_every_tensor_and_returns_fp32() -> None:
     norm = optimizer.norm([torch.tensor([3.0], dtype=torch.bfloat16), torch.ones(4, 5)])
     assert norm.dtype == torch.float32
     assert norm.shape == ()
-    assert float(norm) == pytest.approx(29.0**0.5)
+    assert float(norm) == pytest.approx(cast(float, 29.0**0.5))
     # bf16 would round sqrt(3) to 1.734375; one matrix's norm accumulates in fp32.
     ones = torch.ones(3, dtype=torch.bfloat16)
     assert float(optimizer.norm([ones])) == float(torch.tensor(3.0).sqrt())
@@ -520,7 +520,11 @@ def test_a_tiny_stack_matches_its_golden() -> None:
     }
     generator = torch.Generator().manual_seed(0)
     masters = {
-        name: _portable_uniform(shape, bound=shape[-1] ** -0.5, generator=generator)
+        name: _portable_uniform(
+            shape,
+            bound=cast(float, shape[-1] ** -0.5),
+            generator=generator,
+        )
         for name, shape in shapes.items()
     }
     parameters = {

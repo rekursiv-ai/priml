@@ -43,7 +43,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import math
 
@@ -666,7 +666,7 @@ def run_pin_search_fast(
                 found[win_puzzles] = True
             if level < depth:
                 # Expand survivors whose puzzle is unresolved and within budget.
-                child_count = candidates ** (level + 1)
+                child_count = cast(int, candidates ** (level + 1))
                 expandable = ~found[frontier_puzzle] & (
                     nodes[frontier_puzzle] + child_count <= budget
                 )
@@ -802,7 +802,7 @@ def run_learned_pin_search_fast(
 
             if level == depth:
                 break
-            child_count = candidates ** (level + 1)
+            child_count = cast(int, candidates ** (level + 1))
             expandable = ~accepted[frontier_puzzle] & (
                 nodes[frontier_puzzle] + child_count <= budget
             )

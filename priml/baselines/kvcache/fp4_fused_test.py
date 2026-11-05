@@ -291,8 +291,10 @@ def test_known_nonuniform_logits_weight_the_final_rows(
     keys[:, :-3, :, 0] = 0 if high_tail else 6
     values = torch.zeros_like(keys)
     values[:, -3:] = 1
-    tail = 3 * (math.exp(6 * channels**-0.5) if high_tail else 1)
-    prefix = (length - 3) * (1 if high_tail else math.exp(6 * channels**-0.5))
+    tail = 3 * (math.exp(6 * cast(float, channels**-0.5)) if high_tail else 1)
+    prefix = (length - 3) * (
+        1 if high_tail else math.exp(6 * cast(float, channels**-0.5))
+    )
     expected = torch.full_like(q, tail / (prefix + tail))
 
     actual = Fp4TritonAttention.Config().make()(q, _quantize(keys), _quantize(values))
@@ -325,7 +327,7 @@ def test_kernel_matches_sdpa_over_dequantized_rows(
     key = _dequantized(k, end=k.shape[1], channels=q.shape[-1], dtype=torch.bfloat16)
     value = _dequantized(v, end=v.shape[1], channels=q.shape[-1], dtype=torch.bfloat16)
     logits = q.float().movedim(-3, -2) @ key.float().movedim(-3, -2).transpose(-1, -2)
-    logits *= q.shape[-1] ** -0.5
+    logits *= cast(float, q.shape[-1] ** -0.5)
     if causal:
         query_rows = torch.arange(k.shape[1] - seq, k.shape[1], device=q.device)
         keys = torch.arange(k.shape[1], device=q.device)

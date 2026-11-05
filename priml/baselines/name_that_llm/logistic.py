@@ -205,9 +205,10 @@ class _Objective:
         losses, point_gradient = _multinomial_points(logits, targets=self.targets)
         flattened = weights[:, :-1].ravel(order="K")
         # A BLAS dot product here would round in the host kernel's lane order.
-        norm_squared = (
-            np.square(flattened.astype(np.float64)).sum().astype(flattened.dtype)
-        )
+        norm_squared = cast(
+            np.float64,
+            np.square(flattened.astype(np.float64)).sum(),
+        ).astype(flattened.dtype)
         loss = float(losses.sum() / len(self.features)) + float(
             0.5 * self.penalty * norm_squared,
         )

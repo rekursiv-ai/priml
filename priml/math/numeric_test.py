@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import math
 
 from torch import Tensor
@@ -1386,7 +1388,7 @@ def test_log1mexp_pins_threshold_and_high_precision_values() -> None:
 
 def test_log1psquare_pins_dtype_and_threshold() -> None:
     for dtype in (torch.float32, torch.float64):
-        threshold = torch.finfo(dtype).eps ** -0.5
+        threshold = cast(float, torch.finfo(dtype).eps ** -0.5)
         x = torch.tensor([-2.0, 0.5, threshold, 2 * threshold], dtype=dtype)
         assert log1psquare(x).dtype == dtype
         torch.testing.assert_close(log1psquare(x), torch.log1p(x * x))
@@ -1516,7 +1518,7 @@ def test_softplus_inverse_pins_both_asymptotic_transitions() -> None:
 
 
 def test_sqrt1pm1_pins_stable_formula_and_large_negative_input() -> None:
-    threshold = torch.finfo(torch.float64).eps ** 0.25
+    threshold = cast(float, torch.finfo(torch.float64).eps ** 0.25)
     x = torch.tensor([-0.75, -threshold, threshold / 2, 3.0], dtype=torch.float64)
     expected = x / (torch.sqrt(1 + x) + 1)
     torch.testing.assert_close(sqrt1pm1(x), expected, rtol=1e-14, atol=1e-15)

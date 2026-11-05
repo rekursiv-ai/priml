@@ -38,6 +38,7 @@ from priml.runtime import SingleProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import PinnedDropout, assert_tensor_golden, mismatches
 from priml.train.epoch_loop import EarlyStopping
+from priml.train.profiler import PhaseTimer
 
 
 if TYPE_CHECKING:
@@ -330,9 +331,12 @@ def test_owned_record_ignores_constructor_sampler_changes(
     name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+    recipe = _family_recipe(name)
+    recipe.max_epochs = 1
+    recipe.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(31)
-        expected = capture_training(recipe=_family_recipe(name))
+        expected = capture_training(recipe=recipe)
         torch.manual_seed(31)
 
         def different_sampler(
@@ -346,7 +350,7 @@ def test_owned_record_ignores_constructor_sampler_changes(
                 return tensor.uniform_(-0.1, 0.1)
 
         monkeypatch.setattr(torch.Tensor, "erfinv_", different_sampler)
-        actual = capture_training(recipe=_family_recipe(name))
+        actual = capture_training(recipe=recipe)
     assert not mismatches(expected, actual)
 
 

@@ -265,7 +265,7 @@ class YarnScaling:
             if self.mscale_all_dim == 0:
                 return None
             mscale = _yarn_mscale(self.factor, self.mscale_all_dim)
-            return float(channels_head**-0.5) * mscale * mscale
+            return float(cast(float, channels_head**-0.5)) * mscale * mscale
 
         @classmethod
         def from_hf(cls, config: Mapping[str, object]) -> Self | None:
@@ -859,7 +859,7 @@ class RoPE(nn.Module):
                     "period is independent of it. Use at least 4 channels, "
                     "or choose the base directly.",
                 )
-            bases.append(((m - 1) / (2 * math.pi)) ** (c / (c - 2)))
+            bases.append(cast(float, ((m - 1) / (2 * math.pi)) ** (c / (c - 2))))
         return bases[0] if len(bases) == 1 else tuple(bases)
 
     # Builds the output OUT-OF-PLACE (no ``torch.empty_like`` + strided in-place

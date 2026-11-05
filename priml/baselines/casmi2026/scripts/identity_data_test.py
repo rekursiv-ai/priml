@@ -299,7 +299,10 @@ def test_writer_keeps_every_row_duplicate_and_manifest(
     empty = tmp_path / "empty"
     identity_data.prepare_identity(source, output=empty, version=IDENTITY_RDKIT)
     assert parquet.read_table(empty / "molecules.parquet").num_rows == 0
-    assert np.load(empty / "fingerprints.npy").shape == (0, 2069)
+    assert cast("NDArray[np.uint8]", np.load(empty / "fingerprints.npy")).shape == (
+        0,
+        2069,
+    )
 
 
 if __name__ == "__main__":

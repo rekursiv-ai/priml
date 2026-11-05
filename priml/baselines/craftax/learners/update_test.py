@@ -497,7 +497,8 @@ def _rollout(
     return LearnerRollout(
         observations=torch.randn(agents, rows, observation_size, generator=generator),
         actions=torch.randint(num_actions, (agents, rows), generator=generator).float(),
-        logprobs=torch.randn(agents, rows, generator=generator) - num_actions**0.5,
+        logprobs=torch.randn(agents, rows, generator=generator)
+        - cast(float, num_actions**0.5),
         rewards=torch.randn(agents, rows, generator=generator),
         terminals=(torch.rand(agents, rows, generator=generator) < 0.3).float(),
         values=torch.randn(agents, rows, generator=generator),

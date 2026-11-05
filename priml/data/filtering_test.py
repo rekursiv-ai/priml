@@ -22,6 +22,7 @@ def test_add_appends_and_logs(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.DEBUG, logger="priml.data.filtering"):
         add_filter_reason(sample, "Small", "too_small")
         add_filter_reason(sample, "Blur", "blurry")
+    assert "filter_reasons" in sample
     assert sample["filter_reasons"] == ["Small:too_small", "Blur:blurry"]
     assert "Filter: Blur:blurry" in caplog.text
 
@@ -41,6 +42,7 @@ def test_decode_failure_logs_nothing_and_blocks_later_reasons(
     with caplog.at_level(logging.DEBUG, logger="priml.data.filtering"):
         add_filter_reason(sample, "CropDuringDecodeImage", "decode_failed")
         add_filter_reason(sample, "Other", "late")
+    assert "filter_reasons" in sample
     assert sample["filter_reasons"] == ["CropDuringDecodeImage:decode_failed"]
     assert caplog.text == ""
 

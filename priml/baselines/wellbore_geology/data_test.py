@@ -382,7 +382,7 @@ def test_rotation_moves_probability_rows_and_their_paths_by_the_fitted_shift() -
     )
     rotated = item.arrays["unet_static"]
     np.testing.assert_array_equal(
-        rotated[0],
+        cast("NDArray[np.float32]", rotated[0]),
         probability_image(eye[[1, 1, 3, 3]], columns=5),
         strict=True,
     )
@@ -390,12 +390,12 @@ def test_rotation_moves_probability_rows_and_their_paths_by_the_fitted_shift() -
     shifted = eye[[2, 3, 0, 2]]
     shifted[2] = 0
     np.testing.assert_array_equal(
-        rotated[1],
+        cast("NDArray[np.float32]", rotated[1]),
         probability_image(shifted, columns=5),
         strict=True,
     )
     np.testing.assert_array_equal(
-        rotated[2],
+        cast("NDArray[np.float32]", rotated[2]),
         np.broadcast_to(np.asarray([0.5, 3, 0, 1], dtype=np.float32)[:, None], (4, 5)),
         strict=True,
     )
@@ -487,7 +487,7 @@ def test_rotation_works_in_physical_depth_about_the_first_target() -> None:
     )
 
     np.testing.assert_array_equal(
-        item.arrays["unet_static"][0],
+        cast("NDArray[np.float32]", item.arrays["unet_static"][0]),
         np.broadcast_to(np.asarray([1, 2.75, 4.5, 1], np.float32)[:, None], (4, 4)),
         strict=True,
     )
@@ -553,7 +553,7 @@ def test_probabilities_shift_on_a_float32_candidate_axis() -> None:
         axis=axis,
     )
     np.testing.assert_array_equal(
-        item.arrays["unet_static"][0],
+        cast("NDArray[np.float32]", item.arrays["unet_static"][0]),
         probability_image(shifted, columns=3),
         strict=True,
     )
@@ -774,7 +774,7 @@ def test_an_edited_csv_is_read_again(
     path = tmp_path / "rows.csv"
     path.write_text("X\n1\n")
     os.utime(path, ns=(1_000_000_000, 1_000_000_000))
-    first = read_numeric_csv(path, columns=("X",))["X"].tolist()
+    first = cast(list[float], read_numeric_csv(path, columns=("X",))["X"].tolist())
 
     path.write_text(edited)
     os.utime(path, ns=(1_000_000_000, 1_000_000_000 if keep_mtime else 2_000_000_000))
@@ -1375,7 +1375,9 @@ def test_evaluation_keeps_physical_targets_and_every_suffix_bin() -> None:
     )
     # Bin 1 averages suffix rows 32 to 63 relative to the anchor at row 31; bin 2
     # has no finite target, and bins 0 and 3 lie outside the suffix.
-    relative = (depth[32:64] - depth[31]).astype(np.float64)
+    relative = (depth[32:64] - cast("np.float32 | np.float64", depth[31])).astype(
+        np.float64,
+    )
     physical = np.asarray([0, relative.mean(), 0, 0], dtype=np.float32)
     np.testing.assert_array_equal(evaluated.arrays["target"], physical, strict=True)
     mean, std = config.target_stats
@@ -1449,7 +1451,9 @@ def test_short_visible_context_retains_original_rows_and_owns_output_storage() -
 
 def test_reference_interpolation_includes_endpoints_and_rejects_exterior() -> None:
     well = feature_well()
-    anchor = np.float32(well.horizontal["TVT_input"][31])
+    anchor = np.float32(
+        cast("np.float32 | np.float64", well.horizontal["TVT_input"][31]),
+    )
     well = replace(
         well,
         reference_depth=anchor + np.asarray([-4, 0, 4], dtype=np.float32),
@@ -1468,14 +1472,19 @@ def test_reference_interpolation_includes_endpoints_and_rejects_exterior() -> No
     )
     penalty = item.auxiliary["GR_penalty_error"]
     np.testing.assert_array_equal(penalty[:3, (0, 6)], np.full((3, 2), 25, np.float32))
-    np.testing.assert_array_equal(penalty[3], np.zeros(7, dtype=np.float32))
+    np.testing.assert_array_equal(
+        cast("NDArray[np.float32]", penalty[3]),
+        np.zeros(7, dtype=np.float32),
+    )
     assert item.arrays["typewell_target_probs"].dtype == np.float32
     assert item.arrays["typewell_target_probs"].shape == (0,)
 
 
 def test_alignment_targets_clip_both_tails_before_gaussian_normalization() -> None:
     well = feature_well()
-    anchor = np.float32(well.horizontal["TVT_input"][31])
+    anchor = np.float32(
+        cast("np.float32 | np.float64", well.horizontal["TVT_input"][31]),
+    )
     truth = well.horizontal["TVT"].copy()
     truth[32:64] = anchor - 10
     truth[64:96] = anchor + 10
@@ -1508,7 +1517,7 @@ def test_particle_paths_normalize_separately_and_mask_their_own_empty_rows() -> 
     config.particle = ParticleFeatures.Config()
     item = config.make()(well, training=True)
     depth = well.horizontal["TVT"]
-    anchor = np.float32(depth[31])
+    anchor = np.float32(cast("np.float32 | np.float64", depth[31]))
     relative = np.asarray(
         [
             np.mean(depth[:32] - anchor),
@@ -1560,7 +1569,10 @@ def test_feature_planes_keep_float32_statistics_and_clip_slopes(direction: int) 
         strict=True,
     )
     np.testing.assert_array_equal(planes["gr_slope"][:, 0], [0, direction * 0.25, 0, 0])
-    np.testing.assert_array_equal(planes["gr_abs_diff"][3], np.zeros(5, np.float32))
+    np.testing.assert_array_equal(
+        cast("NDArray[np.float32]", planes["gr_abs_diff"][3]),
+        np.zeros(5, np.float32),
+    )
     np.testing.assert_array_equal(planes["gr_abs_diff"][:, 2], np.zeros(4, np.float32))
     expected_step = (
         np.float32(0.5) - config.vertical_step_stats[0]
@@ -1681,7 +1693,7 @@ def test_feature_slope_excludes_the_exact_denominator_boundary() -> None:
     window.raw["md"][:] = 0
     for index, offset in enumerate((-1, 0, 1)):
         remaining = numerator + offset
-        roots = []
+        roots: list[int] = []
         while remaining:
             root = min(math.isqrt(remaining), 2**24)
             roots.extend((root, -root))
@@ -1689,7 +1701,7 @@ def test_feature_slope_excludes_the_exact_denominator_boundary() -> None:
         depths = np.zeros(config.downsample, dtype=np.float32)
         # Small squares precede large squares so bincount loses no low bits.
         depths[: len(roots)] = np.asarray(roots[::-1], dtype=np.float32) / np.float32(
-            2**50,
+            1 << 50,
         )
         widened = depths.astype(np.float64)
         sums = np.bincount(
@@ -1861,7 +1873,7 @@ def test_quadratic_fits_each_bin_and_skips_bins_under_six_rows() -> None:
     np.testing.assert_array_equal(result[:2, :3], [[2, -3, 5], [2, -3, 5]])
     # Every moment of these eighths is exact, so the exact fit leaves no residual.
     assert result[0, 3] == 0
-    assert result[1, 3] == np.float32((990 / 64 / 9) ** 0.5)
+    assert result[1, 3] == np.float32(cast(float, (990 / 64 / 9) ** 0.5))
     assert np.isnan(result[2:]).all()
     assert result.dtype == np.float32
 
@@ -1990,8 +2002,10 @@ def test_prepared_well_casts_columns_anchors_the_prior_and_owns_the_cache(
         strict=True,
     )
     # The prior is relative to the last visible surface point, row 31.
-    anchor = np.float32(raw.horizontal["TVT_input"][31]) + np.float32(
-        raw.horizontal["Z"][31],
+    anchor = np.float32(
+        cast("np.float64", raw.horizontal["TVT_input"][31]),
+    ) + np.float32(
+        cast("np.float64", raw.horizontal["Z"][31]),
     )
     np.testing.assert_array_equal(
         prepared.horizontal["geo_s_rel_prior_abs"],
@@ -2024,10 +2038,13 @@ def test_prepared_well_casts_columns_anchors_the_prior_and_owns_the_cache(
         np.testing.assert_array_equal(prepared.particle[name], values, strict=True)
         assert not np.shares_memory(prepared.particle[name], values)
     # Window row 0 averages original row 15.5, inside the visible prefix.
-    assert np.count_nonzero(prepared.particle["pf_prob"][0]) == 0
-    assert np.isnan(prepared.particle["pf_tvt_pred"][0])
+    assert (
+        np.count_nonzero(cast("NDArray[np.float32]", prepared.particle["pf_prob"][0]))
+        == 0
+    )
+    assert np.isnan(cast("np.float32", prepared.particle["pf_tvt_pred"][0]))
     np.testing.assert_array_equal(
-        prepared.particle["pf_prob"][1],
+        cast("NDArray[np.float32]", prepared.particle["pf_prob"][1]),
         np.asarray([0, 0.125, 0.75, 0.125, 0, 0, 0], dtype=np.float32),
         strict=True,
     )
@@ -2660,7 +2677,11 @@ def test_reference_gain_clips_to_its_bounds_around_the_curve_mean(
     # The rows 1 below and 8 above the mean 4 end 0.75 or 1.25 times as far from it.
     np.testing.assert_array_equal(
         result.reference_gamma,
-        np.where(well.reference_gamma == 12, np.float32(peak), np.float32(low)),
+        np.where(
+            cast("NDArray[np.bool_]", well.reference_gamma == 12),
+            np.float32(peak),
+            np.float32(low),
+        ),
         strict=True,
     )
 

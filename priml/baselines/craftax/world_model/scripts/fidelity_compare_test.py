@@ -3,7 +3,7 @@
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import functools
 import json
@@ -101,7 +101,7 @@ def test_compare_averages_seeds_and_scores_them_against_seed_noise() -> None:
     nll = _entry(result, "seeds", "nll/nats_per_decision")
     assert nll["delta"] == pytest.approx(-0.9)
     # One degree of freedom: sd 0.1414 over sqrt(1/2 + 1/1).
-    assert nll["z"] == pytest.approx(-0.9 / (0.02 * 1.5) ** 0.5)
+    assert nll["z"] == pytest.approx(-0.9 / cast(float, (0.02 * 1.5) ** 0.5))
     seeds = result["seeds"]
     assert isinstance(seeds, Mapping)
     assert "continuation/ended/1" not in seeds

@@ -55,10 +55,16 @@ def test_logistic_probabilities_keep_underflow_subnormal_and_uniform_rows() -> N
         ),
     )
     # Logits at or below -104 underflow to zero; -103 and -100 stay subnormal.
-    assert probabilities[0].tolist() == [0, 0, 1]
-    assert probabilities[1].view(np.uint32).tolist()[:2] == [1, 27]
-    assert probabilities[2].tolist() == [0.5, 0, 0.5]
-    assert probabilities[3].tolist() == [np.float32(1) / np.float32(3)] * 3
+    assert cast(NDArray[np.float32], probabilities[0]).tolist() == [0, 0, 1]
+    assert cast(NDArray[np.float32], probabilities[1]).view(np.uint32).tolist()[:2] == [
+        1,
+        27,
+    ]
+    assert cast(NDArray[np.float32], probabilities[2]).tolist() == [0.5, 0, 0.5]
+    assert (
+        cast(NDArray[np.float32], probabilities[3]).tolist()
+        == [np.float32(1) / np.float32(3)] * 3
+    )
 
 
 def test_logistic_probabilities_add_each_class_intercept() -> None:
@@ -66,7 +72,7 @@ def test_logistic_probabilities_add_each_class_intercept() -> None:
     model.coef_ = np.zeros((3, 2), dtype=np.float32)
     model.intercept_ = np.array([0, 0, 1], dtype=np.float32)
     probabilities = model.predict_proba(np.ones((4, 2), dtype=np.float32))
-    exponential = np.float32(np.exp(-1.0))
+    exponential = np.float32(cast(np.float64, np.exp(-1.0)))
     expected = np.array([exponential, exponential, 1], dtype=np.float32) / (
         exponential + exponential + 1
     )
@@ -144,7 +150,7 @@ def test_objective_rounds_the_penalty_gradient_once() -> None:
     objective = logistic._Objective(
         features=np.zeros((2, 4)),
         targets=np.array([0, 2], dtype=np.int64),
-        penalty=1 + 2**-24 - 2**-40,
+        penalty=1 + 2.0**-24 - 2.0**-40,
     )
     _, gradient = objective(weights.ravel(order="F"))
     # A float32 penalty rounds to 1; the exact product lies just above the midpoint

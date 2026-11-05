@@ -110,14 +110,17 @@ def test_identity_records_stage_the_prepared_inputs(tmp_path: Path) -> None:
     write_identity(tmp_path)
     table = parquet.read_table(tmp_path / "molecules.parquet")
     assert table.to_pylist() == [dict(row) for row in identity_rows()]
-    fingerprints = cast("np.ndarray", np.load(tmp_path / "fingerprints.npy"))
+    fingerprints = cast(
+        np.ndarray[tuple[int, int], np.dtype[np.uint8]],
+        np.load(tmp_path / "fingerprints.npy"),
+    )
     np.testing.assert_array_equal(fingerprints, identity_fingerprints())
     assert fingerprints.dtype == np.uint8
     assert fingerprints.shape == (8, 2069)
     assert fingerprints[1, :3].tolist() == [0, 5, 10]
     assert fingerprints[7, :3].tolist() == [0, 17, 34]
-    assert not fingerprints[2].any()
-    assert not fingerprints[6].any()
+    assert not fingerprints[2, :].any()
+    assert not fingerprints[6, :].any()
     manifest = cast(
         "dict[str, object]",
         json.loads((tmp_path / "manifest.json").read_text()),

@@ -36,6 +36,40 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
 
+class _ProcessMock:
+    def __init__(self) -> None:
+        self.start = MagicMock()
+        self.kill = MagicMock()
+        self.join = MagicMock()
+        self.is_alive = MagicMock()
+        self.exitcode: int | None = None
+
+
+class _QueueMock:
+    def __init__(self) -> None:
+        self.get = MagicMock()
+
+
+class _MeshMock:
+    def __init__(self) -> None:
+        self.get_rank = MagicMock()
+        self.size = MagicMock()
+        self.ndim = 2
+        self.shape = (2, 3)
+        self.mesh_dim_names = ("dp", "tp")
+        self.device_type = "cpu"
+
+
+class _DistributedMock:
+    def __init__(self) -> None:
+        self.get_rank = MagicMock()
+        self.init_process_group = MagicMock()
+        self.broadcast_object_list = MagicMock()
+        self.barrier = MagicMock()
+        self.destroy_process_group = MagicMock()
+        self.all_gather = MagicMock()
+
+
 def test_call_reports_exact_message_when_dispatch_attempts_are_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -81,11 +115,11 @@ def test_worker_pool_starts_with_no_process_or_queue() -> None:
 
 
 def test_enter_kills_started_children_when_a_later_start_fails() -> None:
-    started: list[MagicMock] = []
+    started: list[_ProcessMock] = []
     start_errors: list[OSError] = []
 
-    def _make_process(*_args: object, **_kwargs: object) -> MagicMock:
-        proc = MagicMock()
+    def _make_process(*_args: object, **_kwargs: object) -> _ProcessMock:
+        proc = _ProcessMock()
         # Fail every third spawn; each attempt's first two must be killed on
         # cleanup before the next retry starts a fresh batch.
         if len(started) % 3 >= 2:
@@ -128,9 +162,9 @@ def test_enter_kills_started_children_when_a_later_start_fails() -> None:
 
 
 def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
-    wedged = MagicMock()
+    wedged = _ProcessMock()
     wedged.is_alive.return_value = True
-    healthy = MagicMock()
+    healthy = _ProcessMock()
     healthy.is_alive.return_value = False
 
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))
@@ -140,7 +174,7 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
     pool.terminate()
 
     # Bounded join, then force-kill the still-alive child.
-    timeout = wedged.join.call_args_list[0].kwargs["timeout"]
+    timeout = cast(object, wedged.join.call_args_list[0].kwargs["timeout"])
     assert isinstance(timeout, (int, float))
     assert timeout > 0
     wedged.kill.assert_called_once()
@@ -179,14 +213,14 @@ def test_call_retries_then_raises_when_worker_keeps_dying(
     still loses a worker (here ``_respawn`` is stubbed to a no-op so the same
     dead mock persists) does dispatch give up, after ``_DISPATCH_ATTEMPTS`` tries.
     """
-    proc = MagicMock()
+    proc = _ProcessMock()
     proc.exitcode = 1
     proc.is_alive.return_value = False
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     assert pool.ack_queue is not None
-    cast(MagicMock, pool.ack_queue).get.side_effect = queue_mod.Empty
+    cast(_QueueMock, pool.ack_queue).get.side_effect = queue_mod.Empty
     pool.processes = [cast(PoolWorker, proc)]
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
     respawns: list[int] = []
@@ -218,14 +252,14 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     dispatch outright; only persistent timeouts give up after
     ``_DISPATCH_ATTEMPTS`` tries.
     """
-    proc = MagicMock()
+    proc = _ProcessMock()
     proc.exitcode = None  # Alive: never produces a _WorkerDiedError.
     proc.is_alive.return_value = True
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     cast(
-        MagicMock,
+        _QueueMock,
         pool.ack_queue,
     ).get.side_effect = queue_mod.Empty  # Never acks -> timeout.
     pool.processes = [cast(PoolWorker, proc)]
@@ -306,7 +340,7 @@ def test_enter_recovers_from_a_port_collision(
 
 
 def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
-    started: list[MagicMock] = []
+    started: list[_ProcessMock] = []
     process_specs: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
 
     def make_process(
@@ -314,14 +348,14 @@ def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
         target: object,
         args: tuple[object, ...],
         kwargs: dict[str, object],
-    ) -> MagicMock:
+    ) -> _ProcessMock:
         process_specs.append((target, args, kwargs))
         rank = args[0]
         ready = kwargs["ready_queue"]
         assert isinstance(rank, int)
         assert isinstance(ready, queue_mod.Queue)
         ready_ranks = cast("queue_mod.Queue[int]", ready)
-        proc = MagicMock()
+        proc = _ProcessMock()
         proc.exitcode = None
         proc.is_alive.return_value = False
         proc.start.side_effect = lambda: ready_ranks.put(rank)
@@ -372,7 +406,7 @@ def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
 
 
 def test_call_returns_once_rank_zero_acks(monkeypatch: pytest.MonkeyPatch) -> None:
-    proc = MagicMock()
+    proc = _ProcessMock()
     proc.exitcode = None
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     commands: queue_mod.Queue[bytes | None] = queue_mod.Queue()
@@ -401,7 +435,7 @@ def test_call_returns_once_rank_zero_acks(monkeypatch: pytest.MonkeyPatch) -> No
 def test_rendezvous_times_out_when_no_rank_acks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    alive = MagicMock()
+    alive = _ProcessMock()
     alive.exitcode = None
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     ready: queue_mod.Queue[int] = queue_mod.Queue()
@@ -421,7 +455,7 @@ def test_rendezvous_fails_fast_when_a_rank_dies_before_acking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dead rank surfaces at the next poll, not after the whole timeout."""
-    dead = MagicMock()
+    dead = _ProcessMock()
     dead.exitcode = 1
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
     ready: queue_mod.Queue[int] = queue_mod.Queue()
@@ -444,7 +478,7 @@ def test_await_dispatch_ack_deadline_and_timeout_are_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
-    ack_queue = MagicMock()
+    ack_queue = _QueueMock()
     ack_queue.get.side_effect = queue_mod.Empty
     pool.ack_queue = cast("tm.Queue[bool]", ack_queue)
     killed: list[list[PoolWorker]] = []
@@ -457,7 +491,7 @@ def test_await_dispatch_ack_deadline_and_timeout_are_explicit(
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.1)
     ticks = iter((0.0, 0.0, 30.0))
     monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
-    alive = MagicMock()
+    alive = _ProcessMock()
     alive.exitcode = None
     processes = [cast(PoolWorker, alive)]
 
@@ -475,7 +509,7 @@ def test_await_dispatch_ack_accepts_ack_inside_final_second(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
-    ack_queue = MagicMock()
+    ack_queue = _QueueMock()
     ack_queue.get.return_value = True
     pool.ack_queue = cast("tm.Queue[bool]", ack_queue)
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(seconds=1))
@@ -494,9 +528,9 @@ def test_await_ready_times_out_at_deadline_without_polling(
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     ticks = iter((0.0, 0.0, 1.0))
     monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
-    ready = MagicMock()
+    ready = _QueueMock()
     ready.get.side_effect = queue_mod.Empty
-    alive = MagicMock()
+    alive = _ProcessMock()
     alive.exitcode = None
 
     with pytest.raises(TimeoutError, match=r"^rendezvous timed out: 0/1 ranks ready$"):
@@ -537,11 +571,11 @@ def test_await_ready_counts_each_rank_ack() -> None:
 def test_await_dispatch_ack_reports_dead_worker_and_kills_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dead = MagicMock()
+    dead = _ProcessMock()
     dead.exitcode = 1
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
-    cast(MagicMock, pool.ack_queue).get.side_effect = queue_mod.Empty
+    cast(_QueueMock, pool.ack_queue).get.side_effect = queue_mod.Empty
     killed: list[list[PoolWorker]] = []
 
     def record_kill(self: WorkerPool, processes: list[PoolWorker]) -> None:
@@ -561,7 +595,7 @@ def test_await_dispatch_ack_reports_dead_worker_and_kills_all(
 def test_respawn_tears_down_the_degraded_pool_before_spawning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stale = MagicMock()
+    stale = _ProcessMock()
     stale.is_alive.return_value = False
     pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.processes = [cast(PoolWorker, stale)]
@@ -600,7 +634,7 @@ def test_worker_configures_cpu_mesh_and_acknowledges_completion(
     cuda_device_count: int,
     expected_backend: str,
 ) -> None:
-    mesh = MagicMock()
+    mesh = _MeshMock()
     mesh.get_rank.return_value = 0
     mesh_constructor = MagicMock(return_value=mesh)
     monkeypatch.setattr(testing, "DeviceMesh", mesh_constructor)
@@ -610,7 +644,7 @@ def test_worker_configures_cpu_mesh_and_acknowledges_completion(
     commands.put(None)
     ready: queue_mod.Queue[int] = queue_mod.Queue()
     acks: queue_mod.Queue[bool] = queue_mod.Queue()
-    fake_dist = MagicMock()
+    fake_dist = _DistributedMock()
     monkeypatch.setattr(testing, "td", fake_dist)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: cuda_device_count)
@@ -629,7 +663,7 @@ def test_worker_configures_cpu_mesh_and_acknowledges_completion(
     assert (tmp_path / "rank_0").read_text() == "done"
     assert mesh_constructor.call_args.args == ("cpu",)
     mesh_kwargs = mesh_constructor.call_args.kwargs
-    mesh_value = mesh_kwargs["mesh"]
+    mesh_value = cast(object, mesh_kwargs["mesh"])
     assert isinstance(mesh_value, Tensor)
     assert torch.equal(mesh_value, torch.tensor([[0, 1, 2], [3, 4, 5]]))
     assert mesh_kwargs["mesh_dim_names"] == ("dp", "tp")
@@ -687,12 +721,12 @@ def test_worker_nonzero_rank_receives_commands_without_reading_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mesh = MagicMock()
+    mesh = _MeshMock()
     mesh.get_rank.return_value = 1
     monkeypatch.setattr(testing, "DeviceMesh", MagicMock(return_value=mesh))
     dispatched = pickle.dumps(functools.partial(_sentinel_worker, str(tmp_path)))
     broadcasts = iter((dispatched, None))
-    fake_dist = MagicMock()
+    fake_dist = _DistributedMock()
 
     def broadcast(values: list[bytes | None], src: int) -> None:
         if src == 0:
@@ -701,7 +735,7 @@ def test_worker_nonzero_rank_receives_commands_without_reading_queue(
     fake_dist.broadcast_object_list.side_effect = broadcast
     monkeypatch.setattr(testing, "td", fake_dist)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    command_queue = MagicMock()
+    command_queue = _QueueMock()
     command_queue.get.side_effect = AssertionError("nonzero rank read its queue")
     ready: queue_mod.Queue[int] = queue_mod.Queue()
     acks: queue_mod.Queue[bool] = queue_mod.Queue()
@@ -780,7 +814,7 @@ def test_do_something_gathers_its_rank_across_the_tp_group(
         for i, out in enumerate(outputs):
             out.copy_(value + i)
 
-    fake_dist = MagicMock()
+    fake_dist = _DistributedMock()
     fake_dist.get_rank.return_value = 4
     fake_dist.all_gather.side_effect = all_gather
     monkeypatch.setattr(testing, "td", fake_dist)
@@ -890,14 +924,14 @@ def test_do_something_reports_exact_mesh_validation_errors(
     value: object,
     expected: str,
 ) -> None:
-    mesh = MagicMock()
+    mesh = _MeshMock()
     mesh.get_rank.return_value = 0
     mesh.ndim = 2
     mesh.shape = (2, 3)
     mesh.size.return_value = 6
     mesh.mesh_dim_names = ("dp", "tp")
     mesh.device_type = "cpu"
-    fake_dist = MagicMock()
+    fake_dist = _DistributedMock()
     fake_dist.get_rank.return_value = 0
     monkeypatch.setattr(testing, "td", fake_dist)
     if field == "rank":

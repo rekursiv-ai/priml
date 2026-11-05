@@ -7,7 +7,7 @@ and omit future annotations, which makes the formatter remove those quotes.
 from collections.abc import Callable
 from dataclasses import field
 from functools import lru_cache, partial
-from typing import TYPE_CHECKING, NamedTuple, Protocol, Self, override
+from typing import TYPE_CHECKING, NamedTuple, Protocol, Self, cast, override
 
 import math
 
@@ -241,7 +241,7 @@ class HashedNgramTables(nn.Module):
                 1,
             )
             self.table.channels_in = self.num_embeddings
-            bound = (3 / self.channels_out) ** 0.5
+            bound = cast(float, (3 / self.channels_out) ** 0.5)
             self.table.init_weight = partial(nn.init.uniform_, a=-bound, b=bound)
             return super().finalize()
 

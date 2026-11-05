@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import math
 
 import numpy as np
@@ -76,7 +78,7 @@ def test_unfitted_calibration_predicts_one_half_everywhere() -> None:
 def test_sigmoid_predictions_follow_the_logistic_on_both_sides_of_zero() -> None:
     model = SigmoidCalibration.Config().make()
     model.a_ = -1.0
-    exponential = np.exp(-0.5)
+    exponential = cast(np.float64, np.exp(-0.5))
     np.testing.assert_array_equal(
         model.predict(np.array([-0.5, 0.5])),
         [exponential / (1 + exponential), 1 / (1 + exponential)],
@@ -86,7 +88,7 @@ def test_sigmoid_predictions_follow_the_logistic_on_both_sides_of_zero() -> None
 def test_sigmoid_rescales_scores_whose_magnitude_reaches_the_threshold() -> None:
     scores = np.sin(np.arange(7) / 3)
     targets = np.array([0, 1, 0, 0, 1, 0, 1], dtype=np.int64)
-    scale = float(np.abs(scores).max())
+    scale = float(cast(np.float64, np.abs(scores).max()))
     config = SigmoidCalibration.Config()
     config.max_magnitude = scale
     rescaled = config.make().fit(scores, targets=targets)

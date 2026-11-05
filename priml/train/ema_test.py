@@ -530,7 +530,9 @@ def test_ema_module_shadow_resumes_through_the_checkpointer(tmp_path: Path) -> N
     assert ema.shadow_model is not None
     assert restored.shadow_model is not None
     expected = cast(_StateDict, ema.shadow_model.state_dict())
-    actual = cast(_StateDict, restored.state_dict()["shadow_model"])
+    restored_state = restored.state_dict()
+    assert "shadow_model" in restored_state
+    actual = cast(_StateDict, restored_state["shadow_model"])
     assert actual.keys() == expected.keys()
     for name, value in expected.items():
         assert torch.equal(actual[name], value), name

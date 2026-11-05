@@ -522,7 +522,7 @@ def check_walk(
         )
         instance = pcgrad.MultiTaskLoss(2)
         report = pin_shared(instance, loss_fine)
-    found = {id(p) for p in instance._shared_params or ()}  # noqa: SLF001 -- What pin_shared set.
+    found = {id(p) for p in cast(Walker, instance)._shared_params or ()}  # noqa: SLF001 -- What pin_shared set.
     missed = [
         n
         for n, p in model.named_parameters()

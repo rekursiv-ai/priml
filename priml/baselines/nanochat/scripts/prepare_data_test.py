@@ -493,11 +493,15 @@ def test_fit_vocabulary_checks_its_unicode_round_trip_probe(
                 else "changed"
             )
 
-    trainer = Mock()
-    trainer.get_mergeable_ranks.return_value = [(b"a", 0)]
-    trainer.get_pattern.return_value = ".+"
+    train_from_iterator = Mock()
+    trainer = SimpleNamespace(
+        get_mergeable_ranks=Mock(return_value=[(b"a", 0)]),
+        get_pattern=Mock(return_value=".+"),
+        train_from_iterator=train_from_iterator,
+    )
     trainer_class = Mock(return_value=trainer)
-    documents = Mock(return_value=iter(["sample"]))
+    sample_documents = iter(["sample"])
+    documents = Mock(return_value=sample_documents)
 
     with (
         patch.object(rustbpe, "Tokenizer", trainer_class),
@@ -519,8 +523,8 @@ def test_fit_vocabulary_checks_its_unicode_round_trip_probe(
         )
 
     documents.assert_called_once_with([shard], max_chars=10, doc_cap=5)
-    trainer.train_from_iterator.assert_called_once_with(
-        documents.return_value,
+    train_from_iterator.assert_called_once_with(
+        sample_documents,
         1,
         pattern=SPLIT_PATTERN,
     )
@@ -544,9 +548,11 @@ def test_fit_vocabulary_reports_a_failed_probe_round_trip(tmp_path: Path) -> Non
             del tokens
             return "changed"
 
-    trainer = Mock()
-    trainer.get_mergeable_ranks.return_value = [(b"a", 0)]
-    trainer.get_pattern.return_value = ".+"
+    trainer = SimpleNamespace(
+        get_mergeable_ranks=Mock(return_value=[(b"a", 0)]),
+        get_pattern=Mock(return_value=".+"),
+        train_from_iterator=Mock(),
+    )
     with (
         patch.object(rustbpe, "Tokenizer", return_value=trainer),
         patch.object(tiktoken, "Encoding", side_effect=InvalidEncoding),
@@ -834,7 +840,7 @@ def test_training_handoff_preserves_config_and_uses_priml(
         else:
             launch_training(config, save_checkpoint=save_checkpoint)
     process.assert_called_once()
-    command = process.call_args.args[0]
+    command = cast(list[str], process.call_args.args[0])
     assert command == [
         sys.executable,
         "-m",
@@ -1796,7 +1802,7 @@ def test_every_replay_archive_counter_has_its_declared_integer_dtype() -> None:
     integer_list_count = 0
     int64_list_count = 0
     for factory_call in array_factory.call_args_list:
-        raw_values: object = factory_call.args[0]
+        raw_values = cast(object, factory_call.args[0])
         if not isinstance(raw_values, list):
             continue
         values = from_plain(cast(list[object], raw_values), list[object])
@@ -2189,7 +2195,7 @@ def test_preparation_reference_passes_exact_stream_arguments_and_saves_outputs(
 
     source = config.corpus.raw_dir / "shard_00007.parquet"
     load.assert_called_once_with(tokenizer_dir)
-    arguments = packed.call_args.kwargs
+    arguments = cast(dict[str, object], packed.call_args.kwargs)
     assert set(arguments) == {
         "paths",
         "tokenizer",
@@ -2294,7 +2300,7 @@ def test_row_preparation_evaluation_saves_batches_and_byte_tables(
     stream = iter([batch])
     with patch.object(prepare_data, "PackedTokenStream", return_value=stream) as packed:
         RowPreparation(config)._evaluation(tmp_path, encoder=encoder)
-    arguments = packed.call_args.kwargs
+    arguments = cast(dict[str, object], packed.call_args.kwargs)
     assert set(arguments) == {
         "paths",
         "tokenizer",
@@ -3033,8 +3039,8 @@ def test_build_reference_eval_writes_both_archives_and_protects_sources(
         )
 
     for index, replay_call in enumerate(prepare_rows.call_args_list):
-        actual_inputs: object = replay_call.args[0]
-        actual_targets: object = replay_call.kwargs["targets"]
+        actual_inputs = cast(object, replay_call.args[0])
+        actual_targets = cast(object, replay_call.kwargs["targets"])
         assert isinstance(actual_inputs, np.ndarray)
         assert isinstance(actual_targets, np.ndarray)
         assert np.array_equal(actual_inputs, expected_inputs)
@@ -3228,7 +3234,8 @@ def test_main_dump_and_regular_stages_dispatch_without_training(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    preparation = Mock()
+    dump, run, training_config = Mock(), Mock(), Mock()
+    preparation = SimpleNamespace(dump=dump, run=run, training_config=training_config)
     _main_config(
         monkeypatch,
         ["--stage", "dump", "--directory", str(tmp_path), "--output", "bundle.tar"],
@@ -3247,9 +3254,9 @@ def test_main_dump_and_regular_stages_dispatch_without_training(
         level=logging.INFO,
         format="%(message)s",
     )
-    preparation.dump.assert_called_once_with(Path("bundle.tar"))
-    preparation.run.assert_not_called()
-    preparation.training_config.assert_not_called()
+    dump.assert_called_once_with(Path("bundle.tar"))
+    run.assert_not_called()
+    training_config.assert_not_called()
 
     basic_config.reset_mock()
     _main_config(monkeypatch, ["--stage", "verify", "--directory", str(tmp_path)])
@@ -3265,8 +3272,8 @@ def test_main_dump_and_regular_stages_dispatch_without_training(
         level=logging.INFO,
         format="%(message)s",
     )
-    preparation.run.assert_called_once_with("verify")
-    preparation.training_config.assert_not_called()
+    run.assert_called_once_with("verify")
+    training_config.assert_not_called()
 
 
 def test_main_train_forwards_options_and_launches(
@@ -3291,29 +3298,31 @@ def test_main_train_forwards_options_and_launches(
             "--save-checkpoint",
         ],
     )
-    preparation = Mock()
+    dump, run, training_config = Mock(), Mock(), Mock()
+    preparation = SimpleNamespace(dump=dump, run=run, training_config=training_config)
     monkeypatch.setattr(
         Preparation.Config,
         "make",
         Mock(return_value=preparation),
     )
-    training = Mock()
-    preparation.training_config.return_value = training
+    pprint = Mock()
+    training = SimpleNamespace(pprint=pprint)
+    training_config.return_value = training
     launch = Mock()
     monkeypatch.setattr(prepare_data, "launch_training", launch)
 
     assert prepare_data.main() == 0
 
-    preparation.training_config.assert_called_once_with(
+    training_config.assert_called_once_with(
         "exp019",
         run_directory=tmp_path / "run",
         seed=11,
         train_budget_sec=3.5,
     )
-    training.pprint.assert_called_once_with(hide_default_values=False)
+    pprint.assert_called_once_with(hide_default_values=False)
     launch.assert_called_once_with(training, save_checkpoint=True)
-    preparation.run.assert_not_called()
-    preparation.dump.assert_not_called()
+    run.assert_not_called()
+    dump.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -3356,13 +3365,14 @@ def test_main_still_refuses_an_unset_location_when_parser_error_returns(
     message: str,
 ) -> None:
     _main_config(monkeypatch, ["--stage", stage])
-    preparation = Mock()
+    dump, run, training_config = Mock(), Mock(), Mock()
+    preparation = SimpleNamespace(dump=dump, run=run, training_config=training_config)
     monkeypatch.setattr(Preparation.Config, "make", Mock(return_value=preparation))
     monkeypatch.setattr(argparse.ArgumentParser, "error", _error_returns)
     with pytest.raises(ValueError, match=message):
         prepare_data.main()
-    preparation.dump.assert_not_called()
-    preparation.training_config.assert_not_called()
+    dump.assert_not_called()
+    training_config.assert_not_called()
 
 
 def test_main_keeps_the_factorys_root_without_a_directory_flag(

@@ -301,7 +301,9 @@ def staged_identity() -> list[tuple[object, ...]]:
             (row["standard_formula"], row["standard_mass"], row["standard_heavy"])
             if row["properties_valid"]
             else None,
-            fingerprints[index].tolist() if row["fingerprint_valid"] else None,
+            fingerprints.take(index, axis=0).tolist()
+            if row["fingerprint_valid"]
+            else None,
         )
         for index, row in enumerate(identity_rows())
     ]
@@ -705,7 +707,7 @@ def test_main_search_scores_exact_disjoint_silent_and_shifted_rows() -> None:
     cosine = search.score(pair, store=store, candidates=candidates, cosine=True)
     # Cosine over norms sqrt(1/2 * 1/3): dot 1/3 for the copy, 1/6 for the +10 copy.
     assert cosine.tolist() == [
-        float(np.float32((2 / 3) ** 0.5)),
+        float(np.float32(cast(float, (2 / 3) ** 0.5))),
         0.0,
         0.0,
         0.0,
@@ -1654,7 +1656,10 @@ def test_complete_independent_sdk_assembly_and_failure_boundaries(
     for index, row in enumerate(observed.rows):
         actual, packed = chemistry.record(row["smiles"])
         assert actual == row
-        np.testing.assert_array_equal(packed, identity_fingerprints()[index])
+        np.testing.assert_array_equal(
+            packed,
+            identity_fingerprints().take(index, axis=0),
+        )
     for name in ("standard-error", "properties-error", "canonical-error"):
         actual, _ = chemistry.record(name)
         assert actual["standardized"] is None
@@ -1673,7 +1678,7 @@ def test_complete_independent_sdk_assembly_and_failure_boundaries(
     assert row["fingerprint_valid"]
     assert row["formula"] == observed.rows[0]["formula"]
     assert row["standard_formula_lookup"] == observed.rows[0]["standard_formula_lookup"]
-    np.testing.assert_array_equal(fingerprint, identity_fingerprints()[0])
+    np.testing.assert_array_equal(fingerprint, identity_fingerprints().take(0, axis=0))
 
 
 def test_properties_and_identity_reject_what_the_sdk_stops_parsing(

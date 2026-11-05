@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NotRequired, cast
+from typing import TYPE_CHECKING, BinaryIO, Literal, NotRequired, cast
 
 import subprocess
 import tempfile
@@ -955,7 +955,7 @@ class DecodeVideo:
                 )
             except OSError:
                 return None
-            stdout = process.stdout
+            stdout = cast(BinaryIO | None, process.stdout)
             if stdout is None:
                 raise ValueError("Expected stdout is not None.")
             frame_bytes = height * width * 3

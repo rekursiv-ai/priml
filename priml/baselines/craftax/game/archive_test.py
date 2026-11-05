@@ -9,7 +9,7 @@ archives with every draw replayed from the stream by hand.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, cast
 
 import numpy as np
 import pytest
@@ -318,7 +318,11 @@ def test_restore_rows_restores_the_first_rows_from_drawn_entries() -> None:
         slots: list[int] = []
         for _ in range(2):
             level = int(
-                np.searchsorted(cumulative, rand_r_numba(stream) / 2**31, side="right"),
+                np.searchsorted(
+                    cumulative,
+                    rand_r_numba(stream) / cast(float, 2**31),
+                    side="right",
+                ),
             )
             slots.append(level * 3 + int(rand_r_numba(stream)) % kept.sizes.item(level))
         levels = archive.restore_rows_numba(batch, kept, 2)

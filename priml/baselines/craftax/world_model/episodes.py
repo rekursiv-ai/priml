@@ -10,7 +10,7 @@ variation distance of their categorical distributions.
 """
 
 from collections.abc import Sequence
-from typing import Final
+from typing import Final, cast
 
 import dataclasses
 
@@ -142,7 +142,10 @@ def summarize(episodes: Episodes) -> dict[str, PlainTree]:
         "horizon": horizon,
         "ended": episodes.ended.double().mean().item(),
         "survival": {
-            str(2**k): (episodes.length > 2**k).double().mean().item()
+            str(cast(int, 2**k)): (episodes.length > cast(int, 2**k))
+            .double()
+            .mean()
+            .item()
             for k in range(horizon.bit_length())
             if 2**k < horizon
         },

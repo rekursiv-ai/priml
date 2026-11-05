@@ -118,7 +118,10 @@ def test_sparse_embedding_scales_after_the_configured_upcast(training: bool) -> 
     out = module(4, puzzle_identifiers=torch.zeros(4, dtype=torch.int32))
 
     assert out.dtype == torch.float32
-    expected = torch.tensor(0.3).to(torch.bfloat16).to(torch.float32) * (512**0.5)
+    expected = torch.tensor(0.3).to(torch.bfloat16).to(torch.float32) * cast(
+        float,
+        512**0.5,
+    )
     assert torch.equal(out[0, 0, 0], expected)
     assert not torch.equal(out[0, 0, 0], expected.to(torch.bfloat16).float())
 

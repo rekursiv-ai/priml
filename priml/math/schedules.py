@@ -15,6 +15,7 @@ writes the multiplier into ``param_groups``.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import math
 
@@ -153,7 +154,7 @@ def polynomial(progress: float, *, power: float = 1.0) -> float:
     """
     if power < 0 or not math.isfinite(power):
         raise ValueError(f"power must be finite and nonnegative; got {power}.")
-    return float((1.0 - _clamped(progress)) ** power)
+    return float(cast(float, (1.0 - _clamped(progress)) ** power))
 
 
 def cosine(progress: float, *, final: float = 0.0) -> float:
@@ -195,7 +196,7 @@ def exponential(progress: float, *, decay: float) -> float:
     """
     if decay <= 0:
         raise ValueError(f"decay must be positive; got {decay}.")
-    return float(decay ** _clamped(progress))
+    return float(cast(float, decay ** _clamped(progress)))
 
 
 def staircase(progress: float, *, drops: int = 3, gamma: float = 0.1) -> float:

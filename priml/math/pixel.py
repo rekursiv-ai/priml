@@ -320,7 +320,7 @@ def compute_video_shapes(
     # (not a radius). ``_SQUARE_PER_NOMINAL`` lifts a 16:9-equivalent height
     # to this mean side.
     pixel_scale = nominal_resolution * _SQUARE_PER_NOMINAL
-    aspect_sqrt = aspect**0.5
+    aspect_sqrt = cast(float, aspect**0.5)
     h = round(pixel_scale / aspect_sqrt)
     w = round(pixel_scale * aspect_sqrt)
     f = 1 if duration_sec == 0 else round(duration_sec * fps)

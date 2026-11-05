@@ -160,11 +160,28 @@ def test_writer_retains_duplicate_invalid_and_unsupported_rows(
         mass,
         [record["mass"], record["mass"], np.nan, np.nan, sodium["mass"]],
     )
-    assert np.load(output / "atom_off.npy").tolist() == [0, 2, 4, 4, 4, 5]
-    assert np.load(output / "bond_off.npy").tolist() == [0, 1, 2, 2, 2, 2]
+    assert cast("NDArray[np.int64]", np.load(output / "atom_off.npy")).tolist() == [
+        0,
+        2,
+        4,
+        4,
+        4,
+        5,
+    ]
+    assert cast("NDArray[np.int64]", np.load(output / "bond_off.npy")).tolist() == [
+        0,
+        1,
+        2,
+        2,
+        2,
+        2,
+    ]
     for name in ("amass", "kind", "el", "nh", "el10", "bonds", "bring"):
         np.testing.assert_array_equal(
-            np.load(output / f"{name}.npy"),
+            cast(
+                "NDArray[np.float64 | np.int8 | np.uint8 | np.int32]",
+                np.load(output / f"{name}.npy"),
+            ),
             np.concatenate([record[name], record[name], sodium[name]]),
         )
     manifest = json_loads((output / "manifest.json").read_text(), dict[str, object])
@@ -219,11 +236,19 @@ def test_writer_saves_empty_ragged_streams(
     parquet.write_table(Table.from_pydict({"smiles": values}), source)
     fragnet_data.prepare_fragnet(source, output=destination, version=IDENTITY_RDKIT)
     assert parquet.read_table(destination / "molecules.parquet").num_rows == len(values)
-    assert np.load(destination / "bonds.npy").shape == (0, 2)
-    assert np.load(destination / "amass.npy").shape == (0,)
-    assert np.load(destination / "atom_off.npy").tolist() == [0] * (len(values) + 1)
-    assert np.load(destination / "bond_off.npy").tolist() == [0] * (len(values) + 1)
-    assert np.load(destination / "mass.npy").shape == (len(values),)
+    assert cast("NDArray[np.int32]", np.load(destination / "bonds.npy")).shape == (0, 2)
+    assert cast("NDArray[np.float64]", np.load(destination / "amass.npy")).shape == (0,)
+    assert cast(
+        "NDArray[np.int64]",
+        np.load(destination / "atom_off.npy"),
+    ).tolist() == [0] * (len(values) + 1)
+    assert cast(
+        "NDArray[np.int64]",
+        np.load(destination / "bond_off.npy"),
+    ).tolist() == [0] * (len(values) + 1)
+    assert cast("NDArray[np.float64]", np.load(destination / "mass.npy")).shape == (
+        len(values),
+    )
 
 
 if __name__ == "__main__":

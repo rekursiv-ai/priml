@@ -2364,7 +2364,7 @@ def test_each_family_checks_its_own_admission_column(tmp_path: Path) -> None:
 def test_ice_isolates_a_failing_job_and_keeps_the_rest_of_its_batch() -> None:
     state = SimulationJobState(batch_size=16)
     backend = _Backend(glacier=False)
-    jobs = {(name, *_CONDITION) for name in ("CCO", "bad", "CCN")}
+    jobs: set[SimulationJob] = {(name, *_CONDITION) for name in ("CCO", "bad", "CCN")}
     assert (
         IceScheduling.Config()
         .make()

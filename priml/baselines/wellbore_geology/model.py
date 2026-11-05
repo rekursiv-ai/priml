@@ -1108,42 +1108,42 @@ def finalize_heads(config: PosteriorHeads) -> None:
                 element.p = config.dropout
 
 
-class DepthPosterior(nn.Module):
-    """Turn a feature grid into a posterior over candidate depths.
+def posterior_parameters(
+    config: PosteriorHeads,
+) -> tuple[Conv2d, Tensor, Tensor, Sequential]:
+    """Build the projection, raw axis, normalized axis and mismatch head in draw order.
 
-    Subclasses supply the features, then build the heads with
-    :meth:`_build_posterior`: :class:`SequenceModel` from its U-Net.
+    Args:
+      config: Finalized head widths and physical candidate geometry.
+
+    Returns:
+      projection: Shared candidate-logit projection.
+      raw_axis: Physical float32 CPU candidate depths.
+      axis: Normalized float32 CPU candidate depths.
+      mismatch_head: Auxiliary gamma-ray mismatch projection.
+
     """
+    if min(config.reference_columns, config.reference_window) < 0:
+        raise ValueError("The model requires its reference window geometry.")
+    if config.target_stats is None:
+        raise ValueError("The model requires its target statistics.")
+    projection = config.proj_out.make()
+    window, columns = config.reference_window, config.reference_columns
+    target_mean, target_std = config.target_stats
+    raw_axis = torch.linspace(
+        -window + window / columns,
+        window - window / columns,
+        columns,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    axis = (raw_axis - target_mean) / target_std
+    mismatch = config.unet_gr_rmse_head.make()
+    return projection, raw_axis, axis, mismatch
 
-    def _build_posterior(self, config: PosteriorHeads) -> None:
-        """Build the heads and the depth axis, after any features a subclass built."""
-        if min(config.reference_columns, config.reference_window) < 0:
-            raise ValueError("The model requires its reference window geometry.")
-        if config.target_stats is None:
-            raise ValueError("The model requires its target statistics.")
-        self.proj_out = config.proj_out.make()
-        self.typewell_tvt_axis: Tensor
-        window, columns = config.reference_window, config.reference_columns
-        target_mean, target_std = config.target_stats
-        raw_axis = torch.linspace(
-            -window + window / columns,
-            window - window / columns,
-            columns,
-            dtype=torch.float32,
-            device="cpu",
-        )
-        self.register_buffer(
-            "typewell_tvt_axis_raw",
-            raw_axis,
-            persistent=False,
-        )
-        self.register_buffer(
-            "typewell_tvt_axis",
-            (raw_axis - target_mean) / target_std,
-            persistent=False,
-        )
-        self.unet_gr_rmse_head = config.unet_gr_rmse_head.make()
-        self.register_load_state_dict_pre_hook(_rename_legacy_head)
+
+class DepthPosterior(nn.Module):
+    """Expose complete depth predictions and posterior diagnostics."""
 
     def features(self, x: Tensor) -> Tensor:
         """Return the ``channels_hidden`` feature grid the heads read.
@@ -1155,6 +1155,7 @@ class DepthPosterior(nn.Module):
           features: ``(batch, channels_hidden, rows, columns)``.
 
         """
+        del x
         raise NotImplementedError
 
     def format_backbone(self, device: torch.device) -> None:
@@ -1169,24 +1170,47 @@ class DepthPosterior(nn.Module):
     @override
     def forward(self, x: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
         """Return depth expectation and complete posterior diagnostics."""
-        features = self.features(x)
-        logits = self.proj_out(features).squeeze(1)
-        probabilities = functional.softmax(logits, dim=-1)
-        axis = self.typewell_tvt_axis.to(
-            device=probabilities.device,
-            dtype=probabilities.dtype,
-        )
-        prediction = (probabilities * axis.reshape(1, 1, -1)).sum(dim=-1)
-        pooled = features.mean(dim=-1).transpose(1, 2)
-        batch, rows, channels = pooled.shape
-        mismatch = functional.softplus(
-            self.unet_gr_rmse_head(pooled.reshape(batch * rows, channels)),
-        ).reshape(batch, rows)
-        return prediction, {
-            "alignment_logits": logits,
-            "regression_logits": logits,
-            "unet_GR_RMSE_pred": mismatch,
-        }
+        del x
+        raise NotImplementedError
+
+
+def posterior_prediction(
+    features: Tensor,
+    *,
+    projection: Conv2d,
+    depth_axis: Tensor,
+    mismatch_head: Sequential,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    """Return depth expectation and posterior diagnostics from a complete feature grid.
+
+    Args:
+      features: Encoded image features over rows and candidate columns.
+      projection: Shared candidate-logit projection.
+      depth_axis: Normalized candidate depths.
+      mismatch_head: Auxiliary gamma-ray mismatch projection.
+
+    Returns:
+      prediction: Posterior mean normalized depth per row.
+      diagnostics: Candidate logits and gamma-ray mismatch predictions.
+
+    """
+    logits = projection(features).squeeze(1)
+    probabilities = functional.softmax(logits, dim=-1)
+    axis = depth_axis.to(
+        device=probabilities.device,
+        dtype=probabilities.dtype,
+    )
+    prediction = (probabilities * axis.reshape(1, 1, -1)).sum(dim=-1)
+    pooled = features.mean(dim=-1).transpose(1, 2)
+    batch, rows, channels = pooled.shape
+    mismatch = functional.softplus(
+        mismatch_head(pooled.reshape(batch * rows, channels)),
+    ).reshape(batch, rows)
+    return prediction, {
+        "alignment_logits": logits,
+        "regression_logits": logits,
+        "unet_GR_RMSE_pred": mismatch,
+    }
 
 
 class SequenceModel(DepthPosterior):
@@ -1366,7 +1390,22 @@ class SequenceModel(DepthPosterior):
         self.channels_last = config.channels_last
         # Built before the heads, so their initial draws follow the U-Net's.
         self.unet = config.unet.make()
-        self._build_posterior(config)
+        self.proj_out, raw_axis, axis, mismatch = posterior_parameters(config)
+        self.register_buffer("typewell_tvt_axis_raw", raw_axis, persistent=False)
+        self.typewell_tvt_axis: Tensor
+        self.register_buffer("typewell_tvt_axis", axis, persistent=False)
+        self.unet_gr_rmse_head = mismatch
+        self.register_load_state_dict_pre_hook(_rename_legacy_head)
+
+    @override
+    def forward(self, x: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
+        """Return the U-Net's depth expectation and complete posterior diagnostics."""
+        return posterior_prediction(
+            self.features(x),
+            projection=self.proj_out,
+            depth_axis=self.typewell_tvt_axis,
+            mismatch_head=self.unet_gr_rmse_head,
+        )
 
     @override
     def features(self, x: Tensor) -> Tensor:

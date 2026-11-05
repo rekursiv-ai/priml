@@ -8,7 +8,7 @@ is the eager step it captured.
 from __future__ import annotations
 
 from functools import partial, partialmethod
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import copy
 import itertools
@@ -212,7 +212,7 @@ def test_compare_reports_rms_max_cosine_and_argmax_agreement() -> None:
     stats = compare(got, want, head)
     assert stats == {
         # The squared error 32 over 4 entries against 25 / 4.
-        "rel_rms": pytest.approx((32 / 25) ** 0.5),
+        "rel_rms": pytest.approx(cast(float, (32 / 25) ** 0.5)),
         "max_abs": 4.0,
         "min_cos": 0.0,
         "argmax_agree": 0.5,

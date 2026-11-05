@@ -275,7 +275,7 @@ class TestConfig:
         assert isinstance(attn.rope.frequencies.inner, HuggingFaceFrequencies.Config)
         assert attn.rope.frequencies.inner.base == 50_000.0
         assert attn.softmax_scale == pytest.approx(
-            attn.channels_qk_head**-0.5
+            cast(float, attn.channels_qk_head**-0.5)
             * (1 + 0.1 * torch.log(torch.tensor(32.0)).item()) ** 2,
         )
 
@@ -556,9 +556,10 @@ class TestLoad:
     ) -> None:
         config_dict = hf_config(num_hidden_layers=1)
         cfg = KimiK2.Config.from_hf(config_dict).finalize()
-        hf_model = Mock()
-        hf_model.config.to_dict.return_value = config_dict
-        hf_model.state_dict.return_value = _synth_hf(cfg)
+        hf_model = Mock(
+            config=Mock(to_dict=Mock(return_value=config_dict)),
+            state_dict=Mock(return_value=_synth_hf(cfg)),
+        )
         load_transformers_model = Mock(return_value=hf_model)
         monkeypatch.setattr(
             hub,

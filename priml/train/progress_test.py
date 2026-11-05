@@ -53,15 +53,15 @@ def test_write_progress_uses_utc_iso_timestamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clock = Mock(wraps=datetime)
-    clock.now.return_value = datetime(2025, 2, 3, 4, 5, 6, tzinfo=UTC)
+    now = Mock(return_value=datetime(2025, 2, 3, 4, 5, 6, tzinfo=UTC))
+    clock = Mock(wraps=datetime, now=now)
     monkeypatch.setattr(progress, "datetime", clock)
 
     path = write_progress(1, 2, working_dir=tmp_path)
 
     data = json_loads(path.read_text(), dict[str, object])
     assert data["updated_at"] == "2025-02-03T04:05:06Z"
-    clock.now.assert_called_once_with(tz=UTC)
+    now.assert_called_once_with(tz=UTC)
 
 
 def test_write_progress_overwrites_atomically(tmp_path: Path) -> None:

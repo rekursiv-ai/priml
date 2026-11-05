@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock, call
+from typing import TYPE_CHECKING, Protocol, cast
+from unittest.mock import MagicMock, _Call, call
 
 import logging
 import tempfile
@@ -23,9 +24,133 @@ from priml.train.profiler import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     import torch
+
+
+class _MockControl(Protocol):
+    return_value: object
+    side_effect: object
+    called: bool
+    call_count: int
+    call_args: _Call
+    call_args_list: list[_Call]
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None: ...
+    def assert_called_once(self) -> None: ...
+    def assert_not_called(self) -> None: ...
+    def assert_called_with(self, *args: object, **kwargs: object) -> None: ...
+    def assert_any_call(self, *args: object, **kwargs: object) -> None: ...
+    def assert_has_calls(
+        self,
+        calls: Sequence[object],
+        *,
+        any_order: bool = False,
+    ) -> None: ...
+
+
+@dataclass(slots=True, kw_only=True)
+class _TrackerMock:
+    log_metrics: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _TimerMock:
+    daemon: bool = False
+    start: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+    cancel: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    join: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+
+
+@dataclass(slots=True, kw_only=True)
+class _AveragesMock:
+    table: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+
+
+@dataclass(slots=True, kw_only=True)
+class _ProfilerMock:
+    key_averages: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    start: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+    stop: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+    step: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+    export_chrome_trace: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _EventMock:
+    record: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    synchronize: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    elapsed_time: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _CudaMemoryMock:
+    _record_memory_history: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    _dump_snapshot: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _CudaMock:
+    is_available: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    Event: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+    memory: _CudaMemoryMock = field(default_factory=_CudaMemoryMock)
+
+
+@dataclass(slots=True, kw_only=True)
+class _DistributedMock:
+    is_initialized: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    get_rank: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _ProfilerActivitiesMock:
+    CPU: str = "cpu"
+    CUDA: str = "cuda"
+
+
+@dataclass(slots=True, kw_only=True)
+class _ProfilerApiMock:
+    profile: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    schedule: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    ProfilerActivity: _ProfilerActivitiesMock = field(
+        default_factory=_ProfilerActivitiesMock,
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _TorchMock:
+    cuda: _CudaMock = field(default_factory=_CudaMock)
+    distributed: _DistributedMock = field(default_factory=_DistributedMock)
+    profiler: _ProfilerApiMock = field(default_factory=_ProfilerApiMock)
 
 
 def _phase_timer_config(
@@ -218,7 +343,7 @@ class TestPhaseTimerEnabled:
     ) -> None:
         """Interval aggregation belongs to the timer, not its caller."""
         timer = _phase_timer_config(enabled=True).make()
-        tracker = MagicMock()
+        tracker = _TrackerMock()
         timer.reset_interval()
         timer._interval_started_at = 100.0
         monkeypatch.setattr(
@@ -266,7 +391,7 @@ class TestPhaseTimerEnabled:
     ) -> None:
         """The timer publishes its cumulative totals without caller assembly."""
         timer = _phase_timer_config(enabled=True).make()
-        tracker = MagicMock()
+        tracker = _TrackerMock()
         timer._start_time = 100.0
         monkeypatch.setattr(
             "priml.train.profiler.time.perf_counter",
@@ -480,9 +605,9 @@ class TestPhaseTimerHeartbeat:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        timer = MagicMock()
+        timer = _TimerMock()
 
-        def make_timer(interval: float, callback: Callable[..., object]) -> MagicMock:
+        def make_timer(interval: float, callback: Callable[..., object]) -> _TimerMock:
             del interval, callback
             return timer
 
@@ -570,12 +695,12 @@ class TestPhaseTimerTorchProfile:
     ):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "nested" / "deeper" / "phase_trace.json.gz"
-            averages = MagicMock()
+            averages = _AveragesMock()
             averages.table.return_value = "ops"
-            profiler = MagicMock()
+            profiler = _ProfilerMock()
             profiler.key_averages.return_value = averages
 
-            fake_torch = MagicMock()
+            fake_torch = _TorchMock()
             fake_torch.cuda.is_available.return_value = False
             fake_torch.profiler.profile.return_value = profiler
             fake_torch.profiler.ProfilerActivity.CPU = "cpu"
@@ -621,12 +746,12 @@ class TestPhaseTimerTorchProfile:
         """COLD-008: a second log_summary() is a no-op, never double-stops."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "phase_trace.json.gz"
-            averages = MagicMock()
+            averages = _AveragesMock()
             averages.table.return_value = "ops"
-            profiler = MagicMock()
+            profiler = _ProfilerMock()
             profiler.key_averages.return_value = averages
 
-            fake_torch = MagicMock()
+            fake_torch = _TorchMock()
             fake_torch.cuda.is_available.return_value = False
             fake_torch.profiler.profile.return_value = profiler
             fake_torch.profiler.ProfilerActivity.CPU = "cpu"
@@ -720,10 +845,10 @@ class TestPhaseTimerCudaEvents:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """CUDA timing uses events without synchronizing the hot path."""
-        start = MagicMock()
-        end = MagicMock()
+        start = _EventMock()
+        end = _EventMock()
         start.elapsed_time.return_value = 12.5
-        fake_torch = MagicMock()
+        fake_torch = _TorchMock()
         fake_torch.cuda.is_available.return_value = True
         fake_torch.cuda.Event.side_effect = [start, end]
         monkeypatch.setattr("priml.train.profiler.torch", fake_torch)
@@ -745,11 +870,11 @@ class TestPhaseTimerCudaEvents:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
-        first_start = MagicMock()
-        first_end = MagicMock()
+        first_start = _EventMock()
+        first_end = _EventMock()
         first_start.elapsed_time.return_value = 750.0
-        second_start = MagicMock()
-        second_end = MagicMock()
+        second_start = _EventMock()
+        second_end = _EventMock()
         second_start.elapsed_time.return_value = 250.0
         timer.record_cuda_events(
             "forward",
@@ -784,8 +909,8 @@ class TestPhaseTimerCudaEvents:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
-        start = MagicMock()
-        end = MagicMock()
+        start = _EventMock()
+        end = _EventMock()
         start.elapsed_time.return_value = 0.5
         timer.record_cuda_events(
             "short",
@@ -808,8 +933,8 @@ class TestPhaseTimerCudaEvents:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
-        start = MagicMock()
-        end = MagicMock()
+        start = _EventMock()
+        end = _EventMock()
         start.elapsed_time.return_value = 0.0
         timer.record_cuda_events(
             "instant",
@@ -833,8 +958,8 @@ class TestPhaseTimerCudaEvents:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
-        start = MagicMock()
-        end = MagicMock()
+        start = _EventMock()
+        end = _EventMock()
         start.elapsed_time.return_value = 12.5
 
         timer.record_cuda_events(
@@ -852,11 +977,11 @@ class TestPhaseTimerCudaEvents:
 
     def test_record_cuda_events_invalidates_a_resolved_summary(self) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
-        first_start = MagicMock()
-        first_end = MagicMock()
+        first_start = _EventMock()
+        first_end = _EventMock()
         first_start.elapsed_time.return_value = 10.0
-        second_start = MagicMock()
-        second_end = MagicMock()
+        second_start = _EventMock()
+        second_end = _EventMock()
         second_start.elapsed_time.return_value = 20.0
         timer.record_cuda_events(
             "eval",
@@ -880,8 +1005,8 @@ class TestPhaseTimerCudaEvents:
 
     def test_record_cuda_events_disabled_noop(self) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=False).make()
-        start = MagicMock()
-        end = MagicMock()
+        start = _EventMock()
+        end = _EventMock()
 
         timer.record_cuda_events(
             "forward",
@@ -947,13 +1072,13 @@ def test_phase_timer_working_dir_is_scoped_by_owner() -> None:
     )
 
 
-def _fake_torch(*, cuda: bool) -> tuple[MagicMock, MagicMock, MagicMock]:
+def _fake_torch(*, cuda: bool) -> tuple[_TorchMock, _ProfilerMock, _AveragesMock]:
     """Build a torch stand-in, its recording profiler, and the profiler's table."""
-    averages = MagicMock()
+    averages = _AveragesMock()
     averages.table.return_value = "ops"
-    profiler = MagicMock()
+    profiler = _ProfilerMock()
     profiler.key_averages.return_value = averages
-    fake = MagicMock()
+    fake = _TorchMock()
     fake.cuda.is_available.return_value = cuda
     fake.distributed.is_initialized.return_value = False
     fake.profiler.profile.return_value = profiler
@@ -1187,14 +1312,14 @@ class TestPhaseTimerCudaPaths:
 
     def test_publish_is_a_noop_when_disabled(self) -> None:
         timer = _phase_timer_config(enabled=False).make()
-        tracker = MagicMock()
+        tracker = _TrackerMock()
         assert timer.publish_interval(cast(TrackerProtocol, tracker), step=1) == {}
         assert timer.publish_summary(cast(TrackerProtocol, tracker), step=1) == {}
         tracker.log_metrics.assert_not_called()
 
     def test_summary_is_published_once_but_always_returned(self) -> None:
         timer = _phase_timer_config(enabled=True).make()
-        tracker = MagicMock()
+        tracker = _TrackerMock()
         timer.record("work", 1.0)
         first = timer.publish_summary(cast(TrackerProtocol, tracker), step=1)
         timer.record("work", 1.0)
@@ -1206,7 +1331,7 @@ class TestPhaseTimerCudaPaths:
     def test_publish_is_rank_zero_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
         timer = _phase_timer_config(enabled=True).make()
-        tracker = MagicMock()
+        tracker = _TrackerMock()
         timer.record("work", 1.0)
         metrics = timer.publish_interval(cast(TrackerProtocol, tracker), step=1)
         assert metrics["interval_work_sec"] == 1.0
@@ -1214,8 +1339,8 @@ class TestPhaseTimerCudaPaths:
 
     def test_cuda_summary_is_resolved_once(self) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
-        start = MagicMock()
-        end = MagicMock()
+        start = _EventMock()
+        end = _EventMock()
         start.elapsed_time.return_value = 4.0
         timer.record_cuda_events(
             "fwd",
@@ -1258,9 +1383,9 @@ class TestTorchProfilerCleanup:
             working_dir=str(tmp_path),
         )
         profiling = config.make()
-        averages = MagicMock()
+        averages = _AveragesMock()
         averages.table.return_value = "ops"
-        profiler = MagicMock()
+        profiler = _ProfilerMock()
         profiler.key_averages.return_value = averages
         profiling.profiler = cast("torch.profiler.profile", profiler)
         profiling._profiler_started = True
@@ -1274,7 +1399,7 @@ class TestTorchProfilerCleanup:
 
     def test_cleanup_ignores_profiler_that_never_started(self) -> None:
         profiling = TorchProfiler.Config(torch_profile=False).make()
-        profiler = MagicMock()
+        profiler = _ProfilerMock()
         profiling.profiler = cast("torch.profiler.profile", profiler)
 
         profiling.cleanup()
@@ -1293,7 +1418,7 @@ class TestTorchProfilerCleanup:
         profiling = config.make()
 
         # Simulate: profiler started at step 5, training stopped before step 10.
-        profiler = MagicMock()
+        profiler = _ProfilerMock()
         profiling.profiler = cast("torch.profiler.profile", profiler)
         profiling._profiler_started = True
 

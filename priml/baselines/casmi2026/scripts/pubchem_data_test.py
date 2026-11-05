@@ -115,16 +115,25 @@ def test_writer_retains_duplicate_rows_full_layouts_and_empty_requests(
     assert [row["key"] for row in rows] == (
         ["LFQSCWFLJHTTHZ"] * 3 + [None, None, "LFQSCWFLJHTTHZ", None]
     )
-    ecfp4 = np.load(destination / "ecfp4.npy")
-    raw_fp = np.load(destination / "raw_fp.npy")
+    ecfp4 = cast("NDArray[np.uint8]", np.load(destination / "ecfp4.npy"))
+    raw_fp = cast("NDArray[np.uint8]", np.load(destination / "raw_fp.npy"))
     assert ecfp4.shape == (7, 512)
     assert raw_fp.shape == (7, 2069)
     for index in (0, 1, 2, 6):
-        np.testing.assert_array_equal(raw_fp[index], _ethanol_bits())
+        np.testing.assert_array_equal(
+            cast("NDArray[np.uint8]", raw_fp[index]),
+            _ethanol_bits(),
+        )
     for index in (0, 1, 2, 5, 6):
-        np.testing.assert_array_equal(ecfp4[index], _ethanol_bits()[:512])
+        np.testing.assert_array_equal(
+            cast("NDArray[np.uint8]", ecfp4[index]),
+            _ethanol_bits()[:512],
+        )
     for index in (3, 4, 5):
-        np.testing.assert_array_equal(raw_fp[index], np.zeros(2069, np.uint8))
+        np.testing.assert_array_equal(
+            cast("NDArray[np.uint8]", raw_fp[index]),
+            np.zeros(2069, np.uint8),
+        )
     manifest = json_loads(
         (destination / "manifest.json").read_text(),
         dict[str, object],
@@ -166,8 +175,14 @@ def test_writer_retains_duplicate_rows_full_layouts_and_empty_requests(
         output = tmp_path / f"empty-{index}"
         pubchem_data.prepare_pubchem(source, output=output, version=IDENTITY_RDKIT)
         assert parquet.read_table(output / "molecules.parquet").num_rows == len(values)
-        assert np.load(output / "ecfp4.npy").shape == (len(values), 512)
-        assert np.load(output / "raw_fp.npy").shape == (len(values), 2069)
+        assert cast("NDArray[np.uint8]", np.load(output / "ecfp4.npy")).shape == (
+            len(values),
+            512,
+        )
+        assert cast("NDArray[np.uint8]", np.load(output / "raw_fp.npy")).shape == (
+            len(values),
+            2069,
+        )
 
 
 @pytest.mark.parametrize("field", ["partial", "key"])

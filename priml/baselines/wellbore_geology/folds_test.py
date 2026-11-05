@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -48,7 +48,9 @@ def test_kmeans_recovers_separated_groups_and_each_repeat_stratifies_them(
     model = _kmeans(values, clusters=clusters)
     # One label per whole group: the labels repeat with the group period.
     np.testing.assert_array_equal(model.labels, model.labels[group])
-    assert sorted(model.labels[:clusters].tolist()) == list(range(clusters))
+    assert sorted(cast(list[int], model.labels[:clusters].tolist())) == list(
+        range(clusters),
+    )
     means = np.stack(
         [values[group == member].mean(axis=0) for member in range(clusters)],
     )

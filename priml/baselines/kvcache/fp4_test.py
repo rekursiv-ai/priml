@@ -214,7 +214,7 @@ def test_signed_zero_survives_encoding_and_decoding() -> None:
 
 
 def test_float64_encoding_uses_the_rounded_stored_scale() -> None:
-    row = torch.tensor([6.0, 0.25, -0.25, 1.0], dtype=torch.float64) * (1 + 2**-25)
+    row = torch.tensor([6.0, 0.25, -0.25, 1.0], dtype=torch.float64) * (1 + 2.0**-25)
     incoming = row.expand(2, 3, 5, 4)
 
     actual, _ = _cache().update(incoming, incoming)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import inspect
 import sys
@@ -368,7 +368,7 @@ def test_miniature_is_three_classes_over_six_named_prompt_groups() -> None:
     assert groups.tolist() == [name for name in "abcdef" for _ in range(3)]
     assert embeddings.dtype == np.float32
     # Row 1 is class 1; its first value is element 8 of the sine sequence.
-    assert embeddings[1, 0, 0] == np.float32(np.sin(8 / 5) + 0.5)
+    assert embeddings[1, 0, 0] == np.float32(cast(np.float64, np.sin(8 / 5)) + 0.5)
 
 
 def test_miniature_split_carries_the_miniature_rows_unchanged() -> None:

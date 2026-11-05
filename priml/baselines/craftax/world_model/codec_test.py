@@ -414,7 +414,7 @@ def _f32(value: float) -> float:
 def _game_aux(name: str, value: int) -> float:
     """Return ``compute_observations_numba``'s float32 for one aux token value."""
     if name in SQRT_FIELDS:
-        return _f32(_f32(value**0.5) / 10)
+        return _f32(_f32(cast(float, value**0.5)) / 10)
     if name == "health":
         return _f32(_f32(value / 20) / 10)
     divisor = 255 if name == "light" else 1

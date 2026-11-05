@@ -2,7 +2,7 @@
 
 from functools import partial
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from torch import Tensor, nn
 from treekle import from_plain
@@ -313,7 +313,7 @@ def _build_composite(*, kind: str) -> nn.Module:
 def _composite_output(model: nn.Module, value: Tensor) -> Tensor:
     if isinstance(model, MMDiTBlock):
         return golden.joined(output.float() for output in model([value, value]))
-    output = model(value)
+    output = cast(object, model(value))
     assert isinstance(output, Tensor)
     return output.float()
 

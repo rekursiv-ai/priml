@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import cast, override
 
 import math
 
@@ -461,7 +461,9 @@ class SdpaVarlen(nn.Module):
             # SDPA never exposes its logits, so they are formed again.
             with torch.no_grad():
                 keys = k.repeat_interleave(q.shape[-3] // k.shape[-3], dim=-3)
-                logit_scale = float(q.shape[-1] ** -0.5) if scale is None else scale
+                logit_scale = (
+                    float(cast(float, q.shape[-1] ** -0.5)) if scale is None else scale
+                )
                 logits = q @ keys.transpose(-1, -2) * logit_scale
                 masked = logits.masked_fill(~mask, float("-inf"))
                 self.max_logit = masked.amax().float()

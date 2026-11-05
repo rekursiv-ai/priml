@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import itertools
 import math
@@ -192,7 +192,7 @@ def _adaptive_avg_pool(
         stride = tuple(spatial[i] // output_size[i] for i in range(n))
         kernel = tuple(spatial[i] - (output_size[i] - 1) * stride[i] for i in range(n))
         # Unconditional: the plain-mean case returned above.
-        return _AVG_POOL[n](x, kernel) * float(math.prod(stride) ** 0.5)
+        return _AVG_POOL[n](x, kernel) * cast(float, math.prod(stride) ** 0.5)
 
     # Per-dimension index tables.
     dims = [_dim_info(spatial[i], output_size[i], x.device) for i in range(n)]
@@ -205,7 +205,8 @@ def _adaptive_avg_pool(
     # Non-adaptive shortcut: uniform windows → mean over max_kernel_size dims.
     if not any(d.needs_irregular_kernel for d in dims):
         max_kernel_size_dims = tuple(-(2 * k + 1) for k in reversed(range(n)))
-        return vals.mean(dim=max_kernel_size_dims) * float(
+        return vals.mean(dim=max_kernel_size_dims) * cast(
+            float,
             math.prod(vals.shape[d] for d in max_kernel_size_dims) ** 0.5,
         )
 

@@ -994,7 +994,7 @@ def _exhaustive_pin_trace(
             # Frontier blocks are contiguous and uniformly sized per puzzle
             # (expansion is all-or-nothing per puzzle), so the within-level
             # node offset is a plain remainder.
-            rows_per_puzzle = candidates**level
+            rows_per_puzzle = cast(int, candidates**level)
             within_level = torch.arange(boards.shape[0], device=device).remainder(
                 rows_per_puzzle,
             )
@@ -1007,7 +1007,7 @@ def _exhaustive_pin_trace(
 
             if level == depth:
                 break
-            next_width = candidates ** (level + 1)
+            next_width = cast(int, candidates ** (level + 1))
             expandable = nodes + next_width <= budget
             keep = expandable[frontier_puzzle].nonzero(as_tuple=True)[0]
             if not keep.shape[0]:

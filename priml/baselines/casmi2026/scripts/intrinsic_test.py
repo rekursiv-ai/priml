@@ -148,8 +148,11 @@ def test_writer_keeps_complete_arrays_vocabularies_and_provenance(
     empty = tmp_path / "empty"
     intrinsic.prepare_intrinsic(request, output=empty, version=IDENTITY_RDKIT)
     assert parquet.read_table(empty / "molecules.parquet").num_rows == 0
-    assert np.load(empty / "records.npy").shape == (0, 34)
-    assert np.load(empty / "capabilities.npy").shape == (0, 22)
+    assert cast("NDArray[np.float32]", np.load(empty / "records.npy")).shape == (0, 34)
+    assert cast("NDArray[np.uint8]", np.load(empty / "capabilities.npy")).shape == (
+        0,
+        22,
+    )
 
 
 def _boundary(

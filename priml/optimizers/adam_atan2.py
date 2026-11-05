@@ -142,6 +142,6 @@ class AdamATan2(Optimizer):
             if wd != 0.0:
                 p.mul_(1.0 - lr * wd)
             step_size = lr / (1.0 - beta1**step)
-            bias_correction2_sqrt = (1.0 - beta2**step) ** 0.5
+            bias_correction2_sqrt = cast(float, (1.0 - beta2**step) ** 0.5)
             update = torch.atan2(m, v.sqrt() / bias_correction2_sqrt)
             p.add_(update, alpha=-step_size)

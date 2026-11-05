@@ -1001,7 +1001,10 @@ def test_cuda_synchronize_path() -> None:
 
 
 def test_no_pending_divergence_and_gradient_clipping_paths() -> None:
-    step = _smoke_step()
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.config = NanoChatTrainStep.Config()
+    step._model = torch.nn.Linear(2, 3)
+    step._pending_worst = None
     step._assert_not_diverged()
     step.config.gradient_clip_norm = float("inf")
     assert step._clip_gradients() == {}
@@ -1174,19 +1177,28 @@ def test_a_two_pass_update_charges_the_budget_and_guards_the_worst_pass() -> Non
 
 
 def test_call_eval_and_partial_epoch_cleanup() -> None:
-    step = _smoke_step()
-    batch = _smoke_batch(step)
-    logits = step.call_eval(**batch)
-    assert logits.shape[:2] == batch["media"].shape
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.config = NanoChatTrainStep.Config()
+    step.parallelism = NoParallel.Config(device="cpu").make()
+    step._model = nn.Linear(4, 5)
+    media = torch.randn(2, 3, 4)
+    logits = step.call_eval(media=media)
+    assert logits.shape == (2, 3, 5)
+    assert not step.model.training
+    assert logits.is_inference()
+    assert logits.dtype == step.config.dtype_autocast
+    for parameter in step.model.parameters():
+        parameter.grad = torch.ones_like(parameter)
     step._pending_passes = 1
     step._pending_worst = torch.tensor(2.0)
     step.on_epoch_end()
     assert step.accumulation_complete
     assert step._pending_worst is None
+    assert all(parameter.grad is None for parameter in step.model.parameters())
 
 
 def test_load_state_requires_budget_clock() -> None:
-    step = _smoke_step()
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
     with pytest.raises(ValueError, match="local_step"):
         step.load_state_dict({})
 
@@ -1373,10 +1385,22 @@ def test_a_scaled_member_without_a_numeric_rate_is_refused() -> None:
 
 
 def test_train_loss_scores_without_updating() -> None:
-    step = _smoke_step()
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.config = NanoChatTrainStep.Config()
+    step.parallelism = NoParallel.Config(device="cpu").make()
+    step._model = nn.Linear(4, 5)
+    step._compiled_model = None
+    step.loss = step.config.loss.make()
+    step.model.eval()
+    media = torch.randn(2, 3, 4)
+    label = torch.randint(5, (2, 3))
     before = [parameter.detach().clone() for parameter in step.model.parameters()]
-    result = step.train_loss(**_smoke_batch(step))
+    result = step.train_loss(media=media, label=label)
     assert result["loss"].shape == (1,)
+    assert result["model"].shape == label.shape
+    assert step.model.training
+    assert not result["loss"].requires_grad
+    assert all(parameter.grad is None for parameter in step.model.parameters())
     after = list(step.model.parameters())
     assert all(torch.equal(a, b) for a, b in zip(before, after, strict=True))
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import re
 
 import pytest
@@ -498,7 +500,7 @@ def test_image_shape_statistics_basic():
     assert abs(stats.aspect_ratios[4] - 1.0) < 0.001
 
     # Verify effective resolutions (sqrt of pixel density)
-    assert stats.effective_resolutions[0] == round((1920 * 1080) ** 0.5)
+    assert stats.effective_resolutions[0] == round(cast(float, (1920 * 1080) ** 0.5))
     assert stats.effective_resolutions[4] == 1024
 
 
