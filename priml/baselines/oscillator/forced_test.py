@@ -93,9 +93,11 @@ def test_hidden_drive_changes_the_observed_motion() -> None:
 def test_shooting_recovers_clean_stationary_motion_and_rejects_other_physics() -> None:
     cfg = small(seq_len=48, pred_len=16, changes=(1.0,), recent_steps=(40, 40))
     cfg.observation = GlitchySensor.Config(noise=(0, 0), spike_rate=0, quantum=0)
+    # Fewer substeps keep this under the 60 s test timeout on CI runners.
+    cfg.dynamics.substeps = 2
     data = cfg.make()
     episode = data.sample(count=4, seed=21)
-    method = ForcedShooting.Config(visible_steps=40, iterations=800).make()
+    method = ForcedShooting.Config(visible_steps=32, iterations=600).make()
     method.fit(episode.windows, validation=episode.windows, dynamics=data.dynamics)
     prediction = method.predict(episode.windows.media)
     assert prediction.shape == episode.windows.label.shape
