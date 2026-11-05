@@ -25,6 +25,7 @@ from priml.baselines.oscillator.adaptation import (
     ObservedGeometry,
     ObservedNeuralForecast,
 )
+from priml.baselines.oscillator.forced import ForcedData, ForcedDomain
 from priml.baselines.oscillator.hidden import HiddenData, HiddenDomain
 from priml.baselines.oscillator.regimes import DynamicsDomain, RegimeData
 from priml.model.custom_types import propagate_attr
@@ -69,8 +70,10 @@ class RegimeFamily:
         name: str = "in_domain"
         """Result label, not an implementation selector."""
 
-        domain: DynamicsDomain.Config | HiddenDomain.Config = field(
-            default_factory=DynamicsDomain.Config,
+        domain: DynamicsDomain.Config | HiddenDomain.Config | ForcedDomain.Config = (
+            field(
+                default_factory=DynamicsDomain.Config,
+            )
         )
         """Coefficients sampled after the observed change."""
 
@@ -131,7 +134,7 @@ class RegimeBenchmark:
         phase: Literal["development", "audit"] = "development"
         """Evaluation collection; audit uses independently reserved streams."""
 
-        data: RegimeData.Config | HiddenData.Config = field(
+        data: RegimeData.Config | HiddenData.Config | ForcedData.Config = field(
             default_factory=RegimeData.Config,
         )
         """Motion, schedule, and variables exposed to a method."""
@@ -384,7 +387,7 @@ class RegimeBenchmark:
         self,
         method: ObservedForecaster,
         *,
-        data: RegimeData | HiddenData,
+        data: RegimeData | HiddenData | ForcedData,
         scale: Tensor,
     ) -> tuple[dict[str, EpisodeScores], dict[str, float]]:
         """Keep evaluator-only parameters outside the forecaster's input."""

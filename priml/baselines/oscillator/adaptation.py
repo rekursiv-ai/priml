@@ -24,6 +24,7 @@ from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
+    from priml.baselines.oscillator.forced import ForcedDynamics
     from priml.baselines.oscillator.hidden import HiddenDynamics
     from priml.baselines.oscillator.regimes import ObservedWindows
 
@@ -45,7 +46,7 @@ class ObservedForecaster(Protocol):
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics | HiddenDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
         """Return the fitting budget and any model-selection diagnostics."""
         ...
@@ -288,7 +289,7 @@ class ObservedNeuralForecast:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics | HiddenDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
         """Normalize on training only and restore the best validation state."""
         del dynamics
@@ -389,7 +390,7 @@ class ObservedRidge:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics | HiddenDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
         """Fit without reading validation targets or any test episode."""
         del validation, dynamics
@@ -463,7 +464,7 @@ class RecentPhysics:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics | HiddenDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
         """Take only time geometry; the equation form is a declared prior."""
         del validation
@@ -605,7 +606,7 @@ class LastObservation:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: RegimeDynamics | HiddenDynamics,
+        dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
         """Record the output length without fitting any parameters."""
         del validation, dynamics

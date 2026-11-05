@@ -22,6 +22,7 @@ from priml.baselines.oscillator.delayed import (
     SignedHistory,
 )
 from priml.baselines.oscillator.discovery import SparseSimulator
+from priml.baselines.oscillator.forced import ForcedData, ForcedDomain, ForcedShooting
 from priml.baselines.oscillator.forces import (
     CorrectedOscillator,
     PowerForce,
@@ -1385,6 +1386,71 @@ def exp050() -> RegimeBenchmark.Config:
     """
     cfg = exp049()
     cfg.experiment_name = "exp050"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
+    return cfg
+
+
+def exp051() -> RegimeBenchmark.Config:
+    """Forecast a glitchy sensor on a driven system that changes repeatedly.
+
+    Hypothesis:
+      A hidden periodic drive, double wells, up to three unannounced changes
+      and spiky quantized readings defeat pooled forecasters that solve exp049,
+      while the exact continuation shows the history still fixes the future.
+
+    References:
+      exp049 for the undriven, single-change task this extends.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp049()
+    cfg.experiment_name = "exp051"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.data = ForcedData.Config()
+    for recipe in cfg.recipes:
+        if recipe.name == "library_shooting":
+            recipe.method = ForcedShooting.Config()
+    cfg.development = [RegimeFamily.Config(domain=ForcedDomain.Config())]
+
+    # Classic chaotic Duffing settings: a forced, lightly damped double well.
+    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20261201)
+    chaotic.domain = ForcedDomain.Config(
+        stiffness=(-1.2, -0.8),
+        damping=(0.1, 0.3),
+        cubic=(0.8, 1.2),
+        drive=(0.3, 0.6),
+        frequency=(1.0, 1.4),
+    )
+    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20261202)
+    asymmetric.domain = ForcedDomain.Config(quadratic=(0.3, 0.8))
+    # Negative linear damping with amplitude-dependent drag: a limit cycle.
+    excited = RegimeFamily.Config(name="self_excited", seed=20261203)
+    excited.domain = ForcedDomain.Config(damping=(-0.2, -0.05), excitation=(0.3, 0.8))
+    fast = RegimeFamily.Config(name="fast_drive", seed=20261204)
+    fast.domain = ForcedDomain.Config(drive=(0.3, 0.8), frequency=(2.5, 4.0))
+    cfg.audit = [chaotic, asymmetric, excited, fast]
+    return cfg
+
+
+def exp052() -> RegimeBenchmark.Config:
+    """exp051 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods fitted to the training ranges fail on chaotic wells, asymmetric
+      and self-excited mechanisms absent from training, and faster drives.
+
+    References:
+      exp051.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp051()
+    cfg.experiment_name = "exp052"
     cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
     cfg.phase = "audit"
     return cfg

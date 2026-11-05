@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import math
 
@@ -12,13 +12,17 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.oscillator.regimes import EvaluatorEpisodes, ObservedWindows
+from priml.baselines.oscillator.regimes import (
+    EvaluatorEpisodes,
+    ObservedWindows,
+    RegimeDynamics,
+)
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from priml.baselines.oscillator.regimes import RegimeDynamics
+    from priml.baselines.oscillator.forced import ForcedDynamics
 
 
 COEFFICIENTS = 7
@@ -317,18 +321,33 @@ class LibraryShooting:
         seed: int = 4242
         """Restart stream, independent of data and evaluation."""
 
+        robust: float = 0.0
+        """Cauchy loss scale in position units; zero keeps squared error."""
+
+    dynamics_type: ClassVar[type] = HiddenDynamics
+    """Equation form the library declares; other physics is rejected."""
+
+    latent_draws: ClassVar[int] = 2
+    """Uniform draws initializing the unobserved state of each restart."""
+
+    @staticmethod
+    def latent(start: Tensor) -> Tensor:
+        """Map restart draws to the hidden partner's position and velocity."""
+        return torch.stack((2 * start[:, 0] - 1, start[:, 1] - 0.5), dim=-1)
+
     def __init__(self, config: Config) -> None:
         if (
             config.visible_steps < 8
             or min(config.restarts, config.iterations) < 1
             or not config.lr > 0
-            or len(config.lower) != COEFFICIENTS
-            or len(config.upper) != COEFFICIENTS
+            or config.robust < 0
+            or len(config.lower) != len(config.upper)
             or any(b <= a for a, b in zip(config.lower, config.upper, strict=True))
         ):
             raise ValueError("Shooting needs a window, budgets and ordered bounds.")
         self.config = config
-        self.dynamics: HiddenDynamics | None = None
+        self.dynamics: HiddenDynamics | ForcedDynamics | None = None
+        self.coefficients = len(config.lower)
         self.pred_len = 0
 
     def fit(
@@ -336,12 +355,15 @@ class LibraryShooting:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: HiddenDynamics | RegimeDynamics,
+        dynamics: HiddenDynamics | RegimeDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
         """Take the time geometry and declared equation form; no training data."""
         del validation
-        if not isinstance(dynamics, HiddenDynamics):
-            raise TypeError("Library shooting needs the coupled equation form.")
+        if isinstance(dynamics, RegimeDynamics) or not isinstance(
+            dynamics,
+            self.dynamics_type,
+        ):
+            raise TypeError("Library shooting needs its declared equation form.")
         self.dynamics = dynamics
         self.pred_len = train.label.shape[1]
         return {"attempted_updates": 0}
@@ -361,19 +383,20 @@ class LibraryShooting:
         generator = torch.Generator().manual_seed(cfg.seed)
         start = torch.rand(
             batch * restarts,
-            COEFFICIENTS + 2,
+            self.coefficients + self.latent_draws,
             generator=generator,
         ).double()
         # First restart of each episode starts from mid-range coefficients.
         start[::restarts] = 0.5
-        raw = torch.logit(start[:, :COEFFICIENTS].clamp(0.02, 0.98)).requires_grad_()
+        raw = torch.logit(
+            start[:, : self.coefficients].clamp(0.02, 0.98),
+        ).requires_grad_()
         step = self.dynamics.config.step_size
-        state = torch.stack(
+        state = torch.cat(
             (
-                target[:, 0],
-                (target[:, 2] - target[:, 0]) / (2 * step),
-                2 * start[:, COEFFICIENTS] - 1,
-                start[:, COEFFICIENTS + 1] - 0.5,
+                target[:, :1],
+                (target[:, 2:3] - target[:, :1]) / (2 * step),
+                self.latent(start[:, self.coefficients :]),
             ),
             dim=-1,
         ).requires_grad_()
@@ -401,7 +424,7 @@ class LibraryShooting:
         lower: Tensor,
         upper: Tensor,
     ) -> Tensor:
-        """Mean squared mismatch to the observed window for every restart."""
+        """Mean (robust) mismatch to the observed window for every restart."""
         assert self.dynamics is not None
         coefficients = lower + (upper - lower) * torch.sigmoid(raw)
         path = self.dynamics.forecast(
@@ -409,9 +432,7 @@ class LibraryShooting:
             coefficients=coefficients,
             steps=target.shape[1] - 1,
         )
-        return (
-            torch.cat((state[:, None, 0], path[..., 0]), dim=1)
-            .sub(target)
-            .square()
-            .mean(1)
-        )
+        error = torch.cat((state[:, None, 0], path[..., 0]), dim=1).sub(target)
+        if self.config.robust > 0:
+            return error.div(self.config.robust).square().log1p().mean(1)
+        return error.square().mean(1)

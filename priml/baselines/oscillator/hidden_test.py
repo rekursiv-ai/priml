@@ -7,6 +7,7 @@ from priml.baselines.oscillator.adaptation import RecentPhysics
 from priml.baselines.oscillator.hidden import (
     HiddenData,
     HiddenDomain,
+    HiddenDynamics,
     LibraryShooting,
     NoisyPosition,
 )
@@ -127,3 +128,30 @@ def test_invalid_geometry_is_rejected(change: dict[str, object]) -> None:
         setattr(cfg, key, value)
     with pytest.raises(ValueError, match="must be valid"):
         cfg.make()
+
+
+def test_invalid_components_and_premature_prediction_are_rejected() -> None:
+    with pytest.raises(ValueError, match="physical"):
+        HiddenDomain.Config(stiffness=(0.0, 1.0)).make()
+    with pytest.raises(ValueError, match="positive"):
+        HiddenDynamics.Config(substeps=0).make()
+    with pytest.raises(ValueError, match="ordered"):
+        NoisyPosition.Config(noise=(0.2, 0.1)).make()
+    data = HiddenData.Config(seq_len=60, pred_len=8, recent_steps=(20, 40)).make()
+    with pytest.raises(ValueError, match="positive"):
+        data.dynamics.forecast(
+            torch.zeros(1, 4),
+            coefficients=torch.ones(1, 7),
+            steps=0,
+        )
+    with pytest.raises(ValueError, match="must be valid"):
+        data.sample(count=0, seed=1)
+    with pytest.raises(ValueError, match="ordered bounds"):
+        LibraryShooting.Config(visible_steps=4).make()
+    method = LibraryShooting.Config(visible_steps=40).make()
+    with pytest.raises(RuntimeError, match="Fit"):
+        method.predict(torch.zeros(1, 60, 1))
+    episode = data.sample(count=1, seed=1)
+    method.fit(episode.windows, validation=episode.windows, dynamics=data.dynamics)
+    with pytest.raises(ValueError, match="covering"):
+        method.predict(torch.zeros(1, 20, 1))
