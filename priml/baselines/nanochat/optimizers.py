@@ -797,7 +797,10 @@ def _ffn_scaled_normuon(
     for rows, columns in sorted({tuple(p.shape) for p in parameters}):
         rate = config.optimizer.lr
         if columns == config.channels_in and rows > config.channels_in:
-            rate *= (config.reference_expansion * config.channels_in / rows) ** 0.5
+            rate *= cast(
+                float,
+                (config.reference_expansion * config.channels_in / rows) ** 0.5,
+            )
         if (columns == config.channels_in and rows > config.channels_in) or (
             rows == config.channels_in and columns > config.channels_in
         ):

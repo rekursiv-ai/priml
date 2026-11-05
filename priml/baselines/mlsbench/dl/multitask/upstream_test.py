@@ -335,7 +335,7 @@ def test_pin_shared_pins_only_a_walking_combination(tmp_path: Path) -> None:
     assert upstream.pin_shared(plain, loss) == []
     pcgrad = variants["pcgrad"].MultiTaskLoss(2)
     assert upstream.pin_shared(pcgrad, loss) == []
-    assert pcgrad._shared_params == [w]
+    assert cast(upstream.Walker, pcgrad)._shared_params == [w]
 
 
 def test_a_walk_that_finds_more_than_the_ports_is_reported(tmp_path: Path) -> None:

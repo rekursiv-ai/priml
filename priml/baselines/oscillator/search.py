@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import math
 
@@ -24,7 +24,7 @@ else:
 
 # Brent's machine epsilon as the reference fminbound spells it, not float64's
 # exact epsilon; only this value reproduces its iterates bit for bit.
-_SQRT_EPS: Final = float(2.2e-16**0.5)
+_SQRT_EPS: Final = cast(float, 2.2e-16**0.5)
 _GOLDEN: Final = 0.5 * (3 - float(5**0.5))
 
 
@@ -272,7 +272,7 @@ def _jacobian(
     high: float,
 ) -> Tensor:
     """Difference each parameter forward, or backward where forward leaves the box."""
-    step = torch.finfo(x.dtype).eps ** 0.5 * x.abs().clamp(min=1)
+    step = cast(float, torch.finfo(x.dtype).eps ** 0.5) * x.abs().clamp(min=1)
     step = step.where(x + step <= high, -step)
     return torch.column_stack(
         [

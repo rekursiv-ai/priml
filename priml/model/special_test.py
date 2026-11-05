@@ -513,10 +513,11 @@ def test_repeated_sequential_assigns_nested_depth_through_skip() -> None:
     config.repeat = 3
     config.depth_index = ((1, 2),)
 
-    config.finalize()
+    finalized = config.finalize()
 
-    assert isinstance(config.elements, list)
-    for index, element in enumerate(config.elements):
+    assert isinstance(finalized.elements, list)
+    for index, element in enumerate(finalized.elements):
+        assert isinstance(element, Skip.Config)
         assert isinstance(element.inner, Linear.Config)
         assert element.inner.depth_index == ((1, 2), (index, 3))
 
@@ -530,10 +531,11 @@ def test_transformer_assigns_layer_depth_through_a_wrapped_branch() -> None:
     branch.inner = Linear.Config()
     config.block.ffn = branch
 
-    config.finalize()
+    finalized = config.finalize()
 
-    assert isinstance(config.block, list)
-    for index, block in enumerate(config.block):
+    assert isinstance(finalized.block, list)
+    for index, block in enumerate(finalized.block):
+        assert isinstance(block, TransformerBlock.Config)
         assert isinstance(block.ffn, Skip.Config)
         assert isinstance(block.ffn.inner, Linear.Config)
         assert block.ffn.inner.depth_index == ((index, 3),)

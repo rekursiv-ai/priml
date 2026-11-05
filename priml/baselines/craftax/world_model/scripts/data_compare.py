@@ -147,9 +147,11 @@ def compare(
             if name != control:
                 row["delta"] = means[name] - means[control]
             if name != control and degrees:
-                error = (
-                    squares / degrees * (1 / len(v) + 1 / len(values[control]))
-                ) ** 0.5
+                error = cast(
+                    float,
+                    (squares / degrees * (1 / len(v) + 1 / len(values[control])))
+                    ** 0.5,
+                )
                 row["z"] = row["delta"] / error if error else 0.0
             rows[name] = row
         result[metric] = rows

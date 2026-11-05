@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, override
 from unittest.mock import MagicMock, patch
 
@@ -29,10 +30,9 @@ def _make_loss_with_mocked_lpips(
     max_num_random_frames: int,
 ) -> LPIPSLoss:
     """Create ``LPIPSLoss`` with a patched LPIPS module boundary."""
-    mock_lpips = MagicMock()
     mock_criterion = MagicMock()
     mock_criterion.side_effect = side_effect
-    mock_lpips.LPIPS.return_value = mock_criterion
+    mock_lpips = SimpleNamespace(LPIPS=MagicMock(return_value=mock_criterion))
     with patch("priml.loss.lpips_loss.lpips", mock_lpips):
         return LPIPSLoss.Config(max_num_random_frames=max_num_random_frames).make()
 
@@ -48,20 +48,22 @@ def lpips_loss() -> LPIPSLoss:
 
 @pytest.mark.parametrize("pretrained", [True, False])
 def test_lpips_factory_passes_exact_options(pretrained: bool) -> None:
-    mock_lpips = MagicMock()
+    mock_criterion = MagicMock()
+    mock_factory = MagicMock(return_value=mock_criterion)
+    mock_lpips = SimpleNamespace(LPIPS=mock_factory)
     with (
         patch("priml.loss.lpips_loss.lpips", mock_lpips),
         patch("priml.loss.lpips_loss.warnings.filterwarnings") as filter_warnings,
     ):
         result = _lpips("alex", pretrained=pretrained)
 
-    assert result is mock_lpips.LPIPS.return_value
+    assert result is mock_criterion
     filter_warnings.assert_called_once_with(
         "ignore",
         category=UserWarning,
         module=r"torchvision\.models\._utils",
     )
-    mock_lpips.LPIPS.assert_called_once_with(
+    mock_factory.assert_called_once_with(
         net="alex",
         pretrained=pretrained,
         pnet_rand=not pretrained,

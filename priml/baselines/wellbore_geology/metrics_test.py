@@ -1,7 +1,7 @@
 """Tests for pooled scored-row RMSE and exact metric state."""
 
 from collections.abc import Sequence
-from typing import override
+from typing import cast, override
 
 from numpy.typing import NDArray
 
@@ -51,7 +51,7 @@ def test_rmse_pools_rows_instead_of_averaging_batches() -> None:
         torch.tensor([[7.0, 0.0, 9.0], [9.0, 5.0, 5.0]]),
         meta=[_meta(2, [7.0, 4.0]), _meta(1, [9.0])],
     )
-    expected = ((1 + 4 + 9 + 0 + 16 + 0) / 6) ** 0.5
+    expected = cast(float, ((1 + 4 + 9 + 0 + 16 + 0) / 6) ** 0.5)
     assert metric.compute() == {"rmse": expected}
     assert len(saved["predictions"]) == 1
     metric.reset()

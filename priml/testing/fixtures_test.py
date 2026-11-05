@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from importlib import util
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest.mock import MagicMock, patch
 
 import sys
 import warnings
+
+from torch import Tensor
 
 import pytest
 import torch
@@ -19,7 +21,6 @@ from priml.testing.fixtures import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
     from types import ModuleType
 
@@ -156,7 +157,7 @@ def test_test_main_calls_pytest():
         assert mock_pytest.called
         call = mock_pytest.call_args
         assert call is not None
-        call_args = call.args[0]
+        call_args = cast(object, call.args[0])
         assert isinstance(call_args, list)
 
         # Verify the test file is in the arguments.
@@ -188,7 +189,7 @@ def test_test_main_passes_through_argv():
 
             call = mock_pytest.call_args
             assert call is not None
-            call_args = call.args[0]
+            call_args = cast(object, call.args[0])
             assert isinstance(call_args, list)
 
             # Verify extra args were passed through.
@@ -353,6 +354,12 @@ _UNPLACED: Final = {
 """Each factory the mode checks, called with no device."""
 
 
+class _FactoryModule(Protocol):
+    at_none: Callable[[], Tensor]
+    placed: Callable[[], Tensor]
+    plain_op: Callable[[], Tensor]
+
+
 def _module(directory: Path) -> ModuleType:
     """Write and import a module calling each factory unplaced, at None, and placed."""
     lines = ["import torch", ""]
@@ -379,7 +386,7 @@ def test_placed_factories_fail_a_modules_factory_that_names_no_device(
     placed_factories: Callable[[ModuleType], TorchFunctionMode],
 ) -> None:
     module = _module(tmp_path)
-    call = getattr(module, name)
+    call = cast(Callable[[], Tensor], getattr(module, name))
     call()
     with placed_factories(module), pytest.raises(ValueError, match="names no device"):
         call()
@@ -390,13 +397,14 @@ def test_placed_factories_pass_a_named_device_and_other_callers(
     placed_factories: Callable[[ModuleType], TorchFunctionMode],
 ) -> None:
     module = _module(tmp_path)
+    factories = cast(_FactoryModule, module)
     with placed_factories(module):
         with pytest.raises(ValueError, match=r"zeros.* names no device$"):
-            module.at_none()
-        placed = module.placed()
+            factories.at_none()
+        placed = factories.placed()
         assert placed.device.type == "cpu"
         assert placed.dtype == torch.float64
-        assert torch.equal(module.plain_op(), torch.full((2,), 2.0))
+        assert torch.equal(factories.plain_op(), torch.full((2,), 2.0))
         # The test is not the module: its own unplaced factories pass.
         assert torch.zeros(2).device.type == "cpu"
 

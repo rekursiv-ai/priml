@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from torch import Tensor
 
 import pytest
@@ -257,7 +259,7 @@ def test_init_helpers_use_expected_shapes_and_corrected_init() -> None:
     expected_table = torch.empty(3, 12)
     truncated_normal(
         expected_table,
-        std=config.pos2d_init_std / config.channels_in**0.5,
+        std=config.pos2d_init_std / cast(float, config.channels_in**0.5),
         depth_index=(),
         variance_correction=True,
     )
@@ -270,7 +272,8 @@ def test_init_helpers_use_expected_shapes_and_corrected_init() -> None:
     expected_feedback = torch.zeros(5, 12)
     truncated_normal(
         expected_feedback,
-        std=feedback_config.feedback_init_std / feedback_config.channels_in**0.5,
+        std=feedback_config.feedback_init_std
+        / cast(float, feedback_config.channels_in**0.5),
         depth_index=(),
         variance_correction=True,
     )

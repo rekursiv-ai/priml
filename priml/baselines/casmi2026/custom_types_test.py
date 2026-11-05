@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ForwardRef, cast
+
 import dataclasses
 
 import numpy as np
@@ -26,7 +28,10 @@ from priml.baselines.casmi2026.custom_types import (
 def _hints(typed_dict: type) -> dict[str, str]:
     return {
         name: hint if isinstance(hint, str) else hint.__forward_arg__
-        for name, hint in typed_dict.__annotations__.items()
+        for name, hint in cast(
+            dict[str, str | ForwardRef],
+            typed_dict.__annotations__,
+        ).items()
     }
 
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from inspect import getattr_static
+from typing import cast
 from typing_extensions import get_protocol_members
 
 from torch import nn
@@ -60,7 +63,11 @@ def test_runtime_checkable_capabilities() -> None:
     assert not isinstance(_Horizon(), RowWindow)
     assert isinstance(_Ema(), InitializableEMA)
     assert not isinstance(_Horizon(), InitializableEMA)
-    assert InitializableEMA.initialize(_Ema(), nn.Identity()) is None
+    initialize = cast(
+        Callable[[InitializableEMA, nn.Module], object],
+        getattr_static(InitializableEMA, "initialize"),
+    )
+    assert initialize(_Ema(), nn.Identity()) is None
 
 
 if __name__ == "__main__":

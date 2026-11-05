@@ -119,8 +119,8 @@ def test_peak_preparation_filters_quotas_and_square_root_normalizes() -> None:
     )
     assert mz.tolist() == [-1.0, 0.0, 101.5]
     assert it.tolist() == [
-        np.float32((2 / 3) ** 0.5),
-        np.float32((1 / 3) ** 0.5),
+        np.float32(cast(float, (2 / 3) ** 0.5)),
+        np.float32(cast(float, (1 / 3) ** 0.5)),
         1.0,
     ]
     # One peak per 50 Da window by intensity, then trimmed or refilled to the cap.
@@ -470,14 +470,17 @@ def test_model_columns_divide_scores_by_the_root_of_each_bit_count() -> None:
         np.zeros(0, np.float32),
         logits=np.array([0.75, 0.75, 0.75, 0.75, 2.0, 4.0]),
     )
-    z, rank, gap, normalized_z, normalized_rank, leader = features[:, 15:21].T
+    z, rank, gap, normalized_z, normalized_rank, leader = (
+        features[:, column] for column in range(15, 21)
+    )
     # Raw deviations 0, -1 and 1 over sqrt(2/3); float32 deviation is 1 ulp off.
     assert z.tolist() == pytest.approx([0.0, -(1.5**0.5), 1.5**0.5], rel=1e-6)
     assert rank.tolist() == [0.5, 1.0, 0.0]
     assert gap.tolist() == [-1.0, -2.0, 0.0]
     # Normalized deviations -1, -1/2 and 3/2 over sqrt(7/6).
     assert normalized_z.tolist() == [
-        float(np.float32(value / (7 / 6) ** 0.5)) for value in (-1.0, -0.5, 1.5)
+        float(np.float32(value / cast(float, (7 / 6) ** 0.5)))
+        for value in (-1.0, -0.5, 1.5)
     ]
     assert normalized_rank.tolist() == [1.0, 0.5, 0.0]
     assert leader.tolist() == [0.0, 0.0, 1.0]
@@ -1271,13 +1274,14 @@ def test_a_newton_stump_splits_where_the_labels_separate() -> None:
     assert state["gain"].tolist() == pytest.approx([4 / 3, -1.0, -1.0])
     query = np.array([[0.0], [3.0], [np.nan]])
     assert model.stages(query).shape == (1, 3)
-    assert model.stages(query)[0].tolist() == pytest.approx(
+    assert model.stages(query)[0, :].tolist() == pytest.approx(
         [-0.02, 0.02, 0.02],
         abs=1e-12,
     )
     probabilities = model.predict_proba(query)
     assert probabilities[:, 1].tolist() == [
-        _sigmoid(value) for value in state["value"][[1, 2, 2]].tolist()
+        _sigmoid(value)
+        for value in cast(list[float], state["value"].take([1, 2, 2]).tolist())
     ]
     np.testing.assert_array_equal(probabilities[:, 0], 1 - probabilities[:, 1])
 
@@ -1292,7 +1296,7 @@ def test_missing_rows_split_alone_through_an_infinite_threshold() -> None:
     assert state["missing_go_to_left"].tolist() == [0, 0, 0]
     assert state["count"].tolist() == [4, 2, 2]
     stages = model.stages(np.array([[5.0], [np.nan]]))
-    assert stages[0].tolist() == pytest.approx([-0.02, 0.02], abs=1e-12)
+    assert stages[0, :].tolist() == pytest.approx([-0.02, 0.02], abs=1e-12)
 
 
 def test_growth_stops_at_the_leaf_cap_and_skips_hessianless_bins() -> None:
@@ -1351,7 +1355,7 @@ def test_held_out_rows_score_every_round_until_the_patience_window() -> None:
     train, valid = model.validation_indices(labels)
     assert (len(train), len(valid)) == (10, 2)
     assert sorted([*train.tolist(), *valid.tolist()]) == list(range(12))
-    assert sorted(labels[valid].tolist()) == [0.0, 1.0]
+    assert sorted(cast(list[float], labels.take(valid).tolist())) == [0.0, 1.0]
     plain = HistogramBoosting.Config()
     plain.max_depth, plain.rounds, plain.min_leaf, plain.max_bins = 2, 1, 1, 4
     plain.seed = 0
@@ -1364,7 +1368,7 @@ def test_class_allocation_rounds_expected_counts_and_breaks_ties_randomly() -> N
     # Expected counts 1.125 and 1.875 round down; the larger remainder takes the rest.
     assert allocation.tolist() == [1, 2]
     tied = HistogramBoosting.class_allocation(np.array([2, 2]), 3, random)
-    assert sorted(tied.tolist()) == [1, 2]
+    assert sorted(cast(list[int], tied.tolist())) == [1, 2]
     assert HistogramBoosting.class_allocation(np.array([4, 4]), 4, random).tolist() == [
         2,
         2,

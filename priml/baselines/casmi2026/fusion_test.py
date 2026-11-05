@@ -769,7 +769,7 @@ def test_gap_credits_each_peak_by_its_least_cleaved_explanation(
     # The closed form rounds 1 ulp below the exact rational credit; the score is exact.
     assert score == pytest.approx(
         (heavier + 0.5 * lighter) / (heavier + lighter),
-        rel=2**-52,
+        rel=2.0**-52,
         abs=0,
     )
 

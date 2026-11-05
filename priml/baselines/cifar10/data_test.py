@@ -116,8 +116,10 @@ def test_mps_skips_channels_last_conversion(
     path = tmp_path / "split.pt"
     path.touch()
     media = Mock()
-    converted_media = Mock()
-    media.to.return_value = converted_media
+    contiguous = Mock()
+    converted_media = Mock(contiguous=contiguous)
+    to = Mock(return_value=converted_media)
+    media.configure_mock(to=to)
     label = Mock()
     monkeypatch.setattr(
         torch,
@@ -131,7 +133,7 @@ def test_mps_skips_channels_last_conversion(
         dtype=torch.float32,
     )
 
-    converted_media.contiguous.assert_not_called()
+    contiguous.assert_not_called()
 
 
 def test_train_loader_covers_every_image_exactly_once(tmp_path: Path) -> None:

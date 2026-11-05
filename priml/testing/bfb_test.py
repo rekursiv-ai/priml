@@ -42,8 +42,6 @@ from priml.testing.bfb import (
     _assert_equal,
     _assert_portable_output_dtype,
     _assert_portable_state_changes,
-    _byte_span,
-    _compact_copies,
     _copy_back,
     _cpu_state_dict,
     _downcast_f64,
@@ -60,7 +58,6 @@ from priml.testing.bfb import (
     _scales_operand,
     _scales_or_fuses,
     _seed_bfb,
-    _to_cpu,
     _unfused_convolution,
     _upcast,
     _write_back,
@@ -465,23 +462,6 @@ def test_move_to_device_recurses_into_containers_and_passes_scalars() -> None:
     assert isinstance(items, list)
     assert items[1] == "x"
     assert move_to_device(7, "cpu") == 7
-
-
-def test_to_cpu_clones_tensors_and_recurses_into_containers() -> None:
-    tensor = torch.zeros(1)
-    snapshot = cast(
-        dict[str, object],
-        _to_cpu({"a": (tensor, 3), "b": [tensor, "x"]}),
-    )
-    inner = cast(tuple[object, ...], snapshot["a"])
-    copy = inner[0]
-    assert isinstance(copy, Tensor)
-    tensor.fill_(1)
-    assert torch.equal(copy, torch.zeros(1))
-    assert inner[1] == 3
-    items = cast(list[object], snapshot["b"])
-    assert items[1] == "x"
-    assert _to_cpu(None) is None
 
 
 class _OtherDevice(Tensor):
@@ -1145,7 +1125,7 @@ def test_fill_parameters_values_scale_and_total(
     )
     assert count == 15
     assert torch.equal(
-        torch.cat([parameter.detach().flatten() for parameter in module]),
+        torch.cat([parameter.detach().flatten() for parameter in module.parameters()]),
         expected,
     )
 
@@ -3062,6 +3042,7 @@ def test_load_golden_accepts_custom_input_objects(tmp_path: Path) -> None:
         path,
     )
     payload = load_golden(path)
+    assert "input" in payload
     stored = payload["input"]
     assert isinstance(stored, _CustomGoldenInput)
     assert stored.value == 23
@@ -3276,34 +3257,6 @@ def test_regenerate_golden_persists_requested_seed(tmp_path: Path) -> None:
     assert load_golden(tmp_path / "seeded.pt")["seed"] == 29
 
 
-@pytest.mark.parametrize("view", [False, True])
-def test_to_cpu_preserves_input_identity_and_shared_storage(view: bool) -> None:
-    base = torch.arange(6.0)
-    first, second = (base[:4], base[2:]) if view else (base, base)
-    snapshot = cast(tuple[Tensor, Tensor], _to_cpu((first, second)))
-    if not view:
-        assert snapshot[0] is snapshot[1]
-    snapshot[0].add_(1)
-    assert torch.equal(
-        snapshot[1],
-        second + (torch.tensor([1, 1, 0, 0]) if view else 1),
-    )
-    assert torch.equal(base, torch.arange(6.0))
-
-
-def test_to_cpu_stores_only_the_span_its_views_share() -> None:
-    # A golden serializes whole storages, so snapshotting a slice of a large
-    # tensor with its base would push the golden past the size gate.
-    base = torch.arange(1000.0)
-    first, second = base[10:14], base[12:16].view(torch.int32)
-    snapshot = cast(tuple[Tensor, Tensor], _to_cpu((first, second)))
-    storage = snapshot[0].untyped_storage()
-    assert storage.nbytes() == 6 * base.element_size()
-    assert snapshot[1].untyped_storage().data_ptr() == storage.data_ptr()
-    assert torch.equal(snapshot[0], first)
-    assert torch.equal(snapshot[1], second)
-
-
 def _deterministic_identity() -> nn.Module:
     assert torch.are_deterministic_algorithms_enabled()
     return nn.Identity()
@@ -3443,33 +3396,6 @@ def test_first_tensor_uses_exact_type_errors() -> None:
         first_tensor(object())
     with pytest.raises(TypeError, match=r"^module result must start with a Tensor$"):
         first_tensor([None])
-
-
-def test_byte_span_tracks_strides_offsets_and_empty_tensors() -> None:
-    base = torch.arange(20.0).reshape(4, 5)
-    assert _byte_span(base[1:3, 1:4]) == (24, 56)
-    assert _byte_span(torch.empty((0, 3), dtype=torch.float32)) == (0, 0)
-    assert _byte_span(torch.empty_strided((2, 3), (5, 1))) == (0, 32)
-
-
-def test_compact_copies_preserves_shared_views_and_offsets() -> None:
-    base = torch.arange(12.0)
-    left, right = base[2:8:2], base[4:10:2]
-    copied = _to_cpu((left, right))
-    assert isinstance(copied, tuple)
-    copied_left, copied_right = cast(tuple[Tensor, Tensor], copied)
-    assert (
-        copied_left.untyped_storage().data_ptr()
-        == copied_right.untyped_storage().data_ptr()
-    )
-    assert copied_right.storage_offset() - copied_left.storage_offset() == 2
-    assert copied_left.stride() == left.stride()
-    assert copied_right.stride() == right.stride()
-    assert torch.equal(copied_left, left)
-    assert torch.equal(copied_right, right)
-    copied_left[1] = -1
-    assert copied_right[0] == -1
-    assert base[5] == 5
 
 
 def test_cpu_state_dict_is_an_independent_detached_snapshot() -> None:
@@ -3635,39 +3561,6 @@ def test_output_dtype_diagnostic(
     with pytest.raises(TypeError) as error:
         _assert_portable_output_dtype(torch.zeros(2, dtype=dtype))
     assert str(error.value) == message
-
-
-def test_compact_copies_preserves_shared_mixed_dtype_views_and_contents() -> None:
-    base = torch.arange(12, dtype=torch.int32)
-    first = base[2:8]
-    second = base[4:10].view(torch.int16)
-    copied = _compact_copies([first, second])
-    got_first, got_second = copied[id(first)], copied[id(second)]
-
-    assert got_first.device.type == got_second.device.type == "cpu"
-    assert got_first.dtype == first.dtype
-    assert got_second.dtype == second.dtype
-    assert got_first.shape == first.shape
-    assert got_second.shape == second.shape
-    assert got_first.stride() == first.stride()
-    assert got_second.stride() == second.stride()
-    assert torch.equal(got_first, first)
-    assert torch.equal(got_second, second)
-    assert (
-        got_first.untyped_storage().data_ptr()
-        == got_second.untyped_storage().data_ptr()
-    )
-    assert got_second.storage_offset() - 2 * got_first.storage_offset() == 4
-
-
-def test_compact_copies_resolves_lazy_conjugation() -> None:
-    base = torch.tensor([1 + 2j, 3 + 4j, 5 + 6j])
-    conjugate = base.conj()
-    copied = _compact_copies([conjugate])[id(conjugate)]
-
-    assert torch.equal(copied, conjugate)
-    assert not copied.is_conj()
-    assert copied.untyped_storage().data_ptr() != base.untyped_storage().data_ptr()
 
 
 def test_randomize_parameters_pins_seeded_draw_order_and_std() -> None:
@@ -4142,96 +4035,6 @@ def test_replay_golden_rebuilds_input_instead_of_loading_legacy_input(
         )
     finally:
         _restore_torch_process_state(original)
-
-
-def test_compact_copies_pins_empty_allocations_and_storage_copy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    base = torch.arange(12, dtype=torch.int32)
-    first, second = base[2:8:2], base[4:10].view(torch.int16)
-    original_empty = torch.empty
-    original_set = Tensor.set_
-    original_to = Tensor.to
-    allocations: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    storage_sets: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    transfers: list[tuple[tuple[object, ...], dict[str, object]]] = []
-
-    def empty_spy(
-        size: int | tuple[int, ...],
-        *,
-        dtype: torch.dtype | None = None,
-        device: str | torch.device | None = None,
-    ) -> Tensor:
-        if dtype in {torch.uint8, first.dtype, second.dtype}:
-            call_kwargs: dict[str, object] = {"dtype": dtype}
-            if device is not None:
-                call_kwargs["device"] = device
-            allocations.append(((size,), call_kwargs))
-        return original_empty(size, dtype=dtype, device=device)
-
-    def set_spy(
-        tensor: Tensor,
-        storage: torch.UntypedStorage,
-        storage_offset: int,
-        size: tuple[int, ...],
-        stride: tuple[int, ...],
-    ) -> Tensor:
-        if tensor.dtype in {torch.uint8, first.dtype, second.dtype}:
-            storage_sets.append(((storage, storage_offset, size, stride), {}))
-        return original_set(tensor, storage, storage_offset, size, stride)
-
-    def to_spy(
-        tensor: Tensor,
-        device: str | torch.device | None = None,
-        *,
-        copy: bool = False,
-    ) -> Tensor:
-        if tensor.dtype is torch.uint8:
-            transfers.append(((device,), {"copy": copy}))
-        return original_to(tensor, device=device, copy=copy)
-
-    monkeypatch.setattr(torch, "empty", empty_spy)
-    monkeypatch.setattr(Tensor, "set_", set_spy)
-    monkeypatch.setattr(Tensor, "to", to_spy)
-
-    copied = _compact_copies([first, second])
-
-    assert allocations[0] == (
-        (0,),
-        {"dtype": torch.uint8, "device": torch.device("cpu")},
-    )
-    assert allocations[1:] == [
-        ((0,), {"dtype": first.dtype}),
-        ((0,), {"dtype": second.dtype}),
-    ]
-    assert [call[0][1:] for call in storage_sets] == [
-        (8, (32,), (1,)),
-        (0, first.shape, first.stride()),
-        (4, second.shape, second.stride()),
-    ]
-    assert transfers == [(("cpu",), {"copy": True})]
-    first_copy = copied[id(first)]
-    second_copy = copied[id(second)]
-    assert (
-        first_copy.untyped_storage().data_ptr()
-        == second_copy.untyped_storage().data_ptr()
-    )
-    assert torch.equal(first_copy, first)
-    assert torch.equal(second_copy, second)
-
-
-def test_compact_copies_preserves_independent_tensor_contents() -> None:
-    first = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    second = torch.arange(8, dtype=torch.float64).reshape(2, 4)
-
-    copied = _compact_copies([first, second])
-
-    assert torch.equal(copied[id(first)], first)
-    assert torch.equal(copied[id(second)], second)
-    assert (
-        copied[id(first)].untyped_storage().data_ptr()
-        != copied[id(second)].untyped_storage().data_ptr()
-    )
 
 
 def test_randomize_parameters_requests_cpu_generator(

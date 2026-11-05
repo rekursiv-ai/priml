@@ -513,7 +513,7 @@ def aspect_scale(shape: Sequence[int]) -> float:
 
     """
     rows, cols = shape
-    return float(max(1.0, rows / cols) ** 0.5)
+    return float(cast(float, max(1.0, rows / cols) ** 0.5))
 
 
 def apply_update(

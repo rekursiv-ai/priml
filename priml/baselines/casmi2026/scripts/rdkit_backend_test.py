@@ -28,15 +28,17 @@ def _atoms() -> list[SimpleNamespace]:
     return [_atom(symbol) for symbol in ("O", "C", "H", "C")]
 
 
-def _mol(name: str) -> SimpleNamespace:
-    return SimpleNamespace(name=name, GetAtoms=_atoms, GetNumHeavyAtoms=lambda: 3)
+class _Molecule(SimpleNamespace):
+    def __init__(self, name: str) -> None:
+        super().__init__(GetAtoms=_atoms, GetNumHeavyAtoms=lambda: 3)
+        self.name: str = name
 
 
 class _Bits:
     def __init__(self, index: int) -> None:
         self.bits = np.array([index % 2, index // 2 % 2], dtype=np.uint8)
 
-    def fingerprint(self, mol: SimpleNamespace) -> NDArray[np.uint8]:
+    def fingerprint(self, mol: _Molecule) -> NDArray[np.uint8]:
         del mol
         return self.bits
 
@@ -65,44 +67,44 @@ class _Library:
         self.calls.append(("parse", text))
         if text == "error":
             raise ValueError("Bad chemistry input.")
-        return None if text == "invalid" else _mol(text)
+        return None if text == "invalid" else _Molecule(text)
 
-    def to_smiles(self, mol: SimpleNamespace) -> str:
+    def to_smiles(self, mol: _Molecule) -> str:
         self.calls.append(("smiles", mol.name))
         return f"{mol.name}-canonical"
 
-    def key(self, mol: SimpleNamespace) -> str:
+    def key(self, mol: _Molecule) -> str:
         self.calls.append(("key", mol.name))
         return "" if mol.name == "empty" else f"ABCDEFGHIJKLMN-{mol.name}"
 
-    def copy(self, mol: SimpleNamespace) -> SimpleNamespace:
+    def copy(self, mol: _Molecule) -> SimpleNamespace:
         self.calls.append(("copy", mol.name))
-        return _mol(mol.name + "-copy")
+        return _Molecule(mol.name + "-copy")
 
-    def remove_stereo(self, mol: SimpleNamespace) -> None:
+    def remove_stereo(self, mol: _Molecule) -> None:
         self.calls.append(("stereo", mol.name))
 
-    def charge(self, mol: SimpleNamespace) -> int:
+    def charge(self, mol: _Molecule) -> int:
         return int(mol.name == "charged")
 
     def tautomers(self) -> SimpleNamespace:
         return SimpleNamespace(Canonicalize=self.canonicalize)
 
-    def canonicalize(self, mol: SimpleNamespace) -> SimpleNamespace:
+    def canonicalize(self, mol: _Molecule) -> SimpleNamespace:
         self.calls.append(("tautomer", mol.name))
         return mol
 
     def largest(self) -> SimpleNamespace:
         return SimpleNamespace(choose=self.choose)
 
-    def choose(self, mol: SimpleNamespace) -> SimpleNamespace:
+    def choose(self, mol: _Molecule) -> SimpleNamespace:
         self.calls.append(("largest", mol.name))
         return mol
 
     def uncharger(self) -> SimpleNamespace:
         return SimpleNamespace(uncharge=self.uncharge)
 
-    def uncharge(self, mol: SimpleNamespace) -> SimpleNamespace:
+    def uncharge(self, mol: _Molecule) -> SimpleNamespace:
         self.calls.append(("uncharge", mol.name))
         return mol
 
@@ -128,17 +130,17 @@ class _Library:
         return _fingerprint(5)
 
 
-def _maccs(mol: SimpleNamespace) -> list[int]:
+def _maccs(mol: _Molecule) -> list[int]:
     del mol
     return [1, 0, 1]
 
 
-def _mass(mol: SimpleNamespace) -> float:
+def _mass(mol: _Molecule) -> float:
     del mol
     return 46.041864812
 
 
-def _formula(mol: SimpleNamespace) -> str:
+def _formula(mol: _Molecule) -> str:
     del mol
     return "C2H6O"
 

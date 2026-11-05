@@ -20,7 +20,7 @@ the last few digits rather than bitwise.
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Final, NamedTuple
+from typing import Final, NamedTuple, cast
 
 import math
 
@@ -263,7 +263,10 @@ class Pdlp:
                     float(torch.dot(delta_x, delta_x)) * weight.value
                     + float(torch.dot(delta_y, delta_y)) / weight.value
                 )
-                fixed_point_error = max(0.0, movement + 2.0 * interaction * step) ** 0.5
+                fixed_point_error = cast(
+                    float,
+                    max(0.0, movement + 2.0 * interaction * step) ** 0.5,
+                )
                 if restarted:
                     restart_state = _RestartState(
                         fixed_point_error,
@@ -440,7 +443,10 @@ class _PrimalWeight:
         relative_dual = check.dual_residual / (1.0 + check.objective_norm)
         relative_primal = check.primal_residual / (1.0 + check.bound_norm)
         ratio = math.inf if relative_primal == 0.0 else relative_dual / relative_primal
-        primal_norm, dual_norm = primal_distance**0.5, dual_distance**0.5
+        primal_norm, dual_norm = (
+            cast(float, primal_distance**0.5),
+            cast(float, dual_distance**0.5),
+        )
         if (
             1e-16 < primal_norm < 1e12
             and 1e-16 < dual_norm < 1e12

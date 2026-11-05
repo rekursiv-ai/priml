@@ -800,9 +800,8 @@ def test_interpolate_rank_greater_output_rank_channels_last():
 
 def test_decode_jpeg_turbojpeg_success():
     """Test decode_jpeg_turbojpeg successful decode."""
-    mock_turbo = MagicMock()
     mock_bgr = np.ones((2, 4, 3), dtype=np.uint8) * 128
-    mock_turbo.decode.return_value = mock_bgr
+    mock_turbo = MagicMock(decode=MagicMock(return_value=mock_bgr))
 
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
@@ -819,9 +818,8 @@ def test_decode_jpeg_turbojpeg_success():
 
 def test_decode_jpeg_turbojpeg_channels_last():
     """Test decode_jpeg_turbojpeg with channels_first=False."""
-    mock_turbo = MagicMock()
     mock_bgr = np.ones((2, 4, 3), dtype=np.uint8) * 128
-    mock_turbo.decode.return_value = mock_bgr
+    mock_turbo = MagicMock(decode=MagicMock(return_value=mock_bgr))
 
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
@@ -857,12 +855,11 @@ def test_decode_jpeg_turbojpeg_with_crop():
 
 def test_decode_jpeg_turbojpeg_bgr_to_rgb():
     """Test decode_jpeg_turbojpeg converts BGR to RGB."""
-    mock_turbo = MagicMock()
     mock_bgr = np.zeros((2, 4, 3), dtype=np.uint8)
     mock_bgr[:, :, 0] = 255  # Blue channel.
     mock_bgr[:, :, 1] = 128  # Green channel.
     mock_bgr[:, :, 2] = 64  # Red channel.
-    mock_turbo.decode.return_value = mock_bgr
+    mock_turbo = MagicMock(decode=MagicMock(return_value=mock_bgr))
 
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
@@ -885,8 +882,7 @@ def test_decode_jpeg_turbojpeg_bgr_to_rgb():
 
 def test_decode_jpeg_turbojpeg_error():
     """Test decode_jpeg_turbojpeg returns None on error."""
-    mock_turbo = MagicMock()
-    mock_turbo.decode.side_effect = Exception("Decode error")
+    mock_turbo = MagicMock(decode=MagicMock(side_effect=Exception("Decode error")))
 
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(

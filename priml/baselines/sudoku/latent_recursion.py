@@ -391,7 +391,7 @@ class LatentRecursion(nn.Module):
         c = config.channels_in
         # Embedding rescale trick: init tables with std=1/sqrt(C), multiply
         # by sqrt(C) at runtime.
-        self.embed_scale = float(c**0.5)
+        self.embed_scale = float(cast(float, c**0.5))
 
         # NOTE: construction order below is a checkpoint-parity contract --
         # every global-RNG draw must happen in exactly this order so that a
@@ -847,7 +847,7 @@ def truncated_normal_corrected(w: Tensor, *, depth: int = -1) -> None:
     del depth
     truncated_normal(
         w,
-        std=w.shape[-1] ** -0.5,
+        std=cast(float, w.shape[-1] ** -0.5),
         depth_index=(),
         variance_correction=True,
     )
@@ -884,7 +884,7 @@ def _pos_table(num_embeddings: int, config: LatentRecursion.Config) -> nn.Parame
     w = torch.empty(num_embeddings, config.channels_in)
     truncated_normal(
         w,
-        std=config.pos2d_init_std / config.channels_in**0.5,
+        std=config.pos2d_init_std / cast(float, config.channels_in**0.5),
         depth_index=(),
         variance_correction=True,
     )
@@ -897,7 +897,7 @@ def _feedback_table(config: LatentRecursion.Config) -> nn.Parameter:
     if config.feedback_init_std > 0:
         truncated_normal(
             w,
-            std=config.feedback_init_std / config.channels_in**0.5,
+            std=config.feedback_init_std / cast(float, config.channels_in**0.5),
             depth_index=(),
             variance_correction=True,
         )

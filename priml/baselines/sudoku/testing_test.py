@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import json
 
@@ -42,6 +42,8 @@ from priml.testing.golden import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from numpy.typing import NDArray
 
 
 @pytest.mark.parametrize("group", FIXTURE_GROUPS)
@@ -237,7 +239,7 @@ def test_replay_preserves_rng_and_passes_the_requested_harness(
     assert torch.equal(actual["draws"], torch.rand(3, generator=generator))
     for split, rows in (("train", 9), ("test", 2)):
         path = tmp_path / "data" / split / "all__inputs.npy"
-        assert np.load(path).shape == (rows, 81)
+        assert cast("NDArray[np.uint8]", np.load(path)).shape == (rows, 81)
 
 
 @pytest.mark.parametrize("kind", ["recursion", "hypotheses", "verifier", "denoising"])

@@ -160,7 +160,7 @@ def _read_split(
     inputs: list[NDArray[np.uint8]] = []
     labels: list[NDArray[np.uint8]] = []
     for question, answer in _rows(source):
-        side = round(len(question) ** 0.5)
+        side = round(cast(float, len(question) ** 0.5))
         grid, solved = tokenize(question, side=side), tokenize(answer, side=side)
         for view in DIHEDRAL_VIEWS[:views]:
             inputs.append(view(grid).reshape(-1))
@@ -198,7 +198,7 @@ def _write_split(
     np.save(destination / "all__labels.npy", labels)
     np.save(destination / "all__group_indices.npy", groups)
     # Written last: its presence is what marks the split complete.
-    marker = _Marker.of(build, seq_len=inputs.shape[-1])
+    marker = _Marker.of(build, seq_len=cast(int, inputs.shape[-1]))
     (destination / "dataset.json").write_text(
         json_dumps(marker, target=_Marker, sort=False),
     )

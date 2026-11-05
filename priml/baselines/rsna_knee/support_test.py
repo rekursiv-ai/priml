@@ -11,7 +11,7 @@ from dataclasses import field
 from io import BytesIO
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, override
+from typing import TYPE_CHECKING, Final, Literal, cast, override
 
 import csv
 import hashlib
@@ -173,7 +173,7 @@ def dicom_file(
         "big" if syntax == "1.2.840.10008.1.2.2" else "little"
     )
     explicit = syntax != "1.2.840.10008.1.2"
-    rows, columns = pixels.shape
+    rows, columns = cast(tuple[int, int], pixels.shape)
     bits = 8 * pixels.dtype.itemsize
     elements = [
         (0x00100020, b"LO", patient.encode()),

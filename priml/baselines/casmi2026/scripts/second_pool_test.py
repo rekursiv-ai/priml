@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, TypedDict, cast
 
-import json
 import math
 import pickle
 
 from pyarrow import Table, parquet
-from treekle import json_dumps
+from treekle import json_dumps, json_loads
 
 import numpy as np
 import pytest
@@ -22,6 +22,19 @@ from priml.baselines.casmi2026.scripts.second_pool import (
     prepare_second_fingerprints,
     prepare_second_pool,
 )
+
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+
+class _Manifest(TypedDict):
+    rows: int
+    selected_bits: int
+    raw_bits: int
+    rdkit: str
+    generator: dict[str, str]
+    inputs: dict[str, str]
 
 
 # Four-block layout: Morgan2 4096, Morgan3 4096, RDK6 2048, MACCS 167.
@@ -117,17 +130,20 @@ def test_fingerprints_pack_selected_bits_and_mark_failed_rows_invalid(
         version=IDENTITY_RDKIT,
     )
     np.testing.assert_array_equal(
-        np.load(output / "fingerprints.npy"),
+        cast("NDArray[np.uint8]", np.load(output / "fingerprints.npy")),
         [[0b10100000], [0], [0b01011000], [0]],
     )
-    np.testing.assert_array_equal(np.load(output / "fp_bits.npy"), _SELECTED)
+    np.testing.assert_array_equal(
+        cast("NDArray[np.int64]", np.load(output / "fp_bits.npy")),
+        _SELECTED,
+    )
     rows = parquet.read_table(output / "fingerprints.parquet").to_pylist()
     table = {name: [row[name] for row in rows] for name in ("smiles", "valid", "mass")}
     assert table["smiles"] == ["A", "bad", "B", "boom"]
     assert table["valid"] == [True, False, True, False]
     mass = np.array([row["mass"] for row in rows], dtype=np.float64)
     np.testing.assert_array_equal(mass, [100.5, math.nan, 200.25, math.nan])
-    manifest = json.loads((output / "manifest.json").read_text())
+    manifest = json_loads((output / "manifest.json").read_text(), _Manifest)
     assert manifest["rows"] == 4
     assert manifest["selected_bits"] == 5
     assert manifest["raw_bits"] == 10_407
@@ -249,20 +265,23 @@ def test_pool_merges_sources_skips_known_and_invalid_and_sorts_by_mass(
     output = tmp_path / "out"
     _assemble(staged, output)
     np.testing.assert_array_equal(
-        np.load(output / "pool_mass.npy"),
+        cast("NDArray[np.float64]", np.load(output / "pool_mass.npy")),
         [50.0, 100.0, 150.0, 200.0, 300.0],
     )
     np.testing.assert_array_equal(
-        np.load(output / "pool_fp.npy"),
+        cast("NDArray[np.uint8]", np.load(output / "pool_fp.npy")),
         [[16], [2], [8], [4], [1]],
     )
-    np.testing.assert_array_equal(np.load(output / "fp_bits.npy"), _SELECTED)
+    np.testing.assert_array_equal(
+        cast("NDArray[np.int64]", np.load(output / "fp_bits.npy")),
+        _SELECTED,
+    )
     rows = parquet.read_table(output / "pool_meta.parquet").to_pylist()
     meta = {name: [row[name] for row in rows] for name in ("mass", "key", "smiles")}
     assert meta["key"] == ["T3", "K2", "T1", "K3", "K1"]
     assert meta["smiles"] == ["t3", "s2", "t1", "s3", "s1"]
     assert meta["mass"] == [50.0, 100.0, 150.0, 200.0, 300.0]
-    manifest = json.loads((output / "manifest.json").read_text())
+    manifest = json_loads((output / "manifest.json").read_text(), _Manifest)
     assert manifest["rows"] == 5
     assert manifest["selected_bits"] == 5
     assert manifest["raw_bits"] == 10_407

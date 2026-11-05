@@ -584,7 +584,7 @@ def _segment_max_logit(q: Tensor, k: Tensor) -> Tensor:
         if end > start:
             sq = flat_q[start:end].movedim(-2, -3)
             sk = flat_k[start:end].movedim(-2, -3).repeat_interleave(groups, dim=-3)
-            scores = sq @ sk.transpose(-1, -2) * float(q.shape[-1] ** -0.5)
+            scores = sq @ sk.transpose(-1, -2) * float(cast(float, q.shape[-1] ** -0.5))
             causal = torch.ones(end - start, end - start, dtype=torch.bool).tril()
             best = torch.maximum(
                 best,

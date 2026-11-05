@@ -1530,7 +1530,7 @@ def test_rank_scales_logits_by_the_temperature_before_each_projection() -> None:
         ],
     )
     # The float32 chain lands 1 ulp below 2/5 and exactly on every other value.
-    torch.testing.assert_close(ranked[0, 1], expected, rtol=2**-23, atol=0)
+    torch.testing.assert_close(ranked[0, 1], expected, rtol=2.0**-23, atol=0)
 
 
 def test_select_removes_the_largest_real_logits_at_the_chosen_cardinality() -> None:

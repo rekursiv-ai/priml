@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from inspect import getattr_static, getmro
+from typing import TYPE_CHECKING, cast
 from typing_extensions import get_protocol_members
 
 from priml.baselines.motor_imagery.custom_types import (
@@ -13,13 +15,12 @@ from priml.baselines.motor_imagery.custom_types import (
     KernelSize,
     SpatialConfig,
 )
+from priml.baselines.motor_imagery.data import Trial
 from priml.model.custom_types import HasOutputGrid
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
-
-    from priml.baselines.motor_imagery.data import Trial
+    from collections.abc import Iterator
 
 
 @dataclass(slots=True, kw_only=True)
@@ -55,12 +56,16 @@ def test_runtime_checkable_capabilities_match_by_field() -> None:
 
 def test_spatial_config_is_a_protocol_with_grid() -> None:
     assert {"make", "output_grid"} <= get_protocol_members(SpatialConfig)
-    assert HasOutputGrid in SpatialConfig.__mro__
+    assert HasOutputGrid in getmro(SpatialConfig)
 
 
 def test_fold_policy_call_is_declared() -> None:
     assert get_protocol_members(FoldPolicy) == {"__call__"}
-    assert FoldPolicy.__call__(_Folds(), []) is None
+    call = cast(
+        Callable[[FoldPolicy, Sequence[Trial]], object],
+        getattr_static(FoldPolicy, "__call__"),
+    )
+    assert call(_Folds(), []) is None
 
 
 if __name__ == "__main__":

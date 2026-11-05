@@ -193,9 +193,9 @@ def test_fan_out_and_fan_in_scale_a_convolution_differently() -> None:
     weight = torch.empty(64, 32, 3, 3)
     torch.manual_seed(0)
     kaiming_normal_fan_out(weight)
-    assert weight.std() == pytest.approx((2 / (64 * 9)) ** 0.5, rel=0.05)
+    assert weight.std() == pytest.approx(cast(float, (2 / (64 * 9)) ** 0.5), rel=0.05)
     kaiming_normal_fan_in(weight)
-    assert weight.std() == pytest.approx((2 / (32 * 9)) ** 0.5, rel=0.05)
+    assert weight.std() == pytest.approx(cast(float, (2 / (32 * 9)) ** 0.5), rel=0.05)
 
 
 def test_the_activation_slot_reaches_the_stem_and_every_block() -> None:

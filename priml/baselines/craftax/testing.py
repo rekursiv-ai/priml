@@ -432,7 +432,7 @@ def fill_portable(model: nn.Module, *, seed: int) -> None:
         for _, parameter in forward_parameters(model):
             draws = portable_uniform(
                 *parameter.shape,
-                bound=parameter.shape[-1] ** -0.5,
+                bound=cast(float, parameter.shape[-1] ** -0.5),
                 generator=generator,
             )
             parameter.copy_(draws)

@@ -208,7 +208,7 @@ def test_pdf_logit_normal():
     z = torch.logit(x)
     expected = torch.exp(
         -0.5 * ((z - loc) / scale).square()
-        - math.log(scale * (2 * math.pi) ** 0.5)
+        - math.log(scale * cast(float, (2 * math.pi) ** 0.5))
         - torch.log(x)
         - torch.log1p(-x),
     )
@@ -328,10 +328,10 @@ def test_normal_cdf_difference_zero_uses_exact_flipped_reference(a: float) -> No
 def test_ndtr_signbit_rewrite_matches_old_formula_bit_exactly() -> None:
     grid = torch.linspace(-10.0, 10.0, 20_001, dtype=torch.float64)
     x = torch.cat((grid, torch.tensor([0.0, -0.0], dtype=grid.dtype)))
-    t = x * 0.5**0.5
+    t = x * cast(float, 0.5**0.5)
     z = t.abs()
     expected = 0.5 * torch.where(
-        z < 0.5**0.5,
+        z < cast(float, 0.5**0.5),
         1 + torch.erf(t),
         torch.where(t > 0.0, 2 - torch.erfc(z), torch.erfc(z)),
     )
@@ -353,10 +353,10 @@ def test_ndtr_exactly_matches_both_piecewise_branches_and_boundary() -> None:
             torch.tensor(2.0, dtype=torch.float64),
         ],
     )
-    scaled = x * 0.5**0.5
+    scaled = x * cast(float, 0.5**0.5)
     z = scaled.abs()
     expected = 0.5 * torch.where(
-        z < 0.5**0.5,
+        z < cast(float, 0.5**0.5),
         1 + torch.erf(scaled),
         torch.where(scaled > 0, 2 - torch.erfc(z), torch.erfc(z)),
     )
@@ -507,8 +507,7 @@ def test_logit_cdf_passes_finite_logits_and_matches_sigmoid() -> None:
 
     result = cdf_logit_distribution(x, base_cdf)
 
-    logits = base_cdf.call_args.args[0]
-    assert isinstance(logits, Tensor)
+    logits = cast(Tensor, base_cdf.call_args.args[0])
     assert torch.isfinite(logits).all()
     assert torch.equal(logits[x <= 0], torch.zeros_like(logits[x <= 0]))
     assert torch.equal(logits[x >= 1], torch.zeros_like(logits[x >= 1]))
@@ -521,8 +520,7 @@ def test_logit_pdf_passes_finite_logits_and_has_exact_jacobian() -> None:
 
     result = pdf_logit_distribution(x, base_pdf)
 
-    logits = base_pdf.call_args.args[0]
-    assert isinstance(logits, Tensor)
+    logits = cast(Tensor, base_pdf.call_args.args[0])
     assert torch.isfinite(logits).all()
     assert torch.equal(logits[x <= 0], torch.zeros_like(logits[x <= 0]))
     assert torch.equal(logits[x >= 1], torch.zeros_like(logits[x >= 1]))
@@ -650,8 +648,7 @@ def test_random_gamma_uses_rate_and_clamps_underflow(
 
     # random_gamma expands batch size over the concentration vector.
     expected_concentration = concentration.expand(2, 3)
-    sampled_concentration = sampler.call_args.args[0]
-    assert isinstance(sampled_concentration, Tensor)
+    sampled_concentration = cast(Tensor, sampler.call_args.args[0])
     assert torch.equal(sampled_concentration, expected_concentration)
     torch.testing.assert_close(result, standard_gamma / rate)
 
@@ -690,8 +687,7 @@ def test_random_chi2_converter_receives_dtype_and_device(
     result = random_chi2(1, df=df, dtype=torch.float64, device=device)
 
     assert result.dtype is torch.float64
-    concentration = gamma.call_args.kwargs["concentration"]
-    assert isinstance(concentration, Tensor)
+    concentration = cast(Tensor, gamma.call_args.kwargs["concentration"])
     assert concentration.dtype is torch.float64
     assert concentration.device == device
     torch.testing.assert_close(concentration, df.to(dtype=torch.float64) / 2)

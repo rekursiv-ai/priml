@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Self, override
+from typing import Self, cast, override
 
 import math
 
@@ -939,5 +939,5 @@ def _fan_in_bias_init(bias: Tensor, weight: Tensor) -> None:
     if not fan_in:
         nn.init.zeros_(bias)
         return
-    bound = 1 / fan_in**0.5
+    bound = 1 / cast(float, fan_in**0.5)
     nn.init.uniform_(bias, -bound, bound)

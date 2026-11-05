@@ -880,14 +880,25 @@ def test_datapipeline_len_uses_sized_source():
     assert len(pipeline) == 7
 
 
-def _mock_dp_mesh(rank: int, world: int) -> Mock:
+class _MeshMock:
+    def __init__(self, *, mesh_dim_names: tuple[str, ...] = ()) -> None:
+        self.get_local_rank = Mock()
+        self.size = Mock()
+        self.getitem = Mock()
+        self.mesh_dim_names = mesh_dim_names
+
+    def __getitem__(self, name: str) -> _MeshMock:
+        return cast(_MeshMock, self.getitem(name))
+
+
+def _mock_dp_mesh(rank: int, world: int) -> _MeshMock:
     """Mock a device mesh whose ``dp`` dimension reports ``(rank, world)``."""
-    dp = Mock()
+    dp = _MeshMock()
     dp.get_local_rank.return_value = rank
     dp.size.return_value = world
-    mesh = Mock()
+    mesh = _MeshMock()
     mesh.mesh_dim_names = ("dp",)
-    mesh.__getitem__ = Mock(return_value=dp)
+    mesh.getitem.return_value = dp
     return mesh
 
 
@@ -961,11 +972,11 @@ def test_distributed_dp_rank_partitions_data_exactly_once() -> None:
 
 
 def test_distributed_shard_reads_dp_mesh_dimension() -> None:
-    dp = Mock()
+    dp = _MeshMock()
     dp.get_local_rank.return_value = 2
     dp.size.return_value = 5
-    mesh = Mock(mesh_dim_names=("dp",))
-    mesh.__getitem__ = Mock(return_value=dp)
+    mesh = _MeshMock(mesh_dim_names=("dp",))
+    mesh.getitem.return_value = dp
 
     with patch(
         "priml.data.pipeline.dataset.global_device_mesh",
@@ -973,7 +984,7 @@ def test_distributed_shard_reads_dp_mesh_dimension() -> None:
     ):
         assert _distributed_shard() == (2, 5)
 
-    mesh.__getitem__.assert_called_once_with("dp")
+    mesh.getitem.assert_called_once_with("dp")
 
 
 def test_distributed_shard_ignores_mesh_without_dp_dimension() -> None:

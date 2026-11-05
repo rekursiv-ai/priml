@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
-
-import json
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from pyarrow import Table, parquet
+from treekle import json_loads
 
 import numpy as np
 import pytest
@@ -23,6 +22,18 @@ from priml.baselines.casmi2026.scripts.second_fragments import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from numpy.typing import NDArray
+
+
+class _Manifest(TypedDict):
+    rows: int
+    masses: int
+    rdkit: str
+    max_breaks: int
+    max_bonds: int
+    generator: dict[str, str]
+    inputs: dict[str, str]
 
 
 _H = ELEMENT_MASSES["H"]
@@ -147,11 +158,11 @@ def test_prepare_writes_ragged_masses_graphs_and_manifest(tmp_path: Path) -> Non
         },
     )
     np.testing.assert_array_equal(
-        np.load(output / "frag_off.npy"),
+        cast("NDArray[np.int64]", np.load(output / "frag_off.npy")),
         [0, len(ethanol), len(ethanol), len(ethanol) + 1],
     )
     np.testing.assert_allclose(
-        np.load(output / "frag_mass.npy"),
+        cast("NDArray[np.float64]", np.load(output / "frag_mass.npy")),
         [*ethanol, _C + 4 * _H],
     )
     rows = parquet.read_table(output / "graphs.parquet").to_pylist()
@@ -163,7 +174,7 @@ def test_prepare_writes_ragged_masses_graphs_and_manifest(tmp_path: Path) -> Non
     assert rows[0]["bonds"] == [[0, 1], [1, 2]]
     assert rows[1]["weights"] == []
     assert rows[1]["bonds"] == []
-    manifest = json.loads((output / "manifest.json").read_text())
+    manifest = json_loads((output / "manifest.json").read_text(), _Manifest)
     assert manifest["rows"] == 3
     assert manifest["masses"] == len(ethanol) + 1
     assert manifest["rdkit"] == IDENTITY_RDKIT

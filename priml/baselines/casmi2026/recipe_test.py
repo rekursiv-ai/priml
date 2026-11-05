@@ -2304,7 +2304,7 @@ def test_all_arm_constructors_are_io_free_and_close_before_first_rank() -> None:
 def test_main_rejects_incomplete_sid_popularity_manifest_and_ranker_data(
     tmp_path: Path,
 ) -> None:
-    config = _main_assets(tmp_path)
+    config = _main_assets(tmp_path, banks=False)
     manifest = Path(config.manifest.path)
     config.manifest.sha256 = "0" * 64
     with pytest.raises(RuntimeError, match=r"hashes to"):
@@ -2575,7 +2575,7 @@ def main_assets(tmp_path_factory: pytest.TempPathFactory) -> MainAssets.Config:
     return _main_assets(tmp_path_factory.mktemp("main_assets"))
 
 
-def _main_assets(directory: Path) -> MainAssets.Config:
+def _main_assets(directory: Path, *, banks: bool = True) -> MainAssets.Config:
     families, _ = _inputs(directory)
     config = MainAssets.Config()
     config.pool_dir = config.library_dir = config.popularity_dir = directory
@@ -2758,8 +2758,9 @@ def _main_assets(directory: Path) -> MainAssets.Config:
         pickle.dumps({"features": list(RANKER_NAMES), "boosters": ranker_texts()}),
     )
     config.rankers.sha256 = _seal(Path(config.rankers.path))
-    config.bank = save_bank(directory, [0])
-    config.views_bank = save_bank(directory, [0, 1, 2])
+    if banks:
+        config.bank = save_bank(directory, [0])
+        config.views_bank = save_bank(directory, [0, 1, 2])
     return config
 
 

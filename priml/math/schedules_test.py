@@ -8,7 +8,7 @@ where it lands, and what it does to the run in between.
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import itertools
 import math
@@ -168,7 +168,7 @@ def test_polynomial_power_shifts_where_the_rate_is_spent() -> None:
     """
     assert polynomial(0.5, power=1.0) == pytest.approx(0.5)
     assert polynomial(0.5, power=2.0) == pytest.approx(0.25)
-    assert polynomial(0.5, power=0.5) == pytest.approx(0.5**0.5)
+    assert polynomial(0.5, power=0.5) == pytest.approx(cast(float, 0.5**0.5))
 
 
 def test_cosine_is_flat_at_both_ends() -> None:

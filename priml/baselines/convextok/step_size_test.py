@@ -126,7 +126,10 @@ def test_polar_pairs_preserve_boundary_rejection_and_clipping(
     assert pairs[1] > 0.0
     assert pairs[2:4].tolist() == [0.0, 0.0]
     assert pairs[4] == 0.0
-    assert pairs[5] == pytest.approx(0.5 * (16 * math.log(2)) ** 0.5, rel=1e-15)
+    assert pairs[5] == pytest.approx(
+        cast(float, 0.5 * (16 * math.log(2)) ** 0.5),
+        rel=1e-15,
+    )
 
 
 def _diagonal_program() -> LinearProgram:
@@ -209,6 +212,19 @@ def test_initial_step_size_observes_iteration_limit_and_strict_tolerance(
 def test_initial_step_size_stops_at_cuopts_5000_iterations_by_default() -> None:
     parameters = inspect.signature(initial_step_size).parameters
     assert cast(object, parameters["max_iterations"].default) == 5_000
+
+
+def test_initial_step_size_runs_the_default_iteration_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaled = scale_program(_diagonal_program())
+    operations = _IterationOps()
+    monkeypatch.setattr(torch.linalg, "vector_norm", operations.vector_norm)
+    monkeypatch.setattr(torch, "dot", operations.dot)
+
+    assert initial_step_size(scaled, tolerance=0.0) == 0.998
+    assert operations.dot_calls == 5_000
+    assert operations.norm_calls == 2 * 5_000
 
 
 @pytest.mark.parametrize("presolve", [0, 2])

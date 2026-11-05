@@ -66,7 +66,7 @@ def fixup(model: nn.Module) -> None:
     blocks = [m for m in model.modules() if isinstance(m, BasicBlock)]
     if not blocks:
         raise ValueError(f"fixup needs BasicBlocks; {type(model).__name__} has none.")
-    scale = len(blocks) ** (-0.5)
+    scale = cast(float, len(blocks) ** (-0.5))
     for block in blocks:
         block.conv2.weight.data.mul_(scale)
         nn.init.constant_(cast(Tensor, block.norm2.weight), 0)

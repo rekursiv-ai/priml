@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 from unittest import mock
 
 from configgle import Makes, PartialConfig
@@ -298,8 +298,7 @@ def test_history_mask_is_applied_consistently_and_does_not_mutate_inputs() -> No
         wraps=method.method.predict,
     ) as predict:
         method.predict(train.media)
-    received = predict.call_args.args[0]
-    assert isinstance(received, Tensor)
+    received = cast(Tensor, predict.call_args.args[0])
     assert torch.equal(received, masked)
     cfg.visible_steps = train.media.shape[1] + 1
     assert torch.equal(cfg.make().mask(train.media), train.media)

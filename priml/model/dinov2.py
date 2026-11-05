@@ -160,7 +160,7 @@ class DinoV2Teacher(nn.Module):
         # Match the reference's 224/448-pixel input and resized DINO position table.
         position = self.encoder.pos_embed.detach()
         patch_tokens = position[:, 1:]
-        source_grid = int(patch_tokens.shape[1] ** 0.5)
+        source_grid = int(cast(float, patch_tokens.shape[1] ** 0.5))
         patch = patch_tokens.reshape(1, source_grid, source_grid, -1).permute(
             0,
             3,

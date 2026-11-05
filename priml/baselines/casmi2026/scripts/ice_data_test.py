@@ -28,6 +28,11 @@ if TYPE_CHECKING:
     from priml.baselines.casmi2026.custom_types import IceRow
 
 
+class _CleanupParameters:
+    def __init__(self) -> None:
+        self.tautomerTransformsFile = ""
+
+
 def test_preparation_requires_the_simulator_version_and_positive_batches(
     tmp_path: Path,
 ) -> None:
@@ -132,7 +137,7 @@ def test_canonical_root_retains_isotopes_hydrogens_and_bond_vocabulary(
         return types.SimpleNamespace(chem=chem)
 
     monkeypatch.setattr(ice_data, "MolecularContext", construct)
-    parameters = types.SimpleNamespace()
+    parameters = _CleanupParameters()
     monkeypatch.setattr(ice_data, "CleanupParameters", lambda: parameters)
     monkeypatch.setattr(ice_data, "TautomerEnumerator", enumerator)
     monkeypatch.setattr(ice_data, "CalcMolFormula", formula)

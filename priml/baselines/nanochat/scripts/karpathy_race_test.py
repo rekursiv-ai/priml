@@ -196,7 +196,7 @@ def test_main_executes_reference_script_and_reports_summary(
     monkeypatch.setattr(karpathy_race, "_import_prepare", import_prepare)
     get_device_name = Mock(return_value="CPU test")
     monkeypatch.setattr(torch.cuda, "get_device_name", get_device_name)
-    monkeypatch.setattr(time, "perf_counter", Mock(side_effect=(10.0, 13.0)))
+    monkeypatch.setattr(time, "perf_counter", Mock(side_effect=[10.0, 13.0]))
     print_mock = Mock(wraps=builtins.print)
     monkeypatch.setattr(builtins, "print", print_mock)
     compile_mock = Mock(wraps=builtins.compile)

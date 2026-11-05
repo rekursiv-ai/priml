@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import inspect
 import math
@@ -275,15 +275,15 @@ def test_truncated_normal_variance_correction_passes_closed_form_parameters(
     weight = torch.empty(2, 3)
     requested_std = 0.75
     lower, upper = -1.25, 2.0
-    sqrt2 = 2.0**0.5
+    sqrt2 = cast(float, 2.0**0.5)
     z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
-    inv_sqrt_2pi = 1.0 / (2.0 * math.pi) ** 0.5
+    inv_sqrt_2pi = 1.0 / cast(float, (2.0 * math.pi) ** 0.5)
     pdf_u = inv_sqrt_2pi * math.exp(-0.5 * upper * upper)
     pdf_l = inv_sqrt_2pi * math.exp(-0.5 * lower * lower)
     ratio = (pdf_u - pdf_l) / z
-    corrected_std = (
-        requested_std
-        / (1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5
+    corrected_std = requested_std / cast(
+        float,
+        (1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5,
     )
 
     truncated_normal(
@@ -352,7 +352,7 @@ def test_truncated_normal_respects_scaled_bounds():
 @pytest.mark.parametrize("width", [1, 3, 4, 7, 512, 921])
 def test_fan_in_truncated_normal_is_truncated_normal_at_fan_in_std(width: int) -> None:
     """Each form equals the explicit draw it names, at awkward widths too."""
-    std = width**-0.5
+    std = cast(float, width**-0.5)
 
     def drawn(init: Callable[[torch.Tensor], object]) -> torch.Tensor:
         w = torch.empty(3, width)
@@ -504,7 +504,21 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
         mirrors the production ``materialize_meta`` audit, which poisons and checks
         params AND float buffers (integer buffers cannot hold NaN and are skipped).
     """
-    builders: dict[str, Callable[[], nn.Module]] = {
+    builders: dict[
+        str,
+        Callable[
+            [],
+            Linear
+            | EnsembleLinear
+            | CenteredRMSNorm
+            | Attention
+            | TransformerBlock
+            | GatedDeltaNet
+            | MoE
+            | MultiHeadLatentAttention
+            | RoPEMixed,
+        ],
+    ] = {
         "linear": lambda: Linear.Config(
             channels_in=16,
             channels_out=8,

@@ -113,7 +113,7 @@ def test_hf_reference_casts_dtype_and_adapts_linear_attention(
     result = hf_reference(reference, dtype=torch.float64)
 
     assert result is reference
-    assert result.weight.dtype == torch.float64
+    assert reference.weight.dtype == torch.float64
     assert adapted == [reference.linear_attn]
 
 

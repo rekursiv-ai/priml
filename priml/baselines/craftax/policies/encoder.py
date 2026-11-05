@@ -498,7 +498,7 @@ class FanInUniform:
 
     def __call__(self, bias: Tensor) -> None:
         """Fill ``bias`` with the draw."""
-        bound = self.fan_in**-0.5
+        bound = cast(float, self.fan_in**-0.5)
         nn.init.uniform_(bias, -bound, bound)
 
 

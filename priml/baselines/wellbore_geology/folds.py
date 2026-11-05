@@ -665,7 +665,7 @@ class GeographicPrior:
         parts = [own] if len(own.values) else []
         parts.extend(
             points[support[int(index)].well_id]
-            for index in nearest[0]
+            for index in cast("NDArray[np.int64]", nearest[0]).flat
             if len(points[support[int(index)].well_id].values)
         )
         if not parts:

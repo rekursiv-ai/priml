@@ -178,7 +178,7 @@ def test_objective_builds_inputs_and_returns_each_loss_term(
         d_alpha[:, None] * teacher_cls[:, 0] + d_sigma[:, None] * cls_noise
     )
     model.assert_called_once()
-    model_args = model.call_args.args
+    model_args = cast(tuple[object, ...], model.call_args.args)
     assert len(model_args) == 4
     noisy_arg, time_arg, labels_arg, cls_arg = model_args
     assert isinstance(noisy_arg, Tensor)
@@ -264,7 +264,7 @@ def test_objective_samples_missing_time_and_noise_from_their_inputs() -> None:
     )
 
     model.assert_called_once()
-    model_args = model.call_args.args
+    model_args = cast(tuple[object, ...], model.call_args.args)
     assert len(model_args) == 4
     noisy_arg, time_arg, labels_arg, cls_arg = model_args
     assert isinstance(noisy_arg, Tensor)

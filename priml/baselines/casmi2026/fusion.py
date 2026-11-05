@@ -349,7 +349,7 @@ def standardized(values: Sequence[float | None]) -> list[float]:
         return [0.0] * len(values)
     mean = sum(valid) / len(valid)
     variance = sum((value - mean) ** 2 for value in valid) / (len(valid) - 1)
-    deviation = variance**0.5
+    deviation = cast(float, variance**0.5)
     if deviation <= 0:
         return [0.0] * len(values)
     return [

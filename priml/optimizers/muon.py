@@ -72,7 +72,7 @@ def adjust_lr_original(lr: float, param: Tensor, ensemble_dims: int = 0) -> floa
 
     """
     c_out, c_in = _shape(param, ensemble_dims)
-    return lr * float(max(1, c_out / c_in) ** 0.5)
+    return lr * float(cast(float, max(1, c_out / c_in) ** 0.5))
 
 
 def adjust_lr_match_rms_adamw(
@@ -94,7 +94,7 @@ def adjust_lr_match_rms_adamw(
 
     """
     c_out, c_in = _shape(param, ensemble_dims)
-    return lr * 0.2 * float(max(c_out, c_in) ** 0.5)
+    return lr * 0.2 * float(cast(float, max(c_out, c_in) ** 0.5))
 
 
 def adjust_lr_conv_heuristic(
@@ -117,7 +117,7 @@ def adjust_lr_conv_heuristic(
 
     """
     c_out, _ = _shape(param, ensemble_dims)
-    return lr * param.data.norm() / float(c_out**0.5)
+    return lr * param.data.norm() / float(cast(float, c_out**0.5))
 
 
 def _shape(param: Tensor, ensemble_dims: int) -> tuple[int, int]:

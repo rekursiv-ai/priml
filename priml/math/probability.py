@@ -859,10 +859,10 @@ def ndtr(x: Tensorable) -> Tensor:
 
     """
     t = convert_to_tensor(x)
-    t = t * 0.5**0.5
+    t = t * cast(float, 0.5**0.5)
     z = t.abs()
     return 0.5 * torch.where(
-        z < 0.5**0.5,
+        z < cast(float, 0.5**0.5),
         1 + torch.erf(t),
         torch.where(torch.signbit(t), torch.erfc(z), 2 - torch.erfc(z)),
     )

@@ -529,9 +529,9 @@ def test_aggregates_sum_class_kind_peak_and_frequency_channels_by_hand() -> None
         assert values.shape == (2, 1, 19)
         # The last three channels discount by the masked explaining share.
         discount = [value * (1.0 - frequency) for value in (4.5, 4.5, 1.5)]
-        assert values[0, 0].tolist() == [*fragment, *peak, *kind, *discount]
+        assert values[0, 0, :].tolist() == [*fragment, *peak, *kind, *discount]
         # Unexplained top peaks only add their weight to the record-less row.
-        assert values[1, 0].tolist() == [0.0] * 15 + [1.5] + [0.0] * 3
+        assert values[1, 0, :].tolist() == [0.0] * 15 + [1.5] + [0.0] * 3
 
 
 def test_llr_backs_off_each_chain_and_counts_the_shared_level_once() -> None:

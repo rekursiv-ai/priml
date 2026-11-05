@@ -13,7 +13,7 @@ them to a loss that asks for them.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from configgle import Makes
 from torch import Tensor
@@ -90,7 +90,7 @@ def long_tail_counts(
     """
     counts = np.zeros(num_classes, dtype=np.int64)
     for c in range(num_classes):
-        mu = (1.0 / imbalance_ratio) ** (c / (num_classes - 1))
+        mu = cast(float, (1.0 / imbalance_ratio) ** (c / (num_classes - 1)))
         counts[c] = max(int(n_max * mu), 1)
     return counts
 

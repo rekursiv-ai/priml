@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import math
 
@@ -322,7 +322,7 @@ def _seeded_stream(seed: int) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
     state = np.empty(624, dtype=np.int64)
     state[0] = seed
     for word in range(1, 624):
-        previous = int(state[word - 1])
+        previous = int(cast("np.int64", state[word - 1]))
         state[word] = (1_812_433_253 * (previous ^ (previous >> 30)) + word) & (
             2**32 - 1
         )
@@ -530,7 +530,7 @@ def test_window_bins_average_visible_and_retained_target_depths(
     )
     np.testing.assert_array_equal(
         record["window_tvt_rel"],
-        np.nan_to_num(expected - np.float32(depth[31])),
+        np.nan_to_num(expected - np.float32(cast("np.float64", depth[31]))),
         strict=True,
     )
     np.testing.assert_array_equal(
@@ -647,7 +647,7 @@ def test_seed_runs_mix_by_profile_prior_and_skip_missing_path_steps(
     probabilities, paths = config.make()._suffix(
         well,
         last=31,
-        anchor=float(well.known_depth[31]),
+        anchor=float(cast("np.float64", well.known_depth[31])),
         rows=64,
     )
     mixed = np.asarray([[0.375, 0.25, 0.375]] * 2, dtype=np.float32)
@@ -687,11 +687,13 @@ class _ScriptedKernel:
     ]:
         del observations, references, initial
         # Each profile is told apart by its initial position.
-        profile = float(parameters[6])
+        profile = float(cast("np.float64", parameters[6]))
         call = self.calls.get(profile, 0)
         self.calls[profile] = call + 1
         column, path = self.runs[profile, call]
-        mass = np.zeros((int(sizes[1]), int(sizes[2])))
+        mass = np.zeros(
+            (int(cast("np.int64", sizes[1])), int(cast("np.int64", sizes[2]))),
+        )
         mass[:, column] = 1
         track = np.repeat(np.asarray(path, dtype=np.float64)[:, None], 2, axis=1)
         return mass, mass.copy(), mass.copy(), track, 0.0

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict, cast
 
-import json
 import math
 
 from pyarrow import Table, parquet
+from treekle import json_loads
 
 import numpy as np
 import pytest
@@ -24,6 +24,16 @@ from priml.baselines.casmi2026.scripts.second_library import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from numpy.typing import NDArray
+
+
+class _Manifest(TypedDict):
+    rows: int
+    peaks: int
+    raw_peaks: bool
+    generator: dict[str, str]
+    inputs: dict[str, str]
 
 
 def _write_input(
@@ -75,31 +85,52 @@ def test_prepare_writes_raw_peaks_aligned_metadata_and_pool_rows(
     )
     _write_pool(pool)
     prepare_second_library(source, pool=pool, output=output)
-    np.testing.assert_array_equal(np.load(output / "off.npy"), [0, 2, 2, 3, 3])
-    np.testing.assert_array_equal(np.load(output / "mz.npy"), [100.0, 50.0, 10.0])
-    np.testing.assert_array_equal(np.load(output / "it.npy"), [1.0, 0.5, 0.25])
     np.testing.assert_array_equal(
-        np.load(output / "prec.npy"),
+        cast("NDArray[np.int64]", np.load(output / "off.npy")),
+        [0, 2, 2, 3, 3],
+    )
+    np.testing.assert_array_equal(
+        cast("NDArray[np.float32]", np.load(output / "mz.npy")),
+        [100.0, 50.0, 10.0],
+    )
+    np.testing.assert_array_equal(
+        cast("NDArray[np.float32]", np.load(output / "it.npy")),
+        [1.0, 0.5, 0.25],
+    )
+    np.testing.assert_array_equal(
+        cast("NDArray[np.float64]", np.load(output / "prec.npy")),
         [200.0, 300.0, 400.0, 500.0],
     )
-    np.testing.assert_array_equal(np.load(output / "pol.npy"), [1, -1, 1, 1])
     np.testing.assert_array_equal(
-        np.load(output / "tims.npy"),
+        cast("NDArray[np.int8]", np.load(output / "pol.npy")),
+        [1, -1, 1, 1],
+    )
+    np.testing.assert_array_equal(
+        cast("NDArray[np.bool_]", np.load(output / "tims.npy")),
         [True, False, False, True],
     )
-    np.testing.assert_array_equal(np.load(output / "row_p.npy"), [2, 0, -1, -1])
+    np.testing.assert_array_equal(
+        cast("NDArray[np.int64]", np.load(output / "row_p.npy")),
+        [2, 0, -1, -1],
+    )
     fallback = second_neutral_mass(
         np.array([200.0, 300.0, 400.0, 500.0]),
         ["[M+H]+", "[M-H]-", "unknown", "[M+Na]+"],
     )
-    neutral = np.load(output / "nm.npy")
+    neutral = cast("NDArray[np.float64]", np.load(output / "nm.npy"))
     assert (
         neutral[0]
         == 2 * ELEMENT_MASSES["C"] + 6 * ELEMENT_MASSES["H"] + (ELEMENT_MASSES["O"])
     )
-    np.testing.assert_array_equal(neutral[1], fallback[1])
-    assert math.isnan(neutral[2])
-    np.testing.assert_array_equal(neutral[3], fallback[3])
+    np.testing.assert_array_equal(
+        cast(np.float64, neutral[1]),
+        cast(np.float64, fallback[1]),
+    )
+    assert math.isnan(cast(np.float64, neutral[2]))
+    np.testing.assert_array_equal(
+        cast(np.float64, neutral[3]),
+        cast(np.float64, fallback[3]),
+    )
     metadata = parquet.read_table(output / "metadata.parquet")
     assert metadata.column_names == [
         "precursor_mz",
@@ -110,7 +141,7 @@ def test_prepare_writes_raw_peaks_aligned_metadata_and_pool_rows(
         "inchikey14",
     ]
     assert metadata.num_rows == 4
-    manifest = json.loads((output / "manifest.json").read_text())
+    manifest = json_loads((output / "manifest.json").read_text(), _Manifest)
     assert (manifest["rows"], manifest["peaks"], manifest["raw_peaks"]) == (4, 3, True)
     assert set(manifest["generator"]) == {"second_library.py"}
     assert set(manifest["inputs"]) == {str(source.resolve()), str(pool.resolve())}
@@ -118,7 +149,7 @@ def test_prepare_writes_raw_peaks_aligned_metadata_and_pool_rows(
 
 @pytest.mark.parametrize(
     ("mzs", "intensities"),
-    [([[1.0]], [[]]), ([None], [[1.0]]), ([[1.0]], [None])],
+    [([[1.0]], [list[float]()]), ([None], [[1.0]]), ([[1.0]], [None])],
 )
 def test_prepare_rejects_peak_lists_of_different_lengths(
     tmp_path: Path,

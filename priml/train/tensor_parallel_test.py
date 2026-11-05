@@ -162,7 +162,7 @@ def test_tp1_applier_is_structural_noop() -> None:
     sharded = apply_tensor_parallel(model, cast(DeviceMesh, _TpOneMesh()))
     assert sharded is model
     assert not any(p.__class__.__name__ == "DTensor" for p in sharded.parameters())
-    assert torch.equal(sharded(x), expected)
+    assert torch.equal(model(x), expected)
 
 
 class _TpTwoSubmesh:

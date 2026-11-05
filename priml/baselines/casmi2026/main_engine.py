@@ -2273,7 +2273,8 @@ class MainRetrieval:
             positions = np.sort(
                 np.argsort(-scores, kind="stable")[: 4 * self.config.n_analog],
             )
-            for position in positions:
+            for index in range(len(positions)):
+                position = positions.item(index)
                 row = selected.item(position)
                 sid, similarity = library.sid.item(row), scores.item(position)
                 if sid not in best or similarity > best[sid].similarity:
@@ -3698,7 +3699,7 @@ def _main_model_features(
         )
     maximum = scores.max().item()
     soft = np.exp(
-        ((scores - maximum) / width**0.5 * 4.0).astype(np.float64),
+        ((scores - maximum) / cast(float, width**0.5) * 4.0).astype(np.float64),
     ).astype(np.float32)
     soft = soft / soft.sum()
     ordered = np.sort(scores)[::-1]

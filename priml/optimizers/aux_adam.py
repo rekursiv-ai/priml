@@ -126,7 +126,7 @@ class AuxAdam(Optimizer):
             parameter.mul_(1 - lr * weight_decay)
             parameter.add_(
                 update,
-                alpha=-(lr * correction2**0.5 / correction1),
+                alpha=-(lr * cast(float, correction2**0.5) / correction1),
             )
 
 

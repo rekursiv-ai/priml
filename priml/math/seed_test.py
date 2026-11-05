@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, call
@@ -186,12 +187,6 @@ def _patch_dist(
     return sink
 
 
-def _mesh_local_rank(local_rank: int) -> MagicMock:
-    mesh = MagicMock()
-    mesh.get_local_rank.return_value = local_rank
-    return mesh
-
-
 @pytest.mark.parametrize(
     ("rank", "broadcast", "mesh", "salt_by_rank", "expected_local_salt"),
     [
@@ -206,7 +201,7 @@ def _mesh_local_rank(local_rank: int) -> MagicMock:
         pytest.param(
             0,
             None,
-            _mesh_local_rank(2),
+            MagicMock(get_local_rank=MagicMock(return_value=2)),
             True,
             ("rank", 2, 100),
             id="rank0_mesh_salt",
@@ -277,7 +272,7 @@ def test_set_seed_distributed_salting_combinations(
 
 
 def test_local_salt_emits_exact_log_messages(caplog: pytest.LogCaptureFixture) -> None:
-    mesh = _mesh_local_rank(3)
+    mesh = MagicMock(get_local_rank=MagicMock(return_value=3))
     with caplog.at_level("INFO", logger="priml.math.seed"):
         mesh_seed = seed._local_salt(
             base_seed=100,
@@ -365,8 +360,7 @@ def test_set_seed_distributed_broadcasts_exact_tensor_from_root(
 
     base_seed, local_seed = set_seed_distributed(seed=999, salt_by_rank=False)
 
-    tensor = broadcast.call_args.args[0]
-    assert isinstance(tensor, Tensor)
+    tensor = cast(Tensor, broadcast.call_args.args[0])
     assert tensor.shape == torch.Size([])
     assert tensor.dtype is torch.long
     assert tensor.device == torch.device("cpu")
@@ -752,9 +746,7 @@ def _fake_device_identity(index: int) -> str:
 def test_cuda_device_identity_uses_uuid_then_fallback_attributes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    properties = MagicMock()
-    properties.uuid = None
-    properties.pci_bus_id = "0000:03:00.0"
+    properties = _DeviceProperties(uuid=None, pci_bus_id="0000:03:00.0")
     get_properties = MagicMock(return_value=properties)
     monkeypatch.setattr(torch.cuda, "get_device_properties", get_properties)
 
@@ -1313,6 +1305,12 @@ def test_salt_returns_exact_31_bit_md5_value() -> None:
     args = ("torch", 42)
     expected = int(hashlib.md5(str(args).encode()).hexdigest(), 16) & 0x7FFFFFFF  # noqa: S324 -- Match the deterministic salt contract.
     assert salt(*args) == expected
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _DeviceProperties:
+    uuid: str | None
+    pci_bus_id: str
 
 
 if __name__ == "__main__":

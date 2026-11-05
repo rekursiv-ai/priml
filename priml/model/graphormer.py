@@ -14,7 +14,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field, replace
-from typing import TYPE_CHECKING, Self, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
@@ -498,7 +498,10 @@ class Graphormer(nn.Module):
         self.degree = config.degree.make()
         self.token = config.token.make()
         # Initial component resets occur before attention-bias construction.
-        _ = nn.init.normal_(self.node.weight, std=std / config.num_layers**0.5)
+        _ = nn.init.normal_(
+            self.node.weight,
+            std=std / cast(float, config.num_layers**0.5),
+        )
         if self.node.bias is not None:
             _ = nn.init.zeros_(self.node.bias)
         _ = nn.init.normal_(self.degree.weight, std=std)
@@ -507,7 +510,10 @@ class Graphormer(nn.Module):
         self.distance = config.distance.make()
         self.spatial = config.spatial.make()
         self.virtual = config.virtual.make()
-        _ = nn.init.normal_(self.edge.weight, std=std / config.num_layers**0.5)
+        _ = nn.init.normal_(
+            self.edge.weight,
+            std=std / cast(float, config.num_layers**0.5),
+        )
         if self.edge.bias is not None:
             _ = nn.init.zeros_(self.edge.bias)
         for embedding in (self.distance, self.spatial, self.virtual):

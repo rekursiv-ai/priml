@@ -438,7 +438,7 @@ class BenchmarkSuite:
 
     def run(
         self,
-        directory: Path | None = None,
+        directory: object = None,
         *,
         phase: Literal["development", "audit"] | None = None,
         resume: bool = False,

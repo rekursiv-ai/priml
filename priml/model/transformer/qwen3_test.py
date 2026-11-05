@@ -580,9 +580,10 @@ class TestLoad:
     ) -> None:
         config_dict = hf_config(num_hidden_layers=1)
         cfg = Qwen3.Config.from_hf(config_dict).finalize()
-        hf_model = Mock()
-        hf_model.config.to_dict.return_value = config_dict
-        hf_model.state_dict.return_value = synth_hf_state_dict(cfg)
+        hf_model = Mock(
+            config=Mock(to_dict=Mock(return_value=config_dict)),
+            state_dict=Mock(return_value=synth_hf_state_dict(cfg)),
+        )
         load_transformers_model = Mock(return_value=hf_model)
         monkeypatch.setattr(
             hub,

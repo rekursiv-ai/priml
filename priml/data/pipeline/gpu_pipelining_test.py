@@ -468,7 +468,7 @@ def test_stream_synchronization(
 
     # 2-stream uses wait_stream, 3-stream uses synchronize directly.
     if gpu_processor_class.__name__ == "PipelinedGPUProcessor2Stream":
-        assert mock_streams[0].wait_stream.called
+        assert cast(MagicMock, mock_streams[0].wait_stream).called
     # Final synchronize should be called.
     mock_sync.assert_called()
 

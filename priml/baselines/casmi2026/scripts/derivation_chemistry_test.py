@@ -56,6 +56,17 @@ def _atom(**properties: int) -> SimpleNamespace:
     return SimpleNamespace(HasProp=has, GetIntProp=get)
 
 
+class _Product(SimpleNamespace):
+    def __init__(self, name: str, **properties: object) -> None:
+        super().__init__(**properties)
+        self.name: str = name
+
+
+class _ParsedMolecule:
+    def __init__(self, smiles: str) -> None:
+        self.smiles = smiles
+
+
 def _product(
     name: str,
     *,
@@ -67,7 +78,7 @@ def _product(
         if site is not None
         else [_atom(old_mapno=2, react_atom_idx=9)]
     )
-    return SimpleNamespace(
+    return _Product(
         name=name,
         GetNumAtoms=lambda: atoms,
         GetAtoms=lambda: mapped,
@@ -104,21 +115,21 @@ def _recorder(label: str, edits: list[tuple[str, object]]) -> SimpleNamespace:
 
 
 def _chem(edited: list[tuple[str, object]]) -> SimpleNamespace:
-    def sanitize(product: SimpleNamespace) -> None:
+    def sanitize(product: _Product) -> None:
         if product.name == "unsanitary":
             raise ValueError(product.name)
 
-    def to_smiles(molecule: SimpleNamespace, **options: bool) -> str:
-        if hasattr(molecule, "name"):
-            return str(molecule.name)
+    def to_smiles(molecule: object, **options: bool) -> str:
+        if isinstance(molecule, _Product):
+            return molecule.name
         return "isomeric" if options.get("isomericSmiles", True) else "skeleton"
 
-    def from_smiles(smiles: str) -> SimpleNamespace | None:
+    def from_smiles(smiles: str) -> _ParsedMolecule | None:
         if smiles == "invalid":
             return None
         if smiles == "broken":
             raise RuntimeError("parse failed")
-        return SimpleNamespace(smiles=smiles)
+        return _ParsedMolecule(smiles)
 
     def inchi_key(molecule: object) -> str:
         del molecule
@@ -145,7 +156,7 @@ def _chem(edited: list[tuple[str, object]]) -> SimpleNamespace:
 def _standard(version: str, edited: list[tuple[str, object]]) -> SimpleNamespace:
     assert version == IDENTITY_RDKIT
 
-    def canonicalize(molecule: SimpleNamespace) -> SimpleNamespace:
+    def canonicalize(molecule: _ParsedMolecule) -> _ParsedMolecule:
         if molecule.smiles == "tautomer-error":
             raise RuntimeError("tautomer failed")
         return molecule
@@ -227,13 +238,13 @@ def test_products_filter_atoms_deduplicate_reject_and_report_the_mapped_site(
 
     monkeypatch.setattr(derivation_chemistry, "ReactionFromSmarts", compile_reaction)
     result = chemistry.products(_parent(), rule=_rule(), limit=10)
-    assert [(cast("SimpleNamespace", item).name, site) for item, site in result] == [
+    assert [(cast(_Product, item).name, site) for item, site in result] == [
         ("first", 1),
         ("second", -1),
     ]
     assert result[0][0] is kept
     result = chemistry.products(_parent(), rule=_rule(), limit=0)
-    assert [cast("SimpleNamespace", item).name for item, _ in result] == ["first"]
+    assert [cast(_Product, item).name for item, _ in result] == ["first"]
     assert compiled == ["[C:1]>>[C:1]"]
 
 

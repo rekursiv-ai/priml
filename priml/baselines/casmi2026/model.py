@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import KW_ONLY, dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Self, TypedDict, override
+from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 import copy
 import math
@@ -748,7 +748,7 @@ class WidthNormal:
           tensor: The same, initialized parameter.
 
         """
-        return nn.init.normal_(tensor, std=(2 / (5 * self.width)) ** 0.5)
+        return nn.init.normal_(tensor, std=cast(float, (2 / (5 * self.width)) ** 0.5))
 
 
 def rectified_stack(
@@ -3738,7 +3738,7 @@ class FragmentKernel(nn.Module):
             projection.contiguous().view(length, batch * heads, width).transpose(0, 1)
             for projection in (q, k, v)
         )
-        scores = torch.bmm(query / width**0.5, key.transpose(-2, -1))
+        scores = torch.bmm(query / cast(float, width**0.5), key.transpose(-2, -1))
         mask = padding.view(batch, 1, 1, length).expand(-1, heads, -1, -1)
         mask = mask.reshape(batch * heads, 1, length)
         bias = torch.zeros_like(mask, dtype=query.dtype)

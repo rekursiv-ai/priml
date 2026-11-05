@@ -258,7 +258,7 @@ def _reference_step(
     exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
     step_size = lr / (1.0 - beta1**step)
-    bias_correction2_sqrt = (1.0 - beta2**step) ** 0.5
+    bias_correction2_sqrt = cast(float, (1.0 - beta2**step) ** 0.5)
     denom = exp_avg_sq.sqrt() / bias_correction2_sqrt
     param.add_(torch.atan2(exp_avg, denom), alpha=-step_size)
     return param, exp_avg, exp_avg_sq

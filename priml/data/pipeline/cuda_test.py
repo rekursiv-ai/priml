@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -98,12 +99,14 @@ def test_assign_gpu_logs_assignment():
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torch.cuda.device_count", return_value=2),
         patch("torch.cuda.set_device"),
-        patch("priml.data.pipeline.dataset.logger") as mock_logger,
+        patch(
+            "priml.data.pipeline.dataset.logger.info",
+        ) as mock_logger,
     ):
         assert _assign_gpu_to_worker(1) == 1
-        mock_logger.info.assert_called_once()
-        args = mock_logger.info.call_args.args
-        template = args[0]
+        mock_logger.assert_called_once()
+        args = mock_logger.call_args.args
+        template = cast(object, args[0])
         assert isinstance(template, str)
         rendered = template % tuple(args[1:])
         assert rendered == "Worker 1: assigned to GPU 1 (total GPUs: 2)"
@@ -113,11 +116,13 @@ def test_assign_gpu_logs_no_cuda():
     """The CPU fallback logs a debug message naming the missing CUDA."""
     with (
         patch("torch.cuda.is_available", return_value=False),
-        patch("priml.data.pipeline.dataset.logger") as mock_logger,
+        patch(
+            "priml.data.pipeline.dataset.logger.debug",
+        ) as mock_logger,
     ):
         assert _assign_gpu_to_worker(0) == -1
-        mock_logger.debug.assert_called_once()
-        message = mock_logger.debug.call_args.args[0]
+        mock_logger.assert_called_once()
+        message = cast(object, mock_logger.call_args.args[0])
         assert isinstance(message, str)
         assert "CUDA not available" in message
 
@@ -130,11 +135,13 @@ def test_assign_gpu_logs_fork_warning():
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torch.cuda.device_count", return_value=2),
         patch("torch.cuda.set_device", side_effect=fork_error),
-        patch("priml.data.pipeline.dataset.logger") as mock_logger,
+        patch(
+            "priml.data.pipeline.dataset.logger.warning",
+        ) as mock_logger,
     ):
         assert _assign_gpu_to_worker(0) == -1
-        mock_logger.warning.assert_called_once()
-        msg = mock_logger.warning.call_args.args[0]
+        mock_logger.assert_called_once()
+        msg = cast(object, mock_logger.call_args.args[0])
         assert isinstance(msg, str)
         assert "CUDA was initialized before fork" in msg
 

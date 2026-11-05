@@ -716,9 +716,12 @@ def test_main_likelihood_is_evaluated_in_float64_and_rounded_once() -> None:
     )
     values, _ = _main_model_features(rows, views=views)
     one = np.float32(1)
-    probability = [one / (one + np.float32(math.exp(-z))) for z in logits.tolist()]
+    probability = [
+        one / (one + np.float32(math.exp(-z)))
+        for z in cast(list[float], logits.tolist())
+    ]
     likelihood = np.zeros(3, np.float32)
-    for row, bits in enumerate(rows.fingerprints.tolist()):
+    for row, bits in enumerate(cast(list[list[float]], rows.fingerprints.tolist())):
         present = absent = np.float32(0)
         for bit, p in zip(bits, probability, strict=True):
             present += np.float32(bit) * np.float32(math.log(p))
@@ -1614,7 +1617,9 @@ def test_main_base_binds_library_analog_model_and_fragment_columns(
         views=bank.views(spectra, merged_counts=[0, 12, 2]),
     )
     assert scores[0] == scores[2]
-    assert scores[3] == np.float32(np.float64(scores[0]) + np.float64(scores[1]))
+    assert scores[3] == np.float32(
+        np.float64(scores.item(0)) + np.float64(scores.item(1)),
+    )
     np.testing.assert_array_equal(base.features[:, names.index("fz")], scores / 100)
     diagnostics = base.diagnostics
     assert (diagnostics.n_cand, diagnostics.n_gen) == (4, 1)
@@ -1643,10 +1648,10 @@ def test_main_base_binds_library_analog_model_and_fragment_columns(
     ]
     # Every pool row holds two fragments; the product brings three.
     assert base.features[:, names.index("fr_n")].tolist() == [
-        np.float32(np.log1p(2.0)),
-        np.float32(np.log1p(2.0)),
-        np.float32(np.log1p(2.0)),
-        np.float32(np.log1p(3.0)),
+        np.float32(cast(np.float64, np.log1p(2.0))),
+        np.float32(cast(np.float64, np.log1p(2.0))),
+        np.float32(cast(np.float64, np.log1p(2.0))),
+        np.float32(cast(np.float64, np.log1p(3.0))),
     ]
     unscored = _base(spectra)
     assert not unscored.features[:, names.index("fz")].any()
@@ -2422,7 +2427,10 @@ def test_planned_requests_keep_parent_order_and_every_budget(
         train_smiles=("p0", "p1"),
         train_mass=np.array([0.0, 900.0]),
     )
-    assert [request["tolerance"] for _, request in wide] == [0.01] * min(parents, 1)
+    assert len(wide) == min(parents, 1)
+    for _, request in wide:
+        assert "tolerance" in request
+        assert request["tolerance"] == 0.01
 
 
 class _Generation:
@@ -2680,7 +2688,9 @@ def _fragnet_record(
 ) -> FragnetRecord:
     """Weigh heavy atoms with their hydrogens; codes C=0 and O=2."""
     masses = ELEMENT_MASSES
-    amass = np.array([masses[symbol] + count * masses["H"] for symbol, count in groups])
+    amass: NDArray[np.float64] = np.array(
+        [masses[symbol] + count * masses["H"] for symbol, count in groups],
+    )
     codes = np.array([2 if symbol == "O" else 0 for symbol, _ in groups], np.int8)
     return {
         "amass": amass,
@@ -2770,17 +2780,23 @@ class Pipeline:
 
 def pipeline(directory: Path) -> Pipeline:
     """Build the propanol query against ethanol and propanol training spectra."""
-    train_mass = np.array([46.041864812, 60.057514876])
+    train_mass: NDArray[np.float64] = np.array([46.041864812, 60.057514876])
     mass = np.repeat(train_mass, 2)
     order = np.argsort(mass, kind="mergesort")
     counts = np.array([3, 4, 2, 5], np.int32)
     library = SpectralLibrary(
         offsets=np.concatenate([[0], np.cumsum(counts)]).astype(np.int64),
         mz=np.concatenate(
-            [np.arange(count, dtype=np.float32) * 10 + 20 for count in counts.tolist()],
+            [
+                np.arange(count, dtype=np.float32) * 10 + 20
+                for count in cast(list[int], counts.tolist())
+            ],
         ),
         intensity=np.concatenate(
-            [np.arange(count, dtype=np.float32) % 3 + 1 for count in counts.tolist()],
+            [
+                np.arange(count, dtype=np.float32) % 3 + 1
+                for count in cast(list[int], counts.tolist())
+            ],
         ),
         structure_mass=train_mass,
         keys=("LFQSCWFLJHTTHZ", "BDERNNFJNOPAEC"),

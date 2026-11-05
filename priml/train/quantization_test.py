@@ -27,10 +27,16 @@ from priml.train.quantization import (
 
 
 if TYPE_CHECKING:
+    from torchao.float8.config import Float8LinearConfig, Float8LinearRecipeName
     from torchao.float8.float8_linear import Float8Linear
 else:
     from wrapt import lazy_import
 
+    Float8LinearConfig = lazy_import("torchao.float8.config", "Float8LinearConfig")
+    Float8LinearRecipeName = lazy_import(
+        "torchao.float8.config",
+        "Float8LinearRecipeName",
+    )
     Float8Linear = lazy_import("torchao.float8.float8_linear", "Float8Linear")
 
 
@@ -179,11 +185,11 @@ def test_enabled_quantization_preserves_recipe_and_initial_state(
     config = Float8ModelQuantization.Config(recipe=recipe)
     strategy = config.make()
     recipes = {
-        "tensorwise": quantization.Float8LinearRecipeName.TENSORWISE,
-        "rowwise": quantization.Float8LinearRecipeName.ROWWISE,
-        "rowwise_gw_hp": quantization.Float8LinearRecipeName.ROWWISE_WITH_GW_HP,
+        "tensorwise": Float8LinearRecipeName.TENSORWISE,
+        "rowwise": Float8LinearRecipeName.ROWWISE,
+        "rowwise_gw_hp": Float8LinearRecipeName.ROWWISE_WITH_GW_HP,
     }
-    expected = quantization.Float8LinearConfig.from_recipe_name(recipes[recipe])
+    expected = Float8LinearConfig.from_recipe_name(recipes[recipe])
     assert strategy.config == config.finalized()
     assert strategy.enabled is True
     assert strategy.converted_count == 0

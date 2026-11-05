@@ -20,6 +20,7 @@ from priml.baselines.wellbore_geology.model import (
     Backbone,
     ConcatUp,
     ConvNormAct,
+    DepthPosterior,
     ImageNorm,
     PosteriorUNet,
     ResidualBlock,
@@ -1139,6 +1140,15 @@ def test_channel_layout_belongs_to_the_model(monkeypatch: pytest.MonkeyPatch) ->
         model.format_backbone(torch.device("cpu"))
         model.format_backbone(torch.device("cuda"))
     assert layouts == [torch.channels_last]
+
+
+def test_base_posterior_requires_features_and_has_no_backbone_layout() -> None:
+    model = DepthPosterior()
+    with pytest.raises(NotImplementedError):
+        model.features(torch.zeros(2, 3, 4, 5))
+    with pytest.raises(NotImplementedError):
+        model(torch.zeros(2, 3, 4, 5))
+    assert model.format_backbone(torch.device("cpu")) is None
 
 
 def test_model_requires_its_reference_geometry_and_target_statistics() -> None:

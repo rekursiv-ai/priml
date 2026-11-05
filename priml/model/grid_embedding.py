@@ -21,7 +21,7 @@ precisely so the order is visible in ``pprint`` rather than buried in a method.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Protocol, Self, override, runtime_checkable
+from typing import Protocol, Self, cast, override, runtime_checkable
 
 import math
 
@@ -523,7 +523,7 @@ class GridEmbedding(nn.Module):
             raise ValueError("GridEmbedding requires grid_shape from the dataset.")
         self.config = config
         self.embed_scale = (
-            float(config.channels_out**0.5)
+            float(cast(float, config.channels_out**0.5))
             if config.embed_scale < 0
             else config.embed_scale
         )
@@ -603,7 +603,7 @@ def _initialize_table_(
         if init_std > 0:
             truncated_normal(
                 initial,
-                std=init_std / channels_out**0.5,
+                std=init_std / cast(float, channels_out**0.5),
                 depth_index=(),
                 variance_correction=True,
             )

@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from types import FunctionType
+from typing import cast
 from unittest.mock import Mock
 
 from torch import Tensor
@@ -205,7 +206,7 @@ def test_jit_binds_the_real_triton_language(monkeypatch: pytest.MonkeyPatch) -> 
     assert result is jit_result
     import_module.assert_called_once_with("triton.language")
     jit.assert_called_once()
-    bound = jit.call_args.args[0]
+    bound = cast(object, jit.call_args.args[0])
     assert isinstance(bound, FunctionType)
     assert bound is not _jit_probe
     assert bound.__name__ == _jit_probe.__name__
@@ -244,12 +245,11 @@ def test_run_dispatches_bucket_and_chunk_kernels(
 ) -> None:
     bucket_kernel = _Kernel()
     chunk_kernel = _Kernel()
-    triton = Mock()
 
     def cdiv(count: int, block: int) -> int:
         return (count + block - 1) // block
 
-    triton.cdiv.side_effect = cdiv
+    triton = Mock(cdiv=Mock(side_effect=cdiv))
     empty_spy = Mock(wraps=torch.empty)
     ones_spy = Mock(wraps=torch.ones)
     monkeypatch.setattr(torch, "empty", empty_spy)

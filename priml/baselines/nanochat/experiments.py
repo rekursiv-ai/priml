@@ -899,7 +899,7 @@ def exp013() -> NgramTrainLoop.Config:
                 width_scaled=scaled,
             ),
         )
-    ngram_rate = 0.6 / (model.channels_in / 768) ** 0.5
+    ngram_rate = 0.6 / cast(float, (model.channels_in / 768) ** 0.5)
     optimizer.optimizers.extend(
         [
             BiasCorrectedRMSProp.Config(
@@ -1059,8 +1059,8 @@ def exp018() -> NgramTrainLoop.Config:
     assert isinstance(model, MemoryNanoChatLM.Config)
     previous_width = model.channels_in
     model.channels_in = 768
-    batch_scale = (96 / cfg.step.rows_per_pass) ** 0.5
-    batch_correction = (cfg.step.rows_per_pass / 96) ** 0.5
+    batch_scale = cast(float, (96 / cfg.step.rows_per_pass) ** 0.5)
+    batch_correction = cast(float, (cfg.step.rows_per_pass / 96) ** 0.5)
     cfg.step.rows_per_pass = 96
     cfg.step.tokens_per_optimizer_step = cfg.step.rows_per_pass * model.max_seq_len
     optimizer = cfg.step.optimizer

@@ -194,7 +194,7 @@ class ImageNetSource:
 
                 try:
                     image = Image.open(image_file)
-                    image.load()  # pyright: ignore[reportUnknownMemberType] -- The dataset backend is third-party and untyped at this boundary.
+                    image.load()
 
                     label = self.validation_labels[member.name]
 
@@ -223,7 +223,7 @@ class ImageNetSource:
 
                 try:
                     image = Image.open(image_file)
-                    image.load()  # pyright: ignore[reportUnknownMemberType] -- The dataset backend is third-party and untyped at this boundary.
+                    image.load()
 
                     sample: Sample = {
                         "file_name": member.name,
@@ -265,7 +265,7 @@ def _read_class_tar(
 
             try:
                 image = Image.open(image_file)
-                image.load()  # pyright: ignore[reportUnknownMemberType] -- The dataset backend is third-party and untyped at this boundary.
+                image.load()
 
                 sample: Sample = {
                     "file_name": image_member.name,

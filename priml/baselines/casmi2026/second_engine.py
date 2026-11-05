@@ -1289,7 +1289,26 @@ class NumericTree:
     binned_left_cat_bitsets: NDArray[np.uint32]
     raw_left_cat_bitsets: NDArray[np.uint32]
 
-    def state(self) -> dict[str, NDArray[np.generic]]:
+    class StateDict(TypedDict):
+        """Preserve each fitted predictor column's dtype across serialization."""
+
+        value: NDArray[np.float64]
+        count: NDArray[np.uint32]
+        feature_idx: NDArray[np.int64]
+        num_threshold: NDArray[np.float64]
+        missing_go_to_left: NDArray[np.uint8]
+        left: NDArray[np.uint32]
+        right: NDArray[np.uint32]
+        gain: NDArray[np.float64]
+        depth: NDArray[np.uint32]
+        is_leaf: NDArray[np.uint8]
+        bin_threshold: NDArray[np.uint8]
+        is_categorical: NDArray[np.uint8]
+        bitset_idx: NDArray[np.uint32]
+        binned_left_cat_bitsets: NDArray[np.uint32]
+        raw_left_cat_bitsets: NDArray[np.uint32]
+
+    def state(self) -> StateDict:
         """Return every fitted column, preserving its complete values and dtype.
 
         Returns:

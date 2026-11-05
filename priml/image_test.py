@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import cast
-from unittest.mock import MagicMock, patch
+from typing import Protocol, cast
+from unittest.mock import MagicMock, _Call, patch
 
 import ctypes
 import platform
@@ -45,6 +46,98 @@ from priml.image import (
     resize,
     resized_dims,
 )
+
+
+class _MockControl(Protocol):
+    return_value: object
+    side_effect: object
+    called: bool
+    call_count: int
+    call_args: _Call
+    call_args_list: list[_Call]
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None: ...
+    def assert_called_once(self) -> None: ...
+    def assert_not_called(self) -> None: ...
+    def assert_called_with(self, *args: object, **kwargs: object) -> None: ...
+    def assert_any_call(self, *args: object, **kwargs: object) -> None: ...
+
+
+@dataclass(slots=True, kw_only=True)
+class _TurboJpegMock:
+    decode: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+class _TurboJpegLibMock:
+    def __init__(self) -> None:
+        self.tj3Init = cast(_MockControl, MagicMock())
+        self.tj3DecompressHeader = cast(_MockControl, MagicMock())
+        self.tj3Get = cast(_MockControl, MagicMock())
+        self.tj3GetErrorCode = cast(_MockControl, MagicMock())
+        self.tj3Set = cast(_MockControl, MagicMock())
+        self.tj3SetCroppingRegion = cast(_MockControl, MagicMock())
+        self.tj3SetScalingFactor = cast(_MockControl, MagicMock())
+        self.tj3Decompress8 = cast(_MockControl, MagicMock())
+        self.tj3Destroy = cast(_MockControl, MagicMock())
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpRgbaMock:
+    rgba: object = field(default_factory=object)
+    size: int = 0
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpUnionMock:
+    RGBA: _WebpRgbaMock = field(default_factory=_WebpRgbaMock)
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpOutputMock:
+    u: _WebpUnionMock = field(default_factory=_WebpUnionMock)
+    colorspace: int = 0
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpConfigMock:
+    output: _WebpOutputMock = field(default_factory=_WebpOutputMock)
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpLibMock:
+    WebPInitDecoderConfig: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    WebPDecode: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    WebPFreeDecBuffer: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    VP8_STATUS_OK: int = 0
+    MODE_RGB: int = 0
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpFfiMock:
+    new: _MockControl = field(default_factory=lambda: cast(_MockControl, MagicMock()))
+    buffer: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    from_buffer: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+    addressof: _MockControl = field(
+        default_factory=lambda: cast(_MockControl, MagicMock()),
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _WebpMock:
+    lib: _WebpLibMock = field(default_factory=_WebpLibMock)
+    ffi: _WebpFfiMock = field(default_factory=_WebpFfiMock)
 
 
 def _jpeg_bytes(
@@ -306,7 +399,7 @@ class TestGetDimensions:
 
 class TestDecodeJpegTurbojpeg:
     def test_success(self) -> None:
-        mock_turbo = MagicMock()
+        mock_turbo = _TurboJpegMock()
         mock_turbo.decode.return_value = np.ones((10, 12, 3), dtype=np.uint8) * 128
         arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 10, 12)
         assert arr is not None
@@ -314,7 +407,7 @@ class TestDecodeJpegTurbojpeg:
         assert arr.dtype == np.uint8
 
     def test_decode_input_and_corrupt_warning_filter(self) -> None:
-        mock_turbo = MagicMock()
+        mock_turbo = _TurboJpegMock()
 
         def decode_with_warnings(data: bytes) -> np.ndarray:
             del data
@@ -346,7 +439,7 @@ class TestDecodeJpegTurbojpeg:
         assert filter_spy.call_args.kwargs == {"message": "Corrupt JPEG data"}
 
     def test_bgr_to_rgb(self) -> None:
-        mock_turbo = MagicMock()
+        mock_turbo = _TurboJpegMock()
         # Decoded image arrays use the production HWC layout with three channels.
         bgr = np.arange(2 * 4 * 3, dtype=np.uint8).reshape((2, 4, 3))
         mock_turbo.decode.return_value = bgr
@@ -505,7 +598,7 @@ class TestDecodeJpegTurbojpeg:
         np.testing.assert_array_equal(actual, full[2:6, 4:8])
 
     def test_decode_error(self) -> None:
-        mock_turbo = MagicMock()
+        mock_turbo = _TurboJpegMock()
         mock_turbo.decode.side_effect = RuntimeError("decode failed")
         assert decode_jpeg_turbojpeg(b"x", cast(TurboJPEG, mock_turbo), 10, 10) is None
 
@@ -588,7 +681,7 @@ class TestDecodeJpegTurbojpeg:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 1
 
@@ -626,7 +719,7 @@ class TestDecodeJpegTurbojpeg:
         lib.tj3Get.assert_any_call(1, 4)
         lib.tj3Get.assert_any_call(1, 5)
         lib.tj3Get.assert_any_call(1, 6)
-        crop_region = lib.tj3SetCroppingRegion.call_args.args[1]
+        crop_region = cast(object, lib.tj3SetCroppingRegion.call_args.args[1])
         assert isinstance(crop_region, _TjRegion)
         assert (crop_region.x, crop_region.y, crop_region.w, crop_region.h) == (
             0,
@@ -662,7 +755,7 @@ class TestDecodeJpegTurbojpeg:
         case: tuple[int, int, int, int, int],
     ) -> None:
         subsample, width, x, mcu_width, expected_x0 = case
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 0
 
@@ -685,7 +778,7 @@ class TestDecodeJpegTurbojpeg:
 
         assert actual is not None
         assert actual.shape == (2, 2, 3)
-        region = lib.tj3SetCroppingRegion.call_args.args[1]
+        region = cast(object, lib.tj3SetCroppingRegion.call_args.args[1])
         assert isinstance(region, _TjRegion)
         assert region.x == expected_x0
         region_width = min(width, x + 2 + mcu_width) - expected_x0
@@ -695,7 +788,7 @@ class TestDecodeJpegTurbojpeg:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 1
 
@@ -723,7 +816,7 @@ class TestDecodeJpegTurbojpeg:
         assert actual is not None
         # Source rows [1, 5) at 1/2 cover reduced rows [0, 3); columns [2, 6) -> [1, 3).
         assert actual.shape == (3, 2, 3)
-        scale = lib.tj3SetScalingFactor.call_args.args[1]
+        scale = cast(object, lib.tj3SetScalingFactor.call_args.args[1])
         assert isinstance(scale, _TjScalingFactor)
         assert (scale.num, scale.denom) == (1, 2)
         assert all(call.args == (1,) for call in lib.tj3GetErrorCode.call_args_list)
@@ -740,7 +833,7 @@ class TestDecodeJpegTurbojpeg:
         expected_width: int,
     ) -> None:
         # Source columns [x, x + w) at 1/2 scale cover [x // 2, ceil((x + w) / 2)).
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 0
 
@@ -759,7 +852,7 @@ class TestDecodeJpegTurbojpeg:
         assert actual.shape == (5, expected_width, 3)
 
     def test_one_row_region_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 0
 
@@ -781,7 +874,7 @@ class TestDecodeJpegTurbojpeg:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 0
 
@@ -805,7 +898,7 @@ class TestDecodeJpegTurbojpeg:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = None
         monkeypatch.setattr("priml.image._libturbojpeg", lambda: lib)
 
@@ -819,7 +912,7 @@ class TestDecodeJpegTurbojpeg:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 0
 
@@ -842,7 +935,7 @@ class TestDecodeJpegTurbojpeg:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        lib = MagicMock()
+        lib = _TurboJpegLibMock()
         lib.tj3Init.return_value = 1
         lib.tj3DecompressHeader.return_value = 0
         lib.tj3Get.return_value = 7
@@ -859,12 +952,14 @@ class TestDecodeWebpLibwebp:
         assert decode_webp_libwebp(b"not-webp", 10, 10) is None
 
     def test_init_failure_returns_none(self) -> None:
-        with patch("priml.image.webp") as mock_webp:
+        mock_webp = _WebpMock()
+        with patch("priml.image.webp", mock_webp):
             mock_webp.lib.WebPInitDecoderConfig.return_value = False
             assert decode_webp_libwebp(b"x", 10, 10) is None
 
     def test_decode_status_not_ok_returns_none(self) -> None:
-        with patch("priml.image.webp") as mock_webp:
+        mock_webp = _WebpMock()
+        with patch("priml.image.webp", mock_webp):
             mock_webp.lib.WebPInitDecoderConfig.return_value = True
             mock_webp.lib.VP8_STATUS_OK = 0
             mock_webp.lib.WebPDecode.return_value = 1  # non-OK.
@@ -874,15 +969,16 @@ class TestDecodeWebpLibwebp:
     def test_happy_path(self) -> None:
         # Mock the webp cffi layer to reach the rgb extraction branch.
         rgb_bytes = b"\x10\x20\x30" * (10 * 12)
-        with patch("priml.image.webp") as mock_webp:
-            config = MagicMock()
+        mock_webp = _WebpMock()
+        with patch("priml.image.webp", mock_webp):
+            config = _WebpConfigMock()
             config_ptr = MagicMock()
             mock_webp.ffi.new.return_value = config_ptr
 
             def get_config(index: int) -> object:
                 return config if index == 0 else MagicMock()
 
-            config_ptr.__getitem__.side_effect = get_config
+            cast(MagicMock, config_ptr.__getitem__).side_effect = get_config
             mock_webp.lib.WebPInitDecoderConfig.return_value = True
             mock_webp.lib.VP8_STATUS_OK = 0
             mock_webp.lib.MODE_RGB = 0
@@ -917,15 +1013,16 @@ class TestDecodeWebpLibwebp:
     def test_crop_returns_exact_region_and_frees_webp_buffer(self) -> None:
         # WebP buffers are fixed HWC images with three color channels.
         pixels = bytes(range(5 * 5 * 3))
-        with patch("priml.image.webp") as mock_webp:
-            config = MagicMock()
+        mock_webp = _WebpMock()
+        with patch("priml.image.webp", mock_webp):
+            config = _WebpConfigMock()
             pointer = MagicMock()
             mock_webp.ffi.new.return_value = pointer
 
             def get_config(index: int) -> object:
                 return config if index == 0 else MagicMock()
 
-            pointer.__getitem__.side_effect = get_config
+            cast(MagicMock, pointer.__getitem__).side_effect = get_config
             mock_webp.lib.WebPInitDecoderConfig.return_value = True
             mock_webp.lib.VP8_STATUS_OK = 0
             mock_webp.lib.MODE_RGB = 7
@@ -955,11 +1052,12 @@ class TestDecodeWebpLibwebp:
 
     def test_webp_buffer_is_freed_when_the_caller_dimensions_are_wrong(self) -> None:
         pixels = bytes(5 * 4 * 3)
-        with patch("priml.image.webp") as mock_webp:
-            config = MagicMock()
+        mock_webp = _WebpMock()
+        with patch("priml.image.webp", mock_webp):
+            config = _WebpConfigMock()
             pointer = MagicMock()
             mock_webp.ffi.new.return_value = pointer
-            pointer.__getitem__.return_value = config
+            cast(MagicMock, pointer.__getitem__).return_value = config
             mock_webp.lib.WebPInitDecoderConfig.return_value = True
             mock_webp.lib.VP8_STATUS_OK = 0
             mock_webp.lib.WebPDecode.return_value = 0
@@ -1570,8 +1668,8 @@ class TestDecodeWebpReal:
         assert arr.shape == (30, 32, 3)
 
 
-@patch("priml.image.webp")
-def test_webp_init_failure(mock_webp: MagicMock) -> None:
+@patch("priml.image.webp", new_callable=_WebpMock)
+def test_webp_init_failure(mock_webp: _WebpMock) -> None:
     mock_webp.lib.WebPInitDecoderConfig.return_value = False
     assert decode_webp_libwebp(b"x", 10, 10) is None
 

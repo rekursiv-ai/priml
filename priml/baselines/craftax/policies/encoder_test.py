@@ -179,7 +179,11 @@ def test_the_convnext_trunk_in_the_blocks_slot_is_the_reference_geometry() -> No
     assert sum(weight.numel() for weight in encoder.parameters()) == 147_488
 
 
-def test_the_trunk_draws_torchs_defaults_and_starts_as_the_identity() -> None:
+@pytest.mark.parametrize(("projection", "fan_in"), [(0, 6), (1, 24)])
+def test_the_trunk_draws_torchs_defaults_and_starts_as_the_identity(
+    projection: int,
+    fan_in: int,
+) -> None:
     torch.manual_seed(0)
     trunk = _tiny_trunk(channels=2).make()
     for block in trunk.blocks:
@@ -187,10 +191,10 @@ def test_the_trunk_draws_torchs_defaults_and_starts_as_the_identity() -> None:
         assert torch.equal(block.norm.weight, torch.ones(6))
         assert block.norm.bias is not None
         assert not block.norm.bias.any()
-        for layer, fan_in in ((block.mlp.proj_in, 6), (block.mlp.proj_out, 24)):
-            assert layer.bias is not None
-            bound = fan_in**-0.5
-            assert bound / 2 < float(layer.bias.detach().abs().max()) <= bound
+        layer = (block.mlp.proj_in, block.mlp.proj_out)[projection]
+        assert layer.bias is not None
+        bound = cast(float, fan_in**-0.5)
+        assert bound / 2 < float(layer.bias.detach().abs().max()) <= bound
     assert not trunk.proj_out.weight.any()
     board = torch.randn(3, 2, 4, 5)
     with torch.no_grad():

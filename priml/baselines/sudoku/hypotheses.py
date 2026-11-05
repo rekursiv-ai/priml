@@ -19,7 +19,7 @@ References:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple, override
+from typing import TYPE_CHECKING, NamedTuple, cast, override
 
 import math
 
@@ -437,21 +437,22 @@ def truncated_normal_(tensor: Tensor, *, generator: torch.Generator) -> Tensor:
 
     """
     lower, upper = -2.0, 2.0
-    sqrt2 = 2.0**0.5
+    sqrt2 = cast(float, 2.0**0.5)
     a = math.erf(lower / sqrt2)
     b = math.erf(upper / sqrt2)
     normalizer = (b - a) / 2.0
-    scale = (2.0 * math.pi) ** -0.5
+    scale = cast(float, (2.0 * math.pi) ** -0.5)
     pdf_upper = scale * math.exp(-0.5 * upper * upper)
     pdf_lower = scale * math.exp(-0.5 * lower * lower)
-    std = (
+    std = cast(
+        float,
         1.0
         / (
             1.0
             - (upper * pdf_upper - lower * pdf_lower) / normalizer
             - ((pdf_upper - pdf_lower) / normalizer) ** 2
         )
-        ** 0.5
+        ** 0.5,
     )
     with torch.no_grad():
         tensor.uniform_(a, b, generator=generator)

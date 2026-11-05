@@ -128,7 +128,7 @@ def test_two_sum_retains_the_complete_roundoff_with_either_larger_operand() -> N
 
 
 def test_binary64_fma_rounds_once_instead_of_rounding_the_product() -> None:
-    x, y, addend = 1 + 2**-27, 1 - 2**-27, -1.0
+    x, y, addend = 1 + 2.0**-27, 1 - 2.0**-27, -1.0
     assert x * y + addend == 0.0
     assert fma64(x, y=y, addend=addend) == -(2**-54)
 

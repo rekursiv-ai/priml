@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -130,7 +131,7 @@ def test_exp000_bandpass_numerator_is_a_scaled_quartic() -> None:
     # Zeros at z = 1 and z = -1 make the numerator a scaled (z**2 - 1)**4.
     assert np.array_equal(
         band[0],
-        band[0][0] * np.asarray([1, 0, -4, 0, 6, 0, -4, 0, 1]),
+        cast(np.float64, band[0][0]) * np.asarray([1, 0, -4, 0, 6, 0, -4, 0, 1]),
     )
 
 
@@ -211,7 +212,12 @@ def test_butterworth_bandpass_halves_power_at_both_edges(
         assert abs(power - 0.5) < 1e-6
     # The band's geometric center in the prewarped domain has unit gain.
     low, high = (4 * math.tan(math.pi * hz / sample_rate) for hz in band_hz)
-    center = 2 * math.atan((low * high) ** 0.5 / 4) * sample_rate / (2 * math.pi)
+    center = (
+        2
+        * math.atan(cast(float, (low * high) ** 0.5) / 4)
+        * sample_rate
+        / (2 * math.pi)
+    )
     peak = abs(
         _response(numerator, denominator=denominator, hz=center, rate=sample_rate),
     )
@@ -529,8 +535,8 @@ def test_filter_initial_state_rounds_to_the_exact_steady_state(
         order=order,
         sample_rate=sample_rate,
     )
-    b = [Fraction(float(value)) for value in numerator]
-    a = [Fraction(float(value)) for value in denominator]
+    b = [Fraction(float(value)) for value in cast(Iterable[np.float64], numerator)]
+    a = [Fraction(float(value)) for value in cast(Iterable[np.float64], denominator)]
     steady = sum(b, start=Fraction(0)) / sum(a, start=Fraction(0))
     residual = [x - y * steady for x, y in zip(b[1:], a[1:], strict=True)]
     expected = [float(sum(residual[index:])) for index in range(len(residual))]
@@ -558,7 +564,8 @@ def test_exp000_initial_state_holds_a_constant_offset(design: str, gain: float) 
         offset,
         b=numerator,
         a=denominator,
-        initial=_filter_initial_state(numerator, a=denominator)[:, None] * offset[0],
+        initial=_filter_initial_state(numerator, a=denominator)[:, None]
+        * cast("NDArray[np.float64]", offset[0]),
     )
     assert np.abs(held - gain * offset).max() < 5e-4
 
@@ -578,8 +585,10 @@ def _response(
     hz: float,
     rate: float,
 ) -> complex:
-    z = np.exp(1j * np.pi * hz / (rate / 2))
-    return complex(np.polyval(numerator, z) / np.polyval(denominator, z))
+    z = cast(np.complex128, np.exp(1j * np.pi * hz / (rate / 2)))
+    return complex(
+        cast(np.complex128, np.polyval(numerator, z) / np.polyval(denominator, z)),
+    )
 
 
 if __name__ == "__main__":

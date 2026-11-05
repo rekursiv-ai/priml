@@ -22,7 +22,7 @@ carries the gradient, and the optimizer scatters those few rows back.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import TYPE_CHECKING, Protocol, Self, override
+from typing import TYPE_CHECKING, Protocol, Self, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -147,7 +147,7 @@ class RegisterTokens(nn.Module):
             )
         self.config = config
         self.embed_scale = (
-            float(config.channels_out**0.5)
+            float(cast(float, config.channels_out**0.5))
             if config.embed_scale < 0
             else config.embed_scale
         )
@@ -310,7 +310,7 @@ class SparsePuzzleEmbedding(nn.Module):
             )
         self.config = config
         self.embed_scale = (
-            float(config.channels_token**0.5)
+            float(cast(float, config.channels_token**0.5))
             if config.embed_scale < 0
             else config.embed_scale
         )

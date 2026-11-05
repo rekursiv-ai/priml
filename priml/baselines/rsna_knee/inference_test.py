@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from functools import partial, partialmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import csv
 import hashlib
@@ -70,7 +70,7 @@ from priml.model.vnet import VNet
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Iterable
 
     from numpy.typing import NDArray
 
@@ -871,7 +871,10 @@ def test_both_stackers_replace_their_findings_and_serialize_nine_digits(
     fluid = None if volume is None else {"eff_sag_p99_open": volume}
     result = postprocess_assets(tmp_path).make()(logits, states, fluid)
     assert not result.failures
-    expected = torch.sigmoid(logits.mean(0)).double().numpy()
+    expected = cast(
+        "NDArray[np.float64]",
+        torch.sigmoid(logits.mean(0)).double().numpy(),
+    )
     b0, b_z, b_lv, b_miss = FLUID_COEFFICIENTS
     # Missing, negative or nonfinite volumes use the missing-volume weight instead.
     expected[FINDINGS.index("Effusion")] = _logistic(
@@ -892,7 +895,7 @@ def test_both_stackers_replace_their_findings_and_serialize_nine_digits(
     np.testing.assert_array_equal(result.probabilities, expected)
     np.testing.assert_array_equal(
         result.serialized,
-        [float(f"{value:.9g}") for value in expected],
+        [float(f"{value:.9g}") for value in cast("Iterable[np.float64]", expected)],
     )
 
 
@@ -1562,7 +1565,7 @@ def test_r7_controller_orders_studies_by_file_count_and_interleaves_halves(
 def test_mean_fill_and_decimal_csv_follow_the_sample_order(tmp_path: Path) -> None:
     ids, sample = ["zeta", "alpha", "empty", "beta"], ["beta", "empty", "zeta", "alpha"]
     data = _competition(tmp_path, ids=ids, sample=sample)
-    columns = np.arange(12) / 64
+    columns: NDArray[np.float64] = np.arange(12) / 64
     result = StageScores(
         values=np.array([0.25, 0.5, 0.0, 0.75])[:, None] + columns,
         scored=np.array([True, True, False, True]),
@@ -1570,7 +1573,10 @@ def test_mean_fill_and_decimal_csv_follow_the_sample_order(tmp_path: Path) -> No
     )
     _mean_fill(result, ids=ids, sample_ids=sample)
     # The scored rows 0.75, 0.25 and 0.5 (plus each column offset) average to 0.5.
-    np.testing.assert_array_equal(result.values[2], 0.5 + columns)
+    np.testing.assert_array_equal(
+        cast("NDArray[np.float64]", result.values[2]),
+        0.5 + columns,
+    )
     path = tmp_path / "ours_sub.csv"
     _write_scores(path, values=result.values, data=data, order=sample, decimals=True)
     rows = {"beta": 0.75, "empty": 0.5, "zeta": 0.25, "alpha": 0.5}
@@ -1579,7 +1585,15 @@ def test_mean_fill_and_decimal_csv_follow_the_sample_order(tmp_path: Path) -> No
         for line in [
             ",".join(["StudyInstanceUID", *reversed(FINDINGS)]),
             *(
-                ",".join([uid, *(str(rows[uid] + offset) for offset in columns[::-1])])
+                ",".join(
+                    [
+                        uid,
+                        *(
+                            str(rows[uid] + offset)
+                            for offset in cast("Iterable[np.float64]", columns[::-1])
+                        ),
+                    ],
+                )
                 for uid in sample
             ),
         ]
@@ -1711,7 +1725,10 @@ def test_generated_tied_ordinal_csvs_pass_without_changing_average_tie_blend(
         sub224=ranks,
     )
     assert np.isnan(diagnostic["raptor_raw_vs_sub"][FINDINGS[0]])
-    assert diagnostic["raptor_raw_vs_sub"][FINDINGS[1]] == round((4 / 5) ** 0.5, 4)
+    assert diagnostic["raptor_raw_vs_sub"][FINDINGS[1]] == round(
+        cast(float, (4 / 5) ** 0.5),
+        4,
+    )
     blend = exp000().blend.make()(
         [parsed, parsed, parsed],
         [np.ones(len(raw), dtype=np.bool_)] * 3,
