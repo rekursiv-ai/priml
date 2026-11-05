@@ -1,9 +1,8 @@
-"""Structured job progress: the ``progress.json`` writer, read by the job launcher.
+"""Structured job progress: the ``progress.json`` writer.
 
-A job may periodically call :func:`write_progress`; the launcher's ``status``/``wait``
-surface the file verbatim, so agents poll structured progress instead of
-grepping log prose. Deliberately tiny and dependency-free: any script the
-scheduler launches can afford it.
+A job may periodically call :func:`write_progress`, so whoever watches the job
+can poll structured progress instead of grepping log prose. No scheduler reads
+the file. Deliberately tiny and dependency-free: any job script can afford it.
 """
 
 from __future__ import annotations
@@ -24,10 +23,9 @@ def write_progress(
     working_dir: Path | str,
     metrics: dict[str, float] | None = None,
 ) -> Path:
-    """Atomically write ``<working_dir>/progress.json`` for the scheduler.
+    """Atomically write ``<working_dir>/progress.json``.
 
-    Atomic replacement ensures a concurrent scheduler read never sees a torn
-    file.
+    Atomic replacement ensures a concurrent reader never sees a torn file.
 
     Args:
         step: Steps completed so far.
