@@ -767,7 +767,9 @@ class InterruptedForecast(RepeatForecast):
 
 class _BoundStudy(BudgetStudy):
     class Config(Makes2["_BoundStudy"], BudgetStudy.Config):
-        bindings: list[tuple[int, int, int | None]] = field(default_factory=list)
+        bindings: list[tuple[int, int, int | None]] = field(
+            default_factory=list[tuple[int, int, int | None]],
+        )
         """Inputs observed by each finalization of this study copy."""
 
         @override
