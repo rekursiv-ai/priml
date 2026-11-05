@@ -439,8 +439,16 @@ def test_resume_validates_core_fields_without_discarding_fit_extensions(
         suite.run(directory, phase="audit", resume=True)
 
 
-def test_direct_resume_rejects_an_ambient_default_dtype_change(tmp_path: Path) -> None:
+def test_direct_resume_rejects_an_ambient_default_dtype_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_runs(phase: str) -> tuple[()]:
+        del phase
+        return ()
+
     suite = tiny_suite().make()
+    monkeypatch.setattr(suite, "plan", no_runs)
     directory = tmp_path / "dtype"
     suite.run(directory, phase="audit")
     original = torch.get_default_dtype()
