@@ -353,6 +353,9 @@ def test_lockstep_runs_an_injected_step_dependent_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(reference.VARIANTS, "step_dependent", step_dependent_experiment)
+    monkeypatch.setattr(vision_reference, "PROBE_SHAPE", (2, 3, 4, 5))
+    for width, tiny_width in zip((16, 32, 64), (2, 3, 4), strict=True):
+        monkeypatch.setitem(vision_reference.TINY_WIDTHS, width, tiny_width)
     record, states = reference.method_lockstep("step_dependent")
     expected_states: list[dict[str, Tensor]] = []
     expected_losses: list[float] = []

@@ -358,7 +358,17 @@ def test_the_fmnist_pipelines_match_the_reference_on_fixed_images() -> None:
 def test_the_fmnist_path_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
     expected = capture_reference.read_sites(_DATA)["port-fmnist"]
     assert expected
-    assert reference.fmnist_draw_sites(tmp_path) == expected
+
+    def narrow_fmnist() -> VisionTrainLoop:
+        experiment = reference.SETTINGS["mobilenetv2-fmnist"].experiment()
+        config = experiment.step.model
+        assert isinstance(config, MobileNetV2.Config)
+        config.channels_stem = 2
+        config.channels_hidden = (3, 4, 5, 6, 7, 8, 9)
+        config.channels_last = 11
+        return experiment
+
+    assert reference.fmnist_draw_sites(tmp_path, narrow_fmnist) == expected
 
 
 def test_the_settings_golden_sees_a_change_of_one_ulp() -> None:

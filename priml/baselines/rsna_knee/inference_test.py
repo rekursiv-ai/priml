@@ -1315,8 +1315,18 @@ def test_corrupt_deflate_mean_fills_r7_failure_and_scores_next_study(
     )
 
 
+def _small_raptor_backbones(config: PublicRecipe.Config) -> None:
+    for arm in (config.raptor384, config.raptor224):
+        backbone = arm.model.backbone
+        assert isinstance(backbone, CoAtNet.Config)
+        backbone.channels_hidden = (2, 3, 4, 5)
+        backbone.blocks_per_stage = (1, 1, 1, 1)
+
+
 def test_recipe_stages_retain_every_model_and_release_parameter() -> None:
-    config = exp000().copy_tree().finalize()
+    config = exp000()
+    _small_raptor_backbones(config)
+    config = config.copy_tree().finalize()
     raptor = config.raptor384
     assert raptor.windows.crop_size == 320
     assert raptor.views == [unchanged, anatomical_mirror]
@@ -1664,7 +1674,12 @@ def test_native_recipe_rejects_arguments_and_protected_or_existing_outputs(
 
 
 def test_released_second_raptor_arm_retains_its_distinct_policy() -> None:
-    config = exp000().copy_tree().finalize()
+    config = exp000()
+    _small_raptor_backbones(config)
+    assert isinstance(config.r7.model, R7.Config)
+    config.r7.model.encoder.channels_hidden = (2, 3)
+    config.r7.model.encoder.blocks_per_stage = (1, 1)
+    config = config.copy_tree().finalize()
     arm = config.raptor224
     assert isinstance(arm.model.backbone, CoAtNet.Config)
     assert arm.model.backbone.image_size == (224, 224)

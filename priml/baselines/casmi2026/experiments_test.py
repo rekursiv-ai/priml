@@ -37,7 +37,9 @@ if TYPE_CHECKING:
 
 
 def test_exp000_config_is_complete_and_hermetic() -> None:
-    config = exp000().finalize()
+    config = exp000()
+    assert_pprint_golden(test_file=__file__, name="exp000", config=config)
+    config = config.finalize()
     assert config.device == "cuda"
     assert config.working_dir == Path("/opt/scratch/runs/casmi2026/exp000")
     assert config.dreams == Path(

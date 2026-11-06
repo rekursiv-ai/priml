@@ -789,6 +789,23 @@ def test_making_a_source_leaves_the_global_generator_where_it_was() -> None:
 def test_initial_weights_are_their_seeds_init(tmp_path: Path) -> None:
     config = InitialWeights.Config()
     config.experiment = SMOKE
+    config.overrides = [
+        "step.model.encoder.channels_in=2",
+        "step.model.decoder.channels_in=2",
+        "step.model.encoder.stack.block.ffn.channels_hidden=2",
+        "step.model.encoder.stack.block.attn.num_heads=1",
+        "step.model.encoder.stack.block.attn.channels_head=2",
+        "step.model.decoder.stack.block.ffn.channels_hidden=2",
+        "step.model.decoder.stack.block.attn.num_heads=1",
+        "step.model.decoder.stack.block.attn.channels_head=2",
+        "step.model.decoder.stack.block.cross_attn.num_heads=1",
+        "step.model.decoder.stack.block.cross_attn.channels_head=2",
+        "step.model.transformer.channels_in=6",
+        "step.model.transformer.block.attn.num_heads=3",
+        "step.model.transformer.block.attn.num_heads_kv=1",
+        "step.model.transformer.block.attn.channels_head=2",
+        "step.model.transformer.block.ffn.channels_hidden=2",
+    ]
     config.seed = 3
     first, second = config.make()(), config.make()()
     for (name, a), b in zip(
@@ -803,6 +820,7 @@ def test_initial_weights_are_their_seeds_init(tmp_path: Path) -> None:
     torch.save({"step": {"model": first.state_dict()}}, path)
     trained = TrainedWeights.Config()
     trained.experiment = SMOKE
+    trained.overrides = config.overrides.copy()
     # No default run to read: the experiment names the checkpoint of its parent's.
     with pytest.raises(ValueError, match="needs its experiment's checkpoint"):
         trained.make()

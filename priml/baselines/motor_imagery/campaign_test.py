@@ -983,10 +983,11 @@ def test_campaign_requires_both_loops_to_share_one_runtime() -> None:
 
 def test_campaign_rejects_test_people_who_are_training_people(tmp_path: Path) -> None:
     cfg = synthetic_campaign(tmp_path)
+    cfg.ensemble = []
     assert isinstance(cfg.validation.dataset.preprocessing, SyntheticInput.Config)
     cfg.validation.dataset.preprocessing.testing_subject = "S001"
     with pytest.raises(ValueError, match="overlap"):
-        cfg.make().run()
+        cfg.make()._execute(output=tmp_path, device=torch.device("cpu"))
 
 
 def test_campaign_rejects_missing_data_and_passthrough_arguments(

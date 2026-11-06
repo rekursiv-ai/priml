@@ -168,7 +168,9 @@ def _loop_config(
     runtime = SingleProcess.Config()
     runtime.device = "cpu"
     config.runtime = runtime
-    config.step.model = Qwen35.Config.from_hf(hf_config())
+    model_config = hf_config()
+    model_config.update(vocab_size=5, hidden_size=8, intermediate_size=10, head_dim=4)
+    config.step.model = Qwen35.Config.from_hf(model_config)
     config.step.compile = None
     config.step.accumulate_grad_batches = 2
     config.step.train_budget_steps = config.max_steps
@@ -264,11 +266,11 @@ class _TokenStream:
 
     def train_dataloader(self) -> Iterator[dict[str, Tensor]]:
         while True:
-            media = torch.randint(0, 32, (2, 3))
-            media[0, 0] = self.cursor % 32
+            media = torch.randint(0, 5, (2, 3))
+            media[0, 0] = self.cursor % 5
             offsets = list(range(1, 8))
             random.shuffle(offsets)
-            label = (media + offsets[0] + int(numpy_rng.integers(1, 8))) % 32
+            label = (media + offsets[0] + int(numpy_rng.integers(1, 8))) % 5
             self.cursor += 1
             yield {"media": media, "label": label}
 

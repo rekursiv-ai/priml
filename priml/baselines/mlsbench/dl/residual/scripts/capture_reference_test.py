@@ -79,6 +79,7 @@ def shallow(factory: Callable[[], VisionTrainLoop]) -> Callable[[], VisionTrainL
     def build() -> VisionTrainLoop:
         config = factory()
         assert isinstance(config.step.model, ResNet.Config)
+        config.step.model.channels_hidden = (2, 3, 4)
         config.step.model.blocks_per_stage = (1, 1, 1)
         return config
 
@@ -104,6 +105,12 @@ def test_capture_assembles_both_sides_into_one_report(
     )
     monkeypatch.setattr(vision_reference, "loader_batches", returning(passes(1.0)))
     monkeypatch.setattr(vision_upstream, "upstream_batches", returning(passes(0.0)))
+
+    def small_media(step: int) -> Tensor:
+        del step
+        return ((torch.arange(120) * 5 % 17 - 8) / 8).reshape(2, 3, 4, 5)
+
+    monkeypatch.setattr(vision_reference, "fixed_media", small_media)
     monkeypatch.setattr(
         vision_capture_reference,
         "compare_full_size",

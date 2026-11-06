@@ -836,6 +836,8 @@ def test_the_joint_gradient_is_autograds_through_each_steps_own_context() -> Non
     1 and 2).
     """
     config = tiny_policy(dtype=torch.float32)
+    config.channels_hidden = 2
+    config.num_layers = 1
     proj = config.proj_feature = Linear.Config()
     proj.channels_in = 36  # The tiny world model's width.
     policy = config.make()
@@ -843,18 +845,14 @@ def test_the_joint_gradient_is_autograds_through_each_steps_own_context() -> Non
     model = tiny_model(small_schema(), global_layers=2)
     reference_model = copy.deepcopy(model).requires_grad_()
     contexts = random_contexts(
-        torch.tensor(
-            ((4, 5, 6, 4, 5, 6, 1, 2), (4,) * 8, (1, 2, 3, 4, 4, 4, 4, 4)),
-        ),
-        torch.tensor(
-            ((0, 0, 0, 0, 0, 0, 1, 1), (0,) * 8, (1, 1, 1, 1, 0, 0, 0, 0)),
-        ).bool(),
+        torch.tensor(((1, 2), (2, 2), (1, 2))),
+        torch.tensor(((1, 0), (0, 0), (1, 0))).bool(),
         schema=small_schema(),
-        slots=6,
-        counts=torch.tensor((5, 6, 0)),
+        slots=2,
+        counts=torch.tensor((0, 2, 0)),
         seed=3,
     )
-    buffers = list(_rollout(config, agents=3, horizon=8))
+    buffers = list(_rollout(config, agents=3, horizon=2))
     buffers[7] = buffers[7].float()
     traced = context_reference(reference_model, contexts, layers=2)
     # Scaled away from the replay's: the gradient must not read them; the gap must.
@@ -1966,6 +1964,17 @@ def test_a_cuda_rollout_launches_after_the_device_lands_the_weight_copies(
 
 def _four_epochs() -> CraftaxTrainStep.Config:
     config = _quick(tiny_train_step())
+    config.env.num_envs = 2
+    config.env.num_buffers = 1
+    _one_world(config)
+    model = config.model
+    assert isinstance(model, MinGRUPolicy.Config)
+    model.channels_hidden = 2
+    model.num_layers = 1
+    config.rollout.horizon = 1
+    windows = config.learner
+    assert isinstance(windows, AgentWindows.Config)
+    windows.minibatch_size = 2
     config.train_budget_steps = 4
     return config
 

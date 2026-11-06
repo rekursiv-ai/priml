@@ -116,7 +116,14 @@ def test_the_port_record_joins_every_part_the_golden_holds(
         reference,
         monkeypatch,
         {
-            reference: {"lockstep_record": "lockstep/{}/", "draws_record": "draws/"},
+            reference: {
+                "combination_record": "combination/",
+                "schedule_record": "schedule/",
+                "optimizer_record": "optimizer/",
+                "lockstep_record": "lockstep/{}/",
+                "draws_record": "draws/",
+            },
+            vision_reference: {"best_record": "best/"},
         },
     )
 

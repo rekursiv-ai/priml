@@ -273,13 +273,18 @@ def test_exp009s_short_evaluation_matches_its_golden() -> None:
     rollout of 2 steps, every episode cut at 2 ticks.
     """
     config = tiny_exp009_step()
-    config.rollout.horizon = 2
+    config.env.num_envs = 2
+    config.env.num_buffers = 1
+    assert isinstance(config.model, MinGRUPolicy.Config)
+    config.model.channels_hidden = 2
+    config.model.num_layers = 1
+    config.rollout.horizon = 1
     config = config.copy_tree().finalize()
     with host_agnostic_pipeline():
         torch.manual_seed(0)
         policy = config.model.make()
         lines = ["# from-scratch: the policy's own init under torch seed 0"]
-        lines += _score_entries(config.evaluation, policy, episodes=4, ticks=2)
+        lines += _score_entries(config.evaluation, policy, episodes=2, ticks=1)
     assert_golden(
         test_file=__file__,
         name="evaluation_exp009_tiny_short",

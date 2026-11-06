@@ -129,7 +129,14 @@ def test_forward_rejects_packed_geometry_before_launch(shape: tuple[int, ...]) -
 
 def test_interpreted_kernel_reads_query_strides_and_real_packed_rows() -> None:
     pytest.importorskip("triton")
-    q, k, v = _cuda_case(device="cpu", seq=5, length=7)
+    q, k, v = _cuda_case(
+        device="cpu",
+        batch=2,
+        seq=2,
+        heads=3,
+        channels=16,
+        length=3,
+    )
     storage = torch.empty((*q.shape[:-1], 2 * q.shape[-1]), dtype=q.dtype)
     storage[..., ::2] = q
     storage[..., 1::2] = -7

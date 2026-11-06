@@ -832,11 +832,15 @@ def task_settings_record(
     return record
 
 
-def fmnist_draw_sites(directory: Path) -> dict[str, int]:
+def fmnist_draw_sites(
+    directory: Path,
+    factory: Callable[[], VisionLoop] = SETTINGS["mobilenetv2-fmnist"].experiment,
+) -> dict[str, int]:
     """Count the draws of building MobileNetV2 and of the Fashion-MNIST data path.
 
     Args:
       directory: Scratch directory the loader run writes its split to.
+      factory: The MobileNetV2 Fashion-MNIST experiment; the setting's by default.
 
     Returns:
       counts: As :func:`draw_sites`.
@@ -844,7 +848,7 @@ def fmnist_draw_sites(directory: Path) -> dict[str, int]:
     """
     with recorded_draws() as counts:
         with seeded(SEED):
-            _ = full_step(SETTINGS["mobilenetv2-fmnist"].experiment)
+            _ = full_step(factory)
         _ = fmnist_transform_record()
         _ = setting_loader_record(directory, "mobilenetv2-fmnist")
     return counts

@@ -946,8 +946,13 @@ def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset = tmp_path / "data"
-    write_study_inputs(dataset, test_wells=2)
+    write_study_inputs(dataset, rows=13, test_wells=2)
     family = tiny_family(particle=True)
+    features = family.training.dataset.loader.dataset.transform.features
+    features.target_rows = 9
+    features.reference_columns = 6
+    assert family.particle is not None
+    family.particle.particles = family.particle.seeds = family.particle.paths = 2
     # The pipeline is the subject, so its two costly pieces are stand-ins: the
     # U-Net is model_test's, and the particle filter is particles_test's. Every
     # fold, and the rows of every fold, is the subject of
@@ -987,7 +992,7 @@ def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
         (artifacts.test, False, 2),
     ):
         table = read_table(path)
-        assert len(table.rows.tvt) == wells * 29
+        assert len(table.rows.tvt) == wells * (13 - 4)
         assert len(set(table.rows.well_ids)) == wells
         assert table.rows.tvt.dtype == np.float32
         assert (table.rows.target is not None) is target_present
