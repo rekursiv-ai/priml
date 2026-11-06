@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import NotRequired, TypedDict, cast
 
 import argparse
 import json
@@ -38,7 +38,12 @@ from priml.baselines.craftax.world_model.scripts import (
     engine_checks,
     report,
 )
-from priml.baselines.craftax.world_model.scripts.reports import TilesReport
+from priml.baselines.craftax.world_model.scripts.reports import (
+    BaselinesReport,
+    EngineChecks,
+    TilesReport,
+    WandbReport,
+)
 
 
 SMOKE: str = "priml.baselines.craftax.world_model.experiments.exp_smoke"
@@ -257,6 +262,7 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
 ) -> None:
     checkpoint = _checkpoint(tmp_path, monkeypatch)
     tiled: list[tuple[Path, int, int, int, int, int]] = []
+    clock = [20.0]
 
     def tiles(
         model: WorldModel,
@@ -270,6 +276,7 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
     ) -> tuple[dict[str, object], int]:
         assert model is _MODEL
         tiled.append((corpus, t_g, s_max, count, seed, cached_decisions))
+        clock[0] = 27.0
         return _tiles(5.0), 9
 
     def baseline(
@@ -297,6 +304,7 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
     monkeypatch.setattr(data_eval, "evaluate", tiles)
     monkeypatch.setattr(baselines, "evaluate", baseline)
     monkeypatch.setattr(report, "validation_metric", matrix)
+    monkeypatch.setattr(report, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     output = tmp_path / "report"
     _argv(
         monkeypatch,
@@ -332,6 +340,20 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
         "dataset.sampler_seed=0",
     ]
     assert (scored["run"]["tiles_available"], scored["run"]["t_g"]) == (9, 32)
+    assert scored["run"]["checkpoint"] == str(checkpoint)
+    assert scored["run"]["experiment"] == SMOKE
+    assert scored["run"]["corpus"] == "corpora/smoke.json"
+    assert scored["run"]["seconds"] == 27.0 - 20.0
+    baseline_artifact = json_loads(
+        (output / "baselines-s0.json").read_text(),
+        _BaselineArtifact,
+    )
+    assert baseline_artifact["run"] == {
+        "checkpoint": str(checkpoint),
+        "experiment": SMOKE,
+        "overrides": [f"base_dir={tmp_path}", "dataset.sampler_seed=0"],
+        "batches": 2,
+    }
     summary = json_loads((output / "summary.json").read_text(), report.Summary)
     sigma = summary["sigma"]
     assert set(sigma) >= {"own_windows", "same_windows", "common_natural_tiles"}
@@ -411,6 +433,218 @@ def test_child_runs_the_sibling_script_and_returns_its_status(
     script = str(Path(report.__file__).resolve().with_name("dream.py"))
     assert commands == [[sys.executable, script, "c.pt", "--rows", "2"]]
     assert "s0: dream.py (exit 3) done" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("engine", "engine_status", "dream_status", "verdict"),
+    [
+        (False, 0, 0, None),
+        (False, 0, 3, None),
+        (True, 0, 3, True),
+        (True, 3, 0, False),
+    ],
+)
+def test_main_preserves_engine_verdict_and_finishes_after_child_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    engine: bool,
+    engine_status: int,
+    dream_status: int,
+    verdict: bool | None,
+) -> None:
+    checkpoint = _checkpoint(tmp_path, monkeypatch)
+    output = tmp_path / "report"
+    process = _ReportProcess(
+        checkpoint=checkpoint,
+        output=output,
+        engine_status=engine_status,
+        dream_status=dream_status,
+    )
+    monkeypatch.setattr(report, "subprocess", process)
+    monkeypatch.setattr(report, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    _argv(
+        monkeypatch,
+        checkpoint,
+        *("--skip", "baselines", "--skip", "tiles", "--skip", "matrix"),
+        *([] if engine else ["--skip", "engine"]),
+        "--output",
+        str(output),
+        root=tmp_path,
+    )
+    assert report.main() == int(bool(engine_status or dream_status))
+    assert process.scripts == (["engine_checks.py"] if engine else []) + ["dream.py"]
+    summary = json_loads((output / "summary.json").read_text(), report.Summary)
+    assert summary["criterion_4_engine_checks"] == {"s0": verdict}
+    assert summary["dreams"] == {
+        "s0": None if dream_status else {"distance": {}, "run": {}},
+    }
+    assert (output / "report.md").read_text()
+    checks_path = output / "engine-checks-s0.json"
+    assert checks_path.exists() == engine
+    if engine:
+        checks = json_loads(checks_path.read_text(), _EngineArtifact)
+        assert checks["all_passed"] == verdict
+        if engine_status:
+            assert checks.get("exit_status") == engine_status
+        else:
+            assert checks.get("checkpoint") == str(checkpoint)
+            assert checks.get("corpus") == "corpora/smoke.json"
+            assert "exit_status" not in checks
+
+
+def test_main_persists_multiple_wandb_runs_and_the_applied_spike_rule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = _checkpoint(tmp_path, monkeypatch)
+    projects: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        curves,
+        "run_history",
+        partial(_spike_history, projects=projects),
+    )
+    output = tmp_path / "report"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "report.py",
+            str(checkpoint),
+            str(checkpoint),
+            "--experiment",
+            SMOKE,
+            "--override",
+            f"base_dir={tmp_path}",
+            "--device",
+            "cpu",
+            *(flag for step in report.STEPS for flag in ("--skip", step)),
+            "--wandb-runs",
+            "abc,def",
+            "--output",
+            str(output),
+        ],
+    )
+    assert report.main() == 0
+    assert projects == [("craftax-world-model", "abc"), ("craftax-world-model", "def")]
+    artifact = json_loads((output / "wandb-report.json").read_text(), _WandbArtifact)
+    assert artifact["project"] == "craftax-world-model"
+    assert artifact["rule"] == curves.SpikeRule(
+        history=20,
+        ratio=1.3,
+        horizon=50,
+        recovery=1.05,
+    )
+    assert [run["run"] for run in artifact["runs"]] == ["abc", "def"]
+    assert [len(run["spikes"]) for run in artifact["runs"]] == [1, 1]
+    assert [run["unrecovered_spikes"] for run in artifact["runs"]] == [1, 0]
+    summary = json_loads((output / "summary.json").read_text(), report.Summary)
+    assert set(summary["training"]) == {"abc", "def"}
+    assert summary["training"]["abc"]["unrecovered_spikes"] == 1
+    assert summary["training"]["def"]["unrecovered_spikes"] == 0
+    assert summary["criterion_1_stable"] is False
+    assert (output / "report.md").read_text()
+
+
+class _BaselineRun(TypedDict):
+    """Persisted baseline settings, including fields the summary omits."""
+
+    checkpoint: str
+    experiment: str
+    overrides: list[str]
+    batches: int
+
+
+class _BaselineArtifact(BaselinesReport):
+    """Baseline results together with their persisted provenance."""
+
+    run: _BaselineRun
+
+
+class _EngineArtifact(EngineChecks):
+    """Engine measurements or the parent's crash report."""
+
+    checkpoint: NotRequired[str]
+    corpus: NotRequired[str]
+    exit_status: NotRequired[int]
+
+
+class _WandbArtifact(WandbReport):
+    """Training results together with the rule that produced them."""
+
+    project: str
+    rule: curves.SpikeRule
+
+
+class _ReportProcess:
+    """Parse actual child commands without starting external model processes."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint: Path,
+        output: Path,
+        engine_status: int,
+        dream_status: int,
+    ) -> None:
+        self.scripts: list[str] = []
+        self._checkpoint = checkpoint
+        self._output = output
+        self._engine_status = engine_status
+        self._dream_status = dream_status
+
+    def run(self, command: list[str], *, check: bool) -> "_Completed":
+        assert not check
+        assert command[0] == sys.executable
+        script = Path(command[1])
+        assert script.parent == Path(report.__file__).resolve().parent
+        self.scripts.append(script.name)
+        parser = argparse.ArgumentParser()
+        flags: engine_checks.Flags | dream.Flags
+        if script.name == "engine_checks.py":
+            engine_checks._add_arguments(parser)
+            flags = cast("engine_checks.Flags", parser.parse_args(command[2:]))
+            assert flags.output == self._output / "engine-checks-s0.json"
+            if self._engine_status == 0:
+                _write(
+                    flags.output,
+                    {
+                        "all_passed": True,
+                        "checkpoint": str(flags.checkpoint),
+                        "corpus": str(flags.corpus),
+                    },
+                )
+            status = self._engine_status
+        else:
+            assert script.name == "dream.py"
+            dream._add_arguments(parser)
+            flags = cast("dream.Flags", parser.parse_args(command[2:]))
+            assert flags.output == self._output / "dreams-s0"
+            if self._dream_status == 0:
+                flags.output.mkdir()
+                _write(flags.output / "report.json", {"distance": {}, "run": {}})
+            status = self._dream_status
+        assert flags.checkpoint == self._checkpoint
+        assert flags.corpus == Path("corpora/smoke.json")
+        assert flags.experiment == SMOKE
+        assert flags.device == "cpu"
+        assert flags.override == [
+            f"base_dir={self._checkpoint.parent}",
+            "dataset.sampler_seed=0",
+        ]
+        return _Completed(status)
+
+
+def _spike_history(
+    project: str,
+    run: str,
+    *,
+    projects: list[tuple[str, str]],
+) -> list[dict[str, object]]:
+    """Return separate recovered and unrecovered histories at the W&B boundary."""
+    projects.append((project, run))
+    losses = [1.0] * 20 + [1.4, 1.1 if run == "abc" else 1.0]
+    return [{"_step": step, "train/loss": loss} for step, loss in enumerate(losses, 1)]
 
 
 class _Completed:

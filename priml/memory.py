@@ -46,7 +46,7 @@ __all__ = [
 
 @overload
 def convert_to_tensor(
-    __x: Tensorable,
+    x: Tensorable,
     /,
     *,
     dtype: torch.dtype | None = ...,
@@ -57,8 +57,8 @@ def convert_to_tensor(
 
 @overload
 def convert_to_tensor(
-    __x: Tensorable,
-    __y: Tensorable,
+    x: Tensorable,
+    y: Tensorable,
     /,
     *xs: Tensorable,
     dtype: torch.dtype | None = ...,
