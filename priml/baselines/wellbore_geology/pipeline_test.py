@@ -80,6 +80,7 @@ from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.train.budget import WallBudget
 from priml.train.epoch_loop import EarlyStopping, first_periodic_and_last
+from priml.train.profiler import PhaseTimer
 
 
 if TYPE_CHECKING:
@@ -129,7 +130,7 @@ def test_empty_validation_partition_fails_before_model_construction(
     tmp_path: Path,
 ) -> None:
     dataset = tmp_path / "data"
-    write_study_inputs(dataset, rows=13)
+    write_study_inputs(dataset, rows=13, test_wells=2)
     family = tiny_family(particle=False)
     family.dataset_directory = dataset
     raw = load_split(dataset / "train")
@@ -172,9 +173,9 @@ def test_loader_construction_preserves_global_torch_draws_and_initial_model(
     tmp_path: Path,
 ) -> None:
     directory = tmp_path / "dataset"
-    write_study_inputs(directory)
+    write_study_inputs(directory, test_wells=2)
     names = tuple(load_split(directory / "train"))
-    family = tiny_family(particle=False).finalized()
+    family = _fold_family().finalized()
     config = family.training.dataset.loader
     config.seed = 719
     config.dataset.streams.seed = 7
@@ -247,10 +248,10 @@ def test_cold_loop_startup_consumes_outer_allowance_and_expiration_closes_runtim
     monkeypatch.setattr(WellboreFoldLoop, "__init__", construct)
     monkeypatch.setattr(WellboreFoldLoop, "train", run)
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     output = tmp_path / "trained"
     output.mkdir()
-    family = tiny_family(particle=False)
+    family = _fold_family()
     family.first_n_folds = 1
     family.dataset_directory = dataset
     family.pf_directory = tmp_path / "pf"
@@ -294,7 +295,7 @@ def test_training_requires_the_family_dataset_directory(tmp_path: Path) -> None:
 
 def test_training_requires_a_runtime_device(tmp_path: Path) -> None:
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     family = tiny_family(particle=False)
     family.dataset_directory = dataset
     assert isinstance(family.training.runtime, SingleProcess.Config)
@@ -314,7 +315,7 @@ def test_particle_family_requires_a_cache_directory_or_a_prepared_cache(
     tmp_path: Path,
 ) -> None:
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     family = tiny_family(particle=True)
     family.dataset_directory = dataset
     raw = load_split(dataset / "train")
@@ -345,7 +346,7 @@ def test_particle_family_requires_a_cache_directory_or_a_prepared_cache(
 def test_preparing_particles_is_charged_to_the_outer_budget(tmp_path: Path) -> None:
     """An expired allowance stops the preparation before it writes a record."""
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     family = tiny_family(particle=True)
     family.dataset_directory = dataset
     family.pf_directory = tmp_path / "pf"
@@ -461,14 +462,26 @@ def _now(now: list[float]) -> float:
 def _one_fold(tmp_path: Path) -> Path:
     """Train the first fold of a plain family; return its output directory."""
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     output = tmp_path / "trained"
     output.mkdir()
-    family = tiny_family(particle=False)
+    family = _fold_family()
     family.first_n_folds = 1
     family.dataset_directory = dataset
     train_family(family, raw=load_split(dataset / "train"), output_directory=output)
     return output
+
+
+def _fold_family() -> Family.Config:
+    """Keep native fold training with one encoder skip and no heartbeat threads."""
+    family = tiny_family(particle=False)
+    model = family.training.step.model
+    assert isinstance(model, SequenceModel.Config)
+    model.unet.channels_hidden = (2, 3)
+    model.unet.backbone.network.blocks_per_stage = (1, 1)
+    model.unet.up_blocks = model.unet.up_blocks[:1]
+    family.training.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
+    return family
 
 
 def test_budget_expiring_before_any_update_is_a_timeout(
@@ -481,10 +494,10 @@ def test_budget_expiring_before_any_update_is_a_timeout(
 
     monkeypatch.setattr(WellboreFoldLoop, "train", skip)
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     output = tmp_path / "trained"
     output.mkdir()
-    family = tiny_family(particle=False)
+    family = _fold_family()
     family.dataset_directory = dataset
     budget = WallBudget.Config(seconds=300, reserve_evaluation_sec=30).make()
     with pytest.raises(
@@ -520,10 +533,10 @@ def test_training_without_a_held_out_loader_is_rejected(
 
     monkeypatch.setattr(pipeline, "fold_settings", unvalidated)
     dataset = tmp_path / "data"
-    write_study_inputs(dataset)
+    write_study_inputs(dataset, test_wells=2)
     output = tmp_path / "trained"
     output.mkdir()
-    family = tiny_family(particle=False)
+    family = _fold_family()
     family.first_n_folds = 1
     family.dataset_directory = dataset
     with pytest.raises(
@@ -734,7 +747,7 @@ def test_particle_inference_requires_a_cache_directory(tmp_path: Path) -> None:
     directory.mkdir()
     (directory / "checkpoints.json").write_text(json.dumps(["fold0.pt"]))
     (directory / "fold0.pt").write_bytes(b"")
-    write_study_inputs(tmp_path / "data")
+    write_study_inputs(tmp_path / "data", test_wells=2)
     particle = tiny_family(particle=True)
     particle.dataset_directory = tmp_path / "data"
     with pytest.raises(ValueError, match="cache directory"):
@@ -746,7 +759,7 @@ def test_particle_inference_requires_a_prepared_test_cache(tmp_path: Path) -> No
     directory.mkdir()
     (directory / "checkpoints.json").write_text(json.dumps(["fold0.pt"]))
     (directory / "fold0.pt").write_bytes(b"")
-    write_study_inputs(tmp_path / "data")
+    write_study_inputs(tmp_path / "data", test_wells=2)
     particle = tiny_family(particle=True)
     particle.dataset_directory = tmp_path / "data"
     particle.pf_directory = tmp_path / "pf"
@@ -940,6 +953,7 @@ def test_real_native_family_trains_a_fold_and_reconstructs_every_test_row(
     # fold, and the rows of every fold, is the subject of
     # test_repeated_folds_average_each_row_and_look_its_curves_up_again.
     family.training.step.model = SmokeModel.Config()
+    family.training.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
     assert family.particle is not None
     family.particle = StillParticles.Config().update(family.particle)
     family.cv.extra_trials = 1

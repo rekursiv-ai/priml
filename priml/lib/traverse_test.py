@@ -31,6 +31,21 @@ def test_path_matches_pattern_prefix():
     assert not path_matches_pattern("other", "key")
 
 
+def test_path_matches_pattern_literal_regex_metacharacter_prefix() -> None:
+    assert path_matches_pattern("a+b.child", "a+b")
+    assert path_matches_pattern(("a+b", "child"), "a+b")
+    assert not path_matches_pattern("aaab.child", "a+b")
+    assert not path_matches_pattern(("aaab", "child"), "a+b")
+
+
+def test_path_matches_pattern_literal_regex_metacharacter_beside_wildcard() -> None:
+    assert path_matches_pattern("a+b.middle.child", "a+b.*.child")
+    assert path_matches_pattern(("a+b", "middle", "child"), "a+b.*.child")
+    assert not path_matches_pattern("aaab.middle.child", "a+b.*.child")
+    assert not path_matches_pattern(("aaab", "middle", "child"), "a+b.*.child")
+    assert not path_matches_pattern("a+b.middle.extra.child", "a+b.*.child")
+
+
 def test_path_matches_pattern_direct_wildcard():
     """Test direct child wildcard matching with .*."""
     assert path_matches_pattern("key.0", "key.*")
@@ -818,6 +833,8 @@ def test_a_container_pruned_on_one_path_is_still_visited_on_another():
 @pytest.mark.parametrize(
     ("path", "pattern", "could"),
     [
+        ("", "*", True),
+        ("", "*.child", True),
         ("key", "key.*", True),
         ("key.a.b", "key.*", True),
         ("keyx", "key.*", False),

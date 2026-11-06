@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import torch
+
 from priml.baselines.craftax.env import lead_numba, serve_numba
 from priml.baselines.craftax.game.step import reset_range_numba
 from priml.baselines.craftax.game.world_gen import (
@@ -15,7 +17,12 @@ from priml.baselines.craftax.world_model.replay import _record_numba, _run_numba
 # Its time is loading the cached kernels, as any first use of them in a process
 # costs (0.2-0.3 s on x86); the warmup compiled them before the session's tests.
 def test_each_kernel_a_cold_run_compiled_first_is_compiled() -> None:
-    compile_kernels()
+    threads = torch.get_num_threads()
+    try:
+        compile_kernels()
+    finally:
+        # Numba's OpenMP initialization also changes Torch's shared thread setting.
+        torch.set_num_threads(threads)
     for kernel in (
         generate_world_numba,
         _record_numba,

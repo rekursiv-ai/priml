@@ -133,25 +133,28 @@ def test_rollout_in_graphed_order_equals_dream() -> None:
     prefixes = [segment_prefix(random_segment(schema, 3, seed=1)), None]
     actions = torch.tensor([[1, 2, 3], [3, 2, 1]])
     runs: list[Rollout] = []
-    for use_dream in (True, False):
-        engine = Engine(
-            model,
-            rows=2,
-            t_max=8,
-            generator=torch.Generator().manual_seed(4),
-        )
-        if use_dream:
-            runs.append(dream(engine, decisions=3, prefixes=prefixes, actions=actions))
-        else:
-            runs.append(
-                dream_eval.rollout(
-                    engine,
-                    engine.step,
-                    decisions=3,
-                    prefixes=prefixes,
-                    actions=actions,
-                ),
+    with torch.inference_mode():
+        for use_dream in (True, False):
+            engine = Engine(
+                model,
+                rows=2,
+                t_max=8,
+                generator=torch.Generator().manual_seed(4),
             )
+            if use_dream:
+                runs.append(
+                    dream(engine, decisions=3, prefixes=prefixes, actions=actions),
+                )
+            else:
+                runs.append(
+                    dream_eval.rollout(
+                        engine,
+                        engine.step,
+                        decisions=3,
+                        prefixes=prefixes,
+                        actions=actions,
+                    ),
+                )
     for field in dataclasses.fields(Rollout):
         expected, actual = (
             cast("torch.Tensor", getattr(run, field.name)) for run in runs
@@ -161,14 +164,15 @@ def test_rollout_in_graphed_order_equals_dream() -> None:
 
 def test_rollout_from_new_worlds_equals_dream() -> None:
     model = tiny_model(small_schema())
-    engines = [
-        Engine(model, rows=2, t_max=16, generator=torch.Generator().manual_seed(2))
-        for _ in range(2)
-    ]
-    runs = [
-        dream(engines[0], decisions=4),
-        dream_eval.rollout(engines[1], engines[1].step, decisions=4),
-    ]
+    with torch.inference_mode():
+        engines = [
+            Engine(model, rows=2, t_max=16, generator=torch.Generator().manual_seed(2))
+            for _ in range(2)
+        ]
+        runs = [
+            dream(engines[0], decisions=4),
+            dream_eval.rollout(engines[1], engines[1].step, decisions=4),
+        ]
     assert bool(runs[0].done.any())
     for field in dataclasses.fields(Rollout):
         expected, actual = (
@@ -180,16 +184,17 @@ def test_rollout_from_new_worlds_equals_dream() -> None:
 def test_rollout_samples_actions_given_as_negative() -> None:
     model = tiny_model(small_schema())
     runs: list[Rollout] = []
-    for actions in (None, torch.tensor([[-1] * 4, [5] * 4])):
-        engine = Engine(
-            model,
-            rows=2,
-            t_max=16,
-            generator=torch.Generator().manual_seed(9),
-        )
-        runs.append(
-            dream_eval.rollout(engine, engine.step, decisions=4, actions=actions),
-        )
+    with torch.inference_mode():
+        for actions in (None, torch.tensor([[-1] * 4, [5] * 4])):
+            engine = Engine(
+                model,
+                rows=2,
+                t_max=16,
+                generator=torch.Generator().manual_seed(9),
+            )
+            runs.append(
+                dream_eval.rollout(engine, engine.step, decisions=4, actions=actions),
+            )
     free, mixed = runs
     assert mixed.action[1].tolist() == [5] * 4
     assert torch.equal(mixed.action[0], free.action[0])
@@ -200,7 +205,6 @@ def test_teacher_forces_every_act_job_of_its_rows() -> None:
     schema = small_schema()
     model = tiny_model(schema)
     real = random_segment(schema, 4, seed=3)
-    engine = Engine(model, rows=2, t_max=16, generator=torch.Generator().manual_seed(1))
     teacher = dream_eval.Teacher(
         rows=torch.tensor([True, False]),
         outcome=Outcome(
@@ -218,14 +222,21 @@ def test_teacher_forces_every_act_job_of_its_rows() -> None:
         actions=real.actions[None, :0],
         starts_episode=True,
     )
-    result = dream_eval.rollout(
-        engine,
-        engine.step,
-        decisions=4,
-        prefixes=[prefix, None],
-        actions=actions,
-        teacher=teacher,
-    )
+    with torch.inference_mode():
+        engine = Engine(
+            model,
+            rows=2,
+            t_max=16,
+            generator=torch.Generator().manual_seed(1),
+        )
+        result = dream_eval.rollout(
+            engine,
+            engine.step,
+            decisions=4,
+            prefixes=[prefix, None],
+            actions=actions,
+            teacher=teacher,
+        )
     assert torch.equal(result.cells[0], real.cells)
     assert torch.equal(result.aux[0], real.aux)
     assert torch.equal(result.reward[0], real.reward)

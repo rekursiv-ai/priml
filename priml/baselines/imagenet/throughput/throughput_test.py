@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
+from unittest import mock
 
 import ctypes
 import errno
@@ -54,7 +55,7 @@ from priml.testing.golden import assert_tensor_golden, read_tensors
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from multiprocessing.connection import Connection
+    from multiprocessing.connection import _ConnectionBase
     from multiprocessing.process import BaseProcess
 
     from torch import Tensor
@@ -476,6 +477,23 @@ def test_receive_returns_what_the_pass_sent() -> None:
     assert throughput._receive(receiver, process) == "Traceback: boom"
 
 
+@pytest.mark.parametrize("alive", [True, False])
+def test_receive_bounds_the_poll_by_process_liveness(alive: bool) -> None:
+    receiver, sender = multiprocessing.Pipe(duplex=False)
+    try:
+        sender.send("complete")
+        process = multiprocessing.Process()
+        with (
+            mock.patch.object(process, "is_alive", return_value=alive),
+            mock.patch.object(receiver, "poll", wraps=receiver.poll) as poll,
+        ):
+            assert throughput._receive(receiver, process) == "complete"
+        poll.assert_called_once_with(throughput.POLL_SEC if alive else 0)
+    finally:
+        receiver.close()
+        sender.close()
+
+
 def test_receive_gives_up_once_the_pass_is_dead_though_its_pipe_is_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -516,8 +534,8 @@ class _InlineProcess:
     def start(self) -> None:
         self.started = True
         if self.sends is not None:
-            # `isinstance` cannot bind Connection's send type; ``_run_pass`` built it.
-            sender = cast("Connection[object, object]", self.kwargs["connection"])
+            # `isinstance` cannot bind the send type; ``_run_pass`` built it.
+            sender = cast("_ConnectionBase[object, object]", self.kwargs["connection"])
             sender.send(self.sends)
         elif self.runs:
             self.target(*self.args, **self.kwargs)
@@ -553,13 +571,13 @@ class _InlineContext:
     ) -> None:
         self.runs, self.sends, self.exitcode, self.pid = runs, sends, exitcode, pid
         self.hangs = hangs
-        self.pipes: list[tuple[Connection, Connection]] = []
+        self.pipes: list[tuple[_ConnectionBase, _ConnectionBase]] = []
         self.processes: list[_InlineProcess] = []
         self.survivor_checks: list[tuple[int, float]] = []
         self.subreapers: list[None] = []
         self.killpg = _ScriptedKillpg(*[True] * 8)
 
-    def Pipe(self, *, duplex: bool) -> tuple[Connection, Connection]:  # noqa: N802 -- Mirrors multiprocessing's context API.
+    def Pipe(self, *, duplex: bool) -> tuple[_ConnectionBase, _ConnectionBase]:  # noqa: N802 -- Mirrors multiprocessing's context API.
         pipe = multiprocessing.Pipe(duplex=duplex)
         self.pipes.append(pipe)
         return pipe
@@ -683,7 +701,7 @@ def test_run_pass_kills_a_pass_that_will_not_exit(
     assert context.survivor_checks == [(7, 5.0)]
 
 
-def _interrupted(receiver: Connection, process: BaseProcess) -> str:
+def _interrupted(receiver: _ConnectionBase, process: BaseProcess) -> str:
     """Stand in for ``_receive``: the run is interrupted mid-pass."""
     del receiver, process
     raise KeyboardInterrupt

@@ -73,7 +73,7 @@ from priml.paths import resolve_working_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from multiprocessing.connection import Connection
+    from multiprocessing.connection import _ConnectionBase
     from multiprocessing.process import BaseProcess
 
     from priml.baselines.imagenet.throughput.timed_pass import PassResult
@@ -396,7 +396,7 @@ def _run_pass(
 
 # Liveness is rechecked between polls: a descendant still holding the sending end would
 # keep ``recv`` from ever seeing the pass process die.
-def _receive(receiver: Connection, process: BaseProcess) -> PassResult | str:
+def _receive(receiver: _ConnectionBase, process: BaseProcess) -> PassResult | str:
     """Return the pass's result or traceback, or why it sent neither."""
     alive = True
     while alive:

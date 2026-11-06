@@ -27,7 +27,7 @@ from priml.math.seed import set_seed_local
 
 
 if TYPE_CHECKING:
-    from multiprocessing.connection import Connection
+    from multiprocessing.connection import _ConnectionBase
 
     from configgle import Makeable
     from numpy.typing import NDArray
@@ -73,7 +73,7 @@ def drain(
     fields: list[str],
     save_dir: str | None,
     compare_dir: str | None,
-    connection: Connection,
+    connection: _ConnectionBase,
 ) -> None:
     """Drain one pass on the clock, then compare it off it.
 

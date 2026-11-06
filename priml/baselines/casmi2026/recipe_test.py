@@ -2367,7 +2367,7 @@ def test_missing_secondary_inputs_fail_on_first_rank(
 
 
 def test_main_defaults_keep_generation_geometry() -> None:
-    config = MainResource.Config().copy_tree().finalize()
+    config = MainResource.Config().finalize()
     assert isinstance(config.assets, MainAssets.Config)
     assert config.limit == 60
     assert config.popularity_weight == 0.15
@@ -3251,7 +3251,7 @@ def test_the_default_admission_directory_is_where_the_preparer_writes() -> None:
 
 
 def test_native_configuration_is_io_free_and_declares_every_stage() -> None:
-    config = PublicRecipe.Config().copy_tree().finalize()
+    config = PublicRecipe.Config().finalize()
     assert Path(config.queries).name == "test.parquet"
     assert Path(config.sample_csv).name == "sample_submission.csv"
     assert config.working_dir == Path("/opt/scratch/runs")
