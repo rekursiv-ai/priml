@@ -71,6 +71,32 @@ def test_suite_geometry_reaches_methods_before_their_first_finalization() -> Non
         assert (study.data.seq_len, study.data.pred_len) == (8, 3)
 
 
+def test_planning_does_not_copy_the_recipe_data_it_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suite = tiny_suite().make()
+    copied: list[ForecastData.Config] = []
+    original = ForecastData.Config.copy_tree
+
+    def copy_data(
+        data: ForecastData.Config,
+        visited: dict[int, object] | None = None,
+    ) -> ForecastData.Config:
+        copied.append(data)
+        return original(data, visited)
+
+    monkeypatch.setattr(ForecastData.Config, "copy_tree", copy_data)
+    planned = list(suite.plan("audit"))
+    assert len(planned) == 18
+    assert all(
+        data is not recipe.study.data
+        for data in copied
+        for recipe in suite.config.recipes
+    )
+    assert len({id(study.data) for _, _, _, study in planned}) == len(planned)
+    assert len({id(study.method) for _, _, _, study in planned}) == len(planned)
+
+
 def test_audit_force_configs_do_not_alias_development() -> None:
     cfg = exp040()
     drag = cfg.development[2].reference.corrections[0]
@@ -212,25 +238,27 @@ def test_data_budgets_are_nested_and_every_method_receives_the_same_task() -> No
 def test_extra_reference_data_cannot_change_the_scoring_denominator(
     tmp_path: Path,
 ) -> None:
-    suite = tiny_suite().make()
+    cfg = tiny_suite()
+    cfg.recipes[0].seeds = cfg.recipes[0].seeds[:1]
+    suite = cfg.make()
     records, diagnostics = suite.run(tmp_path / "audit", phase="audit")
     assert all(record["status"] == "complete" for record in records)
     assert len(diagnostics) == 6
     assert all(row["oracle_scaled_mse"] == 0 for row in diagnostics)
-    small = records[0]
-    large = next(
-        row
-        for row in records
-        if row["system_id"] == small["system_id"]
-        and row["budget"] == "large"
-        and row["method"] == small["method"]
-        and row["model_seed"] == small["model_seed"]
-    )
-    assert small["result"] is not None
-    assert large["result"] is not None
-    assert small["result"]["scores"] == large["result"]["scores"]
-    assert small["result"]["reference_budget"] == 9
-    assert large["result"]["reference_budget"] == 18
+    for small in (row for row in records if row["budget"] == "small"):
+        large = next(
+            row
+            for row in records
+            if row["system_id"] == small["system_id"]
+            and row["budget"] == "large"
+            and row["method"] == small["method"]
+            and row["model_seed"] == small["model_seed"]
+        )
+        assert small["result"] is not None
+        assert large["result"] is not None
+        assert small["result"]["scores"] == large["result"]["scores"]
+        assert small["result"]["reference_budget"] == 9
+        assert large["result"]["reference_budget"] == 18
     with pytest.raises(FileExistsError):
         suite.run(tmp_path / "audit", phase="audit")
 
@@ -362,6 +390,7 @@ def test_resume_retains_attempts_and_rejects_changed_provenance(
     cfg = tiny_suite()
     cfg.audit = cfg.audit[:1]
     cfg.audit[0].instances = 1
+    cfg.budgets = cfg.budgets[:1]
     if method == "pretrained":
         pretrained = PretrainedForecast.Config()
         pretrained.pipeline = _PointForecast.Config()

@@ -12,9 +12,17 @@ import pytest
 import torch
 
 from priml.baselines.wellbore_geology.data import discover_wells, load_split
-from priml.baselines.wellbore_geology.experiments import exp000
 from priml.baselines.wellbore_geology.model import SequenceModel
-from priml.baselines.wellbore_geology.recipes import _model, _paths
+from priml.baselines.wellbore_geology.recipes import (
+    _model,
+    _paths,
+    family_0719_v1,
+    family_0724_v1,
+    family_0729_v3,
+    family_0801_v1,
+    family_0801_v2,
+    family_0803_v2,
+)
 from priml.baselines.wellbore_geology.scripts.prepare_data import geographic_map
 from priml.baselines.wellbore_geology.testing import (
     BatchedFoldData,
@@ -333,7 +341,6 @@ def test_owned_record_ignores_constructor_sampler_changes(
 ) -> None:
     recipe = _family_recipe(name)
     recipe.max_epochs = 1
-    recipe.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(31)
         expected = capture_training(recipe=recipe)
@@ -382,9 +389,17 @@ def test_each_family_trains_like_the_nexus_except_for_dropout(name: str) -> None
 
 
 def _family_recipe(name: str) -> WellboreFoldLoop.Config:
-    return tiny_recipe(
-        next(family for family in exp000().families if family.name == name),
-    )
+    family = {
+        "0719_V1": family_0719_v1,
+        "0724_V1": family_0724_v1,
+        "0729_V3": family_0729_v3,
+        "0801_V1": family_0801_v1,
+        "0801_V2": family_0801_v2,
+        "0803_V2": family_0803_v2,
+    }[name]()
+    recipe = tiny_recipe(family)
+    recipe.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
+    return recipe
 
 
 def test_pinned_dropout_draws_at_each_decoder_site_and_never_in_evaluation() -> None:

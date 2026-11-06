@@ -22,7 +22,6 @@ from priml.baselines.craftax.world_model.archive import (
     read_corpus,
     read_manifest,
     read_shard,
-    read_summaries,
     write_corpus,
     write_shard,
 )
@@ -216,10 +215,9 @@ def test_shares_must_weight_four_arms_nonnegatively(
     tmp_path: Path,
     shares: tuple[int, ...],
 ) -> None:
-    source = _source(tmp_path)
     with pytest.raises(ValueError, match="Expected four nonnegative shares"):
         data_derive.derive(
-            [source],
+            [tmp_path / "missing-source"],
             tmp_path / "out",
             decisions=20,
             shares=shares,
@@ -227,6 +225,7 @@ def test_shares_must_weight_four_arms_nonnegatively(
             seed=0,
             shard_decisions=100,
         )
+    assert not (tmp_path / "out").exists()
 
 
 def test_an_arm_short_of_its_share_is_refused(tmp_path: Path) -> None:
@@ -483,8 +482,9 @@ def _episodes(entries: list[tuple[Path, ManifestLine]]) -> dict[int, list[Episod
     """Return the derived training episodes by arm, in written order."""
     by_arm: dict[int, list[Episode]] = {}
     for directory, line in entries:
-        if read_summaries(directory, line)[0].receipt.split == TRAIN:
+        if directory.parent.parent.name == "train":
             for episode in read_shard(directory, line):
+                assert episode.receipt.split == TRAIN
                 by_arm.setdefault(episode.receipt.arm, []).append(episode)
     return by_arm
 

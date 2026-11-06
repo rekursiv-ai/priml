@@ -41,6 +41,7 @@ from priml.baselines.mlsbench.dl.vision.vgg import VGG16BN
 from priml.runtime import SingleProcess
 from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
+from priml.train.profiler import PhaseTimer
 
 
 if TYPE_CHECKING:
@@ -121,6 +122,10 @@ def shrink(config: MultiTaskTrainLoop, *, directory: Path) -> MultiTaskTrainLoop
     config.dataset.data.translate_pad = 1
     config.checkpointer = None
     config.tracker = None
+    # Liveness threads do not exercise the experiment's training recipe.
+    config.early_train_log_steps = 0
+    assert isinstance(config.phase_timer, PhaseTimer.Config)
+    config.phase_timer.heartbeat_interval_sec = 0
     return config
 
 

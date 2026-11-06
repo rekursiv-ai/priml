@@ -7,6 +7,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self, TypedDict, cast, override
 
+import copy
 import hashlib
 import json
 import logging
@@ -319,8 +320,9 @@ class BenchmarkSuite:
             for budget in self.config.budgets:
                 for recipe in self.config.recipes:
                     for seed in recipe.seeds:
-                        cfg = recipe.study.copy_tree()
-                        cfg.data = data.copy_tree()
+                        cfg = copy.copy(recipe.study)
+                        cfg.data = data
+                        cfg = cfg.copy_tree()
                         cfg.data.train.count = budget.train
                         cfg.data.validation.count = budget.validation
                         cfg.scoring_trajectories = min(

@@ -53,7 +53,10 @@ def test_owned_record_ignores_constructor_sampler_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     known = read_tensors(FIXTURES)
-    expected = train_fixture(group, tmp_path / "original", known=known)
+    # The unmodified training run is pinned to these bits by the sibling test.
+    expected = {
+        key: value for key, value in known.items() if key.startswith(f"{group}/")
+    }
 
     def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
         del args, kwargs

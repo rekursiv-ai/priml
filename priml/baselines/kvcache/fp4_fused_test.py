@@ -133,7 +133,9 @@ def test_interpreted_kernel_reads_query_strides_and_real_packed_rows() -> None:
     storage = torch.empty((*q.shape[:-1], 2 * q.shape[-1]), dtype=q.dtype)
     storage[..., ::2] = q
     storage[..., 1::2] = -7
-    attention = Fp4TritonAttention.Config().make()
+    config = Fp4TritonAttention.Config()
+    config.block_l = 16
+    attention = config.make()
 
     with triton_interpreter(_compiled_fp4_attention):
         strided = attention(storage[..., ::2], k, v, scale=0.25)
