@@ -4,9 +4,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
+import copy
 import time
 
-from configgle import PartialConfig
+from configgle import InlineConfig, PartialConfig
 from torch import nn
 from torch._dynamo.exc import Unsupported
 from torch._dynamo.testing import CompileCounter
@@ -222,9 +223,23 @@ def test_optimizer_splits_matrices_from_tables_and_scales() -> None:
         assert muon["ensemble_dims"] == ensemble
 
 
-def test_training_lowers_the_loss_and_reports_nanochat_series() -> None:
+@pytest.fixture(scope="module")
+def initial_model() -> WorldModel:
+    """Build immutable weights once; each learner owns a deep copy."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        config = WorldModel.Config()
+        _tiny_model(config)
+        return config.make()
+
+
+def test_training_lowers_the_loss_and_reports_nanochat_series(
+    initial_model: WorldModel,
+) -> None:
     torch.manual_seed(0)
-    step = _step_config().make()
+    config = _step_config()
+    config.model = InlineConfig(copy.deepcopy, x=initial_model)
+    step = config.make()
     batch = next(_batches())
     updates = 4
     results = [step.train_step(**batch) for _ in range(updates)]
@@ -262,12 +277,16 @@ def test_loss_is_nanochats_debiased_ema_of_the_objective() -> None:
         assert float(_metrics(result)["loss"]) == pytest.approx(debiased)
 
 
-def test_loss_debiases_by_this_process_updates_after_a_resume() -> None:
-    trained = _step_config().make()
+def test_loss_debiases_by_this_process_updates_after_a_resume(
+    initial_model: WorldModel,
+) -> None:
+    config = _step_config()
+    config.model = InlineConfig(copy.deepcopy, x=initial_model)
+    trained = config.make()
     batches = _batches()
     for _ in range(2):
         trained.train_step(**next(batches))
-    resumed = _step_config().make()
+    resumed = config.make()
     resumed.load_state_dict(trained.state_dict())
     assert resumed.global_step == 2
     result = resumed.train_step(**next(batches))
@@ -288,12 +307,15 @@ def test_window_loss_is_the_mean_of_its_micro_batches() -> None:
     assert float(_metrics(second)["loss"]) == pytest.approx(mean)
 
 
-def test_accumulation_divides_each_micro_batch_gradient() -> None:
+def test_accumulation_divides_each_micro_batch_gradient(
+    initial_model: WorldModel,
+) -> None:
     batch = next(_batches())
     torch.manual_seed(0)
-    single = _step_config().make()
-    once = _metrics(single.train_step(**batch))
     config = _step_config()
+    config.model = InlineConfig(copy.deepcopy, x=initial_model)
+    single = config.make()
+    once = _metrics(single.train_step(**batch))
     config.accumulate_grad_batches = 2
     torch.manual_seed(0)
     double = config.make()

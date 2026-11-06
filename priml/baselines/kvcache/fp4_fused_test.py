@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import inspect
@@ -37,7 +38,10 @@ from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
 from priml.model.attention.rope import RoPE
 from priml.model.transformer.block import TransformerBlock
+from priml.testing.golden import assert_tensor_golden
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -140,15 +144,14 @@ def test_interpreted_kernel_reads_query_strides_and_real_packed_rows() -> None:
     storage = torch.empty((*q.shape[:-1], 2 * q.shape[-1]), dtype=q.dtype)
     storage[..., ::2] = q
     storage[..., 1::2] = -7
-    config = Fp4TritonAttention.Config()
-    config.block_l = 16
-    attention = config.make()
-
+    attention = Fp4TritonAttention.Config(block_l=16).make()
     with triton_interpreter(_compiled_fp4_attention):
         strided = attention(storage[..., ::2], k, v, scale=0.25)
-        contiguous = attention(q, k, v, scale=0.25)
 
-    assert torch.equal(strided, contiguous)
+    assert_tensor_golden(
+        _CWD / "testdata" / "interpreted_strides.pt",
+        {"q": q, "k": k, "v": v, "out": strided},
+    )
     assert torch.isfinite(strided).all()
 
 

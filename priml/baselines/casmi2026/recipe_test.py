@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Final, Literal, TypedDict, Unpack, cast
 import hashlib
 import math
 import pickle
+import shutil
 import sys
 import types
 import weakref
@@ -2394,9 +2395,15 @@ def test_main_defaults_keep_generation_geometry() -> None:
 
 def test_main_generation_keeps_fallback_pool_aliases_and_all_support_logs(
     tmp_path: Path,
+    main_assets: MainAssets.Config,
 ) -> None:
     config = MainResource.Config()
-    assets = _main_assets(tmp_path)
+    source = Path(main_assets.pool_dir)
+    shutil.copytree(source, tmp_path, dirs_exist_ok=True)
+    assets = main_assets.copy_tree()
+    for match in traverse(assets, Path):
+        if match.config.is_relative_to(source):
+            match.replace(tmp_path / match.config.relative_to(source))
     config.assets = assets
     config.engine.max_query_spectra = 2
     pool_dir = Path(assets.pool_dir)
@@ -3296,19 +3303,20 @@ def test_declared_root_reaches_recipe_tables_and_every_relative_input(
 
 def test_native_job_snapshots_config_before_missing_input(tmp_path: Path) -> None:
     config = native_config(tmp_path)
+    job = config.make()
     with pytest.raises(FileNotFoundError):
-        config.make().run()
+        job.run()
     assert (tmp_path / "runs/native/output/config.txt").read_text() == (
         config.pformat(hide_default_values=False) + "\n"
     )
     assert not (tmp_path / "runs/native/output/submission.csv").exists()
     with pytest.raises(FileExistsError):
-        config.make().run()
+        job.run()
     with pytest.raises(
         ValueError,
         match=r"^PublicRecipe accepts configuration fields only\.$",
     ):
-        config.make().run("--truncate")
+        job.run("--truncate")
 
 
 def test_declared_root_and_device_reach_every_resource_and_pinned_checkpoint(

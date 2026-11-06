@@ -25,6 +25,7 @@ from priml.runtime import SingleProcess
 from priml.testing.qwen3_5 import hf_config
 from priml.timer import CheckpointableStepTimer
 from priml.train.checkpointer import Checkpointer
+from priml.train.profiler import PhaseTimer
 from priml.train.train_loop import TrainLoop
 from priml.train.train_step import TrainStep
 
@@ -37,23 +38,30 @@ if TYPE_CHECKING:
     from priml.train.custom_types import OptimizerProtocol, TrainStepOutput
 
 
-@pytest.mark.parametrize("source", ["cadence", "final"])
-def test_lora_training_checkpoint_resumes_exactly(
-    tmp_path: Path,
-    source: Literal["cadence", "final"],
-) -> None:
-    """A rebuilt hybrid resumes the next microbatch and optimizer update exactly."""
-    reference_config = _loop_config(tmp_path / "reference")
-    reference = reference_config.make()
+@pytest.fixture(scope="module")
+def reference_training(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[TrainLoop, dict[str, Tensor], RngState, Path]:
+    directory = tmp_path_factory.mktemp("reference")
+    reference = _loop_config(directory).make()
     assert isinstance(reference.step, _RecordingStep)
     initial = copy.deepcopy(reference.step.model.state_dict())
     _assert_trainable_membership(reference.step)
     reference.train()
     assert reference.checkpointer is not None
     assert reference.checkpointer.available_steps() == [1, 2]
-    reference_rng = get_rng_state()
+    return reference, initial, get_rng_state(), directory / "checkpoints"
 
-    source_dir = tmp_path / "reference" / "checkpoints"
+
+@pytest.mark.parametrize("source", ["cadence", "final"])
+def test_lora_training_checkpoint_resumes_exactly(
+    tmp_path: Path,
+    source: Literal["cadence", "final"],
+    reference_training: tuple[TrainLoop, dict[str, Tensor], RngState, Path],
+) -> None:
+    """A rebuilt hybrid resumes the next microbatch and optimizer update exactly."""
+    reference, initial, reference_rng, source_dir = reference_training
+    assert isinstance(reference.step, _RecordingStep)
     if source == "final":
         prefix_config = _loop_config(tmp_path / "prefix")
         prefix_config.max_steps = 1
@@ -165,6 +173,7 @@ def _loop_config(
     config.num_steps_eval = 0
     config.eval_every_epoch = False
     config.early_train_log_steps = 0
+    config.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
     runtime = SingleProcess.Config()
     runtime.device = "cpu"
     config.runtime = runtime

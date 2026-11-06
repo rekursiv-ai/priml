@@ -18,6 +18,7 @@ from priml.baselines.craftax.world_model.scripts.testing import (
 
 def test_a_graph_replays_the_call_captured_into_it() -> None:
     cuda = FakeCuda()
+    assert cuda.capturing is None
     calls: list[int] = []
     graph = cuda.CUDAGraph()
     stream = cuda.Stream()
@@ -112,6 +113,18 @@ def test_cpu_torch_maps_cuda_to_the_cpu_and_records_compiles() -> None:
         torch.zeros(2, dtype=torch.int16),
     )
     assert isinstance(fake.cuda, FakeCuda)
+
+
+def test_cpu_torch_preserves_seeded_random_streams() -> None:
+    fake = CpuTorch()
+    generator = fake.Generator(device=fake.device("cuda")).manual_seed(7)
+    reference = torch.Generator(device="cpu").manual_seed(7)
+
+    for _ in range(2):
+        assert torch.equal(
+            fake.rand(2, 3, generator=generator),
+            torch.rand(2, 3, generator=reference),
+        )
 
 
 def test_the_clock_reads_its_readings_in_order() -> None:

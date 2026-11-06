@@ -346,12 +346,16 @@ def _train_step(config: CraftaxTrainStep.Config | None = None) -> CraftaxTrainSt
 
 # An epoch of the tiny pipeline at a horizon of 4 in two windows took 25 ms on x86;
 # here 15 ms. The windows' tiling is checked by its own tests.
-def _quick(config: CraftaxTrainStep.Config) -> CraftaxTrainStep.Config:
-    """Cut a tiny step's rollouts to 2 steps, learned as one window of every agent."""
-    config.rollout.horizon = 2
+def _quick(
+    config: CraftaxTrainStep.Config,
+    *,
+    horizon: int = 2,
+) -> CraftaxTrainStep.Config:
+    """Learn each short rollout as one window of every agent."""
+    config.rollout.horizon = horizon
     windows = config.learner
     assert isinstance(windows, AgentWindows.Config)
-    windows.minibatch_size = 2 * config.env.num_envs
+    windows.minibatch_size = horizon * config.env.num_envs
     return config
 
 
@@ -760,11 +764,16 @@ def test_the_step_refuses_an_evaluation_it_could_not_play(
 
 def test_a_world_model_feature_trains_through_the_pipeline_and_its_evaluation() -> None:
     """The learner reads the stored features; the evaluation steps engines of its own."""
-    config = _quick(tiny_train_step())
+    config = tiny_train_step()
+    config.env.num_envs = 2
+    _one_world(config)
+    config = _quick(config, horizon=1)
     config.train_budget_steps = 2
     config.feature = _smoke_feature()
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
+    model.channels_hidden = 2
+    model.num_layers = 1
     proj = model.proj_feature = Linear.Config()
     proj.channels_in = 36
     step = _train_step(config.copy_tree().finalize())
@@ -1080,7 +1089,7 @@ def test_a_joint_learner_replays_the_features_its_actor_read_at_the_same_weights
     config = tiny_train_step()
     config.env.num_envs = 2
     _one_world(config)
-    config = _quick(config)
+    config = _quick(config, horizon=1)
     config.train_budget_steps = 2
     feature = config.feature = _smoke_feature()
     if history == "sliding":
@@ -1089,6 +1098,8 @@ def test_a_joint_learner_replays_the_features_its_actor_read_at_the_same_weights
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.dtype = model.state_dtype = model.output_dtype = torch.float32
+    model.channels_hidden = 2
+    model.num_layers = 1
     proj = model.proj_feature = Linear.Config()
     proj.channels_in = 36  # The smoke world model's width.
     config.feature_training = _small_bins()
@@ -2122,7 +2133,27 @@ def test_a_checkpoint_loaded_after_the_capture_trains_as_the_uninterrupted_run(
     assert lines == _after_epoch_2(uninterrupted)
 
 
-def test_exp009s_epoch_matches_its_golden() -> None:
+@pytest.fixture
+def exp009_step() -> Generator[CraftaxTrainStep]:
+    """Own the fresh-world pipeline's initialization and worker lifetime."""
+    config = tiny_exp009_step()
+    config.env.num_envs = 2
+    config.env.num_buffers = 1
+    model = config.model
+    assert isinstance(model, MinGRUPolicy.Config)
+    model.channels_hidden = 2
+    model.num_layers = 1
+    config = _quick(config)
+    config.train_budget_steps = 1
+    with host_agnostic_pipeline():
+        step = _train_step(config)
+        try:
+            yield step
+        finally:
+            step.close()
+
+
+def test_exp009s_epoch_matches_its_golden(exp009_step: CraftaxTrainStep) -> None:
     """exp009 at test size from the policy's own init under torch seed 0, frozen.
 
     From scratch, so the golden moves with the init's draws: their order,
@@ -2130,12 +2161,8 @@ def test_exp009s_epoch_matches_its_golden() -> None:
     in fresh worlds and writes the dense symbolic view. One epoch of two-step
     rollouts, as the tiny step's golden above.
     """
-    config = _quick(tiny_exp009_step())
-    config.train_budget_steps = 1
-    with host_agnostic_pipeline():
-        step = _train_step(config)
-        lines = ["# from-scratch: the policy's own init under torch seed 0"]
-        lines += _train_out(step)
+    lines = ["# from-scratch: the policy's own init under torch seed 0"]
+    lines += _epochs(exp009_step)
     assert_golden(
         test_file=__file__,
         name="train_step_exp009_tiny",

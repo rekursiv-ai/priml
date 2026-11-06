@@ -505,13 +505,27 @@ def test_decoder_block_checkpoints_only_when_a_backward_can_run(grad: bool) -> N
     assert spy.call_count == int(grad)
 
 
-def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients() -> None:
+@pytest.fixture(scope="module")
+def stored_local_reference() -> tuple[
+    PackedBatch,
+    Tensor,
+    dict[str, Tensor],
+    list[int],
+]:
+    """Evaluate the independent stored-activation loss and gradients once."""
     batch = _batch(windows=1)
     stored = _two_layer_local_model(checkpoint=False)
-    recomputed = _two_layer_local_model(checkpoint=True)
-    stored_calls = _count_local_calls(stored)
-    recomputed_calls = _count_local_calls(recomputed)
+    calls = _count_local_calls(stored)
     loss, grads = _loss_and_grads(stored, batch)
+    return batch, loss, grads, calls
+
+
+def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients(
+    stored_local_reference: tuple[PackedBatch, Tensor, dict[str, Tensor], list[int]],
+) -> None:
+    batch, loss, grads, stored_calls = stored_local_reference
+    recomputed = _two_layer_local_model(checkpoint=True)
+    recomputed_calls = _count_local_calls(recomputed)
     loss_recomputed, grads_recomputed = _loss_and_grads(recomputed, batch)
     # One call per block in forward; a checkpointed block runs again in backward.
     assert stored_calls == [1] * 4
@@ -522,17 +536,39 @@ def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients() -> 
         torch.testing.assert_close(grads_recomputed[name], grad, rtol=0, atol=0)
 
 
-def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels() -> None:
+@pytest.fixture(scope="module")
+def local_recompute_reference() -> tuple[
+    PackedBatch,
+    Tensor,
+    dict[str, Tensor],
+    list[int],
+    Counter[str],
+]:
+    """Measure the independent full-recompute path with every local block retained."""
     batch = pack_windows(
         [[_segment(2, frames=2, starts=True, terminal=True, seed=1)]],
         t_g=5,
         s_max=1,
     )
     plain = _two_layer_local_model(checkpoint=True)
-    kept = _two_layer_local_model(checkpoint=True, keeps_attention=True)
-    calls, calls_kept = _count_local_calls(plain), _count_local_calls(kept)
+    calls = _count_local_calls(plain)
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION), _OpCounter() as ops:
         loss, grads = _loss_and_grads(plain, batch)
+    return batch, loss, grads, calls, ops.counts
+
+
+def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels(
+    local_recompute_reference: tuple[
+        PackedBatch,
+        Tensor,
+        dict[str, Tensor],
+        list[int],
+        Counter[str],
+    ],
+) -> None:
+    batch, loss, grads, calls, counts = local_recompute_reference
+    kept = _two_layer_local_model(checkpoint=True, keeps_attention=True)
+    calls_kept = _count_local_calls(kept)
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION), _OpCounter() as ops_kept:
         loss_kept, grads_kept = _loss_and_grads(kept, batch)
     # Both re-run every block's feed-forward in backward...
@@ -540,7 +576,7 @@ def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels() -> N
     # ...but a kept block's attention kernels run once: the encoder's
     # self-attention and the decoder's self- and cross-attention, in 2 blocks each.
     kernel = "aten._scaled_dot_product_flash_attention_for_cpu.default"
-    assert ops.counts[kernel] - ops_kept.counts[kernel] == 2 * 1 + 2 * 2
+    assert counts[kernel] - ops_kept.counts[kernel] == 2 * 1 + 2 * 2
     torch.testing.assert_close(loss_kept, loss, rtol=0, atol=0)
     assert grads_kept.keys() == grads.keys()
     for name, grad in grads.items():

@@ -74,13 +74,13 @@ def port_lockstep(
 
 
 def shallow(factory: Callable[[], VisionTrainLoop]) -> Callable[[], VisionTrainLoop]:
-    """Return ``factory`` with one block per stage, in place of ResNet-56."""
+    """Return ``factory`` with one identity and one projected block."""
 
     def build() -> VisionTrainLoop:
         config = factory()
         assert isinstance(config.step.model, ResNet.Config)
-        config.step.model.channels_hidden = (2, 3, 4)
-        config.step.model.blocks_per_stage = (1, 1, 1)
+        config.step.model.channels_hidden = (2, 3)
+        config.step.model.blocks_per_stage = (1, 1)
         return config
 
     return build
@@ -98,6 +98,7 @@ def test_capture_assembles_both_sides_into_one_report(
     stored = read_tensors(_DATA / "reference.pt")
     monkeypatch.setattr(reference, "port_record", returning(stored))
     monkeypatch.setattr(reference, "lockstep_record", port_lockstep)
+    monkeypatch.setattr(upstream, "FORWARDS", 1)
     monkeypatch.setattr(
         reference,
         "VARIANTS",

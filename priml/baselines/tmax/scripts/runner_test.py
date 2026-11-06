@@ -959,6 +959,23 @@ def test_the_qwen35_namespace_mapper_matches_upstream() -> None:
     assert vllm_weight_name_mapper("allenai/OLMo-2-1124-7B") is None
 
 
+@pytest.mark.parametrize(
+    "checkpoint",
+    ["Qwen/Qwen3.6-4B", "/checkpoints/qwen3.6-trained"],
+    ids=["repository", "local-checkpoint"],
+)
+def test_qwen36_weights_use_the_vllm_language_model_namespace(checkpoint: str) -> None:
+    mapper = vllm_weight_name_mapper(checkpoint)
+
+    assert mapper is not None
+    assert [
+        mapper(name) for name in ["model.embed_tokens.weight", "lm_head.weight"]
+    ] == [
+        "language_model.model.embed_tokens.weight",
+        "language_model.lm_head.weight",
+    ]
+
+
 def test_collection_reports_to_the_session_actor_manager() -> None:
     # Upstream receives the session's actor manager and chosen age limit.
     seen: list[object] = []

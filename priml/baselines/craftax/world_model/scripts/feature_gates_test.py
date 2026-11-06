@@ -14,6 +14,7 @@ import copy
 import itertools
 import sys
 
+from configgle import PartialConfig
 from treekle import from_plain, json_loads
 
 import pytest
@@ -167,9 +168,11 @@ def test_a_graphed_step_replays_the_eager_step_exactly(
 
 def test_a_graphed_step_captures_each_new_plan_on_first_replay(
     monkeypatch: pytest.MonkeyPatch,
+    source: WorldModelFeature,
 ) -> None:
     fake = _install(monkeypatch)
     config = _sliding_config()
+    config.weights = PartialConfig(copy.deepcopy, x=source.model)
     sliding = config.history
     assert isinstance(sliding, Sliding.Config)
     sliding.fallback_rows = 1
