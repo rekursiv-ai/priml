@@ -365,7 +365,7 @@ class PortBackend:
         return str(config.copy_tree().finalize().working_dir)
 
     def data(self, fields: Mapping[str, object]) -> DataLike:
-        config = PuzzleData.Config()
+        config: PuzzleData.Config = PuzzleData.Config()
         config.spec = self.spec
         for key, value in fields.items():
             setattr(config, key, value)

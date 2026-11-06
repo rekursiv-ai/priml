@@ -160,6 +160,25 @@ def test_a_slice_keeps_its_axes_whether_or_not_it_holds_cells() -> None:
             _ = table[BF]
 
 
+def test_empty_sub_table_transforms_preserve_removed_axes() -> None:
+    table = Cost()[BF]
+    for transformed in (
+        table.only("primal"),
+        table.relabel("adjoint"),
+        table.tile(2),
+    ):
+        assert transformed["flops"].sum() == 0
+        with pytest.raises(KeyError):
+            _ = transformed[BF]
+
+
+def test_empty_report_slice_rejects_the_removed_axis() -> None:
+    report = Report()["primal"]
+    assert report["matmul"].sum() == 0.0
+    with pytest.raises(KeyError):
+        _ = report["primal"]
+
+
 def test_a_sub_table_is_read_by_its_sum_not_by_naming_every_axis() -> None:
     t = _t()
     assert t["bytes", "adjoint", "selection", I64] == 2
@@ -1242,6 +1261,11 @@ def test_an_uncosted_function_is_rejected_by_name() -> None:
         f"{gelu.__qualname__} has no cost(); every slot under a costed container "
         "must implement HasCost, or be a function decorated with @set_cost."
     )
+
+
+def test_cost_rejects_a_partial_without_a_cost() -> None:
+    with pytest.raises(TypeError):
+        cost(functools.partial(abs))
 
 
 def test_cost_rejects_a_config_without_a_cost() -> None:

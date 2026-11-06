@@ -259,6 +259,18 @@ def test_q_lambda_stops_at_a_terminal_step() -> None:
     assert targets.tolist() == [[3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0]]
 
 
+def test_q_lambda_terminal_uses_the_last_reward() -> None:
+    rewards = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    targets = q_lambda_targets(
+        rewards=rewards,
+        q_values=torch.full((4, 2, 5), 100.0),
+        dones=torch.ones(3, 2, dtype=torch.bool),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    assert torch.equal(targets, rewards)
+
+
 @pytest.mark.parametrize("bootstrap", [math.nan, math.inf])
 def test_q_lambda_terminal_ignores_a_non_finite_bootstrap(bootstrap: float) -> None:
     # The state after a terminal belongs to no episode; whatever it holds,

@@ -186,6 +186,9 @@ def test_exp023_refuses_a_parent_without_reference_evaluation(
 
 def test_exp024_changes_only_the_budget() -> None:
     changed = experiments.exp024()
+    final = changed.copy_tree().finalize()
+    assert final.experiment_name == "exp024"
+    assert final.working_dir == Path("/opt/scratch/runs/nanochat/exp024")
     assert changed.max_time == changed.step.train_budget_sec == 300.0
     original = experiments.exp022()
     changed.experiment_name = original.experiment_name

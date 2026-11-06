@@ -280,6 +280,174 @@ def test_manual_data_parallel_broadcasts_parameters_and_buffers(
     assert len(values) == len(tuple(model.parameters())) + len(tuple(model.buffers()))
 
 
+def test_manual_data_parallel_receives_the_selected_subgroup_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receive parameters and buffers from subgroup rank zero's global rank."""
+    mesh = _FakeMesh()
+    process_group = object()
+    groups = {"tp": process_group}
+    ranks = {process_group: {0: 4, 1: 7}}
+
+    def get_group(name: str) -> object:
+        return groups[name]
+
+    def global_rank(group: object, rank: int) -> int:
+        return ranks[group][rank]
+
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(mesh, "get_group", get_group)
+    monkeypatch.setattr(dist, "get_global_rank", global_rank)
+    model = nn.Linear(2, 3)
+    model.register_buffer("tracked", torch.zeros(4))
+    state = [*model.parameters(), *model.buffers()]
+    remote_state = [
+        torch.full_like(tensor, index) for index, tensor in enumerate(state, 2)
+    ]
+    calls: list[tuple[Tensor, int, object]] = []
+    monkeypatch.setattr(
+        dist,
+        "broadcast",
+        functools.partial(
+            _receive_broadcast,
+            calls=calls,
+            remote_state=list(remote_state),
+        ),
+    )
+    config = ManualDataParallel.Config()
+    config.mesh_dim = "tp"
+
+    assert config.make()(model) is model
+
+    assert len(calls) == len(state)
+    for (actual, source_rank, group), tensor, expected in zip(
+        calls,
+        state,
+        remote_state,
+        strict=True,
+    ):
+        assert actual is tensor
+        assert source_rank == 4
+        assert group is process_group
+        assert torch.equal(tensor, expected)
+
+
+def _receive_broadcast(
+    tensor: Tensor,
+    *,
+    src: int,
+    group: object,
+    calls: list[tuple[Tensor, int, object]],
+    remote_state: list[Tensor],
+) -> None:
+    calls.append((tensor, src, group))
+    tensor.copy_(remote_state.pop(0))
+
+
+def test_manual_data_parallel_materializes_on_the_mesh_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Materialize CPU replica weights despite an ambient meta default device."""
+    mesh = _FakeMesh()
+    process_group = object()
+    values: list[Tensor] = []
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(
+        mesh,
+        "get_group",
+        functools.partial(_return_group, group=process_group),
+    )
+    monkeypatch.setattr(dist, "get_global_rank", _local_rank)
+    monkeypatch.setattr(
+        dist,
+        "broadcast",
+        functools.partial(_record_broadcast, values=values),
+    )
+    with torch.device("meta"):
+        model = nn.Linear(2, 3)
+        placed = ManualDataParallel.Config().make()(model)
+
+    assert placed is model
+    for parameter in model.parameters():
+        assert parameter.device == torch.device("cpu")
+        assert torch.isfinite(parameter).all()
+    assert len(values) == 2
+
+
+def test_sum_gradients_reduces_one_parameter_on_its_device_and_subgroup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reduce a single CPU weight using the requested mesh dimension."""
+    mesh = _FakeMesh()
+    process_group = object()
+    groups = {"tp": process_group}
+
+    def get_group(name: str) -> object:
+        return groups[name]
+
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(mesh, "get_group", get_group)
+    calls: list[tuple[Tensor, dist.ReduceOp, object]] = []
+    monkeypatch.setattr(
+        dist,
+        "all_reduce",
+        functools.partial(_record_sum, calls=calls),
+    )
+    model = nn.Linear(2, 3, bias=False)
+    model.weight.grad = torch.ones_like(model.weight)
+    config = SumGradients.Config()
+    config.mesh_dim = "tp"
+
+    with torch.device("meta"):
+        config.make()(model)
+
+    assert len(calls) == 2
+    assert calls[0][0].device == model.weight.device
+    assert calls[0][0].dtype == torch.int32
+    assert calls[1][0] is model.weight.grad
+    assert all(op is dist.ReduceOp.SUM for _, op, _ in calls)
+    assert all(group is process_group for _, _, group in calls)
+    assert torch.equal(model.weight.grad, torch.full_like(model.weight, 3))
+
+
+def test_sum_gradients_continues_after_a_globally_absent_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reduce later gradients while leaving globally absent state unset."""
+    mesh = _FakeMesh()
+    process_group = object()
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(
+        mesh,
+        "get_group",
+        functools.partial(_return_group, group=process_group),
+    )
+    model = nn.Linear(2, 3)
+    assert model.bias is not None
+    model.bias.grad = torch.full_like(model.bias, 3)
+    calls: list[Tensor] = []
+    remote_gradients = [torch.full_like(model.bias, 5)]
+    monkeypatch.setattr(
+        dist,
+        "all_reduce",
+        functools.partial(
+            _record_sum_with_remote_presence,
+            calls=calls,
+            remote_presence=[0, 1],
+            remote_gradients=remote_gradients,
+        ),
+    )
+
+    SumGradients.Config().make()(model)
+
+    assert len(calls) == 2
+    assert calls[0].tolist() == [0, 2]
+    assert calls[1] is model.bias.grad
+    assert model.weight.grad is None
+    assert torch.equal(model.bias.grad, torch.full_like(model.bias, 8))
+    assert remote_gradients == []
+
+
 def test_sum_gradients_reduces_registered_parameters_in_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
