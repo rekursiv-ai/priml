@@ -457,10 +457,10 @@ def test_a_sliding_engine_runs_each_kernel_at_three_shapes_whatever_its_capacity
 def test_a_joint_restore_encodes_the_restored_rows_frames_alone() -> None:
     config = _sliding_config()
     config.joint = True
-    config.compile = _CountingCompile.Config()
+    config.compile = _ShapeRecordingCompile.Config()
     source = config.make()
     encode = source.kernels.encode
-    assert isinstance(encode, _CountedCalls)
+    assert isinstance(encode, _ShapeRecording)
     cells, aux, actions = _frames(3, 3)
     donor, restored = _engine(source, rows=3), _engine(source, rows=3)
     for t in range(3):
@@ -490,7 +490,8 @@ def test_a_joint_restore_encodes_the_restored_rows_frames_alone() -> None:
     assert encode.calls == 0
     restored.restore_history(archive, torch.tensor([-1, 0, -1]))
     # The restored row's 4 frames, in batches of the step's 3, the last padded.
-    assert encode.calls == 2
+    assert encode.calls == -(-source.ring // len(restored.length))
+    assert encode.shapes == {(cells[:, 0].shape, aux[:, 0].shape)}
     # Of its ring's 4 slots, the donor's 3 steps filled the first 3.
     torch.testing.assert_close(
         restored.obs_ring[1, :3],
@@ -691,7 +692,10 @@ def test_after_new_weights_a_rebuilt_engine_reads_every_context_under_them(
     config.hook_interval = 3
     config.weights = _TwoLayerWeights.Config()
     config.joint = True
+    config.compile = _ShapeRecordingCompile.Config()
     source = config.make()
+    encode = source.kernels.encode
+    assert isinstance(encode, _ShapeRecording)
     rows, steps, changed = 3, 7, 5
     cells, aux, actions = _frames(rows, steps)
     engine = _engine(source, rows=rows)
@@ -706,6 +710,8 @@ def test_after_new_weights_a_rebuilt_engine_reads_every_context_under_them(
         hook=source.hook_interval,
         before={changed: partial(_publish, source.model, engine)},
     )
+    assert encode.calls == steps + engine.ring
+    assert encode.shapes == {(cells[:, 0].shape, aux[:, 0].shape)}
     held = min(source.context_decisions, changed)
     assert decisions[:, changed - 1].tolist() == [held, 2, held]
     firsts = torch.arange(steps) - decisions + 1
@@ -979,6 +985,26 @@ def test_a_sliding_engines_plan_lives_on_the_engines_device() -> None:
     assert isinstance(cpu, SlidingEngine)
     assert cpu._plan.tolist() == [3] * 5
     assert not cpu._planned.any()
+
+
+def test_joint_reencoding_keeps_indices_on_the_engines_meta_device() -> None:
+    config = _sliding_config()
+    config.weights = _TwoLayerWeights.Config()
+    config.joint = True
+    config.compile = _ShapeRecordingCompile.Config()
+    source = config.make()
+    engine = source.make_engine(rows=3, device=torch.device("meta"))
+    assert engine.cell_ring is not None
+    assert engine.aux_ring is not None
+    engine._encode_rings(torch.arange(2, device="meta"))
+    encode = source.kernels.encode
+    assert isinstance(encode, _ShapeRecording)
+    assert encode.calls == -(-2 * engine.ring // len(engine.length))
+    assert encode.shapes == {
+        (engine.cell_ring[:, 0].shape, engine.aux_ring[:, 0].shape),
+    }
+    assert engine.obs_ring.device.type == "meta"
+    assert engine.obs_ring.shape == (3, engine.ring, source.width)
 
 
 def test_timing_events_exist_on_cuda_alone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1569,42 +1595,17 @@ def _window_reference(
     return context_features(model, layers=2, windows=windows).view(rows, steps, -1)
 
 
-class _CountedCalls:
-    """A function, and how often it was called."""
+class _ShapeRecording:
+    """A function, its call count and its input shapes: a compiled kernel's graphs."""
 
     def __init__(self, function: Callable[..., object]) -> None:
         self.function = function
         self.calls = 0
-
-    def __call__(self, *args: object) -> object:
-        """Count the call, then make it."""
-        self.calls += 1
-        return self.function(*args)
-
-
-class _CountingCompile:
-    """A ``compile`` slot that counts each kernel's calls rather than compiling it."""
-
-    class Config(Fig["_CountingCompile"]):
-        """No options."""
-
-    def __init__(self, config: Config) -> None:
-        del config
-
-    def __call__(self, function: Callable[..., object]) -> Callable[..., object]:
-        """Return ``function``, counted."""
-        return _CountedCalls(function)
-
-
-class _ShapeRecording:
-    """A function, and the input shapes it was called at: a compiled kernel's graphs."""
-
-    def __init__(self, function: Callable[..., object]) -> None:
-        self.function = function
         self.shapes: set[tuple[torch.Size, ...]] = set()
 
     def __call__(self, *args: object) -> object:
-        """Record the shapes of the tensor arguments, then make the call."""
+        """Record the call and its tensor shapes, then make the call."""
+        self.calls += 1
         self.shapes.add(
             tuple(arg.shape for arg in args if isinstance(arg, torch.Tensor)),
         )

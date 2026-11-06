@@ -254,6 +254,9 @@ def test_vocabulary_must_leave_room_for_every_byte() -> None:
 def test_donor_recipe_fits_convextok_on_its_raw_shards(tmp_path: Path) -> None:
     """The baseline's recipe with ConvexTok in its tokenizer slot and its ten IDs."""
     config = donor_convextok16k()
+    assert config.copy_tree().finalize().working_dir == Path(
+        "/opt/scratch/datasets/nanochat-convextok",
+    )
     config.working_dir = tmp_path
     finalized = config.copy_tree().finalize()
     tokenizer = finalized.tokenizer
