@@ -102,6 +102,8 @@ def test_base_dir_moves_every_path_of_a_capture(tmp_path: Path) -> None:
 
 def test_the_smoke_arm_captures_exp_smoke_into_the_world_models_smoke_corpus() -> None:
     config = _finalized(experiments.smoke)
+    assert (config.decisions, config.shard_decisions) == (20_000, 10_000)
+    assert _source(config).policy.rollout.horizon == 16
     assert _source(config).checkpoint == Path(
         "/opt/scratch/runs/craftax/exp_smoke/checkpoints/step_00000004.pt",
     )
@@ -134,7 +136,14 @@ def test_a_v2_branch_arm_without_its_pools_raises_its_todo(
 
 
 def test_v2_fresh_budgets_are_the_tables_millions() -> None:
-    fresh = [round(factory().decisions * 4 / 1_000_000) for factory in V2_FRESH]
+    configs = [_finalized(factory) for factory in V2_FRESH]
+    assert [config.decisions for config in configs] == [
+        851_508_459,
+        64_152_549,
+        92_152_350,
+        67_974_772,
+    ]
+    fresh = [round(config.decisions * 4 / 1_000_000) for config in configs]
     assert fresh == [3_406, 257, 369, 272]
 
 
@@ -156,6 +165,27 @@ def test_the_e2e_arms_shrink_the_arms_into_one_root() -> None:
     assert [_source(c).checkpoint for c in arms] == [
         _source(factory()).checkpoint for factory in ARMS
     ]
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        experiments.e2e_arm0,
+        experiments.e2e_arm1,
+        experiments.e2e_arm2,
+        experiments.e2e_arm3,
+    ],
+)
+def test_e2e_arms_publish_small_shards_on_two_buffers(
+    factory: Callable[[], CaptureWorker.Config],
+) -> None:
+    config = _finalized(factory)
+    assert (config.shard_decisions, _source(config).env.num_buffers) == (100_000, 2)
+
+
+def test_e2e_verifier_replays_a_tenth_of_each_shard() -> None:
+    config = experiments.e2e_verifier().copy_tree().finalize()
+    assert config.fraction == 0.1
 
 
 def _finalized(factory: Callable[[], CaptureWorker.Config]) -> CaptureWorker.Config:

@@ -501,6 +501,39 @@ def test_eval_config_rejects_invalid_counts(
         overrides(_config(tmp_path))
 
 
+@pytest.mark.parametrize(("port", "n_concurrent"), [(0, 1), (1, 0)])
+def test_eval_config_rejects_zero_port_or_concurrency(
+    tmp_path: Path,
+    port: int,
+    n_concurrent: int,
+) -> None:
+    config = _config(tmp_path)
+    with pytest.raises(ValueError, match="positive"):
+        replace(config, port=port, n_concurrent=n_concurrent)
+
+
+def test_minimum_positive_eval_settings_reach_the_commands(tmp_path: Path) -> None:
+    config = replace(
+        _config(tmp_path),
+        port=1,
+        gpus=1,
+        data_parallel_size=1,
+        tensor_parallel_size=1,
+        n_concurrent=1,
+        n_attempts=1,
+        max_format_errors=1,
+        n_tasks=1,
+    )
+    vllm = build_vllm_command(config)
+    for option in ("--port", "--tensor-parallel-size", "--data-parallel-size"):
+        assert vllm[vllm.index(option) + 1] == "1"
+    harbor = build_harbor_command(config)
+    for option in ("--n-concurrent", "-k", "--n-tasks"):
+        assert harbor[harbor.index(option) + 1] == "1"
+    assert "max_format_errors=1" in harbor
+    assert "api_base=http://localhost:1/v1" in harbor
+
+
 def test_eval_config_requires_the_checkout_and_checkpoint(tmp_path: Path) -> None:
     config = _config(tmp_path)
     with pytest.raises(FileNotFoundError, match="TMax checkout is missing"):

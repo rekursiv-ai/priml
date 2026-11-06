@@ -786,7 +786,9 @@ def test_making_a_source_leaves_the_global_generator_where_it_was() -> None:
     assert torch.equal(torch.get_rng_state(), before)
 
 
-def test_initial_weights_are_their_seeds_init(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def initial_weights() -> tuple[InitialWeights.Config, WorldModel]:
+    """Build one seeded reference for initialization and checkpoint round trips."""
     config = InitialWeights.Config()
     config.experiment = SMOKE
     config.overrides = [
@@ -807,15 +809,36 @@ def test_initial_weights_are_their_seeds_init(tmp_path: Path) -> None:
         "step.model.transformer.block.ffn.channels_hidden=2",
     ]
     config.seed = 3
-    first, second = config.make()(), config.make()()
+    return config, config.make()()
+
+
+def test_initial_weights_are_their_seeds_init(
+    initial_weights: tuple[InitialWeights.Config, WorldModel],
+) -> None:
+    config, first = initial_weights
+    second = config.make()()
     for (name, a), b in zip(
         first.state_dict().items(),
         second.state_dict().values(),
         strict=True,
     ):
         assert torch.equal(a, b), name
+
+
+def test_initial_weights_change_with_the_seed(
+    initial_weights: tuple[InitialWeights.Config, WorldModel],
+) -> None:
+    config, first = initial_weights
+    config = config.copy_tree()
     config.seed = 4
     assert not torch.equal(config.make()().start, first.start)
+
+
+def test_trained_weights_restore_the_checkpoint(
+    initial_weights: tuple[InitialWeights.Config, WorldModel],
+    tmp_path: Path,
+) -> None:
+    config, first = initial_weights
     path = tmp_path / "step.pt"
     torch.save({"step": {"model": first.state_dict()}}, path)
     trained = TrainedWeights.Config()

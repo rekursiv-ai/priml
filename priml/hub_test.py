@@ -517,7 +517,11 @@ def test_save_hf_checkpoint_round_trips_locally(tmp_path: Path) -> None:
         # must make them contiguous without touching the values.
         "model.norm.weight": torch.arange(6.0).reshape(2, 3).t(),
     }
-    directory = save_hf_checkpoint(tmp_path / "nested" / "out", config, state)
+    directory = save_hf_checkpoint(
+        tmp_path / "nested" / "deeper" / "out",
+        config,
+        state,
+    )
 
     hf_config, hf_sd = load_hf_checkpoint(directory, dtype=None)
 
@@ -599,6 +603,30 @@ def test_save_hf_checkpoint_rejects_conflicting_auxiliary_files(
             {"w": torch.ones(1)},
             auxiliary_files=[source],
         )
+
+
+def test_save_hf_checkpoint_rejects_duplicate_auxiliary_basenames(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first" / "tokenizer.json"
+    second = tmp_path / "second" / "tokenizer.json"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first tokenizer")
+    second.write_bytes(b"second tokenizer")
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="Auxiliary file"):
+        save_hf_checkpoint(
+            out,
+            {},
+            {"w": torch.zeros(2, 3)},
+            auxiliary_files=[first, second],
+        )
+
+    assert not out.exists()
+    assert first.read_bytes() == b"first tokenizer"
+    assert second.read_bytes() == b"second tokenizer"
 
 
 def test_save_hf_checkpoint_refuses_foreign_shards(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from functools import cache
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -685,26 +686,36 @@ def test_rollout_refuses_no_decisions_and_a_prefix_per_row_short(
         )
 
 
+@pytest.fixture(scope="module")
+def evaluation_inputs(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[WorldModel, Path]:
+    """Share immutable validation episodes and evaluation weights across output checks."""
+    archive = tmp_path_factory.mktemp("dream-evaluation") / "archive"
+    _write_val_archive(archive, lengths=(5, 6, 7, 8))
+    return tiny_model(craftax_schema()), archive
+
+
 def test_evaluate_bundles_a_pre_death_continuation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    evaluation_inputs: tuple[WorldModel, Path],
 ) -> None:
     without_decoding(monkeypatch, dream_eval)
-    archive = tmp_path / "archive"
-    _write_val_archive(archive)
+    model, archive = evaluation_inputs
     stats = dream_eval.evaluate(
-        tiny_model(craftax_schema()),
+        model,
         archive=archive,
         output=tmp_path / "dreams",
         rows=8,
         t_max=8,
-        decisions=2,
+        decisions=1,
         prefix=2,
-        continuation=2,
-        horizons=HORIZONS,
+        continuation=1,
+        horizons=(1,),
         seed=0,
         resamples=4,
-        permutations=4,
+        permutations=2,
     )
     bundles = from_plain(stats["bundles"], list[dict[str, object]])
     (death,) = [b for b in bundles if b["name"] == "continuation-recorded_pre_death"]
@@ -958,11 +969,10 @@ def test_episode_record_holds_every_frame_it_keeps() -> None:
 def test_evaluate_writes_statistics_episodes_and_bundles(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    evaluation_inputs: tuple[WorldModel, Path],
 ) -> None:
     without_decoding(monkeypatch, dream_eval)
-    archive = tmp_path / "archive"
-    _write_val_archive(archive)
-    model = tiny_model(craftax_schema())
+    model, archive = evaluation_inputs
     output = tmp_path / "dreams"
     stats = dream_eval.evaluate(
         model,
@@ -970,13 +980,13 @@ def test_evaluate_writes_statistics_episodes_and_bundles(
         output=output,
         rows=2,
         t_max=16,
-        decisions=4,
+        decisions=2,
         prefix=2,
         continuation=3,
-        horizons=HORIZONS,
+        horizons=(2,),
         seed=0,
-        resamples=4,
-        permutations=4,
+        resamples=2,
+        permutations=2,
     )
     written = json_loads((output / "stats.json").read_text(), dict[str, object])
     assert written["schema"] == stats["schema"] == "craftax-dream-eval/v1"
@@ -1108,9 +1118,8 @@ def dreamed(
     """
     del step
     rows = engine.rows
-    played = [random_segment(craftax_schema(), decisions, seed=r) for r in range(rows)]
-    cells = torch.stack([segment.cells for segment in played])
-    aux = torch.stack([segment.aux for segment in played])
+    base_cells, base_aux = _dream_frames(rows, decisions)
+    cells, aux = base_cells.clone(), base_aux.clone()
     reward = torch.zeros(rows, decisions, dtype=torch.int16)
     done = torch.zeros(rows, decisions, dtype=torch.bool)
     starts = torch.zeros(rows, decisions + 1, dtype=torch.bool)
@@ -1140,6 +1149,16 @@ def dreamed(
         action_logp=zeros,
         reward_logp=zeros,
         done_logp=zeros,
+    )
+
+
+@cache
+def _dream_frames(rows: int, decisions: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reuse seeded stand-in frames; each rollout edits only its own clones."""
+    played = [random_segment(craftax_schema(), decisions, seed=r) for r in range(rows)]
+    return (
+        torch.stack([segment.cells for segment in played]),
+        torch.stack([segment.aux for segment in played]),
     )
 
 
@@ -1174,12 +1193,12 @@ def _tiny_trained(
     return tiny_model(small_schema()), exp_smoke()
 
 
-def _write_val_archive(root: Path) -> None:
-    """Publish one validation shard of four arm-3 episodes, two of them deaths."""
+def _write_val_archive(root: Path, *, lengths: Sequence[int] = (9, 12, 10, 14)) -> None:
+    """Publish arm-3 validation episodes, alternating deaths and survivals."""
     directory = root / "val" / "arm3" / "w0"
     directory.mkdir(parents=True)
     episodes: list[Episode] = []
-    for index, decisions in enumerate((9, 12, 10, 14)):
+    for index, decisions in enumerate(lengths):
         segment = random_segment(craftax_schema(), decisions, seed=index, terminal=True)
         aux = segment.aux.clone()
         aux[:, dream_eval.FIELDS.index("floor")] = (

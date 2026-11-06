@@ -7,6 +7,7 @@ is exact.
 
 from __future__ import annotations
 
+from functools import cache, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -19,6 +20,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
+from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import (
     CEILING,
     shared_scores,
@@ -50,9 +52,10 @@ _CWD: Final = Path(__file__).resolve().parent
 _DATA: Final = _CWD / "testdata"
 
 
-def stored(prefix: str) -> dict[str, Tensor]:
+@cache
+def stored(prefix: str = "") -> dict[str, Tensor]:
     """Return the captured values whose key starts with ``prefix``."""
-    record = read_tensors(_DATA / "reference.pt")
+    record = stored() if prefix else read_tensors(_DATA / "reference.pt")
     return {k: v for k, v in record.items() if k.startswith(prefix)}
 
 
@@ -305,6 +308,10 @@ class StepDependent:
 def step_dependent_experiment() -> MachineUnlearning.Config:
     """Inject a valid updating method without changing the experiment's recipe."""
     cfg = exp000()
+    model = cfg.pretrain.model
+    assert isinstance(model, ResNet.Config)
+    model.channels_hidden = (16, 32)
+    model.blocks_per_stage = (1, 1)
     cfg.method = InlineConfig(StepDependent)
     return cfg
 
@@ -353,6 +360,11 @@ def test_lockstep_runs_an_injected_step_dependent_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(reference.VARIANTS, "step_dependent", step_dependent_experiment)
+    monkeypatch.setattr(
+        vision_reference,
+        "tiny_model",
+        partial(vision_reference.tiny_model, blocks=(1, 1)),
+    )
     monkeypatch.setattr(vision_reference, "PROBE_SHAPE", (2, 3, 4, 5))
     for width, tiny_width in zip((16, 32, 64), (2, 3, 4), strict=True):
         monkeypatch.setitem(vision_reference.TINY_WIDTHS, width, tiny_width)

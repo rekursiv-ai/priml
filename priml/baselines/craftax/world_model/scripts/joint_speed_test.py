@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import copy
 import sys
 import warnings
 
-from configgle import Fig, PartialConfig
+from configgle import PartialConfig
 from treekle import json_loads
 
 import pytest
@@ -193,12 +195,19 @@ def test_window_stats_count_the_plans_passes_tokens_and_flops() -> None:
 @pytest.mark.parametrize("compiled", [False, True])
 def test_the_joint_world_model_copies_the_feature_source_for_the_replay(
     monkeypatch: pytest.MonkeyPatch,
+    twenty_layers: WorldModel,
     *,
     compiled: bool,
 ) -> None:
     fake = CpuTorch()
     monkeypatch.setattr(joint_speed, "torch", fake)
-    monkeypatch.setattr(joint_speed, "InitialWeights", _TwentyLayers)
+    monkeypatch.setattr(
+        joint_speed,
+        "InitialWeights",
+        SimpleNamespace(
+            Config=partial(PartialConfig, copy.deepcopy, x=twenty_layers),
+        ),
+    )
     monkeypatch.setattr(joint_speed, "Flash4Varlen", SdpaVarlen)
     flags = _flags(compile=compiled)
     joint = joint_speed._joint_world_model(flags, device=torch.device("cpu"))
@@ -342,18 +351,10 @@ def _contexts(*, horizon: int) -> Contexts:
     )
 
 
-class _TwentyLayers:
-    """Twenty global blocks of the tiny world model: exp001's depth, at test width."""
-
-    class Config(Fig["_TwentyLayers"]):
-        """Nothing to configure."""
-
-    def __init__(self, config: Config) -> None:
-        del config
-
-    def __call__(self) -> WorldModel:
-        """Return the model."""
-        return tiny_model(small_schema(), global_layers=20)
+@pytest.fixture(scope="module")
+def twenty_layers() -> WorldModel:
+    """Share immutable exp001-depth weights; each source receives its own copy."""
+    return tiny_model(small_schema(), global_layers=20)
 
 
 def _tiny_exp003() -> CraftaxTrainLoop:

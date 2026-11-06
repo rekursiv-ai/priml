@@ -1031,6 +1031,10 @@ def test_model_cost_keeps_alignment_and_auxiliary_grids_independent(
 @pytest.mark.parametrize("nested", [False, True])
 def test_auxiliary_head_cost_retains_nested_running_state(nested: bool) -> None:
     config = tiny_model_config(dropout=0)
+    config.unet.channels_hidden = (5,)
+    config.unet.backbone.network.blocks_per_stage = (1,)
+    config.unet.up_blocks = []
+    config.reference_columns = 6
     config.unet_gr_rmse_head.elements = [
         Linear.Config(channels_out=4),
         BatchNorm.Config(elementwise_affine=True),
@@ -1043,9 +1047,9 @@ def test_auxiliary_head_cost_retains_nested_running_state(nested: bool) -> None:
         ]
     execution = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 16, 32, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 4, 6, requires_grad=True),
         run=_all_cost_outputs,
-        input_grid=(16, 32),
+        input_grid=(4, 6),
         batch_size=2,
         dtype=torch.float32,
     )

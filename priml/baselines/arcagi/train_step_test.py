@@ -514,7 +514,7 @@ def test_owned_record_ignores_constructor_sampler_changes(
     recipe: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = run_port(recipe)
+    expected = read_tensors(_CWD / "testdata" / f"{recipe}.pt")
 
     def different_sampler(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
         del args, kwargs
