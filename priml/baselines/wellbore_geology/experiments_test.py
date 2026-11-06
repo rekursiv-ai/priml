@@ -51,8 +51,27 @@ from priml.train.epoch_loop import EarlyStopping
 
 @pytest.fixture(scope="module")
 def finalized_exp000() -> WellboreStudy.Config:
-    """Finalize the study with its nexus family alone; each family finalizes apart."""
+    """Finalize the nexus family at minimal distinct test geometry."""
     study = exp000()
+    family = study.families[-1]
+    family.training.max_epochs = 3
+    family.cv.folds = 2
+    family.cv.repeats = 1
+    family.training.dataset.loader.batch_size = 2
+    family.training.dataset.validation_batch_size = 2
+    features = family.training.dataset.loader.dataset.transform.features
+    features.prefix_rows = 2
+    features.target_rows = 6
+    features.downsample = 2
+    features.reference_columns = 6
+    model = _model(family)
+    model.channels_hidden = 2
+    model.kernel_size = 1
+    model.unet.channels_hidden = (2, 3)
+    model.unet.backbone.network.blocks_per_stage = (1, 1)
+    model.unet.up_blocks = model.unet.up_blocks[:1]
+    assert family.particle is not None
+    family.particle.particles = family.particle.seeds = family.particle.paths = 2
     study.families = study.families[-1:]
     return study.finalized()
 

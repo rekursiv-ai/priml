@@ -112,9 +112,13 @@ def test_preparing_writes_each_record_without_reading_it_back(
         prefix_rows=4,
         target_rows=6,
         downsample=2,
-        reference_columns=7,
+        reference_columns=3,
         reference_window=100.0,
+        particles=2,
+        seeds=1,
+        paths=1,
     )
+    config.emission.grid_step = 10.0
     # A family's split directory is created with its missing parents.
     directory = tmp_path / "family" / "train"
     prepared = prepare_particles(

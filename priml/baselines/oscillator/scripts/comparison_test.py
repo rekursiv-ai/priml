@@ -28,6 +28,7 @@ def test_smoke_run_writes_configs_records_and_provenance(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
+    monkeypatch.setattr(ForecastStudy, "run", _canned_run)
     smoke = experiments.exp_smoke()
     assert isinstance(smoke.method, DLinearForecast.Config)
     smoke.method.updates = 1
@@ -156,6 +157,23 @@ def _canned_run(study: ForecastStudy) -> dict[str, object]:
     }
 
 
+def _split_seed_run(study: ForecastStudy) -> dict[str, object]:
+    return {
+        "experiment": study.config.experiment_name,
+        "seed": study.config.seed,
+        "split_seeds": [
+            stream.seed
+            for stream in (
+                study.config.data.train,
+                study.config.data.validation,
+                study.config.data.synthetic,
+                study.config.data.test,
+                study.config.data.shifted,
+            )
+        ],
+    }
+
+
 def test_cli_refuses_to_overwrite_a_run(tmp_path: Path) -> None:
     with pytest.raises(FileExistsError):
         comparison.main(["--directory", str(tmp_path)])
@@ -202,8 +220,19 @@ def test_cli_can_run_only_the_requested_simulator_case(
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
     smoke = experiments.exp_smoke()
+    smoke.data.seq_len = 2
+    smoke.data.pred_len = 3
+    for stream in (
+        smoke.data.train,
+        smoke.data.validation,
+        smoke.data.synthetic,
+        smoke.data.test,
+        smoke.data.shifted,
+    ):
+        stream.count = 2
     assert isinstance(smoke.method, DLinearForecast.Config)
     smoke.method.updates = 1
+    smoke.method.batch_size = 3
     monkeypatch.setattr(experiments, "exp_smoke", lambda: smoke)
     destination = tmp_path / "run"
     comparison.main(
@@ -226,6 +255,8 @@ def test_cli_can_run_only_the_requested_simulator_case(
     assert report["cases"] == ["mismatched"]
     assert len(records) == 1
     assert records[0]["case"] == "mismatched"
+    training = from_plain(records[0]["training"], dict[str, object])
+    assert training["updates"] == 1
     assert not (destination / "matched-exp_smoke-7.json").exists()
 
 
@@ -256,6 +287,7 @@ def test_data_offsets_are_saved_and_shift_every_split_seed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
+    monkeypatch.setattr(ForecastStudy, "run", _split_seed_run)
     smoke = experiments.exp_smoke()
     smoke.data.synthetic.count = 4
     assert isinstance(smoke.method, DLinearForecast.Config)
@@ -282,7 +314,8 @@ def test_data_offsets_are_saved_and_shift_every_split_seed(
     assert report["data_seed_offsets"] == [0, 1000]
     records = from_plain(report["runs"], list[dict[str, object]])
     assert [record["data_seed_offset"] for record in records] == [0, 0, 1000, 1000]
-    assert records[0]["training"] != records[2]["training"]
+    assert records[0]["split_seeds"] == [101, 202, 303, 404, 505]
+    assert records[2]["split_seeds"] == [1101, 1202, 1303, 1404, 1505]
     assert (destination / "matched-exp_smoke-7.json").exists()
     assert (destination / "matched-exp_smoke-7-data1000.json").exists()
     config = (destination / "matched-exp_smoke-7-data1000.txt").read_text()

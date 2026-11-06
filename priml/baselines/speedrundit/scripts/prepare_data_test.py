@@ -30,6 +30,7 @@ from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.latent_codec import FloatCodec, ScalarTableCodec
 from priml.baselines.speedrundit.scripts import prepare_data
 from priml.model.ae.distribution import PointMass
+from priml.model.ae.invae import INVAE
 from priml.model.ae.invae_test import tiny
 from priml.model.ae.latent_norm import LatentNormalizer, ScaleLatents
 
@@ -409,7 +410,10 @@ def _non_finite_encode(model: nn.Module, images: Tensor) -> PointMass:
     return PointMass(torch.full((images.shape[0], 4, *_GRID), float("nan")))
 
 
-def test_seeded_posterior_is_stable_after_resume(tmp_path: Path) -> None:
+def test_seeded_posterior_is_stable_after_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A limit inside a window still encodes the whole window, as a full run does.
 
     At 4px the latent has 8 values, below the size where torch's CPU normal
@@ -421,6 +425,17 @@ def test_seeded_posterior_is_stable_after_resume(tmp_path: Path) -> None:
     full.autoencoder.image_size = 4
     resumed.autoencoder = full.autoencoder.copy_tree()
     full.seed = resumed.seed = 7
+    autoencoder_config = INVAE.Config
+    make = autoencoder_config.make
+    autoencoders: dict[int, INVAE] = {}
+
+    def make_once(config: INVAE.Config) -> INVAE:
+        key = id(config)
+        if key not in autoencoders:
+            autoencoders[key] = make(config)
+        return autoencoders[key]
+
+    monkeypatch.setattr(autoencoder_config, "make", make_once)
     prepare_data.prepare(full, imagenet=raw, device="cpu", batch_size=2)
     prepare_data.prepare(resumed, imagenet=raw, device="cpu", batch_size=2, limit=1)
     prepare_data.prepare(resumed, imagenet=raw, device="cpu", batch_size=2)

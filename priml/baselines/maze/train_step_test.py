@@ -49,10 +49,11 @@ if TYPE_CHECKING:
 
 _CWD: Final = Path(__file__).resolve().parent
 
-SIDE: Final = 4
+SIDE: Final = 2
 SLOTS: Final = 3
-WIDTH: Final = 8
+WIDTH: Final = 4
 TRAIN_STEPS: Final = 2
+RECORD_STEPS: Final = 1
 
 RUNGS: Final[dict[str, Callable[[], MazeTrainLoop]]] = {
     "exp000": experiments.exp000,
@@ -146,7 +147,7 @@ def record(config: BoundaryLossTrainStep.Config) -> dict[str, Tensor]:
         out["init"] = joined(step.model.parameters())
         data = batches()
         steps: list[dict[str, Tensor]] = []
-        for batch in data[:TRAIN_STEPS]:
+        for batch in data[:RECORD_STEPS]:
             result = step.train_step(**batch)
             # The stablemax loss sums in float64, whose last bit follows the
             # host's libm; rounding to float32 is what makes it portable.

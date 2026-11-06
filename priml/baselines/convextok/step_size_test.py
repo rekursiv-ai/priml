@@ -52,16 +52,18 @@ class _IterationOps:
     def __init__(self) -> None:
         self.norm_calls = 0
         self.dot_calls = 0
+        self.unit = torch.tensor(1.0, dtype=torch.float64)
+        self.zero = torch.tensor(0.0, dtype=torch.float64)
 
     def vector_norm(self, value: torch.Tensor) -> torch.Tensor:
         del value
         self.norm_calls += 1
-        return torch.tensor(1.0 if self.norm_calls % 2 else 0.0)
+        return self.unit if self.norm_calls % 2 else self.zero
 
     def dot(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
         del left, right
         self.dot_calls += 1
-        return torch.tensor(1.0, dtype=torch.float64)
+        return self.unit
 
 
 def test_probe_matches_libstdcxx_normal_draws() -> None:
@@ -218,6 +220,11 @@ def test_initial_step_size_runs_the_default_iteration_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scaled = scale_program(_diagonal_program())
+
+    def ones_probe(size: int) -> Tensor:
+        return torch.ones(size, dtype=torch.float64)
+
+    monkeypatch.setattr(step_size, "singular_value_probe", ones_probe)
     operations = _IterationOps()
     monkeypatch.setattr(torch.linalg, "vector_norm", operations.vector_norm)
     monkeypatch.setattr(torch, "dot", operations.dot)

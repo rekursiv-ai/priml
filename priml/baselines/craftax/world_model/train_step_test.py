@@ -96,7 +96,14 @@ def _step_config() -> WorldModelTrainStep.Config:
     return config
 
 
-def _segment(decisions: int, *, frames: int, starts: bool, seed: int) -> Segment:
+def _segment(
+    decisions: int,
+    *,
+    frames: int,
+    starts: bool,
+    seed: int,
+    terminal: bool = False,
+) -> Segment:
     schema = small_schema()
     generator = torch.Generator().manual_seed(seed)
     cells = torch.stack(
@@ -123,7 +130,7 @@ def _segment(decisions: int, *, frames: int, starts: bool, seed: int) -> Segment
         aux=aux.to(torch.int16),
         actions=torch.randint(0, 43, (decisions,), generator=generator).byte(),
         reward=torch.randint(-1, 4, (decisions,), generator=generator).short(),
-        done=torch.zeros(decisions, dtype=torch.bool),
+        done=torch.tensor([False] * (decisions - 1) + [terminal]),
         starts_episode=starts,
     )
 
@@ -475,9 +482,13 @@ def test_eval_loss_restores_the_models_mode() -> None:
 
 def test_state_dict_keeps_the_cumulative_series() -> None:
     step = _step_config().make()
-    batches = _batches()
+    batch = pack_windows(
+        [[_segment(2, frames=2, starts=True, seed=0, terminal=True)]],
+        t_g=4,
+        s_max=1,
+    )
     for _ in range(2):
-        step.train_step(**next(batches))
+        step.train_step(media=batch)
     assert step.total_training_time > 0
     restored = _step_config().make()
     restored.load_state_dict(step.state_dict())

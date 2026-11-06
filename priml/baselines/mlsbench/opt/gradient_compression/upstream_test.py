@@ -19,7 +19,10 @@ from treekle import from_plain
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision_reference
+from priml.baselines.mlsbench.dl.vision import (
+    reference as vision_reference,
+    upstream as vision_upstream,
+)
 from priml.baselines.mlsbench.opt.gradient_compression import (
     reference,
     upstream,
@@ -68,8 +71,8 @@ class BasicBlock(nn.Module):
 class ResNet(nn.Module):
     def __init__(self, block, num_blocks, num_classes=10):
         super().__init__()
-        self.conv = nn.Conv2d(3, 4, 3, padding=1)
-        self.linear = nn.Linear(4, num_classes)
+        self.conv = nn.Conv2d(3, 2, 3, padding=1)
+        self.linear = nn.Linear(2, num_classes)
 
     def forward(self, x):
         return self.linear(F.adaptive_avg_pool2d(F.relu(self.conv(x)), 1).flatten(1))
@@ -263,9 +266,19 @@ def test_lockstep_records_one_update_per_epoch(tmp_path: Path) -> None:
     assert not torch.equal(states[0]["conv.weight"], states[1]["conv.weight"])
 
 
-def test_the_trace_sees_the_schedule_cadence_and_best_accuracy(tmp_path: Path) -> None:
+def test_the_trace_sees_the_schedule_cadence_and_best_accuracy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Twelve epochs reach warmup's end, one periodic evaluation and the last.
-    record = upstream.upstream_trace(scripts(tmp_path)["none"], epochs=12)
+    monkeypatch.setattr(vision_reference, "PROBE_SHAPE", (2, 3, 2, 3))
+    root = tmp_path / "clone"
+    write_clone(root)
+    script = vision_upstream.narrowed(
+        vision_upstream.load_script(root / upstream.PRISTINE),
+        upstream.Script,
+    )
+    record = upstream.upstream_trace(script, epochs=12)
     assert record["schedule/exp000"][0].item() == 0.1 / 6
     assert record["schedule/exp004"][5].item() == 0.05
     assert record["eval/epochs"].tolist() == [1, 10, 12]

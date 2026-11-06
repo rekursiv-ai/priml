@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
 import json
+import shutil
 
 from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
-from treekle import json_loads
+from treekle import from_plain, json_loads
 
 import pytest
 import torch
@@ -412,10 +413,28 @@ def test_a_declared_architecture_must_match_the_staged_checkpoint(
         config.make()
 
 
-def _staged_tiny_checkpoint(root: Path) -> Path:
+def _staged_tiny_checkpoint(
+    root: Path,
+    *,
+    hidden_size: int = 16,
+    vocab_size: int = 32,
+    num_hidden_layers: int = 2,
+) -> Path:
     """Stage a tiny source checkpoint: config, safetensors weights, tokenizer."""
     torch.manual_seed(0)
-    metadata = {**hf_config(), "pad_token_id": 7}
+    layer_types = from_plain(hf_config()["layer_types"], list[str])
+    metadata: dict[str, object] = {
+        **hf_config(),
+        "vocab_size": vocab_size,
+        "num_hidden_layers": num_hidden_layers,
+        "layer_types": layer_types[:num_hidden_layers],
+        "hidden_size": hidden_size,
+        "intermediate_size": hidden_size * 3 // 2,
+        "head_dim": hidden_size // 2,
+        "linear_key_head_dim": hidden_size // 4,
+        "linear_value_head_dim": hidden_size // 4,
+        "pad_token_id": 7,
+    }
     architecture = Qwen35.Config.from_hf(metadata)
     model = architecture.make()
     hub.save_hf_checkpoint(
@@ -427,12 +446,24 @@ def _staged_tiny_checkpoint(root: Path) -> Path:
     return root
 
 
+@pytest.fixture(scope="module")
+def shared_tiny_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Stage the identical small source shared by checkpoint-path tests."""
+    return _staged_tiny_checkpoint(
+        tmp_path_factory.mktemp("tmax-checkpoint") / "source",
+        hidden_size=8,
+        vocab_size=8,
+        num_hidden_layers=1,
+    )
+
+
 def test_full_checkpoint_loads_into_fully_sharded_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    shared_tiny_checkpoint: Path,
 ) -> None:
     """Rebuild a full checkpoint through an FSDP-sharded model."""
-    checkpoint = _staged_tiny_checkpoint(tmp_path / "source")
+    checkpoint = shared_tiny_checkpoint
     dist.init_process_group(
         backend="gloo",
         init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
@@ -457,9 +488,12 @@ def test_full_checkpoint_loads_into_fully_sharded_model(
         assert torch.equal(actual[name], value), name
 
 
-def test_export_round_trips_the_trained_weights(tmp_path: Path) -> None:
+def test_export_round_trips_the_trained_weights(
+    tmp_path: Path,
+    shared_tiny_checkpoint: Path,
+) -> None:
     """The exported checkpoint is the staged format with the trained weights."""
-    source = _staged_tiny_checkpoint(tmp_path / "source")
+    source = shutil.copytree(shared_tiny_checkpoint, tmp_path / "source")
     (source / "generation_config.json").write_text("{}", encoding="utf-8")
     (source / "README.md").write_text("not part of the export", encoding="utf-8")
     config = TMaxDPPOTrainStep.Config()
@@ -482,7 +516,18 @@ def test_export_round_trips_the_trained_weights(tmp_path: Path) -> None:
         (tmp_path / "export" / "config.json").read_text(encoding="utf-8"),
         dict[str, object],
     )
-    assert written == {**hf_config(), "pad_token_id": 7}
+    assert written == {
+        **hf_config(),
+        "vocab_size": 8,
+        "num_hidden_layers": 1,
+        "layer_types": ["linear_attention"],
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "head_dim": 4,
+        "linear_key_head_dim": 2,
+        "linear_value_head_dim": 2,
+        "pad_token_id": 7,
+    }
     assert (tmp_path / "export" / "tokenizer.json").is_file()
     assert (tmp_path / "export" / "generation_config.json").is_file()
     assert not (tmp_path / "export" / "README.md").exists()
@@ -552,7 +597,10 @@ def test_the_pad_token_may_be_an_added_token_record(tmp_path: Path) -> None:
     assert train_step._tokenizer_pad_token_id(tmp_path) == 7
 
 
-def test_export_derives_the_text_only_config(tmp_path: Path) -> None:
+def test_export_derives_the_text_only_config(
+    tmp_path: Path,
+    shared_tiny_checkpoint: Path,
+) -> None:
     """The released multimodal source exports as the text model upstream saves.
 
     Upstream's trainer holds the text model ``AutoModelForCausalLM`` maps the
@@ -561,7 +609,7 @@ def test_export_derives_the_text_only_config(tmp_path: Path) -> None:
     the extracted text config. The export carries that config rather than
     refusing the real source checkpoint after the run that produced it.
     """
-    source = _staged_tiny_checkpoint(tmp_path / "source")
+    source = shared_tiny_checkpoint
     config = TMaxDPPOTrainStep.Config()
     config.model_path = source
     config.parallelism = NoParallel.Config(device="cpu")
@@ -572,6 +620,14 @@ def test_export_derives_the_text_only_config(tmp_path: Path) -> None:
     # text_config whose own tied-head flag differs from the wrapper's.
     step._checkpoint_metadata["text_config"] = {
         **hf_config(),
+        "vocab_size": 8,
+        "num_hidden_layers": 1,
+        "layer_types": ["linear_attention"],
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "head_dim": 4,
+        "linear_key_head_dim": 2,
+        "linear_value_head_dim": 2,
         "tie_word_embeddings": True,
     }
     step._checkpoint_metadata["architectures"] = ["Qwen3_5ForConditionalGeneration"]

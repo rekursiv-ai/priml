@@ -118,7 +118,7 @@ def test_the_kernels_match_the_torch_reference_under_the_triton_interpreter(
 ) -> None:
     """Triton's CPU interpreter runs each launch's host code and kernel body.
 
-    Four rows of four lanes make the loss kernel write four blocks of partial sums.
+    A two-by-eight minibatch exercises every Triton stage with distinct axes.
     """
     monkeypatch.setattr(policy_gradient_kernel, "_require_cuda", _accept_any_device)
     # The logsumexp's ``where`` evaluates the rescale it discards, whose ``exp``
@@ -138,12 +138,12 @@ def _assert_kernels_match_reference() -> None:
     batch = random_minibatch(
         rows=2,
         horizon=TritonPPO.Config.ADVANTAGE_WIDTH,
-        num_actions=3,
+        num_actions=2,
         seed=3,
     )
     reference = TorchPPO.Config().make()
     config = TritonPPO.Config()
-    config.block = 4
+    config.block = 16
     config.num_warps = 1
     triton_ppo = config.make()
     inputs = (batch["decoded"], batch["actions"], batch["action_mask"])

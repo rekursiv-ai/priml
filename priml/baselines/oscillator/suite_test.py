@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal, Self, override
 
 import sys
 
-from configgle import Fig, LateBound, Makes, Makes2
+from configgle import Fig, LateBound, Makes, Makes2, traverse
 from torch import Tensor
 from treekle import ReadError, from_plain, json_dumps, json_loads
 
@@ -95,6 +95,53 @@ def test_planning_does_not_copy_the_recipe_data_it_replaces(
     )
     assert len({id(study.data) for _, _, _, study in planned}) == len(planned)
     assert len({id(study.method) for _, _, _, study in planned}) == len(planned)
+    tasks = dict(suite.tasks("audit"))
+    for _, system_id, _, study in planned:
+        task = tasks[system_id]
+        for leaf in (
+            "cheap",
+            "reference",
+            "train",
+            "validation",
+            "synthetic",
+            "test",
+            "shifted",
+        ):
+            assert getattr(study.data, leaf) is not getattr(task, leaf), leaf
+            if leaf not in {"train", "validation"}:
+                assert getattr(study.data, leaf) == getattr(task, leaf), leaf
+    assert (
+        len({id(study.data.train) for _, _, _, study in planned})
+        == len({id(study.data.shifted) for _, _, _, study in planned})
+        == len(planned)
+    )
+
+
+def test_planned_methods_share_no_nested_config_with_their_recipe() -> None:
+    cfg = exp040()
+    cfg.audit = cfg.audit[:1]
+    cfg.audit[0].instances = 1
+    cfg.budgets = cfg.budgets[:1]
+    for recipe in cfg.recipes:
+        recipe.seeds = recipe.seeds[:1]
+    for recipe, _, _, study in cfg.make().plan("audit"):
+        nested = {
+            id(found.config)
+            for found in traverse(recipe.study.method, Fig, recurse=True)
+            if found.fqn
+        }
+        copied = {
+            id(found.config)
+            for found in traverse(study.method, Fig, recurse=True)
+            if found.fqn
+        }
+        assert len(copied) == len(nested)
+        assert copied.isdisjoint(nested)
+    assert any(
+        found.fqn
+        for recipe in cfg.recipes
+        for found in traverse(recipe.study.method, Fig, recurse=True)
+    )
 
 
 def test_audit_force_configs_do_not_alias_development() -> None:
@@ -239,11 +286,23 @@ def test_extra_reference_data_cannot_change_the_scoring_denominator(
     tmp_path: Path,
 ) -> None:
     cfg = tiny_suite()
+    cfg.data.seq_len = 3
+    cfg.data.pred_len = 2
+    cfg.data.synthetic.count = 2
+    cfg.data.test.count = 2
+    cfg.data.shifted.count = 2
+    cfg.audit = cfg.audit[:1]
+    cfg.audit[0].instances = 1
+    cfg.budgets = [
+        ReferenceBudget.Config(train=4, validation=2),
+        ReferenceBudget.Config(name="large", train=8, validation=3),
+    ]
     cfg.recipes[0].seeds = cfg.recipes[0].seeds[:1]
+    cfg.recipes[1].seeds = cfg.recipes[1].seeds[:1]
     suite = cfg.make()
     records, diagnostics = suite.run(tmp_path / "audit", phase="audit")
     assert all(record["status"] == "complete" for record in records)
-    assert len(diagnostics) == 6
+    assert len(diagnostics) == 2
     assert all(row["oracle_scaled_mse"] == 0 for row in diagnostics)
     for small in (row for row in records if row["budget"] == "small"):
         large = next(
@@ -257,8 +316,8 @@ def test_extra_reference_data_cannot_change_the_scoring_denominator(
         assert small["result"] is not None
         assert large["result"] is not None
         assert small["result"]["scores"] == large["result"]["scores"]
-        assert small["result"]["reference_budget"] == 9
-        assert large["result"]["reference_budget"] == 18
+        assert small["result"]["reference_budget"] == 6
+        assert large["result"]["reference_budget"] == 11
     with pytest.raises(FileExistsError):
         suite.run(tmp_path / "audit", phase="audit")
 
@@ -388,9 +447,16 @@ def test_resume_retains_attempts_and_rejects_changed_provenance(
     method: str,
 ) -> None:
     cfg = tiny_suite()
+    cfg.data.seq_len = 3
+    cfg.data.pred_len = 2
+    cfg.data.synthetic.count = 2
+    cfg.data.test.count = 2
+    cfg.data.shifted.count = 2
     cfg.audit = cfg.audit[:1]
     cfg.audit[0].instances = 1
-    cfg.budgets = cfg.budgets[:1]
+    cfg.budgets = [ReferenceBudget.Config(train=4, validation=2)]
+    cfg.recipes = cfg.recipes[:1]
+    cfg.recipes[0].seeds = [11, 12]
     if method == "pretrained":
         pretrained = PretrainedForecast.Config()
         pretrained.pipeline = _PointForecast.Config()

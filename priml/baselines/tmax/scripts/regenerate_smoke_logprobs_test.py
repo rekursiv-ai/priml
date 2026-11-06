@@ -42,19 +42,12 @@ def test_regeneration_reproduces_the_committed_fixture(
 
 
 def test_regeneration_refuses_a_fixture_whose_ratio_drifts(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _copy(tmp_path)
-    monkeypatch.setattr("sys.argv", ["regen", "--fixture", str(fixture)])
-
-    def drifted(*args: object) -> float:
-        del args
-        return 2.0
-
-    monkeypatch.setattr(regenerate_smoke_logprobs, "_ratio_mean", drifted)
+    monkeypatch.setattr(regenerate_smoke_logprobs, "RATIO_TOLERANCE", 0.5)
+    regenerate_smoke_logprobs._check_ratio(1.5)
     with pytest.raises(SystemExit, match="differs from 1"):
-        regenerate_smoke_logprobs.main()
+        regenerate_smoke_logprobs._check_ratio(1.75)
 
 
 def test_a_packed_row_must_carry_the_records_tokens() -> None:

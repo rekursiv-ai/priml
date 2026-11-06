@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from priml.baselines.wellbore_geology.data import discover_wells, load_split
+from priml.baselines.wellbore_geology.metrics import PooledRMSE
 from priml.baselines.wellbore_geology.model import SequenceModel
 from priml.baselines.wellbore_geology.recipes import (
     _model,
@@ -334,16 +335,33 @@ def test_complete_native_record_retains_every_tensor_scalar_and_container() -> N
     assert values["name/@str"].tolist() == list(b"native")
 
 
-@pytest.mark.parametrize("name", ["0719_V1", "0803_V2", "0801_V2"])
-def test_owned_record_ignores_constructor_sampler_changes(
-    name: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param("0719_V1", id="0719_V1"),
+        pytest.param("0803_V2", id="0803_V2"),
+        pytest.param("0801_V2", id="0801_V2"),
+    ],
+)
+def owned_record_expected(
+    request: pytest.FixtureRequest,
+) -> tuple[str, dict[str, torch.Tensor]]:
+    name = cast("str", request.param)
     recipe = _family_recipe(name)
     recipe.max_epochs = 1
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(31)
-        expected = capture_training(recipe=recipe)
+        return name, capture_training(recipe=recipe)
+
+
+def test_owned_record_ignores_constructor_sampler_changes(
+    owned_record_expected: tuple[str, dict[str, torch.Tensor]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name, expected = owned_record_expected
+    recipe = _family_recipe(name)
+    recipe.max_epochs = 1
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(31)
 
         def different_sampler(
@@ -398,8 +416,66 @@ def _family_recipe(name: str) -> WellboreFoldLoop.Config:
         "0803_V2": family_0803_v2,
     }[name]()
     recipe = tiny_recipe(family)
+    model = recipe.step.model
+    assert isinstance(model, SequenceModel.Config)
+    model.channels_hidden = 5
+    model.reference_columns = 6
+    model.unet.channels_hidden = (5,)
+    model.unet.backbone.network.blocks_per_stage = (1,)
+    model.unet.up_blocks = []
+    dataset = recipe.dataset
+    assert isinstance(dataset, BatchedFoldData.Config)
+    dataset.batches = _small_training_batches
+    metric = recipe.metrics_eval[""]
+    assert isinstance(metric, PooledRMSE.Config)
+    metric.expansion.prefix_rows = 2
+    metric.expansion.target_rows = 6
+    metric.expansion.downsample = 2
     recipe.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
     return recipe
+
+
+def _small_training_batches() -> list[dict[str, object]]:
+    target = (torch.arange(2 * 4).reshape(2, 4) % 7).float() / 11
+    mask = torch.ones(2, 4, dtype=torch.bool)
+    mask[:, :2] = False
+    probability = (torch.arange(2 * 4 * 6).reshape(2, 4, 6) % 13 + 1).float()
+    probability.div_(probability.sum(-1, keepdim=True))
+    return [
+        {
+            "media": (torch.arange(2 * 3 * 4 * 6).reshape(2, 3, 4, 6) % 17).float()
+            / 19,
+            "typewell_aux": torch.zeros(
+                2,
+                2,
+                6,
+            ),  # ImageFeatures stacks value and mask.
+            "z_rel": target / 3,
+            "bin_count": torch.full((2, 4), 2.0),
+            "label": target,
+            "typewell_target_probs": probability,
+            "aux_targets": {
+                "GR_penalty_error": probability,
+                "unet_GR_RMSE": target.abs(),
+                "unet_GR_RMSE_mask": mask,
+                "gr_corr_weight_gr": target,
+                "gr_corr_weight_mask": mask,
+            },
+            "target_mask": mask,
+            "row_mask": torch.ones(2, 4),
+            "meta": [
+                {
+                    "well_id": f"golden{index}",
+                    "suffix_len": 6,
+                    "submit_indices": np.arange(6),
+                    "suffix_z": np.linspace(0, 1, 6, dtype=np.float32),
+                    "tvt0": 100.0 + index,
+                    "TVT": np.linspace(99, 103, 6, dtype=np.float32),
+                }
+                for index in range(2)
+            ],
+        },
+    ]
 
 
 def test_pinned_dropout_draws_at_each_decoder_site_and_never_in_evaluation() -> None:

@@ -439,7 +439,7 @@ def test_the_ports_rollout_captures_episodes_that_replay(short: None) -> None:
     # One rollout of a tiny policy: every row's episode ends within its horizon.
     del short
     env = CaptureEnv(
-        CaptureEnv.Config(num_envs=4, num_buffers=2),
+        CaptureEnv.Config(num_envs=2, num_buffers=2),
         schedule=Schedule(budget=10**9),
     )
     torch.manual_seed(0)

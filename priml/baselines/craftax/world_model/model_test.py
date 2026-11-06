@@ -523,7 +523,11 @@ def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients() -> 
 
 
 def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels() -> None:
-    batch = _batch(windows=1)
+    batch = pack_windows(
+        [[_segment(2, frames=2, starts=True, terminal=True, seed=1)]],
+        t_g=5,
+        s_max=1,
+    )
     plain = _two_layer_local_model(checkpoint=True)
     kept = _two_layer_local_model(checkpoint=True, keeps_attention=True)
     calls, calls_kept = _count_local_calls(plain), _count_local_calls(kept)

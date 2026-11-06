@@ -332,11 +332,11 @@ def test_float8_linear_forward_keeps_autocast_enabled(
 
     strategy = Float8ModelQuantization.Config().make()
     monkeypatch.setattr(Float8Linear, "forward", _spy_forward)
-    model = nn.Sequential(nn.Linear(16, 16, bias=False))
+    model = nn.Sequential(nn.Linear(16, 32, bias=False))
     quantized = strategy(model)
 
     with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
-        quantized(torch.randn(2, 16))
+        quantized(torch.randn(48, 16))
 
     assert observed == [True]
 

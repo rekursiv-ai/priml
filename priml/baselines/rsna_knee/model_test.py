@@ -663,7 +663,10 @@ def test_raptor_cost_counts_whole_bag_without_duplicating_parameters(
     config = _raptor_config()
     backbone = _backbone(config)
     backbone.image_size = (32, 64)
-    backbone.blocks_per_stage = (1, 1, 1, 1)
+    assert isinstance(backbone.stage, list)
+    backbone.stage = [backbone.stage[0], backbone.stage[2]]
+    backbone.channels_hidden = (2, 3)
+    backbone.blocks_per_stage = (1, 1)
     config.chunk_size = chunk_size
     assert_cost_matches_torch(
         config,
@@ -1128,27 +1131,27 @@ def test_backbone_config_names_its_native_architecture() -> None:
 
 
 def test_encoder_and_study_cost_match_complete_torch_architecture() -> None:
-    # ConvNeXt's three downsamplers require both spatial extents to be >=32.
-    # Meta tensors keep the narrow four-stage encoder free of weight allocation.
+    # One stage retains the encoder and readout paths at distinct minimum axes.
     encoder = _Architecture.Config()
     assert isinstance(encoder.backbone, ConvNeXt.Config)
-    encoder.backbone.channels_hidden = (2, 3, 4, 5)
-    encoder.backbone.blocks_per_stage = (1, 1, 1, 1)
+    encoder.backbone.channels_hidden = (2,)
+    encoder.backbone.blocks_per_stage = (1,)
     study = Raptor.Config()
     study.backbone = encoder
+    study.head.channels_hidden = 2
     with torch.device("meta"):
         assert_cost_matches_torch(
             encoder,
-            build_input=lambda: torch.randn(2, 3, 32, 64, requires_grad=True),
-            input_grid=(32, 64),
+            build_input=lambda: torch.randn(2, 3, 4, 6, requires_grad=True),
+            input_grid=(4, 6),
             batch_size=2,
             dtype=torch.float32,
         )
         assert_cost_matches_torch(
             study,
-            build_input=lambda: torch.randn(2, 4, 3, 32, 64, requires_grad=True),
-            input_grid=(32, 64),
-            seq_len=4,
+            build_input=lambda: torch.randn(2, 5, 3, 4, 6, requires_grad=True),
+            input_grid=(4, 6),
+            seq_len=5,
             batch_size=2,
             dtype=torch.float32,
         )

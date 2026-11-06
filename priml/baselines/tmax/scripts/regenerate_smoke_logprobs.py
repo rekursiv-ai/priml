@@ -87,10 +87,15 @@ def main() -> int:
     step.model.load_state_dict(weights)
     check_batch = _batch(config)
     ratio = _ratio_mean(step, check_batch)
-    if abs(ratio - 1.0) > RATIO_TOLERANCE:
-        raise SystemExit(f"Fixture ratio_mean differs from 1: {ratio!r}")
+    _check_ratio(ratio)
     print(f"ratio_mean={ratio!r} (verified through the training step)")
     return 0
+
+
+def _check_ratio(ratio: float) -> None:
+    """Reject a regenerated fixture whose mean importance ratio drifts."""
+    if abs(ratio - 1.0) > RATIO_TOLERANCE:
+        raise SystemExit(f"Fixture ratio_mean differs from 1: {ratio!r}")
 
 
 class _Flags(Protocol):

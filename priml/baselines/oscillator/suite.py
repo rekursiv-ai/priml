@@ -321,8 +321,16 @@ class BenchmarkSuite:
                 for recipe in self.config.recipes:
                     for seed in recipe.seeds:
                         cfg = copy.copy(recipe.study)
-                        cfg.data = data
-                        cfg = cfg.copy_tree()
+                        cfg.method = copy.deepcopy(recipe.study.method)
+                        # Data configs are leaves; shallow copies isolate budgets.
+                        cfg.data = copy.copy(data)
+                        cfg.data.cheap = copy.copy(data.cheap)
+                        cfg.data.reference = copy.copy(data.reference)
+                        cfg.data.train = copy.copy(data.train)
+                        cfg.data.validation = copy.copy(data.validation)
+                        cfg.data.synthetic = copy.copy(data.synthetic)
+                        cfg.data.test = copy.copy(data.test)
+                        cfg.data.shifted = copy.copy(data.shifted)
                         cfg.data.train.count = budget.train
                         cfg.data.validation.count = budget.validation
                         cfg.scoring_trajectories = min(

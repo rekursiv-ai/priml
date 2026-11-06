@@ -20,7 +20,8 @@ from priml.testing.golden import mismatches, read_tensors
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
+
 
 _CWD: Final = Path(__file__).resolve().parent
 
@@ -110,6 +111,42 @@ def test_the_port_record_holds_every_stored_key_of_its_variants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(reference, "VARIANTS", {"basic": reference.VARIANTS["basic"]})
+    monkeypatch.setattr(
+        reference,
+        "block_record",
+        lambda: {
+            key: value
+            for key, value in stored("block/").items()
+            if key.split("/")[1] == "basic"
+        },
+    )
+    monkeypatch.setattr(
+        vision_reference,
+        "schedule_record",
+        lambda: stored("schedule/"),
+    )
+    monkeypatch.setattr(
+        vision_reference,
+        "optimizer_record",
+        lambda: stored("optimizer/"),
+    )
+    monkeypatch.setattr(vision_reference, "best_record", lambda: stored("best/"))
+
+    def draws_record(names: Iterable[str]) -> dict[str, torch.Tensor]:
+        return {
+            key: value
+            for name in names
+            for key, value in stored(f"draws/{name}").items()
+        }
+
+    monkeypatch.setattr(reference, "draws_record", draws_record)
+
+    def lockstep_record(name: str) -> dict[str, torch.Tensor]:
+        return stored(
+            f"lockstep/{name}/",
+        )
+
+    monkeypatch.setattr(reference, "lockstep_record", lockstep_record)
     expected = {
         k
         for k in stored("")
