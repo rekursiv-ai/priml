@@ -55,6 +55,7 @@ from priml.testing.golden import (
     PinnedRandom,
     read_tensors,
 )
+from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA
 
 
@@ -481,6 +482,54 @@ class CopyPreparation:
         return copy.deepcopy(model)
 
 
+class FittedInferenceStep(MotorImageryStep):
+    """Supply a fitted predecessor while retaining the real inference lifecycle."""
+
+    def __init__(
+        self,
+        config: MotorImageryStep.Config,
+        *,
+        model: torch.nn.Module,
+    ) -> None:
+        self.config = config
+        self._model = model
+        self.timer_eval = CheckpointableStepTimer()
+        self.timer_step = CheckpointableStepTimer(global_count=2, local_count=2)
+        self.ema = config.ema.make()
+        assert isinstance(self.ema, EMA)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.copy_(
+                    torch.arange(parameter.numel()).reshape(parameter.shape)
+                    / parameter.numel()
+                    + 0.25,
+                )
+            for buffer in model.buffers():
+                buffer.fill_(3)
+            self.ema(model)
+            for parameter in model.parameters():
+                parameter.add_(0.5)
+            for buffer in model.buffers():
+                buffer.add_(1)
+            self.ema(model)
+
+
+class FittedInferenceLoop(MotorImageryLoop):
+    """Offer explicit fitted state at the campaign's fit boundary."""
+
+    def __init__(
+        self,
+        config: MotorImageryLoop.Config,
+        *,
+        model: torch.nn.Module,
+    ) -> None:
+        self.step = FittedInferenceStep(config.step, model=model)
+
+    @override
+    def train(self) -> None:
+        """Keep the supplied predecessor; numerical fitting has its own golden test."""
+
+
 class ObservedCampaign(MotorImageryCampaign):
     """Observe real full-cohort fitting while isolating subject validation."""
 
@@ -507,12 +556,18 @@ class ObservedCampaign(MotorImageryCampaign):
         trials: list[Trial],
         validation_subjects: list[str],
     ) -> MotorImageryLoop:
-        loop = super()._make_loop(
-            model,
-            config=config,
-            trials=trials,
-            validation_subjects=validation_subjects,
-        )
+        if (
+            isinstance(config.step.ema, EMA.Config)
+            and config.step.ema.shadow_kind == "param_dict"
+        ):
+            loop = FittedInferenceLoop(config, model=model)
+        else:
+            loop = super()._make_loop(
+                model,
+                config=config,
+                trials=trials,
+                validation_subjects=validation_subjects,
+            )
         assert isinstance(loop.step, MotorImageryStep)
         self.offered.append(model)
         self.fitted.append(loop.step)
@@ -536,10 +591,21 @@ def _record_inference(
         predictions.append(output.detach().clone())
 
 
-@pytest.mark.parametrize("policy", ["copy", "ema_module", "ema_params", "autocast"])
+@pytest.mark.parametrize(
+    ("policy", "member"),
+    [
+        pytest.param("copy", -1, id="copy"),
+        pytest.param("ema_module", -1, id="ema_module"),
+        pytest.param("ema_params", 0, id="ema_params-multiscale"),
+        pytest.param("ema_params", 1, id="ema_params-shallow"),
+        pytest.param("ema_params", 2, id="ema_params-attention"),
+        pytest.param("autocast", -1, id="autocast"),
+    ],
+)
 def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
     tmp_path: Path,
     policy: str,
+    member: int,
 ) -> None:
     cfg = ObservedCampaign.Config()
     cfg.update(synthetic_campaign(tmp_path))
@@ -588,9 +654,17 @@ def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
     assert isinstance(finalized_shallow.pool, AvgPool2d.Config)
     assert finalized_shallow.pool.kernel_size == (1, 16)
     assert finalized_shallow.pool.stride == (1, 15)
+    if policy == "ema_params":
+        runner.config.ensemble = [runner.config.ensemble[member]]
     with portable_half_precision():
-        runner.run()
-    assert len(runner.fitted) == len(cfg.ensemble) == 3
+        if policy == "ema_params":
+            output = Path(cfg.working_dir)
+            output.mkdir()
+            runner._execute(output=output, device=torch.device("cpu"))
+        else:
+            runner.run()
+    assert len(runner.fitted) == len(runner.config.ensemble)
+    assert len(runner.fitted) == (1 if policy == "ema_params" else 3)
     if policy == "copy":
         for offered, fitted in zip(runner.offered, runner.fitted, strict=True):
             assert fitted.model is not offered
@@ -632,6 +706,37 @@ def test_campaign_exports_and_predicts_the_complete_fitted_inference_state(
             expected_prediction = step.call_eval(media)
         assert isinstance(expected_prediction, Tensor)
         assert torch.equal(prediction, expected_prediction)
+        if policy == "ema_params":
+            assert isinstance(step.ema, EMA)
+            parameters = dict(step.model.named_parameters())
+            buffers = dict(step.model.named_buffers())
+            assert buffers
+            assert state.keys() == parameters.keys() | buffers.keys()
+            for name, parameter in parameters.items():
+                assert torch.equal(state[name], step.ema.shadow_params[name])
+                assert not torch.equal(state[name], parameter)
+            for name, buffer in buffers.items():
+                assert torch.equal(state[name], torch.full_like(buffer, 4))
+            with portable_half_precision(), torch.no_grad():
+                restored = copy.deepcopy(step.model)
+                assert isinstance(
+                    restored,
+                    (MultiScaleEEGNet, ShallowConvNet, AttentionEEGNet),
+                )
+                restored.load_state_dict(state)
+                restored.eval()
+                reloaded = restored(media)
+                model = step.model
+                assert isinstance(
+                    model,
+                    (MultiScaleEEGNet, ShallowConvNet, AttentionEEGNet),
+                )
+                model.eval()
+                live = model(media)
+            assert prediction.shape == (5, 2)
+            assert torch.isfinite(prediction).all()
+            assert torch.equal(prediction, reloaded)
+            assert not torch.equal(prediction, live)
 
 
 @pytest.mark.parametrize("default", ["cpu", "meta"])

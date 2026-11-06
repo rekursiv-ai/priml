@@ -26,10 +26,12 @@ from priml.baselines.wellbore_geology import particles, pipeline
 from priml.baselines.wellbore_geology.data import (
     FoldObservations,
     PredictionRows,
+    RawWell,
     load_split,
 )
 from priml.baselines.wellbore_geology.inference import (
     FamilyArtifacts,
+    PredictionBuilder,
     PredictionTable,
     SingleFamilyPrediction,
     read_table,
@@ -78,7 +80,6 @@ from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.train.budget import WallBudget
 from priml.train.epoch_loop import EarlyStopping, first_periodic_and_last
-from priml.train.profiler import PhaseTimer
 
 
 if TYPE_CHECKING:
@@ -390,34 +391,43 @@ def test_a_fold_saves_its_selected_state_not_its_last_one(
     assert caplog.messages == ["fold0: priml best_epoch=7, best_rmse=0.2500"]
 
 
-def test_repeated_folds_average_each_row_and_look_its_curves_up_again(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _selecting(monkeypatch, None)
-    dataset = tmp_path / "data"
-    write_study_inputs(dataset, rows=13, test_wells=0)
-    output = tmp_path / "trained"
-    output.mkdir()
-    family = tiny_family(particle=False)
-    family.training.step.model = SmokeModel.Config()
-    family.training.phase_timer = PhaseTimer.Config(heartbeat_interval_sec=0)
-    features = family.training.dataset.loader.dataset.transform.features
-    features.target_rows = 8
-    features.reference_columns = 8
-    family.cv.repeats = 2
-    family.dataset_directory = dataset
-    trained = train_family(
-        family,
-        raw=load_split(dataset / "train"),
-        output_directory=output,
-    )
-    table = read_table(trained.oof)
-    assert len(table.rows.tvt) == 4 * (13 - features.prefix_rows)
+def test_repeated_folds_average_each_row_and_look_its_curves_up_again() -> None:
+    curves = {
+        name: RawWell(
+            well_id=name,
+            horizontal={},
+            reference_depth=np.asarray([0, 1, 2], dtype=np.float64),
+            reference_gamma=np.asarray([0, 1, 4], dtype=np.float64),
+        )
+        for name in ("well0", "well1")
+    }
+    builder = PredictionBuilder.Config().make()
+    tables = [
+        builder.lookup_gamma(
+            PredictionTable(
+                rows=PredictionRows(
+                    well_ids=(name, name),
+                    submit_indices=np.asarray([4, 5], dtype=np.int64),
+                    tvt=np.asarray([2 * repeat, 1], dtype=np.float32),
+                    z=np.asarray([3, 4], dtype=np.float32),
+                    target=np.asarray([1, 2], dtype=np.float32),
+                ),
+            ),
+            curves=curves,
+        )
+        for repeat in range(2)
+        for name in curves
+    ]
+    table = builder.average_repeats(tables, curves=curves, repeats=2)
+    assert table.rows.well_ids == ("well0", "well0", "well1", "well1")
+    np.testing.assert_array_equal(table.rows.submit_indices, [4, 5, 4, 5])
+    np.testing.assert_array_equal(table.rows.tvt, np.ones(4, dtype=np.float32))
+    np.testing.assert_array_equal(table.rows.target, [1, 2, 1, 2])
     lookups = [name for name in table.diagnostics if name.endswith("_lookup_GR")]
     assert lookups
     for name in lookups:
         assert np.isfinite(table.diagnostics[name]).any(), name
+        np.testing.assert_array_equal(table.diagnostics[name], np.ones(4))
 
 
 # The EMA shadow is never read: a fold predicts with the state it selected.
