@@ -209,6 +209,41 @@ def test_family_without_held_out_observations_still_resolves_its_inputs() -> Non
     assert train.directory == Path("/data/train")
 
 
+def test_family_resolves_particle_cache_directories_without_overwriting_them(
+    tmp_path: Path,
+) -> None:
+    config = family_0803_v2()
+    config.pf_directory = tmp_path / "particles"
+    validation = config.training.dataset.validation
+    assert validation is not None
+    assert isinstance(validation.particle, ParticleCache.Config)
+    validation.particle.directory = tmp_path / "held-out"
+    resolved = config.finalized()
+    train = resolved.training.dataset.loader.dataset.observations
+    assert isinstance(train, FoldObservations.Config)
+    assert isinstance(train.particle, ParticleCache.Config)
+    assert train.particle.directory == tmp_path / "particles" / "train"
+    assert resolved.training.dataset.validation is not None
+    assert isinstance(
+        resolved.training.dataset.validation.particle,
+        ParticleCache.Config,
+    )
+    assert (
+        resolved.training.dataset.validation.particle.directory == tmp_path / "held-out"
+    )
+
+
+@pytest.mark.parametrize("particle", [False, True])
+def test_family_constructs_matching_particle_declarations(particle: bool) -> None:
+    config = family_0803_v2() if particle else family_0719_v1()
+    resolved = config.finalized()
+    family = Family(resolved)
+    assert family.config is resolved
+    features = family.config.training.dataset.loader.dataset.transform.features
+    assert (family.config.particle is not None) == particle
+    assert (features.particle is not None) == particle
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

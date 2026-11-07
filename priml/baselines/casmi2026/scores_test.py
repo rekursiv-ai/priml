@@ -129,6 +129,25 @@ def test_population_z_is_zero_below_the_variance_cutoff(values: list[float]) -> 
     assert scores.dtype == source.dtype
 
 
+def test_population_z_uses_population_variance_without_changing_input() -> None:
+    values = np.array([2.0, 4.0], np.float32)
+    actual = population_z(values)
+
+    assert actual.dtype == np.float32
+    np.testing.assert_array_equal(actual, np.array([-1.0, 1.0], np.float32))
+    np.testing.assert_array_equal(values, np.array([2.0, 4.0], np.float32))
+
+
+@pytest.mark.parametrize("spread", [0.0, 1e-10, 1e-9])
+def test_population_z_returns_zeros_at_or_below_the_cutoff(spread: float) -> None:
+    values = np.array([-spread, spread], np.float64)
+    actual = population_z(values)
+
+    assert actual.dtype == values.dtype
+    np.testing.assert_array_equal(actual, np.zeros_like(values))
+    np.testing.assert_array_equal(values, np.array([-spread, spread], np.float64))
+
+
 def test_tanimoto_keeps_the_additive_guard_in_binary32() -> None:
     shared = np.array([2.0, 0.0], np.float32)
     left = np.array([4.0, 0.0], np.float32)

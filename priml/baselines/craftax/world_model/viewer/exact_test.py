@@ -173,6 +173,11 @@ def test_manifest_keys_inside_lists_are_renamed_both_ways() -> None:
 
 
 def test_frame_and_health_records_keep_their_byte_layout() -> None:
+    frame = frame_dtype.__wrapped__()
+    health = health_dtype.__wrapped__()
+    assert frame == frame_dtype()
+    assert health == health_dtype()
+    assert health.descr == [("current", "<f4", (15,)), ("maximum", "<f4", (15,))]
     assert (frame_dtype().itemsize, health_dtype().itemsize) == (7_858, 120)
     fields = frame_dtype().fields
     assert fields is not None

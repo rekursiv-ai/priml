@@ -51,6 +51,19 @@ def test_prepare_validates_then_copies_inputs_and_records_digests(
     }
 
 
+def test_prepare_data_returns_independent_complete_population_configs() -> None:
+    first = prepare_data()
+    second = prepare_data()
+
+    assert first == Preparation.Config()
+    assert first is not second
+    assert first.dataset is not second.dataset
+    first.dataset.max_prompts = 2
+    first.dataset.labels.clear()
+    assert second.dataset.max_prompts is None
+    assert second.dataset.labels
+
+
 def test_prepare_requires_real_input_files(tmp_path: Path) -> None:
     config = Preparation.Config()
     config.base_dir = tmp_path

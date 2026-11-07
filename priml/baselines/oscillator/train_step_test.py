@@ -228,10 +228,11 @@ def test_finalize_keeps_explicit_step_settings() -> None:
     assert cfg.copy_tree().finalize().step.model.channels == 3
 
 
-def test_a_nested_step_seed_is_rejected() -> None:
+@pytest.mark.parametrize("seed", [0, 1, 7])
+def test_a_nested_step_seed_is_rejected(seed: int) -> None:
     """The study seeds the run; a second seed on the step would fork the stream."""
     cfg = DLinearForecast.Config()
-    cfg.step.seed = 1
+    cfg.step.seed = seed
     with pytest.raises(ValueError, match="nested DLinear step seed must be None"):
         cfg.make()
 

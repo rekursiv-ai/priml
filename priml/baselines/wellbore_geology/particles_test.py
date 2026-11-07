@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock, call, patch
 
 import math
 
@@ -382,6 +383,25 @@ def test_normal_stream_caches_the_second_polar_draw(
 
 def test_engine_compiles_the_tracker_once() -> None:
     assert engine() is engine()
+
+
+def test_engine_registers_random_helpers_before_compiling_the_tracker() -> None:
+    register = Mock()
+    registration = Mock(register_jitable=register)
+    compiler = Mock(return_value=_track_numba)
+    with (
+        patch.object(particles, "lazy_import", return_value=registration) as imports,
+        patch("numba.njit", return_value=compiler) as njit,
+    ):
+        kernel = engine.__wrapped__()
+    assert kernel is _track_numba
+    imports.assert_called_once_with("numba.extending")
+    assert register.call_args_list == [
+        call(_uniform_numba),
+        call(_normal_numba),
+    ]
+    njit.assert_called_once_with(cache=True)
+    compiler.assert_called_once_with(_track_numba)
 
 
 def test_one_merged_step_scores_both_curves_and_the_anchor_prior() -> None:
