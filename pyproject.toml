@@ -109,6 +109,8 @@ test = [
     "pytest-cov>=7.1.0",
     "nodejs-wheel-binaries>=24.19.0",
     "hypothesis>=6.170.14",
+    # The hub loaders' tests skip without it, and the coverage floor counts them.
+    "priml[hub]",
 ]
 typecheck = [
     "basedpyright>=1.40.2",

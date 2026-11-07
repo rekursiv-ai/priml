@@ -1,5 +1,6 @@
 """Require typed complete public family settings and native geometry propagation."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import torch
 
 from priml.baselines.wellbore_geology.data import FoldObservations
 from priml.baselines.wellbore_geology.metrics import PooledRMSE
+from priml.baselines.wellbore_geology.particles import ParticleCache
 from priml.baselines.wellbore_geology.recipes import (
     Family,
     _model,
@@ -169,6 +171,32 @@ def test_published_family_helpers_reject_a_missing_rule() -> None:
         _model(model)
     # A model without the posterior geometry is left as it was declared.
     assert isinstance(model.finalized().training.step.model, ProbeModel.Config)
+
+
+def test_family_particle_cache_reads_resolve_under_its_particle_root() -> None:
+    config = family_0803_v2()
+    config.dataset_directory = Path("/data")
+    config.pf_directory = Path("/pf")
+    validation = config.training.dataset.validation
+    assert isinstance(validation, FoldObservations.Config)
+    assert isinstance(validation.particle, ParticleCache.Config)
+    validation.particle.directory = Path("/declared")
+    family = config.make()
+    train = family.config.training.dataset.loader.dataset.observations
+    held_out = family.config.training.dataset.validation
+    assert isinstance(train, FoldObservations.Config)
+    assert isinstance(held_out, FoldObservations.Config)
+    assert isinstance(train.particle, ParticleCache.Config)
+    assert isinstance(held_out.particle, ParticleCache.Config)
+    assert train.particle.directory == Path("/pf/train")
+    assert held_out.particle.directory == Path("/declared")
+
+
+@pytest.mark.parametrize("factory", [family_0719_v1, family_0803_v2])
+def test_a_consistent_family_builds(factory: Callable[[], Family.Config]) -> None:
+    config = factory()
+    family = config.make()
+    assert family.config.name == config.name
 
 
 def test_family_without_held_out_observations_still_resolves_its_inputs() -> None:

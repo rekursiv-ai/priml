@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from torch import Tensor
 
@@ -13,6 +13,7 @@ import torch
 from priml.baselines.casmi2026.scores import (
     average_ranks,
     ordinal_ranks,
+    population_z,
     tanimoto,
 )
 from priml.math import stats
@@ -102,6 +103,30 @@ def test_average_ranks_supports_the_empty_population() -> None:
     ranked = average_ranks(np.zeros(0, np.float32))
     assert ranked.dtype == np.float64
     assert ranked.size == 0
+
+
+def test_population_z_uses_population_variance_in_float32() -> None:
+    values = np.array([1.0, 2.0, 3.0, 6.0], np.float32)
+    scores = population_z(values)
+    assert scores.dtype == np.float32
+    # ``ddof=0``: the sample deviation would shrink every score.
+    np.testing.assert_allclose(
+        scores,
+        (values - 3.0) / cast(float, 3.5**0.5),
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [[5.0, 5.0, 5.0], [1.0, 1.0 + 1e-10], [7.0]],
+    ids=["constant", "below-cutoff", "single"],
+)
+def test_population_z_is_zero_below_the_variance_cutoff(values: list[float]) -> None:
+    source = np.asarray(values, np.float64)
+    scores = population_z(source)
+    np.testing.assert_array_equal(scores, np.zeros_like(source))
+    assert scores.dtype == source.dtype
 
 
 def test_tanimoto_keeps_the_additive_guard_in_binary32() -> None:
