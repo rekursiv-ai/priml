@@ -11,7 +11,7 @@ import math
 import pytest
 import torch
 
-from priml.math.fused import _two_sum, fma32, fma64
+from priml.math.fused import _host_fma, _two_sum, fma32, fma64
 from priml.testing.bfb import host_agnostic_numerics
 
 
@@ -128,9 +128,12 @@ def test_two_sum_retains_the_complete_roundoff_with_either_larger_operand() -> N
 
 
 def test_binary64_fma_rounds_once_instead_of_rounding_the_product() -> None:
+    # The binding is cached per process; drop it so this call builds it afresh.
+    _host_fma.cache_clear()
     x, y, addend = 1 + 2.0**-27, 1 - 2.0**-27, -1.0
     assert x * y + addend == 0.0
     assert fma64(x, y=y, addend=addend) == -(2**-54)
+    assert _host_fma.cache_info().currsize == 1
 
 
 @pytest.mark.parametrize(

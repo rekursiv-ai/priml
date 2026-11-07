@@ -18,6 +18,7 @@ searches for an entry the row holds, so its not-found results are tested here.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Final
 from unittest.mock import call, patch
@@ -309,6 +310,41 @@ def _assert_matches_pslp(path: Path) -> None:
         assert_reduced_like(presolved, golden)
         primal = presolved.postsolve(torch.from_numpy(golden["point_x"]))
         assert torch.equal(primal, torch.from_numpy(golden["post_x"]))
+
+
+def test_each_struct_type_is_bound_to_its_handle_with_its_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-bound under a recorder: numba's registry refuses a second real binding.
+
+    The real binding runs first, so the cache this refills leaves numba bound.
+    """
+    core._define_proxies()
+    core._define_proxies.cache_clear()
+    bound: list[tuple[type, object, list[str]]] = []
+    monkeypatch.setattr(core, "define_proxy", partial(_record, bound))
+
+    core._define_proxies()
+
+    assert bound == [
+        (
+            core._MatrixHandle,
+            core.MatrixType,
+            [name for name, _ in core._MATRIX_FIELDS],
+        ),
+        (core._IVecHandle, core.IVecType, ["data", "len"]),
+        (core._DVecHandle, core.DVecType, ["data", "len"]),
+        (core._CoreHandle, core.CoreType, [name for name, _ in core._CORE_FIELDS]),
+    ]
+
+
+def _record(
+    bound: list[tuple[type, object, list[str]]],
+    proxy: type,
+    struct_type: object,
+    fields: list[str],
+) -> None:
+    bound.append((proxy, struct_type, fields))
 
 
 if __name__ == "__main__":

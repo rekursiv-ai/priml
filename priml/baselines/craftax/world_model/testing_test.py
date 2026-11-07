@@ -21,6 +21,7 @@ from priml.baselines.craftax.world_model.model import DecoderBlock
 from priml.baselines.craftax.world_model.schema import done_id
 from priml.baselines.craftax.world_model.testing import (
     NaiveVarlen,
+    _seeded_tiny_model,
     context_features,
     context_reference,
     final_hidden,
@@ -43,6 +44,21 @@ def test_small_schema_cuts_cells_and_scalars() -> None:
     schema = small_schema()
     assert schema.cell_slots == 3
     assert len(schema.scalar_names) == len(schema.scalar_ranges) == 4
+
+
+def test_a_rebuilt_tiny_model_equals_the_cached_one() -> None:
+    """The cache only saves time: a fresh seeded build gives the same weights."""
+    schema = small_schema()
+    cached = tiny_model(schema)
+    _seeded_tiny_model.cache_clear()
+    rebuilt = tiny_model(schema)
+    assert _seeded_tiny_model.cache_info().currsize == 1
+    for (name, a), (_, b) in zip(
+        cached.state_dict().items(),
+        rebuilt.state_dict().items(),
+        strict=True,
+    ):
+        assert torch.equal(a, b), name
 
 
 def test_tiny_models_are_equal_copies_and_restore_the_rng() -> None:

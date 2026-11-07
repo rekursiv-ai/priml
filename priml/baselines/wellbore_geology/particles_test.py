@@ -8,6 +8,8 @@ from unittest.mock import Mock, call, patch
 
 import math
 
+from numba.core.dispatcher import Dispatcher
+
 import numpy as np
 import pytest
 
@@ -382,7 +384,12 @@ def test_normal_stream_caches_the_second_polar_draw(
 
 
 def test_engine_compiles_the_tracker_once() -> None:
-    assert engine() is engine()
+    # The kernel is cached per process; clear it so this test builds it.
+    engine.cache_clear()
+    kernel = engine()
+    assert kernel is engine()
+    assert isinstance(kernel, Dispatcher)
+    assert kernel.py_func is _track_numba
 
 
 def test_engine_registers_random_helpers_before_compiling_the_tracker() -> None:

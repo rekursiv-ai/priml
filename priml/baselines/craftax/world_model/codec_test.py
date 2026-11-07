@@ -81,6 +81,8 @@ WORKED_AUX_IDS = (
 
 
 def test_encode_inverts_every_aux_value_and_cell() -> None:
+    # The tables are cached per device; clear them so this encode builds them.
+    _tables.cache_clear()
     obs, cells, aux = _synthetic_frames()
     got_cells, got_aux = encode(obs)
     assert got_cells.dtype == torch.uint8
