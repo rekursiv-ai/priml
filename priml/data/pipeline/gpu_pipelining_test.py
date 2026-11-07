@@ -418,6 +418,7 @@ def test_gpu_path_with_mocks(
     """GPU path should use streams correctly."""
     config = gpu_processor_class.Config()
     config.processors.append(SimpleProcessor.Config())
+    entered: list[object] = []
 
     # Different stream creation patterns for 2-stream vs 3-stream.
     if gpu_processor_class.__name__ == "PipelinedGPUProcessor2Stream":
@@ -429,7 +430,7 @@ def test_gpu_path_with_mocks(
         patch("torch.cuda.is_available", return_value=True),
         patch("torch.cuda.Stream", side_effect=mock_streams),
         patch("torch.cuda.synchronize") as mock_sync,
-        patch("torch.cuda.stream"),
+        patch("torch.cuda.stream", side_effect=partial(_record_entry, entered)),
     ):
         processor = _make(gpu_processor_class, config)
         samples = [{"a": 1}, {"b": 2}]
@@ -437,6 +438,13 @@ def test_gpu_path_with_mocks(
 
     assert len(result) == 2
     assert all(s["processed"] for s in result)
+    if gpu_processor_class is PipelinedGPUProcessor2Stream:
+        output, input_stream = mock_streams
+        assert entered == [input_stream, output, input_stream, output]
+        assert output.mock_calls == [
+            ("wait_stream", (input_stream,), {}),
+            ("wait_stream", (input_stream,), {}),
+        ]
     # Synchronize should be called at the end.
     mock_sync.assert_called()
 
@@ -551,18 +559,21 @@ def test_list_in_dict_transformation(
     """Lists within dicts should be accessible via numeric indices."""
     config = gpu_processor_class.Config()
     config.processors.append(PassthroughProcessor.Config())
-    config.input_spec = {"items.0": torch.tensor}
+    config.input_spec = {"items.0": torch.tensor, "rows.0.value": _times_ten}
     config.input_require_tensor = False  # Allow transforming lists to tensors.
 
     with patch("torch.cuda.is_available", return_value=False):
         processor = _make(gpu_processor_class, config)
-        samples = [{"items": [[1, 2], [3, 4]]}]
+        samples = [
+            {"items": [[1, 2], [3, 4]], "rows": [{"value": 3}, {"value": 4}]},
+        ]
         result = list(processor(iter(samples)))
 
     items = _at(result[0], "items")
     assert isinstance(items, list)
     assert isinstance(items[0], Tensor)
     assert items[1] == [3, 4]  # Second item unchanged.
+    assert result[0]["rows"] == [{"value": 30}, {"value": 4}]
 
 
 def test_in_place_modification(
