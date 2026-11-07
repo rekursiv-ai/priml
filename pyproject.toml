@@ -122,6 +122,7 @@ typecheck = [
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
+    "codedoctor[coverage,mutation,notebook]",
     {include-group = "stubs"},
 ]
 dev = [
@@ -318,6 +319,34 @@ do_not_mutate_patterns = [
     '^\s*help=("[^"]*"\s*)+,?\s*$',
     '^\s*(description|formatter_class)=[\w.]+,?\s*$',
 ]
+
+[tool.houselint]
+# Each key defaults the `houselint` flag of that name;
+# the command line overrides it. Globs are relative to this file's directory, and a
+# glob without `/` names a basename in any directory. `GLOBS = RULES` is ruff's
+# per-file-ignores; a bare glob skips the file for every rule unopened.
+select = "ALL"
+fix = "ALL"
+# Each export sets its own package for both.
+set = ["import-alias.first-party=priml", "test-footer.runner=priml.lib.testing.runner"]
+exclude = [
+    "**/third_party/** typings/** **/.export/typings/** **/torch-types/shed/**",
+    """*_test.py **/tests/test*.py =
+    args-section assert cache-kwarg def-order final-inline globals
+    lazy-import-cost mkdir-mode module-side-effects nested-def returns-named
+    returns-section single-use-helper tempfile-prefix tensor-value-guard
+    tmp-literal xdg-literal""",
+    """conftest.py =
+    args-section def-order lazy-import-cost module-side-effects returns-section""",
+    "experiments.py experiments_*.py = returns-section",
+    "**/private/testdata/** = globals",
+]
+
+[tool.coverage-floor]
+# Each key defaults the `coverage_floor` flag of that name. A
+# changed source under a prefix must be covered to PERCENT by its own sidecar
+# tests; `=PERCENT`, with no prefix, floors every path. Each export sets its own.
+floor = ["=100"]
 
 [tool.coverage.run]
 # sys.monitoring, the default from Python 3.14 on. 3.12's default, ctrace,
@@ -863,6 +892,7 @@ explicit = true
 
 [tool.uv.sources]
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
+codedoctor = { git = "https://github.com/rekursiv-ai/codedoctor", branch = "main" }
 # Pin at cu128 for providers that don't keep their drivers up-to-date.
 # To test that it installed correctly,
 #   uv --quiet run python -c "import torch; print(f'PyTorch CUDA: {torch.version.cuda}'); print(f'cuDNN: {torch.backends.cudnn.version()}'); print(f'Device: {torch.cuda.get_device_name(0)}')"
