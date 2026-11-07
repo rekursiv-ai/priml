@@ -1,6 +1,7 @@
 """Check the stratified sampler, window building, packing, and the replay stream."""
 
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 from typing import cast, override
 
@@ -14,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.craftax.world_model import data
 from priml.baselines.craftax.world_model.archive import (
     Episode,
     Receipt,
@@ -958,11 +960,85 @@ def test_prefetch_thread_stops_when_the_consumer_stops(tmp_path: Path) -> None:
     batches = iter(stream.train_dataloader())
     next(batches)
     assert threading.active_count() == before + 1
+    # A daemon: a stream abandoned unclosed must not hold the interpreter at exit.
+    (worker,) = [t for t in threading.enumerate() if t.name == "craftax-replay-stream"]
+    assert worker.daemon
     del batches
     for thread in threading.enumerate():
         if thread.name == "craftax-replay-stream":
             thread.join(timeout=5)
     assert threading.active_count() == before
+
+
+def test_the_prefetch_thread_builds_one_batch_ahead_of_the_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each batch held is pinned memory on CUDA: one queued, one being built.
+    full: queue.Queue[bool] = queue.Queue()
+    offer = data._offer
+
+    def recording(
+        ready: queue.Queue[_Item | BaseException | None],
+        done: threading.Event,
+        item: _Item | BaseException | None,
+    ) -> bool:
+        full.put(ready.full())
+        return offer(ready, done, item)
+
+    monkeypatch.setattr(data, "_offer", recording)
+    item = _tiny_item()
+    batches = iter(_Stream(lambda _: item, first=0, device=torch.device("cpu")))
+    next(batches)
+    # Built while the consumer holds the first, the third finds the second queued.
+    offers = [full.get(timeout=5) for _ in range(3)]
+    del batches
+    assert offers[2]
+
+
+def test_the_stream_moves_every_tensor_to_its_device_without_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The meta device stands in for a GPU: a copy from pinned memory overlaps
+    # the step only when it does not block.
+    item = _tiny_item()
+    moves = _Moves()
+    monkeypatch.setattr(torch.Tensor, "to", moves)
+    stream = _Stream(lambda _: item, first=0, count=1, device=torch.device("meta"))
+    assert len(list(stream)) == 1
+    tensors = len(dataclasses.fields(PackedBatch)) + 2
+    assert moves.moves == [(torch.device("meta"), True)] * tensors
+
+
+class _Moves:
+    """``Tensor.to`` that records each destination and whether the copy may overlap.
+
+    A descriptor, so it binds the tensor as ``self`` when patched onto ``Tensor``.
+    """
+
+    def __init__(self) -> None:
+        self.moves: list[tuple[torch.device, bool]] = []
+        self._to = torch.Tensor.to
+
+    def __get__(self, tensor: torch.Tensor, owner: type) -> partial[torch.Tensor]:
+        return partial(self._move, tensor)
+
+    def _move(
+        self,
+        tensor: torch.Tensor,
+        device: torch.device,
+        *,
+        non_blocking: bool = False,
+    ) -> torch.Tensor:
+        self.moves.append((device, non_blocking))
+        return self._to(tensor, device, non_blocking=non_blocking)
+
+
+def _tiny_item() -> _Item:
+    """Return two windows of one two-decision segment each, their strata and weights."""
+    segment = _segment(2, frames=2, starts=False, done=True)
+    parts = [[(segment, torch.tensor([4, 5]))] for _ in range(2)]
+    batch, stratum = pack(parts, t_g=6, s_max=2)
+    return batch, stratum, (stratum >= 0).float()
 
 
 def test_the_prefetch_thread_hands_a_producers_error_to_the_consumer() -> None:

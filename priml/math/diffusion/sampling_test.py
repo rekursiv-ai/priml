@@ -16,6 +16,7 @@ from priml.math.diffusion.sampling import (
     SampleOneStepResult,
     SampleResult,
     ddpm,
+    ddpm_ddim,
     ddpm_ddim_step,
     rescale_classifier_free_guidance,
     sample,
@@ -152,6 +153,16 @@ def test_ddpm_step_matches_ddpm(eta: float) -> None:
     torch.testing.assert_close(x0_ddpm, result.x_clean)
     torch.testing.assert_close(mean_ddpm, mean_step)
     torch.testing.assert_close(log_std_ddpm, log_std_step)
+
+
+def test_ddpm_ddim_defaults_to_the_ddpm_posterior() -> None:
+    model, x1 = torch.randn(2, 3, 4)
+    log_snr_curr = torch.tensor([-1.0, 0.5, 1.5])[:, None]
+    log_snr_next = torch.tensor([1.0, 2.0, 3.5])[:, None]
+    default = ddpm_ddim(model, x1, log_snr_curr, log_snr_next)
+    posterior = ddpm_ddim(model, x1, log_snr_curr, log_snr_next, eta=1)
+    for got, want in zip(default, posterior, strict=True):
+        assert torch.equal(got, want)
 
 
 def test_ddim_is_deterministic() -> None:

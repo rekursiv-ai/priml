@@ -231,6 +231,32 @@ def test_ensure_room_reports_the_context_and_reprefills_full_rows(
         engine.ensure_room(HOOK + 1)
 
 
+def test_a_reprefill_writes_the_last_blocks_cache_and_skips_its_feed_forward() -> None:
+    # Only a step reads past the last block's attention.
+    config = _config(layers=2)
+    config.weights = _TwoLayerWeights.Config()
+    config.compile = _ShapeRecordingCompile.Config()
+    source = config.make()
+    cells, aux, actions = _frames(2, 8)
+    engine = _engine(source, rows=2)
+    run_steps(
+        engine,
+        engine,
+        obs=decode(cells, aux),
+        actions=actions,
+        resets={4: [1]},
+        hook=HOOK,
+        history=HeldHistory(2, t_max=T_MAX, keep=KEEP),
+    )
+    pre, post = source.kernels.pre, source.kernels.post
+    assert isinstance(pre, _ShapeRecording)
+    assert isinstance(post, _ShapeRecording)
+    pre.calls = post.calls = 0
+    assert engine.ensure_room(HOOK)["feature/reprefill_rows"] == 1
+    # One chunk of one row through both blocks.
+    assert (pre.calls, post.calls) == (2, 1)
+
+
 def test_the_context_telemetry_reads_the_rows_that_continue(
     source: WorldModelFeature,
 ) -> None:
