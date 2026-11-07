@@ -157,6 +157,21 @@ def test_prediction_crop_uses_its_own_shape() -> None:
     assert np.array_equal(restored, prediction)
 
 
+def test_crop_grid_recovers_content_touching_both_edges_from_nonzero_origin() -> None:
+    spec = ArcSpec()
+    spec.max_grid = 4
+    config = SpatialAugmentation.Config()
+    config.spec = spec
+    spatial = config.make()
+    grid = np.array([[0, 1, 2], [3, 4, 9]], dtype=np.uint8)
+    packed = spatial.pack_one_at(grid, tag=(1, 2, 1))
+
+    restored = crop_grid(packed, spec=spec, row=2, col=1)
+
+    assert restored.shape == grid.shape
+    assert np.array_equal(restored, grid)
+
+
 def test_single_grid_pack_reuses_canvas_eos_at_nonzero_origin() -> None:
     """Pack one input without fabricating a paired label grid."""
     spec = ArcSpec(max_grid=7)

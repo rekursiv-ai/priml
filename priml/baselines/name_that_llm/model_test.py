@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 
 from priml.baselines.name_that_llm.model import (
+    DocumentFeatures,
+    LogBlend,
     QwenHeads,
     StyleCounts,
     center,
@@ -54,6 +56,37 @@ def test_style_features_count_every_column() -> None:
         ],
     )
     assert np.array_equal(actual, a2=expected)
+
+
+def test_document_features_multiply_standardized_style_on_fit_and_prediction() -> None:
+    config = DocumentFeatures.Config()
+    config.style_weight = 2.0
+    features = config.make()
+    training = features.fit_transform(["a b", "a b!"])
+    prediction = features.transform(["a b!!", "a b"])
+    exclamation_column = training.shape[1] - 4
+
+    assert np.array_equal(
+        training.data[training.indices == exclamation_column],
+        a2=[-2.0, 2.0],
+    )
+    assert np.array_equal(
+        prediction.data[prediction.indices == exclamation_column],
+        a2=[6.0, -2.0],
+    )
+
+
+def test_blend_clips_upper_overshoots_and_uses_the_configured_floor() -> None:
+    config = LogBlend.Config()
+    config.weights = {"plain": 0.5}
+    config.minimum_probability = 0.25
+    blend = config.make()
+    probabilities = np.array([[0.0, 0.125, 1.5], [0.25, 0.5, 2.0]])
+
+    assert np.array_equal(
+        blend({"plain": probabilities}),
+        a2=0.5 * np.log(np.array([[0.25, 0.25, 1.0], [0.25, 0.5, 1.0]])),
+    )
 
 
 def test_center_preserves_input_and_uses_each_group_mean() -> None:

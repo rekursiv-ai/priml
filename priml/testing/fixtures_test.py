@@ -313,14 +313,15 @@ def test_cleanup_cuda_reclaims_at_setup_and_teardown_with_a_live_context(
 
 
 @pytest.mark.parametrize(
-    ("initialized", "expected_calls"),
-    [(True, 1), (False, 0)],
-    ids=["context-created", "no-context"],
+    ("initialized", "available", "expected_calls"),
+    [(True, True, 1), (True, False, 0), (False, True, 0)],
+    ids=["context-created", "test-faked-cuda-away", "no-context"],
 )
 def test_cleanup_cuda_rechecks_when_torch_arrives_during_the_test(
     monkeypatch: pytest.MonkeyPatch,
     *,
     initialized: bool,
+    available: bool,
     expected_calls: int,
 ) -> None:
     """Torch imported by the test body: reclaim only if a context now exists."""
@@ -333,10 +334,47 @@ def test_cleanup_cuda_rechecks_when_torch_arrives_during_the_test(
 
     monkeypatch.setitem(sys.modules, "torch", real_torch)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: initialized)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
     with pytest.raises(StopIteration):
         next(gen)
 
     assert synchronize.call_count == expected_calls
+
+
+def test_cleanup_cuda_never_queries_availability_without_a_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    available = MagicMock(return_value=True)
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", available)
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    gen = _start_cleanup_cuda()
+    with pytest.raises(StopIteration):
+        next(gen)
+    available.assert_not_called()
+    synchronize.assert_not_called()
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_cleanup_cuda_reclaims_a_context_first_created_by_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+    available: bool,
+) -> None:
+    real_is_initialized = torch.cuda.is_initialized
+    synchronize = _fake_cuda(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "is_initialized", real_is_initialized)
+    monkeypatch.setattr(torch.cuda, "_initialized", False)
+    gen = _start_cleanup_cuda()
+    synchronize.assert_not_called()
+    # The body creates the context: the real flag flips, not a faked accessor.
+    monkeypatch.setattr(torch.cuda, "_initialized", True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert synchronize.call_count == int(available)
+    # This test's own cleanup_cuda reads the same flag before monkeypatch undoes it.
+    monkeypatch.setattr(torch.cuda, "_initialized", False)
 
 
 _UNPLACED: Final = {

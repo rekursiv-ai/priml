@@ -31,6 +31,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.env import StallCap, WorldPool
 from priml.baselines.craftax.experiments import exp000
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
@@ -359,8 +360,19 @@ def _quick(
     return config
 
 
-def test_the_pipeline_boots_then_prefetches_one_rollout_ahead_of_the_learner() -> None:
-    step = _train_step()
+@eager(world=tiny_world)
+def test_the_pipeline_boots_then_prefetches_one_rollout_ahead_of_the_learner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    config = tiny_train_step()
+    config.env.num_envs = 2
+    config.env.restart = WorldPool.Config(num_worlds=2)
+    policy = tiny_policy(dtype=torch.float32)
+    policy.channels_hidden = 3
+    policy.num_layers = 1
+    config.model = policy
+    step = _train_step(_quick(config))
     try:
         # The training loop drives it through the step protocol alone.
         initial = [p.detach().clone() for p in step.model.parameters()]
@@ -379,7 +391,7 @@ def test_the_pipeline_boots_then_prefetches_one_rollout_ahead_of_the_learner() -
         assert first["model"].shape == (len(TorchPPO.Config.LOSS_NAMES),)
         assert "metrics" in first
         assert "learning_rate" in first["metrics"]
-        assert first["metrics"]["agent_steps"] == 1 * 4 * 2
+        assert first["metrics"]["agent_steps"] == 1 * 2 * 2
         step.train_step()
         # Epoch 1 copied the epoch-0 update into the actor before its rollout.
         assert (step.global_step, step.ready, step.write) == (2, 0, 1)

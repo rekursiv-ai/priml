@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Never, cast
 
@@ -426,6 +427,59 @@ def test_server_readiness_returns_once_the_model_is_listed() -> None:
         urlopen=_returns(response),
     )
     assert response.closed
+
+
+@pytest.mark.parametrize(("interval", "request_timeout"), [(0.5, 0.5), (20.0, 10.0)])
+def test_server_readiness_probes_the_local_models_endpoint_with_a_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    interval: float,
+    request_timeout: float,
+) -> None:
+    response = _ModelsResponse("requested-model")
+    requests: list[tuple[str, float]] = []
+    times = iter((0.0, 0.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(times))
+
+    def urlopen(url: str, *, timeout: float) -> _ModelsResponse:
+        requests.append((url, timeout))
+        return response
+
+    wait_for_server(
+        8123,
+        "requested-model",
+        interval=interval,
+        sleep=_fails("must not sleep after readiness"),
+        urlopen=urlopen,
+    )
+    assert requests == [("http://localhost:8123/v1/models", request_timeout)]
+    assert response.closed
+
+
+@pytest.mark.parametrize("body", [b"{}", b'{"data":null}'])
+def test_server_readiness_retries_missing_models_and_closes_each_response(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+) -> None:
+    pending = BytesIO(body)
+    ready = _ModelsResponse("requested-model")
+    responses = iter((pending, ready))
+    times = iter((0.0, 0.0, 0.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(times))
+    sleeps: list[float] = []
+
+    def urlopen(*_args: object, **_kwargs: object) -> BytesIO | _ModelsResponse:
+        return next(responses)
+
+    wait_for_server(
+        8123,
+        "requested-model",
+        interval=0.5,
+        sleep=sleeps.append,
+        urlopen=urlopen,
+    )
+    assert sleeps == [0.5]
+    assert pending.closed
+    assert ready.closed
 
 
 def test_server_readiness_retries_after_a_refused_connection() -> None:

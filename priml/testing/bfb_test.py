@@ -189,7 +189,7 @@ def _capture_torch_process_state() -> _TorchProcessState:
 
 
 def _restore_torch_process_state(state: _TorchProcessState) -> None:
-    torch.use_deterministic_algorithms(
+    torch._C._set_deterministic_algorithms(
         state.algorithms_enabled,
         warn_only=state.warn_only_enabled,
     )
@@ -801,7 +801,7 @@ def test_bfb_restores_process_state_after_success(
 ) -> None:
     original = _capture_torch_process_state()
     try:
-        torch.use_deterministic_algorithms(False, warn_only=True)
+        torch._C._set_deterministic_algorithms(False, warn_only=True)
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
         torch.backends.cuda.enable_flash_sdp(True)
@@ -833,7 +833,7 @@ def test_bfb_restores_process_state_after_runner_failure(
 ) -> None:
     original = _capture_torch_process_state()
     try:
-        torch.use_deterministic_algorithms(False, warn_only=True)
+        torch._C._set_deterministic_algorithms(False, warn_only=True)
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
         torch.backends.cuda.enable_flash_sdp(True)
@@ -3130,7 +3130,7 @@ def test_write_golden_copies_output_to_cpu_with_explicit_copy(
             run=run,
         )
     finally:
-        torch.use_deterministic_algorithms(prior)
+        torch._C._set_deterministic_algorithms(prior)
 
     assert calls == [(("cpu",), {"copy": True})]
 
@@ -3305,7 +3305,7 @@ def _tanh_row_sum(x: Tensor) -> Tensor:
 def test_bfb_builds_under_deterministic_algorithms(tmp_path: Path) -> None:
     before = torch.are_deterministic_algorithms_enabled()
     try:
-        torch.use_deterministic_algorithms(False)
+        torch._C._set_deterministic_algorithms(False)
         for check in (regenerate_golden, assert_bfb_against_golden):
             check(
                 golden_dir=tmp_path,
@@ -3315,7 +3315,7 @@ def test_bfb_builds_under_deterministic_algorithms(tmp_path: Path) -> None:
             )
             assert not torch.are_deterministic_algorithms_enabled()
     finally:
-        torch.use_deterministic_algorithms(before)
+        torch._C._set_deterministic_algorithms(before)
 
 
 def _build_wide_buffer() -> nn.Module:

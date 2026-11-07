@@ -224,6 +224,21 @@ def test_empty_peak_mask_and_missing_energy(tmp_path: Path) -> None:
     assert output["ce_known"].tolist() == [1, 0, 1]
 
 
+def test_collate_bounds_merged_counts_before_scaling(tmp_path: Path) -> None:
+    config = cache(tmp_path)
+    rows = parquet.read_table(tmp_path / "spec_meta.parquet").to_pylist()
+    for row, count in zip(rows, [0, 4, 9, 1, 2, 3, 4, 5], strict=True):
+        row["ce_n"] = count
+    parquet.write_table(
+        Table.from_pylist(rows),
+        where=tmp_path / "spec_meta.parquet",
+    )
+
+    output = config.make().collate(torch.tensor([2, 0, 1]))
+
+    assert output["merged"].tolist() == [2.0, 0.25, 1.0]
+
+
 def test_invalid_batch_geometry_and_identity_buckets(tmp_path: Path) -> None:
     config = SpectrumData.Config()
     config.working_dir = tmp_path

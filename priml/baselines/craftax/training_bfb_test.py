@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 
-from priml.baselines.craftax.testing import tiny_train_step
+from priml.baselines.craftax.eager import eager, tiny_world
+from priml.baselines.craftax.env import WorldPool
+from priml.baselines.craftax.testing import tiny_policy, tiny_train_step
 from priml.baselines.craftax.train_step import AgentWindows
 from priml.optimizers.fused_muon import FusedMuon
 
@@ -31,28 +33,37 @@ def _masters(step: CraftaxTrainStep) -> list[Tensor]:
 
 # Rollouts of 2 steps, one window of every agent: the epoch's parts are the train
 # step's tests'. The evaluation plays one rollout from its reset, as ``play`` begins.
+@eager(world=tiny_world)
 def _train(*, evaluate_between: bool) -> list[Tensor]:
     """Run two of the tiny pipeline's epochs; return the masters."""
-    config = tiny_train_step()
-    config.rollout.horizon = 2
-    windows = config.learner
-    assert isinstance(windows, AgentWindows.Config)
-    windows.minibatch_size = 2 * config.env.num_envs
-    torch.manual_seed(0)
-    step = config.make()
-    try:
-        step.train_step()
-        if evaluate_between:
-            evaluation = step.make_evaluator()
-            try:
-                evaluation.reset()
-                evaluation.collect()
-            finally:
-                evaluation.close()
-        step.train_step()
-        return _masters(step)
-    finally:
-        step.close()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        config = tiny_train_step()
+        config.env.num_envs = 2
+        config.env.restart = WorldPool.Config(num_worlds=2)
+        policy = tiny_policy(dtype=torch.float32)
+        policy.channels_hidden = 3
+        policy.num_layers = 1
+        config.model = policy
+        config.rollout.horizon = 2
+        windows = config.learner
+        assert isinstance(windows, AgentWindows.Config)
+        windows.minibatch_size = 2 * config.env.num_envs
+        torch.manual_seed(0)
+        step = config.make()
+        try:
+            step.train_step()
+            if evaluate_between:
+                evaluation = step.make_evaluator()
+                try:
+                    evaluation.reset()
+                    evaluation.collect()
+                finally:
+                    evaluation.close()
+            step.train_step()
+            return _masters(step)
+        finally:
+            step.close()
 
 
 def _same(first: list[Tensor], second: list[Tensor]) -> bool:

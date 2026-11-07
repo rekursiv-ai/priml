@@ -14,6 +14,7 @@ import torch
 
 from priml.baselines.craftax.world_model.archive import (
     Episode,
+    ManifestLine,
     Receipt,
     read_manifest,
     write_shard,
@@ -26,7 +27,7 @@ from priml.baselines.craftax.world_model.coverage import (
     report,
     transition_signatures,
 )
-from priml.baselines.craftax.world_model.index import FLOOR_AUX
+from priml.baselines.craftax.world_model.index import FLOOR_AUX, EpisodeReader
 from priml.baselines.craftax.world_model.index_test import inline_pools
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
@@ -406,8 +407,42 @@ def test_republished_summaries_miss_the_coverage_cache(tmp_path: Path) -> None:
         assert coverage.achievements.nonzero()[:, 0].tolist() == [achievement]
 
 
-def test_load_coverage_defaults_to_the_measured_fastest_pool() -> None:
-    assert (load_coverage.__kwdefaults__ or {})["workers"] == 4
+def test_load_coverage_defaults_to_the_measured_fastest_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = count_shard([_episode(2)])
+    selected: list[int] = []
+
+    def chunks(
+        directory: Path,
+        line: ManifestLine,
+        function: Callable[[list[Episode]], Coverage],
+        *,
+        workers: int,
+        chunk_decisions: int,
+        read: EpisodeReader,
+    ) -> list[Coverage]:
+        del directory, line, function, chunk_decisions, read
+        selected.append(workers)
+        return [expected]
+
+    monkeypatch.setattr(
+        "priml.baselines.craftax.world_model.coverage.map_chunks",
+        chunks,
+    )
+    line = ManifestLine(
+        shard="shard-000000",
+        episodes=1,
+        decisions=2,
+        sha256={"bin": "a" * 64, "frames": "b" * 64, "meta": "c" * 64},
+        provenance={},
+    )
+
+    actual = load_coverage(tmp_path, line, coverage_dir=tmp_path / "cache")
+
+    assert selected == [4]
+    _assert_same(actual, expected)
 
 
 def test_chunked_coverage_equals_counting_the_whole_shard(tmp_path: Path) -> None:

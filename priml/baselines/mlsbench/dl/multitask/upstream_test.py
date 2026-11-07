@@ -18,13 +18,14 @@ from unittest import mock
 import sys
 import warnings
 
-from torch import Tensor
+from torch import Tensor, nn
 from torch.utils import data
 
 import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.multitask import upstream
+from priml.baselines.mlsbench.dl.multitask.losses import graph_leaves
 from priml.baselines.mlsbench.dl.vision import (
     reference,
     upstream as vision_upstream,
@@ -338,6 +339,16 @@ def test_pin_shared_pins_only_a_walking_combination(tmp_path: Path) -> None:
     assert cast(upstream.Walker, pcgrad)._shared_params == [w]
 
 
+def test_pin_shared_accepts_a_nonempty_walk_and_pins_every_loss_leaf() -> None:
+    first = torch.ones(2, requires_grad=True)
+    second = torch.ones(3, requires_grad=True)
+    loss = first.square().sum() + second.square().sum()
+    module = _SubsequenceWalker()
+
+    assert upstream.pin_shared(module, loss) == []
+    assert module.pinned_ids() == {id(first), id(second)}
+
+
 def test_a_walk_that_finds_more_than_the_ports_is_reported(tmp_path: Path) -> None:
     root = tmp_path / "clone"
     write_clone(root)
@@ -492,6 +503,21 @@ def test_batches_carry_the_superclass_of_each_label(tmp_path: Path) -> None:
     assert len(train) == len(evaluation) == reference.LOADER_PASSES
     for batch in train[0] + evaluation[0]:
         assert torch.equal(batch["label_coarse"], batch["label"] % 20)
+
+
+class _SubsequenceWalker(nn.Module):
+    """Walk a proper nonempty subsequence of a multi-leaf loss graph."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._shared_params: list[Tensor] | None = None
+
+    def pinned_ids(self) -> set[int]:
+        """Return the identities of the leaves pinned on this instance."""
+        return {id(p) for p in self._shared_params or ()}
+
+    def _get_shared_params(self, loss: Tensor) -> list[Tensor]:
+        return graph_leaves(loss)[1:]
 
 
 class _LoaderCalls:

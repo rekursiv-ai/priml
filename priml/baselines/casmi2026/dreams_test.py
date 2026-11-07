@@ -205,6 +205,12 @@ def test_bank_keeps_or_averages_the_model_axis_of_single_and_merged_items(
     assert [array.shape for array in bank.predict([])] == [(0, 7), (0, 10)]
 
 
+def test_merged_adduct_breaks_observation_ties_by_training_frequency() -> None:
+    adducts = ["[2M+Na]+", "[M+H]+"]
+    assert merged_adduct(adducts) == "[M+H]+"
+    assert merged_adduct(adducts[::-1]) == "[M+H]+"
+
+
 def test_bank_metadata_adduct_and_validation_boundaries(tmp_path: Path) -> None:
     assert merged_adduct(["z", "a"]) == "a"
     assert merged_adduct(["[M+Na]+", "[M+H]+", "[M+Na]+", "[M+H]+ "]) == "[M+Na]+"

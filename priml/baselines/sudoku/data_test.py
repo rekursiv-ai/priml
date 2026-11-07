@@ -102,6 +102,19 @@ def test_split_loading_returns_tensors_and_logs_counts(
     ]
 
 
+def test_memory_mapped_split_keeps_inputs_and_labels_read_only(
+    dataset_dir: Path,
+) -> None:
+    arrays = data.read_split_arrays(dataset_dir / "train", mmap=True)
+
+    for array in (arrays.inputs, arrays.labels):
+        assert isinstance(array, np.memmap)
+        assert not array.flags.writeable
+        assert array[:, 0].tolist() == list(range(2, 8))
+        with pytest.raises(ValueError, match="read-only"):
+            array[0, 0] = 9
+
+
 def test_eval_is_neither_shuffled_nor_augmented(dataset_dir: Path) -> None:
     """A score must not depend on which transformation was drawn."""
     data = _data(dataset_dir, augment=True, seed=0)

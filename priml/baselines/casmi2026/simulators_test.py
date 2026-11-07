@@ -1021,7 +1021,7 @@ def test_prepared_numeric_backend_replays_the_released_model_inference(
         assert released == [True]
         torch.save({"state_dict": {}}, checkpoint)
         with pytest.raises(ValueError, match="Checkpoint keys differ"):
-            _ = config.make()
+            load_released_checkpoint(backend.model, checkpoint)
 
 
 def test_assembly_excludes_padding_with_different_fragment_counts() -> None:

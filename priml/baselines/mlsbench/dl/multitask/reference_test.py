@@ -28,6 +28,8 @@ from priml.testing.golden import mismatches, read_tensors
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from torch import Tensor
+
     from priml.baselines.mlsbench.dl.multitask.experiments import (
         MultiTaskTrainLoop,
     )
@@ -250,6 +252,61 @@ def test_the_spy_runs_before_first_on_the_first_fine_loss_only() -> None:
     assert seen[0] is first
     assert [loss.item() for loss in spy.losses] == [11.0, 22.0]
     assert spy.epochs == [[0, 5], [1, 5]]
+
+
+class _ObservedSum(_Sum):
+    """Record the runner's inputs and add a differentiable parameter sum."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.offset = nn.Parameter(torch.zeros(2))
+        self.losses_fine: list[Tensor] = []
+        self.epochs: list[tuple[int, int]] = []
+        self.gradients_cleared: list[bool] = []
+
+    @override
+    def forward(
+        self,
+        loss_fine: Tensor,
+        loss_coarse: Tensor,
+        epoch: int,
+        total_epochs: int,
+    ) -> Tensor:
+        self.losses_fine.append(loss_fine)
+        self.epochs.append((epoch, total_epochs))
+        self.gradients_cleared.append(self.offset.grad is None)
+        return (
+            super().forward(loss_fine, loss_coarse, epoch, total_epochs)
+            + self.offset.sum()
+        )
+
+
+def test_run_combination_forwards_before_first_before_the_first_fine_loss() -> None:
+    module = _ObservedSum()
+    seen: list[tuple[Tensor, int]] = []
+
+    def before_first(loss: Tensor) -> None:
+        seen.append((loss, len(module.losses_fine)))
+
+    _ = reference.run_combination(module, "observed", before_first=before_first)
+
+    assert len(seen) == 1
+    assert seen[0][0] is module.losses_fine[0]
+    assert seen[0][1] == 0
+
+
+def test_run_combination_passes_epochs_and_horizon_with_cleared_gradients() -> None:
+    module = _ObservedSum()
+
+    record = reference.run_combination(module, "observed")
+
+    assert module.epochs == [(0, 5), (1, 5), (1, 5)]
+    assert module.gradients_cleared == [True, True, True]
+    assert module.offset.grad is None
+    assert torch.equal(
+        record["combination/observed/grad"][:, -module.offset.numel() :],
+        torch.ones(len(reference.CALL_EPOCHS), module.offset.numel()),
+    )
 
 
 def test_settings_record_joins_every_setting(monkeypatch: pytest.MonkeyPatch) -> None:

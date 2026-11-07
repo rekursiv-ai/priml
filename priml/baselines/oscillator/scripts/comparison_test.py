@@ -219,20 +219,8 @@ def test_cli_can_run_only_the_requested_simulator_case(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
+    monkeypatch.setattr(ForecastStudy, "run", _canned_run)
     smoke = experiments.exp_smoke()
-    smoke.data.seq_len = 2
-    smoke.data.pred_len = 3
-    for stream in (
-        smoke.data.train,
-        smoke.data.validation,
-        smoke.data.synthetic,
-        smoke.data.test,
-        smoke.data.shifted,
-    ):
-        stream.count = 2
-    assert isinstance(smoke.method, DLinearForecast.Config)
-    smoke.method.updates = 1
-    smoke.method.batch_size = 3
     monkeypatch.setattr(experiments, "exp_smoke", lambda: smoke)
     destination = tmp_path / "run"
     comparison.main(
@@ -255,8 +243,8 @@ def test_cli_can_run_only_the_requested_simulator_case(
     assert report["cases"] == ["mismatched"]
     assert len(records) == 1
     assert records[0]["case"] == "mismatched"
-    training = from_plain(records[0]["training"], dict[str, object])
-    assert training["updates"] == 1
+    assert smoke.data.reference.cubic != smoke.data.cheap.cubic
+    assert records[0]["reference_cubic"] == smoke.data.reference.cubic
     assert not (destination / "matched-exp_smoke-7.json").exists()
 
 

@@ -178,8 +178,41 @@ def test_republished_split_misses_the_index_cache(tmp_path: Path) -> None:
         assert index.split.tolist() == [split]
 
 
-def test_load_index_defaults_to_the_measured_fastest_pool() -> None:
-    assert (load_index.__kwdefaults__ or {})["workers"] == 4
+def test_load_index_defaults_to_the_measured_fastest_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = build_index([_episode([0, 1], died=False)])
+    selected: list[int] = []
+
+    def chunks(
+        directory: Path,
+        line: ManifestLine,
+        function: Callable[[list[Episode]], ShardIndex],
+        *,
+        workers: int,
+        chunk_decisions: int,
+    ) -> list[ShardIndex]:
+        del directory, line, function, chunk_decisions
+        selected.append(workers)
+        return [expected]
+
+    monkeypatch.setattr(
+        "priml.baselines.craftax.world_model.index.map_chunks",
+        chunks,
+    )
+    line = ManifestLine(
+        shard="shard-000000",
+        episodes=1,
+        decisions=2,
+        sha256={"bin": "a" * 64, "frames": "b" * 64, "meta": "c" * 64},
+        provenance={},
+    )
+
+    actual = load_index(tmp_path, line, index_dir=tmp_path / "cache")
+
+    assert selected == [4]
+    _assert_same_index(actual, expected)
 
 
 def _mixed() -> list[Episode]:

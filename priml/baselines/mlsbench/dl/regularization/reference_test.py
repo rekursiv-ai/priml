@@ -50,6 +50,20 @@ def test_every_regularizer_and_its_gradients_match_the_script() -> None:
     assert_exact(stored("regularizer/"), reference.regularizer_record())
 
 
+def test_copies_isolate_parameters_and_buffers_between_runs() -> None:
+    model = nn.BatchNorm1d(2)
+    copies = reference.Copies(model)
+    first, second = copies(), copies()
+    with torch.no_grad():
+        first.get_parameter("weight").zero_()
+        first.get_buffer("running_mean").fill_(3)
+    assert torch.equal(first.get_parameter("weight"), torch.zeros(2))
+    assert torch.equal(first.get_buffer("running_mean"), torch.full((2,), 3.0))
+    for untouched in (model, second):
+        assert torch.equal(untouched.get_parameter("weight"), torch.ones(2))
+        assert torch.equal(untouched.get_buffer("running_mean"), torch.zeros(2))
+
+
 def test_a_port_call_hands_on_every_input_and_states_its_context() -> None:
     seen = _Seen()
     model = nn.Identity()

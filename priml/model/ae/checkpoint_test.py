@@ -90,6 +90,21 @@ def test_url_file_identity_is_its_url_and_digest() -> None:
     }
 
 
+def test_hub_file_identity_preserves_the_complete_receipt() -> None:
+    source = HubFile.Config()
+    source.repo_id = "owner/autoencoder"
+    source.filename = "encoder.safetensors"
+    source.revision = _REVISION
+    source.sha256 = "a" * 64
+
+    assert source.make().identity() == {
+        "repo_id": "owner/autoencoder",
+        "filename": "encoder.safetensors",
+        "revision": _REVISION,
+        "sha256": "a" * 64,
+    }
+
+
 @pytest.mark.parametrize("revision", ["", "main", _REVISION[:12], _REVISION.upper()])
 def test_hub_file_needs_a_pinned_revision(revision: str) -> None:
     """A branch or a short SHA can resolve to other bytes later."""

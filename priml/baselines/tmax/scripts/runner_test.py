@@ -366,6 +366,29 @@ def test_serialization_matches_tmax_fields_and_adds_tool_mask() -> None:
     ]
 
 
+def test_serialization_preserves_each_samples_request_metadata() -> None:
+    info = [{"request_id": "first"}, {"request_id": "second"}]
+    result = _result()
+    result.request_info = info
+
+    def request_info_for_sample(
+        request_info: object,
+        index: int,
+    ) -> Mapping[str, object] | None:
+        return info[index] if request_info is info else None
+
+    records = serialize_rollout_records(
+        _batch(),
+        result,
+        step=7,
+        advantages=[-0.5, 0.5],
+        num_samples_per_prompt=2,
+        request_info_for_sample=request_info_for_sample,
+    )
+
+    assert [record["request_info"] for record in records] == info
+
+
 def test_serialization_refuses_misaligned_masks() -> None:
     # The tool mask must cover every response token exactly.
     result = _result()

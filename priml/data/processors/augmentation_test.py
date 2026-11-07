@@ -991,6 +991,32 @@ def test_mixup_cutmix_accepts_list_labels_when_mixing(
     assert result["label"].shape == (2, 2)
 
 
+@pytest.mark.parametrize(
+    "ratio",
+    [math.nan, 0.0, -0.5],
+    ids=["nan", "zero", "negative"],
+)
+def test_center_crop_rejects_nan_and_nonpositive_ratios(ratio: float) -> None:
+    config = GetCenterCropBoxFromDimensions.Config()
+    config.ratio = ratio
+
+    with pytest.raises(ValueError, match="ratio"):
+        config.make()
+
+
+def test_rand_augment_validates_media_after_a_missing_sample() -> None:
+    samples: list[RandAugment.Input] = [
+        {},
+        {"media_tensor": torch.zeros(3, 2, 4, 5)},
+    ]
+    processor = RandAugment.Config().make()
+    outputs = processor(iter(samples))
+
+    assert next(outputs) == {}
+    with pytest.raises(TypeError, match="uint8"):
+        next(outputs)
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

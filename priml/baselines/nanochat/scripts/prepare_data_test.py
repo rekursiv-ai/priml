@@ -42,6 +42,7 @@ from numpy import array, array_equal, int64, load, savez, zeros
 from numpy.lib.format import read_array
 from numpy.typing import NDArray
 from pyarrow import Table, parquet
+from pyarrow.lib import StringBuilder
 from tokenizers import decoders, models, normalizers, pre_tokenizers, processors
 from torch import Tensor
 from treekle import ReadError, from_plain, json_loads
@@ -111,10 +112,17 @@ VOCAB: Final = 300
 _CWD: Final = Path(__file__).resolve().parent
 
 
+def _text_table(documents: list[str]) -> Table:
+    # Python-list inference imports pandas (~0.17 s); this is already UTF-8 text.
+    builder = StringBuilder()
+    builder.append_values(documents)
+    return pa.table({"text": builder.finish()})
+
+
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:
     """Write one parquet shard holding the given documents."""
     parquet.write_table(
-        pa.table({"text": documents}),
+        _text_table(documents),
         root / f"shard_{index:05d}.parquet",
     )
 
@@ -374,7 +382,7 @@ def test_fit_vocabulary_records_and_reuses_exact_artifacts(
 ) -> None:
     shard = tmp_path / "shard_00000.parquet"
     parquet.write_table(
-        pa.table({"text": ["hello world 123", "café hello", "你好 world"]}),
+        _text_table(["hello world 123", "café hello", "你好 world"]),
         shard,
     )
     output = tmp_path / "nested" / "tokenizer"
@@ -577,7 +585,7 @@ def test_fit_vocabulary_rebuilds_when_the_byte_table_is_missing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     shard = tmp_path / "shard_00000.parquet"
-    parquet.write_table(pa.table({"text": ["small corpus for refitting"]}), shard)
+    parquet.write_table(_text_table(["small corpus for refitting"]), shard)
     output = tmp_path / "tokenizer"
     caplog.set_level(
         "INFO",
@@ -641,7 +649,7 @@ def test_document_batches_respect_shards_row_groups_and_refill_size(
         (second, ["f", "g"]),
     ):
         parquet.write_table(
-            pa.table({"text": documents}),
+            _text_table(documents),
             path,
             row_group_size=3,
         )
@@ -2057,10 +2065,10 @@ def test_corpus_build_moves_donor_and_copies_validation(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()
     parquet.write_table(
-        pa.table({"text": ["donor", "keep", "donor"]}),
+        _text_table(["donor", "keep", "donor"]),
         raw / "shard_00000.parquet",
     )
-    parquet.write_table(pa.table({"text": ["heldout"]}), raw / "shard_00001.parquet")
+    parquet.write_table(_text_table(["heldout"]), raw / "shard_00001.parquet")
     config = CorpusPreparation.Config()
     config.raw_dir = raw
     config.working_dir = tmp_path / "prepared"
@@ -2674,7 +2682,7 @@ def test_documents_stops_when_the_character_budget_is_reached(
 ) -> None:
     shard = tmp_path / "shard.parquet"
     parquet.write_table(
-        pa.table({"text": ["ab", "cd", "ef"]}),
+        _text_table(["ab", "cd", "ef"]),
         shard,
         row_group_size=1,
     )
@@ -2684,7 +2692,7 @@ def test_documents_stops_when_the_character_budget_is_reached(
 
 def test_documents_counts_from_zero_for_a_small_budget(tmp_path: Path) -> None:
     shard = tmp_path / "shard.parquet"
-    parquet.write_table(pa.table({"text": ["a", "b", "c"]}), shard)
+    parquet.write_table(_text_table(["a", "b", "c"]), shard)
 
     assert list(_documents([shard], max_chars=2, doc_cap=1)) == ["a", "b"]
 
@@ -3451,7 +3459,7 @@ def test_corpus_build_deduplicates_moves_donors_and_preserves_sources(
     }
     for shard, texts in original.items():
         parquet.write_table(
-            pa.table({"text": texts}),
+            _text_table(texts),
             raw / f"shard_{shard:05d}.parquet",
         )
     config = CorpusPreparation.Config()
@@ -4266,7 +4274,7 @@ def test_a_corrupted_byte_table_is_refitted(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     shard = tmp_path / "shard_00000.parquet"
-    parquet.write_table(pa.table({"text": ["hello world 123", "café hello"]}), shard)
+    parquet.write_table(_text_table(["hello world 123", "café hello"]), shard)
     output = tmp_path / "tokenizer"
     fit = partial(
         prepare_data._fit_vocabulary,
