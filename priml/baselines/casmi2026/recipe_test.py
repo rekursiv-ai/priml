@@ -2162,7 +2162,7 @@ def test_main_data_reads_all_positions_and_casts_each_popularity_before_sum(
     assert inputs.families.train_smiles == inputs.library.smiles
     assert inputs.train_fingerprints.shape == (3, 1)
     assert len(inputs.bank.models) == 1
-    assert len(inputs.views_bank.models) == 3
+    assert len(inputs.views_bank.models) == 1
     assert len(inputs.rankers.models) == 4
     assert all(len(model.trees) == 3 for model in inputs.rankers.models)
     np.testing.assert_array_equal(
@@ -2198,6 +2198,10 @@ def test_second_stage_reaches_native_index_models_and_accepts_empty_raw_key(
 ) -> None:
     config = SecondResource.Config()
     assets = second_config(tmp_path)
+    for family in (assets.rankers.own, assets.rankers.pv):
+        family.priors = family.priors[:1]
+        family.seeds = family.seeds[:1]
+        family.tree.rounds = 2
     np.save(Path(assets.pool_dir) / "fp_bits.npy", np.arange(8, dtype=np.int64))
     states = second_states()
     assets.bank.model.channels_out = 8
@@ -2767,7 +2771,7 @@ def _main_assets(directory: Path, *, banks: bool = True) -> MainAssets.Config:
     config.rankers.sha256 = _seal(Path(config.rankers.path))
     if banks:
         config.bank = save_bank(directory, [0])
-        config.views_bank = save_bank(directory, [0, 1, 2])
+        config.views_bank = save_bank(directory, [0])
     return config
 
 

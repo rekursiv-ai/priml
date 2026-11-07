@@ -1110,6 +1110,54 @@ def test_ema_update_every_skips_off_cycle_calls() -> None:
     torch.testing.assert_close(ema.shadow_params["weight"], torch.full((3, 2), 2.0))
 
 
+def test_ema_update_cadence_starts_at_the_warmup_boundary() -> None:
+    model = nn.Linear(2, 3, bias=False)
+    config = EMA.Config()
+    config.decay = 0.5
+    config.update_after_step = 1
+    config.update_every = 3
+    config.shadow_kind = "param_dict"
+    ema = config.make()
+
+    for live, expected in [
+        (1.0, 1.0),
+        (5.0, 3.0),
+        (9.0, 3.0),
+        (13.0, 3.0),
+        (17.0, 10.0),
+    ]:
+        with torch.no_grad():
+            model.weight.fill_(live)
+        ema(model)
+        assert torch.equal(
+            ema.shadow_params["weight"],
+            torch.full_like(model.weight, expected),
+        )
+    assert (ema.global_step, ema.local_step) == (5, 2)
+
+
+def test_ema_warmup_seed_averages_persistent_buffers_with_configured_decay() -> None:
+    model = nn.BatchNorm1d(2)
+    config = EMA.Config()
+    config.decay = 0.5
+    config.update_after_step = 1
+    config.warmup_seed = True
+    config.buffer_update_fn = ema_module.average_persistent_buffers
+    ema = config.make()
+    ema(model)
+    with torch.no_grad():
+        model.get_buffer("running_mean").fill_(8.0)
+    ema(model)
+
+    assert ema.shadow_model is not None
+    assert torch.equal(
+        ema.shadow_model.get_buffer("running_mean"),
+        torch.full((2,), 4.0),
+    )
+    assert torch.equal(model.get_buffer("running_mean"), torch.full((2,), 8.0))
+    assert (ema.global_step, ema.local_step) == (2, 1)
+
+
 def test_ema_before_first_update_is_a_noop_and_saves_counters_only() -> None:
     model = nn.Linear(2, 3)
     with torch.no_grad():

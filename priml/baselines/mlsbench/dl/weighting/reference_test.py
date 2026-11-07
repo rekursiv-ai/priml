@@ -57,6 +57,14 @@ def test_the_synthetic_cut_keeps_the_scripts_images_in_its_order() -> None:
     assert_exact(stored("subset/"), reference.subset_record())
 
 
+def test_synthetic_images_keep_their_source_index_after_crop_and_mirror() -> None:
+    media, _ = reference.long_tail_split()
+    codes = media[:, 2, 7:9, 11:14].flip(-1)
+    count = reference.SPLIT_CLASSES * reference.SPLIT_PER_CLASS
+    expected = torch.arange(1, count + 1).repeat_interleave(2 * 3).reshape(count, 2, 3)
+    assert torch.equal(codes.to(torch.int64) - 1, expected - 1)
+
+
 def test_the_schedule_and_optimizer_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),

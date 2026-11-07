@@ -1305,6 +1305,22 @@ def test_native_runner_requires_the_family_dataset_directory(tmp_path: Path) -> 
     assert not (tmp_path / "unused").exists()
 
 
+def test_native_runner_preserves_an_existing_family_run(tmp_path: Path) -> None:
+    family = Family.Config()
+    family.dataset_directory = tmp_path / "data"
+    output = tmp_path / "trained"
+    output.mkdir()
+    configuration = output / "family.json"
+    configuration.write_text("original family configuration\n")
+    runner = NativeFamilyRunner.Config().make()
+
+    with pytest.raises(FileExistsError):
+        runner.run(family, output_directory=output, budget=None)
+
+    assert configuration.read_text() == "original family configuration\n"
+    assert sorted(path.name for path in output.iterdir()) == ["family.json"]
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

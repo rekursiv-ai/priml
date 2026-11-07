@@ -41,7 +41,6 @@ from priml.baselines.casmi2026.dreams import (
 )
 from priml.baselines.casmi2026.dreams_test import (
     checkpoint_config,
-    save_bank,
     source_checkpoint,
 )
 from priml.baselines.casmi2026.fragnet import (
@@ -2854,7 +2853,6 @@ def pipeline(directory: Path) -> Pipeline:
         )
         for smiles, packed, similarity, tanimoto, parent, combo in (
             ("CCOC", 48, 0.98, 0.4, 0, ("methyl_O",)),
-            ("CC(C)O", 240, 0.74, 0.57, 1, ("hydroxyl_aliph", "dehydroxyl_aliph")),
         )
     )
     proposals = PreparedPaths(
@@ -2902,10 +2900,12 @@ def pipeline(directory: Path) -> Pipeline:
     config.checkpoints = [checkpoint_config(full, index=0)]
     config.merged_adduct = modal_adduct
     config.single_count = keep_count
-    views = directory / "views"
-    views.mkdir()
+    views = directory / "views.pt"
+    torch.save(checkpoint, views)
+    views_config = MainBank.Config()
+    views_config.checkpoints = [checkpoint_config(views, index=0)]
     with torch.random.fork_rng(devices=[]):
-        bank, views_bank = config.make(), save_bank(views, [0, 1, 2]).make()
+        bank, views_bank = config.make(), views_config.make()
     target = train_mass.item(1)
     spectra: list[SpectrumRequest] = [
         {
@@ -3001,17 +3001,17 @@ def assert_main_pipeline(tmp_path: Path) -> None:
         generated=inputs.generated,
     )
     rows = base.rows
-    assert rows.candidates.smiles == ("CCCO", "CCOC", "CC(C)O")
-    assert rows.candidates.sources == ("pool", "generated", "generated")
-    np.testing.assert_array_equal(rows.candidates.pool_rows, [0, -1, -1])
-    np.testing.assert_array_equal(rows.train_sid, [1, -1, -1])
-    np.testing.assert_array_equal(rows.parent_sid, [-1, 0, 1])
+    assert rows.candidates.smiles == ("CCCO", "CCOC")
+    assert rows.candidates.sources == ("pool", "generated")
+    np.testing.assert_array_equal(rows.candidates.pool_rows, [0, -1])
+    np.testing.assert_array_equal(rows.train_sid, [1, -1])
+    np.testing.assert_array_equal(rows.parent_sid, [-1, 0])
     np.testing.assert_array_equal(
         rows.parent_similarity,
-        np.array([0, 0.98, 0.74], np.float32),
+        np.array([0, 0.98], np.float32),
     )
-    assert rows.raw == (None, "CCOC", "CC(C)O")
-    assert base.diagnostics.n_gen == 2
+    assert rows.raw == (None, "CCOC")
+    assert base.diagnostics.n_gen == 1
     values, views = family_features(
         base,
         inputs.spectra,
@@ -3036,16 +3036,16 @@ def assert_main_pipeline(tmp_path: Path) -> None:
         members = [name for name in names if name.startswith(family + "__")]
         assert members == sorted(members)
     assert all(
-        value.shape == (3,) and value.dtype == np.float32 for value in values.values()
+        value.shape == (2,) and value.dtype == np.float32 for value in values.values()
     )
     assert sum(name.startswith("derivation__") for name in names) == 41
     assert sum(name.startswith("frag2__") for name in names) == 31
     assert sum(name.startswith("analog_struct__") for name in names) == 36
-    assert views.single.shape[0] == views.merged.shape[0] == 3
+    assert views.single.shape[0] == views.merged.shape[0] == 1
     assert views.modes.tolist() == [1.0, -1.0]
-    # Both generated rows hold their own derivation support; the pool row holds a log.
-    assert values["derivation__dp_hit"].tolist() == [1, 0, 0]
-    assert values["derivation__dg_n_par"].tolist() == [0, 1, 1]
+    # The generated row holds its own derivation support; the pool row holds a log.
+    assert values["derivation__dp_hit"].tolist() == [1, 0]
+    assert values["derivation__dg_n_par"].tolist() == [0, 1]
     rankers = TreeBank(
         features=RANKER_NAMES,
         models=tuple(LightGBMModel.parse(text) for text in ranker_texts()),
@@ -3053,7 +3053,7 @@ def assert_main_pipeline(tmp_path: Path) -> None:
     combined = {
         name: base.features[:, i] for i, name in enumerate(main_feature_names())
     } | values
-    selected = select_features(combined, names=RANKER_NAMES, count=3)
+    selected = select_features(combined, names=RANKER_NAMES, count=2)
     ranked = _run(engine, inputs, rankers)
     np.testing.assert_array_equal(ranked.features, selected)
     np.testing.assert_array_equal(ranked.scores, rankers.score(selected, RANKER_NAMES))

@@ -45,29 +45,24 @@ def cleanup_cuda() -> Generator[None]:
       item: Each yielded value.
 
     """
-    torch_loaded_at_setup = "torch" in sys.modules
-    reclaim = (
-        _cuda_reclaimer()
-        if torch_loaded_at_setup and torch.cuda.is_available()
-        else None
-    )
-    if reclaim is not None and _cuda_is_initialized():
-        # Same gate as teardown: with no context there is nothing to reclaim,
-        # and reaching `synchronize` would force the lazy init anyway.
+    if "torch" not in sys.modules:
+        yield
+        if _cuda_is_initialized() and torch.cuda.is_available():
+            # Torch first imported by the test body: reclaim only if that import
+            # path actually created a context.
+            _cuda_reclaimer()()
+        return
+    # Bound before the test's patches: a test faking `is_initialized()` True on a
+    # CPU-only host must not reach `synchronize`. Initialization is a flag read,
+    # so no test probes the driver merely by running.
+    really_initialized = torch.cuda.is_initialized
+    reclaim = _cuda_reclaimer()
+    if really_initialized():
         reclaim()
     yield
-    if torch_loaded_at_setup:
-        # All three are load-bearing: the setup snapshot, because a test faking
-        # `is_available()` True on a CPU-only host must not reach `synchronize`;
-        # `_cuda_is_initialized()`, because forcing CUDA's lazy init on a host
-        # the test never touched can raise; and a live `is_available()`, because
-        # a test that faked CUDA away is still faked when this runs.
-        if reclaim is not None and _cuda_is_initialized() and torch.cuda.is_available():
-            reclaim()
-    elif _cuda_is_initialized():
-        # Torch first imported by the test body: no setup snapshot either way,
-        # so reclaim only if that import path actually created a context.
-        _cuda_reclaimer()()
+    # A live `is_available()` too: a test that faked CUDA away is still faked here.
+    if really_initialized() and torch.cuda.is_available():
+        reclaim()
 
 
 @contextmanager

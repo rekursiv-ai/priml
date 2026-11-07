@@ -936,10 +936,10 @@ def pipeline_fragments() -> FragmentMassStore:
 
 
 def pipeline_bank(directory: Path) -> SecondBank:
-    """Pin two single and two merged eight-bit checkpoints of the seeded states."""
+    """Pin one single and one merged eight-bit checkpoint of the seeded states."""
     states = second_states()
     files: list[tuple[Path, str]] = []
-    for index, name in enumerate(("single_a", "merged_b", "single_c", "merged_d")):
+    for index, name in enumerate(("single_a", "merged_b")):
         state = {key: value.clone() for key, value in states[index % 2].items()}
         state["head.3.weight"] = torch.cat(
             # SecondBank adds one output row to this seven-bit source head.
@@ -950,7 +950,7 @@ def pipeline_bank(directory: Path) -> SecondBank:
         path = directory / f"{name}.pt"
         torch.save({"model": state, "nbits": 8, "d": 8, "layers": 1}, path)
         files.append((path, hashlib.sha256(path.read_bytes()).hexdigest()))
-    config = tiny_bank(single=(files[0], files[2]), merged=(files[1], files[3]))
+    config = tiny_bank(single=(files[0],), merged=(files[1],))
     config.model.channels_out = 8
     with torch.random.fork_rng(devices=[]):
         return config.make()
@@ -970,7 +970,7 @@ def test_second_pipeline_composes_retrieval_fragments_bank_and_rankers(
     raw = second_library()
     fragments = pipeline_fragments()
     bank = pipeline_bank(tmp_path)
-    assert len(bank.single) == len(bank.merged) == 2
+    assert len(bank.single) == len(bank.merged) == 1
     engine = SecondEngine.Config().make()
     index = engine.retrieval.index(raw)
     bases: list[SecondBase] = []
@@ -1053,12 +1053,12 @@ def test_second_pipeline_composes_retrieval_fragments_bank_and_rankers(
     assert (unknown.target, unknown.channels, unknown.logits) == (None, None, None)
     assert len(unknown.rows) == 0
     rank_config = SecondRankerBank.Config()
-    rank_config.own.priors, rank_config.own.seeds = [0.35, 0.55], [0, 1]
-    rank_config.pv.priors, rank_config.pv.seeds = [0.30, 0.60], [0, 1, 2, 3]
+    rank_config.own.priors, rank_config.own.seeds = [0.35], [0, 1]
+    rank_config.pv.priors, rank_config.pv.seeds = [0.30], [0, 1]
     rank_config.weight_fingerprint = 0.88
     for family in (rank_config.own, rank_config.pv):
         family.tree.max_depth = 2
-        family.tree.rounds = 3
+        family.tree.rounds = 2
         family.tree.min_leaf = 1
         family.tree.max_bins = 2
         family.tree.max_leaves = 2

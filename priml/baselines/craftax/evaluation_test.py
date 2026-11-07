@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.env import BossFightReward, StallCap
 from priml.baselines.craftax.evaluation import Evaluation
 from priml.baselines.craftax.game.state import LOG_DTYPE
@@ -70,7 +71,12 @@ def policy() -> MinGRUPolicy:
     return tiny_policy().make()
 
 
-def test_an_evaluation_is_an_evaluator(policy: MinGRUPolicy) -> None:
+@eager(world=tiny_world)
+def test_an_evaluation_is_an_evaluator(
+    policy: MinGRUPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     evaluation = _evaluation(policy)
     evaluation.close()
 

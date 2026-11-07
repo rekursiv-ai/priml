@@ -141,14 +141,31 @@ def _probe(
 
 def test_run_screens_the_median_target_and_reports_the_wide_pool_fit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, chemistry, pool = _screen_inputs(tmp_path)
-    screen = PubChemScreen.Config(pass_one=3, popularity_union=2, limit=2).make()
+    predictions: list[NDArray[np.float32]] = []
+
+    def predicted(
+        bank: MainBank,
+        spectra: Sequence[SpectrumRequest],
+    ) -> NDArray[np.float32] | None:
+        assert len(spectra) == 1
+        result = molecule_logits(bank, spectra)
+        if result is not None:
+            predictions.append(result)
+        return result
+
+    monkeypatch.setattr(pubchem, "molecule_logits", predicted)
+    screen = PubChemScreen.Config(
+        pass_one=3,
+        popularity_union=2,
+        limit=2,
+        max_spectra=1,
+    ).make()
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         bank = tiny_pubchem_bank(tmp_path)
         assert molecule_logits(bank, []) is None
-        logits = molecule_logits(bank, _query(100.0, "[M+H]+"))
-        wide = molecule_logits(bank, _query(100.004, "[M+H]+"))
         full, fallback, unpooled, unknown = (
             screen.run(
                 "m",
@@ -165,8 +182,8 @@ def test_run_screens_the_median_target_and_reports_the_wide_pool_fit(
                 (100.0, "unknown"),
             )
         )
-    assert logits is not None
-    assert wide is not None
+    assert len(predictions) == 3
+    logits, wide, _ = predictions
     assert logits.shape == (7,)
     assert logits.dtype == np.float32
     assert full is not None

@@ -103,6 +103,15 @@ def test_a_policy_source_writes_its_policys_observation_layout(
     assert len(episodes) == source.env.num_envs
 
 
+def test_policy_provenance_identifies_the_loaded_checkpoint(tmp_path: Path) -> None:
+    config = _policy_source(tmp_path, board=False)
+    source = config.make()
+    try:
+        assert source.provenance()["checkpoint"] == str(config.checkpoint)
+    finally:
+        source.close()
+
+
 def test_a_policy_source_needs_its_checkpoint(tmp_path: Path) -> None:
     config = _policy_source(tmp_path, board=False)
     config.checkpoint = None

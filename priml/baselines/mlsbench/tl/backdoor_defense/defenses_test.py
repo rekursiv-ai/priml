@@ -66,6 +66,17 @@ def test_confidence_z_score_standardizes_within_the_predicted_class() -> None:
         np.testing.assert_allclose(scores[mask], expected, rtol=1e-4, atol=1e-6)
 
 
+def test_confidence_z_score_adds_configured_regularization_to_class_spread() -> None:
+    config = ConfidenceZScore.Config()
+    config.eps = 0.5
+    defense = config.make()
+    predictions = np.log(np.array([[2, 1, 1], [6, 1, 1]], dtype=np.float32))
+
+    scores = defense.score_samples(np.zeros((2, 3), dtype=np.float32), predictions)
+
+    np.testing.assert_allclose(scores, [-0.2, 0.2], rtol=1e-6)
+
+
 def test_spectral_signature_flags_the_outlier_of_its_class() -> None:
     scores = fitted(SpectralSignature.Config().make()).score_samples(
         features(),

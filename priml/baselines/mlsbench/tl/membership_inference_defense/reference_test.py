@@ -22,6 +22,9 @@ from priml.baselines.mlsbench.dl.vision.scripts import (
     capture_reference as vision_capture_reference,
 )
 from priml.baselines.mlsbench.tl.membership_inference_defense import reference
+from priml.baselines.mlsbench.tl.membership_inference_defense.metrics import (
+    MembershipInference,
+)
 from priml.baselines.mlsbench.tl.membership_inference_defense.scripts import (
     capture_reference,
 )
@@ -64,6 +67,19 @@ def test_the_attack_matches_the_driver_on_scores_tied_within_each_half() -> None
     assert member.unique().numel() < member.numel()
     assert nonmember.unique().numel() < nonmember.numel()
     assert_exact(expected, reference.attack_record())
+
+
+def test_scored_preserves_accuracy_for_a_single_member() -> None:
+    metric = MembershipInference.Config().make()
+    logits = torch.tensor([[3.0, 0.0, -1.0], [0.0, 3.0, -1.0]])
+    metric.update(logits, label=torch.tensor([0, 2]), split=torch.tensor(0))
+    # `scored` must retain full accuracy when MembershipInference saw one member.
+    metric.update(logits[:1], label=torch.tensor([0]), split=torch.tensor(1))
+    metric.update(logits, label=torch.tensor([2, 2]), split=torch.tensor(2))
+
+    record = reference.scored("evaluation", metric)
+
+    assert record["evaluation/accuracy"].tolist() == [0.5, 1.0, 0.0]
 
 
 def test_no_stored_auc_ranks_a_score_both_halves_hold() -> None:

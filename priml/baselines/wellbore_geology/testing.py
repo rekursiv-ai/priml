@@ -216,16 +216,15 @@ class EvalIdentityDropout(PinnedDropout):
     """
 
     @override
-    def __torch_dispatch__(
+    def _dispatch(
         self,
         func: OpOverload[..., object],
-        types: tuple[type, ...],
-        args: tuple[object, ...] = (),
-        kwargs: dict[str, object] | None = None,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
     ) -> object:
         if func is torch.ops.aten.feature_dropout.default and args[2] is False:
-            return func(*args, **(kwargs or {}))
-        return super().__torch_dispatch__(func, types, args, kwargs)
+            return func(*args, **kwargs)
+        return super()._dispatch(func, args, kwargs)
 
 
 class ObservedLoss(WellboreLoss):

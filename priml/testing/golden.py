@@ -39,6 +39,7 @@ import torch
 
 from priml.math.seed import get_rng_state
 from priml.testing import regenerate
+from priml.testing.eager_dispatch import EagerDispatchMode
 
 
 if TYPE_CHECKING:
@@ -207,7 +208,7 @@ class PinnedRandom(TorchDispatchMode):
         return tensor.copy_(values * (high - low) + low)
 
 
-class PinnedDropout(TorchDispatchMode):
+class PinnedDropout(EagerDispatchMode):
     """Supply fixed Bernoulli inputs while observing every stochastic call site.
 
     Args:
@@ -224,16 +225,14 @@ class PinnedDropout(TorchDispatchMode):
         self.names = {id(module): name for name, module in model.named_modules()}
 
     @override
-    def __torch_dispatch__(
+    def _dispatch(
         self,
         func: OpOverload[..., object],
-        types: tuple[type, ...],
-        args: tuple[object, ...] = (),
-        kwargs: dict[str, object] | None = None,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
     ) -> object:
-        del types
         if not _is_stochastic(func, args):
-            return func(*args, **(kwargs or {}))
+            return func(*args, **kwargs)
         if func is not torch.ops.aten.bernoulli_.float:
             raise ValueError(func)
         self.calls += 1
