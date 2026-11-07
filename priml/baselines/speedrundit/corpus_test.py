@@ -17,6 +17,7 @@ from priml.baselines.speedrundit.corpus import (
     autoencoder_identity,
     load_stored,
     load_table,
+    mismatches,
     save_stored,
     save_table,
     verify_receipt,
@@ -174,6 +175,20 @@ def test_every_mismatched_identity_is_named(tmp_path: Path) -> None:
     assert "autoencoder.latent_shape" in message
     assert "autoencoder.sample" in message
     assert "codec.stored_dtype" in message
+
+
+@pytest.mark.parametrize(
+    ("recorded", "expected"),
+    [
+        pytest.param({}, {"checkpoint": None}, id="missing-recorded"),
+        pytest.param({"checkpoint": None}, {}, id="missing-expected"),
+    ],
+)
+def test_missing_identity_field_differs_from_null(
+    recorded: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    assert len(mismatches(recorded, expected=expected)) == 1
 
 
 def test_a_corpus_without_a_receipt_is_refused(tmp_path: Path) -> None:

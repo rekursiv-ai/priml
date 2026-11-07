@@ -83,8 +83,9 @@ def test_capture_assembles_both_sides_into_one_report(
     recipe = upstream.Trace(epochs=[0])
     traces = _Calls(recipe, *[initial] * len(reference.SETTINGS))
     lockstep = _Calls(({"lockstep/x/loss": torch.zeros(2)}, [zero, zero]))
+    imports = _Calls(variants)
     stand_ins: dict[tuple[object, str], object] = {
-        (upstream, "variants"): returning(variants),
+        (upstream, "variants"): imports,
         (upstream, "trace_main"): traces,
         (capture_reference, "upstream_record"): returning({"loss/x": torch.zeros(2)}),
         (capture_reference, "compare_recipe"): returning(["recipe: differs"]),
@@ -105,6 +106,7 @@ def test_capture_assembles_both_sides_into_one_report(
     for (module, name), value in stand_ins.items():
         monkeypatch.setattr(module, name, value)
     captured = capture_reference.capture(tmp_path / "clone", tmp_path)
+    assert imports.calls == [((tmp_path / "clone", tmp_path), {})]
     assert set(captured.record) == {"loss/x", "lockstep/x/loss", "settings/x/train"}
     assert captured.sites == {"reference": {"a": 1}, "port": {"b": 2}}
     # ``mismatches`` names the stand-in port's missing keys first, sorted.
@@ -122,7 +124,8 @@ def test_capture_assembles_both_sides_into_one_report(
         "sites: unreached",
     ]
     # The recipe runs the linear model serially; each setting stops at its scheduler.
-    (_, first), *settings = traces.calls
+    (arguments, first), *settings = traces.calls
+    assert arguments == (variants["pristine"], upstream.recipe_argv("resnet20-cifar10"))
     assert first == {
         "build": upstream.linear_model,
         "split": first["split"],
