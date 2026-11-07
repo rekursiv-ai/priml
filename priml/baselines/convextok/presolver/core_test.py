@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+from unittest.mock import call, patch
 
 import numpy as np
 import pytest
@@ -145,6 +146,26 @@ def test_new_core_retains_input_arrays_and_builds_state() -> None:
         actual = fields[name]
         assert isinstance(actual, np.ndarray)
         assert np.array_equal(actual, expected), name
+
+
+def test_define_proxies_binds_each_struct_to_its_handle_and_fields() -> None:
+    with patch.object(core, "define_proxy") as define:
+        core._define_proxies.__wrapped__()
+
+    assert define.call_args_list == [
+        call(
+            core._MatrixHandle,
+            core.MatrixType,
+            ["x", "i", "start", "end", "m", "n", "nnz", "n_alloc"],
+        ),
+        call(core._IVecHandle, core.IVecType, ["data", "len"]),
+        call(core._DVecHandle, core.DVecType, ["data", "len"]),
+        call(
+            core._CoreHandle,
+            core.CoreType,
+            [name for name, _ in core._CORE_FIELDS],
+        ),
+    ]
 
 
 def test_shift_row_steps_past_an_empty_left_neighbour() -> None:

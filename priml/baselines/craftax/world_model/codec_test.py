@@ -353,6 +353,55 @@ def test_decode_marks_out_of_field_values_as_nan() -> None:
     assert nan_at == [3 * 8, 792 + 22, 792 + 23, 792 + 28, 792 + 43]
 
 
+def test_fresh_cpu_tables_hold_schema_bounds_and_game_float_formulas() -> None:
+    tables = _tables.__wrapped__(torch.device("cpu"))
+    schema = craftax_schema()
+    bounds = _aux_bounds()
+    assert tables.obs_names == (
+        tuple(field.name for field in schema.cell_fields) * schema.cell_slots
+        + schema.scalar_names
+    )
+    assert tables.cell_channel.tolist() == list(range(len(schema.cell_fields)))
+    assert tables.cell_limit.tolist() == [field.valid for field in schema.cell_fields]
+    for channel, field in enumerate(schema.cell_fields):
+        assert torch.equal(
+            tables.cell_float[channel, : field.valid],
+            torch.arange(field.valid).float(),
+        )
+        assert tables.cell_float[channel, field.valid :].isnan().all()
+    assert tables.aux_field.tolist() == list(range(len(schema.scalar_names)))
+    assert tables.aux_low.tolist() == [low for low, _ in bounds]
+    assert tables.aux_high.tolist() == [high for _, high in bounds]
+    scales = {
+        **dict.fromkeys(SQRT_FIELDS | TENTHS_FIELDS, 10),
+        **dict.fromkeys(QUARTER_FIELDS, 4),
+        **dict.fromkeys(HALF_FIELDS, 2),
+        "health": 200,
+        "light": 255,
+    }
+    assert tables.aux_scale.tolist() == [
+        scales.get(name, 1) for name in schema.scalar_names
+    ]
+    assert tables.aux_square.tolist() == [
+        name in SQRT_FIELDS for name in schema.scalar_names
+    ]
+    assert tables.aux_exact.tolist() == [
+        name not in {"health", "light"} for name in schema.scalar_names
+    ]
+    assert tables.aux_health.tolist() == [
+        name == "health" for name in schema.scalar_names
+    ]
+    for row, (name, (low, high)) in enumerate(
+        zip(schema.scalar_names, bounds, strict=True),
+    ):
+        values = [low, (low + high) // 2, high]
+        assert tables.aux_float[row, torch.tensor(values) + 1].tolist() == [
+            _game_aux(name, value) for value in values
+        ], name
+        assert tables.aux_float[row, : low + 1].isnan().all(), name
+        assert tables.aux_float[row, high + 2 :].isnan().all(), name
+
+
 def test_tables_off_the_cpu_are_the_cpus_moved_float64_included() -> None:
     # ``meta`` stands in for an accelerator: any device but the CPU and MPS
     # takes every CPU table, the float64 ones too.

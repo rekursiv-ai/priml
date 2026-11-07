@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
-from configgle import Fig
+from configgle import Fig, InlineConfig, Makes
 from torch.utils.data import DataLoader
 
 import pytest
 import torch
 
-from priml.baselines.wellbore_geology.data import FoldObservations
+from priml.baselines.wellbore_geology.data import (
+    FoldObservations,
+    WellDataset,
+    WellLoader,
+)
 from priml.baselines.wellbore_geology.folds import GeographicPrior
 from priml.baselines.wellbore_geology.metrics import PooledRMSE
 from priml.baselines.wellbore_geology.testing import (
@@ -26,13 +31,16 @@ from priml.baselines.wellbore_geology.train_loop import (
 )
 from priml.optimizers.lr_schedule import RecursiveCosine
 from priml.runtime import SingleProcess, runtime_initialized
-from priml.train.epoch_loop import EarlyStopping
+from priml.train.epoch_loop import EarlyStopping, EpochTrainLoop
 from priml.train.profiler import PhaseTimer
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
+
+    from priml.baselines.wellbore_geology.data import WellRecord
+    from priml.baselines.wellbore_geology.folds import RelativeSurface
 
 
 def test_original_row_metric_is_bound_to_the_native_eval_slot() -> None:
@@ -341,6 +349,127 @@ def test_a_repeated_score_keeps_the_first_selection() -> None:
         assert loop.best_state is state
     finally:
         loop.close()
+
+
+@pytest.mark.parametrize("device", [None, "cpu", "cuda"])
+@pytest.mark.parametrize("validation", [False, True])
+def test_fold_data_builds_independent_training_and_validation_loaders(
+    device: str | None,
+    validation: bool,
+) -> None:
+    config = FoldData.Config()
+    config.loader = RecordingLoader.Config()
+    config.loader.seed = 11
+    config.loader.batch_size = 2
+    config.validation_batch_size = 3
+    config.validation_seed_offset = 7
+    config.device = None if device is None else torch.device(device)
+    if not validation:
+        config.validation = None
+    data = FoldData(config)
+    assert data.train_dataloader() is data.train
+    assert isinstance(data.train, DataLoader)
+    assert data.train.pin_memory == (device == "cuda")
+    assert data.state_dict() == {"timer_epoch": {"global_count": 0, "global_sec": 0.0}}
+    assert config.loader.pin_memory is False
+    assert config.loader.shuffle
+    assert config.loader.drop_last
+    assert config.loader.dataset.transform.paths is not None
+    assert config.loader.dataset.transform.images is not None
+    if validation:
+        held_out = data._held_out
+        assert isinstance(held_out, RecordingLoader)
+        assert held_out.config.seed == 18
+        assert held_out.config.batch_size == 3
+        assert held_out.config.pin_memory == (device == "cuda")
+        assert held_out.config.shuffle is False
+        assert held_out.config.drop_last is False
+        assert held_out.config.dataset.transform.paths is None
+        assert held_out.config.dataset.transform.images is None
+        assert held_out.config.dataset.observations == config.validation
+        assert data.eval_dataloader() is held_out.loader
+        observations = held_out.dataset.observations
+        assert isinstance(observations, FoldObservations)
+        assert data.held_out_surfaces is observations.surfaces
+        assert data.validation is not data.train
+    else:
+        assert data.validation is None
+        assert data.eval_dataloader() == ()
+        with pytest.raises(ValueError, match="_held_out"):
+            _ = data.held_out_surfaces
+
+
+class RecordingLoader(WellLoader):
+    """Replace dataset and DataLoader construction at the fold's data boundary."""
+
+    class Config(Makes["RecordingLoader"], WellLoader.Config, kw_only=True):
+        """Keep the native loader settings available for inspection."""
+
+    def __init__(self, config: WellLoader.Config) -> None:
+        self.config = config
+        self.loader = DataLoader[dict[str, object]](
+            [],
+            pin_memory=config.pin_memory,
+        )
+        dataset = config.dataset.copy_tree()
+        dataset.observations = InlineConfig(EmptyFoldObservations)
+        dataset.transform.paths = dataset.transform.images = None
+        dataset.streams.seed = config.seed
+        self.dataset = WellDataset(dataset.finalized())
+
+
+class EmptyFoldObservations(FoldObservations):
+    """Complete empty observation boundary with valid sequence behavior."""
+
+    def __init__(self) -> None:
+        self.wells: tuple[WellRecord, ...] = ()
+        self.surfaces: dict[str, RelativeSurface] = {}
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_fold_seeds_fill_only_unset_random_streams(explicit: bool) -> None:
+    config = WellboreFoldLoop.Config()
+    config.base_seed = 7
+    config.fold = 2
+    config.fold_seed_stride = 13
+    config.loader_seed_offset = 3
+    if explicit:
+        config.seed = 19
+        config.dataset.loader.seed = 23
+        config.dataset.loader.dataset.streams.seed = 29
+    resolved = config.finalized()
+    assert resolved.seed == (19 if explicit else 9)
+    assert resolved.dataset.loader.seed == (23 if explicit else 36)
+    assert resolved.dataset.loader.dataset.streams.seed == (29 if explicit else 9)
+    assert config.seed == (19 if explicit else None)
+    assert config.dataset.loader.seed == (23 if explicit else -1)
+    assert config.dataset.loader.dataset.streams.seed == (29 if explicit else -1)
+
+
+@pytest.mark.parametrize(
+    ("is_final", "truncated", "evaluated", "force", "expected"),
+    [
+        (True, True, False, False, True),
+        (False, True, False, False, False),
+        (True, False, False, False, False),
+        (True, True, True, False, False),
+        (False, False, False, True, True),
+    ],
+)
+def test_truncated_final_evaluation_forces_only_an_unevaluated_terminal_epoch(
+    is_final: bool,
+    truncated: bool,
+    evaluated: bool,
+    force: bool,
+    expected: bool,
+) -> None:
+    loop = WellboreFoldLoop.__new__(WellboreFoldLoop)
+    loop.config = WellboreFoldLoop.Config()
+    loop.config.evaluate_truncated = truncated
+    loop._terminal_epoch_evaluated = evaluated
+    with patch.object(EpochTrainLoop, "_maybe_eval", autospec=True) as evaluate:
+        loop._maybe_eval(is_final=is_final, force=force)
+    evaluate.assert_called_once_with(loop, is_final=is_final, force=expected)
 
 
 if __name__ == "__main__":
