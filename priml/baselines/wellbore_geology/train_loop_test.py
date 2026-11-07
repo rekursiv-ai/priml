@@ -5,17 +5,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from configgle import Fig
+from torch.utils.data import DataLoader
 
 import pytest
 import torch
 
 from priml.baselines.wellbore_geology.data import FoldObservations
+from priml.baselines.wellbore_geology.folds import GeographicPrior
 from priml.baselines.wellbore_geology.metrics import PooledRMSE
 from priml.baselines.wellbore_geology.testing import (
     BatchedFoldData,
     probe_recipe,
+    tiny_family,
+    write_study_inputs,
 )
 from priml.baselines.wellbore_geology.train_loop import (
+    FoldData,
     WellboreFoldLoop,
     require_fresh_runtime,
 )
@@ -27,6 +32,7 @@ from priml.train.profiler import PhaseTimer
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 
 def test_original_row_metric_is_bound_to_the_native_eval_slot() -> None:
@@ -172,6 +178,77 @@ def test_reconstructible_config_resolves_original_complete_update_horizon(
     schedule = finalized.step.lr_schedule
     assert isinstance(schedule, RecursiveCosine.Config)
     assert schedule.T_max == expected
+
+
+def test_family_seed_derives_unset_fold_streams() -> None:
+    config = WellboreFoldLoop.Config()
+    config.base_seed = 10
+    config.fold = 2
+    finalized = config.finalized()
+    assert finalized.seed == 12
+    assert finalized.dataset.loader.seed == 10 + 1000 * 2 + 1
+    assert finalized.dataset.loader.dataset.streams.seed == 12
+
+
+def test_family_seed_keeps_declared_fold_streams() -> None:
+    config = WellboreFoldLoop.Config()
+    config.base_seed = 10
+    config.fold = 2
+    config.seed = 5
+    config.dataset.loader.seed = 6
+    config.dataset.loader.dataset.streams.seed = 7
+    finalized = config.finalized()
+    assert finalized.seed == 5
+    assert finalized.dataset.loader.seed == 6
+    assert finalized.dataset.loader.dataset.streams.seed == 7
+
+
+def test_without_a_family_seed_the_fold_streams_stay_unset() -> None:
+    finalized = WellboreFoldLoop.Config().finalized()
+    assert finalized.dataset.loader.seed == -1
+    assert finalized.dataset.loader.dataset.streams.seed == -1
+
+
+# ``current_epoch`` counts completed epochs, so the truncated pass scores as epoch 1.
+@pytest.mark.parametrize(("truncated", "epochs"), [(False, [1]), (True, [1, 1])])
+def test_a_truncated_last_epoch_is_scored_only_when_asked(
+    *,
+    truncated: bool,
+    epochs: list[int],
+) -> None:
+    config = probe_recipe()
+    # Two updates per epoch: the third stops partway through the second epoch.
+    config.max_steps = 3
+    config.evaluate_truncated = truncated
+    loop = config.finalized().make()
+    loop.train()
+    assert loop.native_step.global_step == 3
+    assert [row["epoch"] for row in loop.val_history] == epochs
+
+
+def test_real_fold_data_builds_training_and_held_out_loaders(tmp_path: Path) -> None:
+    write_study_inputs(tmp_path, rows=13)
+    config = tiny_family(particle=False).training.dataset.copy_tree()
+    train = config.loader.dataset.observations
+    validation = config.validation
+    assert isinstance(train, FoldObservations.Config)
+    assert isinstance(validation, FoldObservations.Config)
+    for observations, wells in ((train, ("well0", "well1")), (validation, ("well2",))):
+        observations.directory = tmp_path / "train"
+        observations.geography = GeographicPrior.Config()
+        observations.support_well_ids = ("well0", "well1")
+        observations.well_ids = wells
+    config.validation_batch_size = 3
+    config.loader.seed = 3
+    config.loader.dataset.streams.seed = 4
+    data = FoldData(config.finalized())
+    assert isinstance(data.train, DataLoader)
+    assert data.train.batch_size == 2
+    assert isinstance(data.validation, DataLoader)
+    assert data.validation.batch_size == 3
+    assert data.eval_dataloader() is data.validation
+    assert data.train_dataloader() is data.train
+    assert set(data.held_out_surfaces) == {"well2"}
 
 
 def test_unrun_loop_starts_without_a_selection() -> None:

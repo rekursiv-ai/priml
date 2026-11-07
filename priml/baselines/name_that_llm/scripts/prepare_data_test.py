@@ -10,7 +10,10 @@ from treekle import json_loads
 
 import pytest
 
-from priml.baselines.name_that_llm.scripts.prepare_data import Preparation
+from priml.baselines.name_that_llm.scripts.prepare_data import (
+    Preparation,
+    prepare_data,
+)
 
 
 if TYPE_CHECKING:
@@ -72,6 +75,15 @@ def test_prepare_rejects_smoke_caps_before_io(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="complete input population"):
         config.make().run()
     assert not (tmp_path / "prepared").exists()
+
+
+def test_the_entry_config_prepares_into_scratch_datasets() -> None:
+    config = prepare_data()
+    assert (config.base_dir, config.directory) == (
+        "/opt/scratch",
+        "/datasets/name-that-llm/prepared",
+    )
+    assert config.dataset.max_prompts is None
 
 
 if __name__ == "__main__":
