@@ -956,25 +956,24 @@ def _scored_targets(
 
 def test_prefetch_thread_stops_when_the_consumer_stops(tmp_path: Path) -> None:
     stream = _stream(_corpus(tmp_path))
-    before = threading.active_count()
+    # Another test's stream may still be winding down; only this one's thread counts.
+    before = set(threading.enumerate())
     batches = iter(stream.train_dataloader())
     next(batches)
-    assert threading.active_count() == before + 1
+    (worker,) = set(threading.enumerate()) - before
+    assert worker.name == "craftax-replay-stream"
     # A daemon: a stream abandoned unclosed must not hold the interpreter at exit.
-    (worker,) = [t for t in threading.enumerate() if t.name == "craftax-replay-stream"]
     assert worker.daemon
     del batches
-    for thread in threading.enumerate():
-        if thread.name == "craftax-replay-stream":
-            thread.join(timeout=5)
-    assert threading.active_count() == before
+    worker.join(timeout=5)
+    assert not worker.is_alive()
 
 
 def test_the_prefetch_thread_builds_one_batch_ahead_of_the_consumer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Each batch held is pinned memory on CUDA: one queued, one being built.
-    full: queue.Queue[bool] = queue.Queue()
+    queued: queue.Queue[tuple[bool, int]] = queue.Queue()
     offer = data._offer
 
     def recording(
@@ -982,7 +981,7 @@ def test_the_prefetch_thread_builds_one_batch_ahead_of_the_consumer(
         done: threading.Event,
         item: _Item | BaseException | None,
     ) -> bool:
-        full.put(ready.full())
+        queued.put((ready.full(), ready.qsize()))
         return offer(ready, done, item)
 
     monkeypatch.setattr(data, "_offer", recording)
@@ -990,9 +989,12 @@ def test_the_prefetch_thread_builds_one_batch_ahead_of_the_consumer(
     batches = iter(_Stream(lambda _: item, first=0, device=torch.device("cpu")))
     next(batches)
     # Built while the consumer holds the first, the third finds the second queued.
-    offers = [full.get(timeout=5) for _ in range(3)]
+    # Whether the consumer took the first before the third was built is a race, so
+    # each offer also checks the bound: never more than one batch waits.
+    offers = [queued.get(timeout=5) for _ in range(3)]
     del batches
-    assert offers[2]
+    assert offers[2][0]
+    assert max(size for _, size in offers) == 1
 
 
 def test_the_stream_moves_every_tensor_to_its_device_without_blocking(
