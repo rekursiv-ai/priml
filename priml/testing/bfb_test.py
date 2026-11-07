@@ -39,6 +39,7 @@ from priml.testing import bfb, regenerate
 from priml.testing.bfb import (
     _EXACT_F32_OPS,
     _FLOAT_FACTORIES,
+    _alpha_index,
     _assert_equal,
     _assert_portable_output_dtype,
     _assert_portable_state_changes,
@@ -46,6 +47,7 @@ from priml.testing.bfb import (
     _cpu_state_dict,
     _downcast_f64,
     _downcast_result,
+    _dtype_index,
     _floating_tensors,
     _max_ulp_diff,
     _module_device,
@@ -3667,6 +3669,18 @@ def test_add_passes_through_unless_its_alpha_scales(alpha: float, upcast: bool) 
     with OpsIssued() as issued, host_agnostic_numerics():
         torch.add(left, right, alpha=alpha)
     assert ("aten.to.dtype" in issued.names) is upcast
+
+
+def test_alpha_and_dtype_positions_are_read_from_the_op_schema() -> None:
+    # Both lookups are cached per process; clear them so this test reads the schema.
+    _alpha_index.cache_clear()
+    _dtype_index.cache_clear()
+    assert _alpha_index(torch.ops.aten.add.Tensor) == 2
+    assert _alpha_index(torch.ops.aten.mul.Tensor) is None
+    assert _dtype_index(torch.ops.aten.softmax.int) == 2
+    # ``sum``'s ``dtype`` is keyword-only, so no caller passes it positionally.
+    assert _dtype_index(torch.ops.aten.sum.dim_IntList) is None
+    assert _dtype_index(torch.ops.aten.mul.Tensor) is None
 
 
 def test_scales_or_fuses_distinguishes_add_sub_and_decomposed_ops() -> None:

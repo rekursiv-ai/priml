@@ -179,6 +179,12 @@ def test_frame_and_health_records_keep_their_byte_layout() -> None:
     assert health == health_dtype()
     assert health.descr == [("current", "<f4", (15,)), ("maximum", "<f4", (15,))]
     assert (frame_dtype().itemsize, health_dtype().itemsize) == (7_858, 120)
+    health_fields = health_dtype().fields
+    assert health_fields is not None
+    assert {name: entry[1] for name, entry in health_fields.items()} == {
+        "current": 0,
+        "maximum": 60,
+    }
     fields = frame_dtype().fields
     assert fields is not None
     # games.mjs reads the action, tick, score and achievement count at these offsets.
