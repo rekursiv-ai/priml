@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -125,6 +127,38 @@ def test_short_adds_the_shortest_long_wins_up_to_their_natural_share() -> None:
     assert _picked(two.episodes) == [(0, 0), (0, 1), (0, 4), (0, 5)]
 
 
+@pytest.mark.parametrize(
+    ("second_death", "expected", "added"),
+    [(3, [(0, 0), (0, 1), (0, 2), (0, 3)], 1), (9, [(0, 0), (0, 2)], 0)],
+)
+def test_short_counts_the_win_at_the_cap_toward_its_share(
+    second_death: int,
+    expected: list[tuple[int, int]],
+    added: int,
+) -> None:
+    main = _pool(
+        _ghost(0, "death", 2),
+        _ghost(1, "death", second_death),
+        _ghost(2, "win", 5),
+        _ghost(3, "win", 7),
+    )
+    chosen = short_set([main], cap=5, count=4)
+    assert _picked(chosen.episodes) == expected
+    assert chosen.composition.added_wins == added
+
+
+def test_short_breaks_equal_length_and_ordinal_ties_by_capture() -> None:
+    main = _pool(_ghost(0, "death", 2), _ghost(1, "win", 7))
+    extra = _pool(
+        _ghost(0, "death", 3),
+        dataclasses.replace(_ghost(1, "win", 7), sampling_seed=2),
+        capped=True,
+    )
+    chosen = short_set([main, extra], cap=5, count=4)
+    assert _picked(chosen.episodes) == [(0, 0), (1, 0), (0, 1), (1, 1)]
+    assert chosen.composition.added_wins == 2
+
+
 def test_short_takes_every_win_when_the_uncapped_captures_saw_no_death() -> None:
     main = _pool(_ghost(0, "win", 500), _ghost(1, "win", 50), _ghost(2, "win", 900))
     chosen = short_set(
@@ -168,6 +202,12 @@ def test_quiet_runs_collapse_to_their_ends_and_short_ones_stay() -> None:
     assert quiet_segments(busy, live=live, decisive=none, rule=rule).tolist() == [
         [0, 300],
     ]
+    assert quiet_segments(
+        np.zeros(4, np.int64),
+        live=np.full(4, 2, np.int64),
+        decisive=np.zeros(4, np.int64),
+        rule=QuietRule(per_live=2, min_run=4, keep=1),
+    ).tolist() == [[0, 1], [3, 4]]
 
 
 def test_a_death_or_win_is_never_skipped_even_in_a_crowd() -> None:
