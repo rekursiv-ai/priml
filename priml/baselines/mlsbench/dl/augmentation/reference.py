@@ -51,6 +51,10 @@ if TYPE_CHECKING:
     from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 
+# ``test_record`` names the test split's pipeline, so explicit gate selection
+# would otherwise hand this helper module to pytest as a test.
+__test__ = False
+
 AUGMENTS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
     "pad_crop_flip": exp000,
     "cutout": exp001,
