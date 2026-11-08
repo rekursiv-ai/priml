@@ -339,6 +339,6 @@ def _tensor_bytes(tree: object) -> int:
     """Total bytes of every tensor leaf in ``tree``."""
     return sum(
         leaf.numel() * leaf.element_size()
-        for leaf in cast(list[object], tree_leaves(tree))
+        for leaf in tree_leaves(tree)
         if isinstance(leaf, Tensor)
     )
