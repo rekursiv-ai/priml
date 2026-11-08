@@ -1550,7 +1550,7 @@ def test_feature_planes_keep_float32_statistics_and_clip_slopes(direction: int) 
     window.raw["gamma"][:] = np.asarray([1, 1, 2, 4, 9, np.nan], np.float32) * direction
     window.raw["md"][:] = [0, 0.5, 0, 0.5, 0, 1]
     window.raw["z"][:] = np.arange(6, dtype=np.float32) / 2
-    gamma = np.asarray([1, 3, 9, 8], dtype=np.float32) * direction
+    gamma = np.asarray([1, 3, 9, np.nan], dtype=np.float32) * direction
     nan_rate = np.asarray([0, 0, 0, 1], dtype=np.float32)
     reference = np.asarray([1, 2, np.nan, 4, 5], dtype=np.float32)
     axis = np.asarray([-4, -2, 0, 2, 4], dtype=np.float32)
@@ -1768,9 +1768,11 @@ def test_finite_gamma_survives_missing_fraction_rounding(
         downsample=2,
         reference_columns=5,
     )
+    config.channels = ["gr_abs_diff"]
     builder = config.make()
     well = feature_well()
-    expected = builder(well, training=True).auxiliary["GR_penalty_error"]
+    expected = builder(well, training=True)
+    assert np.count_nonzero(expected.arrays["unet_static"])
     missing_fraction = np.float32(2**25 / (2**25 + 1))
     assert missing_fraction == 1
     missing = ~np.isfinite(builder._window(well).raw["gamma"])
@@ -1790,8 +1792,17 @@ def test_finite_gamma_survives_missing_fraction_rounding(
         )
 
     monkeypatch.setattr(data, "_bin_mean", rounded_missing_fraction)
-    actual = builder(well, training=True).auxiliary["GR_penalty_error"]
-    np.testing.assert_array_equal(actual, expected, strict=True)
+    actual = builder(well, training=True)
+    np.testing.assert_array_equal(
+        actual.auxiliary["GR_penalty_error"],
+        expected.auxiliary["GR_penalty_error"],
+        strict=True,
+    )
+    np.testing.assert_array_equal(
+        actual.arrays["unet_static"],
+        expected.arrays["unet_static"],
+        strict=True,
+    )
 
 
 def feature_well() -> WellRecord:
