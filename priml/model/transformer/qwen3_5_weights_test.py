@@ -298,21 +298,12 @@ def test_tied_head_on_a_different_device_is_rejected() -> None:
     native_config = Qwen35.Config.from_hf(config)
     with patch("torch.equal", side_effect=AssertionError("compared across devices")):
         head = state["lm_head.weight"]
-        state["lm_head.weight"] = _OtherDevice(head)
+        state["lm_head.weight"] = head.to("meta")
         with pytest.raises(ValueError, match="device") as error:
             remap_hf_state_dict(state, native_config)
         assert (
             str(error.value) == "Tied lm_head.weight must match the embedding device."
         )
-
-
-class _OtherDevice(torch.Tensor):
-    """A CPU tensor reporting a different device, for the tied-head check."""
-
-    @property
-    @override
-    def device(self) -> torch.device:
-        return torch.device("meta")
 
 
 class _CustomBlock(torch.nn.Module):
