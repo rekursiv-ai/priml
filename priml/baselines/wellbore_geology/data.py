@@ -555,7 +555,7 @@ class ImageFeatures:
                 (gamma[:, None] - reference[None, :]) / np.float32(cfg.gamma_stats[1]),
             ),
         )
-        absolute_gamma[nan_rate >= 1] = 0
+        absolute_gamma[~np.isfinite(gamma)] = 0
         absolute_gamma[:, ~np.isfinite(reference)] = 0
         planes["gr_abs_diff"] = absolute_gamma
         planes["tw_seen_tvt_abs_diff"] = _finish(
