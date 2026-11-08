@@ -120,6 +120,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Final,
+    Literal,
     NotRequired,
     TypedDict,
     cast,
@@ -893,16 +894,18 @@ def _is_narrow_float(dtype: torch.dtype) -> bool:
 # ``_foreach_*`` ops (e.g. ``_foreach_norm`` behind ``clip_grad_norm_``) receive a
 # ``list[Tensor]`` rather than a bare tensor, so a direct ``isinstance(a, Tensor)``
 # check misses them and the upcast silently does not apply.
-def _floating_tensors(value: object) -> list[Tensor]:
-    """Return the floating tensors appearing in a tensor / list / tuple."""
-    if isinstance(value, Tensor):
-        return [value] if value.dtype.is_floating_point else []
-    if isinstance(value, (list, tuple)):
-        found: list[Tensor] = []
-        for item in cast(list[object] | tuple[object, ...], value):
-            found.extend(_floating_tensors(item))
-        return found
-    return []
+def _floating_tensors(values: Iterable[object]) -> list[Tensor]:
+    """Return the floating tensors among ``values``, inside lists and tuples too."""
+    found: list[Tensor] = []
+    for value in values:
+        if isinstance(value, Tensor):
+            if value.dtype.is_floating_point:
+                found.append(value)
+        elif isinstance(value, (list, tuple)):
+            found.extend(
+                _floating_tensors(cast(list[object] | tuple[object, ...], value)),
+            )
+    return found
 
 
 # Torch promotes mixed inputs, so a bfloat16 tensor meeting a float32 one yields
@@ -915,7 +918,7 @@ def _result_dtype(tensors: Sequence[Tensor]) -> torch.dtype:
     # Nearly every op meets one dtype, which promotes to itself; the general rule
     # costs ~10us per op and the harness dispatches ~1e4 ops per golden.
     first = tensors[0].dtype
-    if all(tensor.dtype == first for tensor in tensors):
+    if len({tensor.dtype for tensor in tensors}) == 1:
         return first
     # A zero-dimensional float64 tensor does not widen a float32 vector.
     # Dtype-only promotion loses that distinction.
@@ -967,7 +970,7 @@ def _downcast_result(
         elif isinstance(value, tuple):
             sequence = cast(tuple[object, ...], value)
         else:
-            shared_tensors.extend(_floating_tensors(value))
+            shared_tensors.extend(_floating_tensors((value,)))
             continue
         if len(sequence) == len(typed_result):
             sequences.append(sequence)
@@ -975,7 +978,7 @@ def _downcast_result(
     for index, value in enumerate(typed_result):
         tensors = list(shared_tensors)
         for sequence in sequences:
-            tensors.extend(_floating_tensors(sequence[index]))
+            tensors.extend(_floating_tensors((sequence[index],)))
         target = _result_dtype(tensors) if tensors else fallback
         downcast.append(_downcast_f64(value, target))
     return downcast
@@ -1025,7 +1028,6 @@ def _write_back(
     target: torch.dtype,
 ) -> object:
     """Restore an in-place / ``out=`` / foreach op's mutation onto the originals."""
-    schema = func._schema  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
     # Copy each mutated float64 upcast copy back into its float32 original (the
     # side effect), recording (upcast_copy -> original) so a returned element
     # that IS a write target can be swapped to the caller's original. Returns
@@ -1033,10 +1035,7 @@ def _write_back(
     # returns ``(output, save_mean, save_invstd)`` while writing ``running_*`` --
     # are simply downcast, never dropped.
     upcast_to_original: list[tuple[object, object]] = []
-    for i, arg in enumerate(schema.arguments):
-        if arg.alias_info is None or not arg.alias_info.is_write:
-            continue
-        name = arg.name
+    for i, name in _plan(func).write_arguments:
         original = kwargs[name] if name in kwargs else args[i]
         computed = up_kwargs[name] if name in up_kwargs else up_args[i]
         _copy_back(original, computed)
@@ -1087,6 +1086,18 @@ def _passes_through(func: OpOverload[..., object]) -> bool:
     )
 
 
+type _Route = Literal[
+    "plain",
+    "convolution_backward",
+    "dot",
+    "matrix",
+    "convolution",
+    "group_norm",
+    "batch_norm",
+    "decompose",
+]
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class _OpPlan:
     """What the harness decides from an op alone, so each dispatch reads it once."""
@@ -1105,24 +1116,70 @@ class _OpPlan:
     """Its packet name, :func:`_op_name`."""
 
     writes: bool
-    """Mutates an argument; see :func:`_writes`."""
+    """Mutates an argument; see :func:`_write_arguments`."""
+
+    write_arguments: tuple[tuple[int, str], ...]
+    """Position and name of each argument it mutates."""
 
     convolution_backward: bool
     """Is ``aten.convolution_backward.default``."""
+
+    dtype_index: int | None
+    """Position of a ``dtype`` argument callers may pass positionally."""
+
+    float_factory: bool
+    """An aten arithmetic factory: widened by its dtype when it has no tensor
+    operand; see ``_FLOAT_FACTORIES``."""
+
+    route: _Route
+    """How :func:`_run_unfused` runs it; see :func:`_route`."""
 
 
 @cache
 def _plan(func: OpOverload[..., object]) -> _OpPlan:
     """Return ``func``'s plan."""
     passes_through = _passes_through(func)
+    aten = func.namespace == "aten"
+    name = _op_name(func)
+    convolution_backward = func is torch.ops.aten.convolution_backward.default
+    write_arguments = _write_arguments(func)
     return _OpPlan(
         native=passes_through and _alpha_index(func) is None,
         passes_through=passes_through,
-        aten=func.namespace == "aten",
-        name=_op_name(func),
-        writes=_writes(func),
-        convolution_backward=func is torch.ops.aten.convolution_backward.default,
+        aten=aten,
+        name=name,
+        writes=bool(write_arguments),
+        write_arguments=write_arguments,
+        convolution_backward=convolution_backward,
+        dtype_index=_dtype_index(func),
+        float_factory=aten and name in _FLOAT_FACTORIES,
+        route=_route(name, aten=aten, convolution_backward=convolution_backward),
     )
+
+
+# The ops whose float64 form :func:`_run_unfused` replaces. A route is a fact about the
+# op alone, so every other op returns at once instead of testing each name per call.
+# ``matrix`` and ``decompose`` can both end in the decomposition; a ``dot``,
+# ``convolution``, ``group_norm`` or ``batch_norm`` whose arguments are not the
+# supported form runs as called, like a ``plain`` op.
+def _route(name: str, *, aten: bool, convolution_backward: bool) -> _Route:
+    """Return how an op leaves the harness's upcast."""
+    base = name.removesuffix("_")
+    if not aten:
+        return "plain"
+    if convolution_backward:
+        return "convolution_backward"
+    if name in {"dot", "vdot"}:
+        return "dot"
+    if base in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
+        return "matrix"
+    if base in {"convolution", "_convolution"}:
+        return "convolution"
+    if name == "native_group_norm":
+        return "group_norm"
+    if name in {"native_batch_norm", "_native_batch_norm_legit"}:
+        return "batch_norm"
+    return "decompose" if name in _UNFUSED_OPS else "plain"
 
 
 # A view moves no bytes, so it is exact, and its result must alias its input: upcast,
@@ -1168,11 +1225,12 @@ def _alpha_index(func: OpOverload[..., object]) -> int | None:
 
 
 @cache
-def _writes(func: OpOverload[..., object]) -> bool:
-    """Whether the op mutates an argument: in-place, ``out=``, or foreach."""
-    return any(
-        arg.alias_info is not None and arg.alias_info.is_write
-        for arg in func._schema.arguments  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
+def _write_arguments(func: OpOverload[..., object]) -> tuple[tuple[int, str], ...]:
+    """Return each argument the op mutates: in-place, ``out=``, or foreach."""
+    return tuple(
+        (index, arg.name)
+        for index, arg in enumerate(func._schema.arguments)  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
+        if arg.alias_info is not None and arg.alias_info.is_write
     )
 
 
@@ -1233,15 +1291,16 @@ def _run_unfused(
 ) -> object:
     """Run ``func``, through its decomposition when its kernel may fuse an FMA."""
     plan = _plan(func)
-    if not plan.aten:
+    route = plan.route
+    if route == "plain":
         return func(*args, **kwargs)
     name = plan.name
     base = name.removesuffix("_")
-    if plan.convolution_backward:
+    if route == "convolution_backward":
         return _pairwise_convolution_backward(func, args, kwargs)
-    if name in {"dot", "vdot"} and _real_vectors(args):
+    if route == "dot" and _real_vectors(args):
         return cast("Callable[..., Tensor]", _pairwise_dot)(*args, **kwargs)
-    if base in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
+    if route == "matrix":
         matrix_names = (
             ("mat", "vec")
             if base == "addmv"
@@ -1274,27 +1333,23 @@ def _run_unfused(
         # Bias may expand to the product, never expand the product itself.
         # This validation remains necessary when beta=0 ignores bias values.
         _ = bias.expand(shape)
-    if name != base and base in {"addmm", "baddbmm", "addbmm", "addmv"}:
-        functional = cast(
-            "OpOverload[..., object]",
-            getattr(torch.ops.aten, base).default,
-        )
-        result = _run_unfused(functional, args, kwargs)
-        original = cast(Tensor, args[0] if args else kwargs["self"])
-        return original.copy_(cast(Tensor, result))
-    if base == "addbmm":
-        return cast("Callable[..., Tensor]", _unfused_addbmm)(*args, **kwargs)
-    if base in {"convolution", "_convolution"}:
+        if name != base and base in {"addmm", "baddbmm", "addbmm", "addmv"}:
+            functional = cast(
+                "OpOverload[..., object]",
+                getattr(torch.ops.aten, base).default,
+            )
+            result = _run_unfused(functional, args, kwargs)
+            original = cast(Tensor, args[0] if args else kwargs["self"])
+            return original.copy_(cast(Tensor, result))
+        if base == "addbmm":
+            return cast("Callable[..., Tensor]", _unfused_addbmm)(*args, **kwargs)
+    if route == "convolution":
         bias = args[2] if len(args) > 2 else kwargs.get("bias")
         if isinstance(bias, Tensor):
             return _unfused_convolution(func, args, kwargs, bias=bias)
-    if name == "native_group_norm" and not kwargs:
+    if route == "group_norm" and not kwargs:
         return _unfused_group_norm(args)
-    if (
-        name in {"native_batch_norm", "_native_batch_norm_legit"}
-        and len(args) == 8
-        and not kwargs
-    ):
+    if route == "batch_norm" and len(args) == 8 and not kwargs:
         return _unfused_batch_norm(func, args=args)
     if name in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
         return _decomposition(func, args, kwargs)(*args, **kwargs)
@@ -1596,17 +1651,21 @@ class _Float64Compute(EagerDispatchMode):
             plan.passes_through and not _scales_operand(func, args, kwargs)
         ):
             return func(*args, **kwargs)
-        args, kwargs = _dtype_as_keyword(func, args=args, kwargs=kwargs)
-        input_tensors: list[Tensor] = []
-        for value in (*args, *kwargs.values()):
-            input_tensors.extend(_floating_tensors(value))
+        if plan.dtype_index is not None:
+            args, kwargs = _dtype_as_keyword(func, args=args, kwargs=kwargs)
+        # Torch hands over a handful of arguments, almost all scalars or tensors, so
+        # the walk is one call over all of them rather than one per argument.
+        input_tensors = _floating_tensors((*args, *kwargs.values()))
         explicit_dtype = kwargs.get("dtype")
+        named_dtype = (
+            explicit_dtype if isinstance(explicit_dtype, torch.dtype) else None
+        )
         # A tensorless sampler's width is its dtype kwarg or the process default;
         # see the note above ``_EXACT_F32_OPS``.
-        factory = plan.aten and plan.name in _FLOAT_FACTORIES and not input_tensors
+        factory = plan.float_factory and not input_tensors
         target = (
-            explicit_dtype
-            if isinstance(explicit_dtype, torch.dtype)
+            named_dtype
+            if named_dtype is not None
             else _result_dtype(input_tensors)
             if input_tensors
             else torch.int64
@@ -1614,16 +1673,14 @@ class _Float64Compute(EagerDispatchMode):
             and not any(isinstance(value, float) for value in (*args, *kwargs.values()))
             else torch.get_default_dtype()
         )
-        narrow = any(_is_narrow_float(value.dtype) for value in input_tensors) or (
+        narrow = bool({tensor.dtype for tensor in input_tensors} - {torch.float64}) or (
             factory and _is_narrow_float(target)
         )
         if not narrow:
             return _run_unfused(func, args, kwargs)
-        up_args = tuple(_upcast(a) for a in args)
+        up_args = tuple([_upcast(a) for a in args])
         up_kwargs = {k: _upcast(v) for k, v in kwargs.items()}
-        if factory or (
-            isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype)
-        ):
+        if factory or (named_dtype is not None and _is_narrow_float(named_dtype)):
             up_kwargs["dtype"] = torch.float64
         result = _one_term_mm(func, args=up_args)
         if result is None:
