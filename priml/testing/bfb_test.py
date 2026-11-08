@@ -56,12 +56,14 @@ from priml.testing.bfb import (
     _plan,
     _replay_golden,
     _resolve_output,
+    _route,
     _run_unfused,
     _scales_operand,
     _scales_or_fuses,
     _seed_bfb,
     _unfused_convolution,
     _upcast,
+    _write_arguments,
     _write_back,
     _write_golden,
     assert_bfb_against_golden,
@@ -469,7 +471,13 @@ def test_move_to_device_recurses_into_containers_and_passes_scalars() -> None:
 class _OtherDevice(Tensor):
     """A CPU tensor reporting a different device, to reach the cross-device path."""
 
-    device = torch.device("meta")
+    # Reported through attribute lookup: the checkers disagree on whether
+    # ``Tensor.device`` is a property, so no class-level override satisfies all three.
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if name == "device":
+            return torch.device("meta")
+        return cast(object, super().__getattribute__(name))
 
 
 def test_equality_checks_compare_across_devices_on_cpu() -> None:
@@ -3663,6 +3671,154 @@ def test_plan_records_what_each_op_alone_decides() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("func", "route"),
+    [
+        (torch.ops.aten.exp.default, "plain"),
+        (torch.ops.prims.mul.default, "plain"),
+        (torch.ops.aten.convolution_backward.default, "convolution_backward"),
+        (torch.ops.aten.dot.default, "dot"),
+        (torch.ops.aten.vdot.default, "dot"),
+        (torch.ops.aten.addmm.default, "matrix"),
+        (torch.ops.aten.addmm_.default, "matrix"),
+        (torch.ops.aten.baddbmm.default, "matrix"),
+        (torch.ops.aten.baddbmm_.default, "matrix"),
+        (torch.ops.aten.addbmm.default, "matrix"),
+        (torch.ops.aten.addbmm_.default, "matrix"),
+        (torch.ops.aten.addmv.default, "matrix"),
+        (torch.ops.aten.addmv_.default, "matrix"),
+        (torch.ops.aten._addmm_activation.default, "matrix"),
+        (torch.ops.aten.convolution.default, "convolution"),
+        (torch.ops.aten._convolution.default, "convolution"),
+        (torch.ops.aten.native_group_norm.default, "group_norm"),
+        (torch.ops.aten.native_batch_norm.default, "batch_norm"),
+        (torch.ops.aten._native_batch_norm_legit.default, "batch_norm"),
+        (torch.ops.aten.add.Tensor, "decompose"),
+        (torch.ops.aten.lerp_.Scalar, "decompose"),
+        (torch.ops.aten.native_layer_norm.default, "decompose"),
+    ],
+    ids=str,
+)
+def test_plan_routes_each_op_by_how_run_unfused_treats_it(
+    func: OpOverload[..., object],
+    route: str,
+) -> None:
+    """``_plan`` caches its route, so ``_route`` is also asked directly."""
+    assert _plan(func).route == route
+    assert (
+        _route(
+            _op_name(func),
+            aten=func.namespace == "aten",
+            convolution_backward=func is torch.ops.aten.convolution_backward.default,
+        )
+        == route
+    )
+
+
+def test_a_route_outside_aten_is_plain_whatever_its_name() -> None:
+    for name in ("dot", "addmm", "convolution", "native_group_norm", "add"):
+        assert _route(name, aten=False, convolution_backward=False) == "plain"
+    assert _route("add", aten=True, convolution_backward=False) == "decompose"
+    assert (
+        _route("anything", aten=True, convolution_backward=True)
+        == "convolution_backward"
+    )
+
+
+def test_plan_records_write_positions_dtype_position_and_float_factories() -> None:
+    aten = torch.ops.aten
+    assert _plan(aten.add_.Tensor).write_arguments == ((0, "self"),)
+    assert _plan(aten.add.out).write_arguments == ((3, "out"),)
+    assert _plan(aten._foreach_mul_.Scalar).write_arguments == ((0, "self"),)
+    assert _plan(aten.exp.default).write_arguments == ()
+    assert _write_arguments(aten.add_.Tensor) == ((0, "self"),)
+    assert _plan(aten.softmax.int).dtype_index == 2
+    assert _plan(aten.exp.default).dtype_index is None
+    assert {
+        name: _plan(func).float_factory
+        for name, func in {
+            "randn": aten.randn.default,
+            "normal": aten.normal.float_float,
+            "arange": aten.arange.default,
+            "exp": aten.exp.default,
+            "rand": aten.rand.default,
+        }.items()
+    } == {
+        "randn": True,
+        "normal": True,
+        "arange": True,
+        "exp": False,
+        "rand": False,
+    }
+
+
+def test_a_plain_op_runs_as_called_whatever_the_name_tables_say(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan decides once; a plain op never reaches the decomposition tests."""
+    func = torch.ops.aten.exp.default
+    assert _plan(func).route == "plain"
+    monkeypatch.setattr(bfb, "_UNFUSED_OPS", frozenset({"exp"}))
+    monkeypatch.setattr(bfb, "_scales_or_fuses", _refuse)
+    value = torch.linspace(0.0, 1.0, 3)
+    assert torch.equal(cast(Tensor, _run_unfused(func, (value,), {})), value.exp())
+
+
+@pytest.mark.parametrize(
+    ("func", "args", "kwargs"),
+    [
+        (
+            torch.ops.aten.dot.default,
+            (torch.arange(3), torch.arange(3)),
+            {},
+        ),
+        (
+            torch.ops.aten.native_group_norm.default,
+            (torch.linspace(-1.0, 1.0, 24).reshape(2, 3, 4), None, None, 2, 3, 4, 1),
+            {"eps": 1e-5},
+        ),
+        (
+            torch.ops.aten.convolution.default,
+            (
+                torch.linspace(-1.0, 1.0, 30).reshape(2, 3, 5),
+                torch.linspace(-1.0, 1.0, 24).reshape(4, 3, 2),
+                None,
+                [1],
+                [0],
+                [1],
+                False,
+                [0],
+                1,
+            ),
+            {},
+        ),
+    ],
+    ids=["integer_dot", "group_norm_keyword", "convolution_without_bias"],
+)
+def test_run_unfused_runs_an_unsupported_form_as_called(
+    monkeypatch: pytest.MonkeyPatch,
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> None:
+    """A routed op outside the unfused table, in a form it does not rewrite, is native."""
+    monkeypatch.setattr(bfb, "_scales_or_fuses", _refuse)
+    expected = func(*args, **kwargs)
+    actual = _run_unfused(func, args, kwargs)
+    expected_tensors = cast(
+        tuple[Tensor, ...],
+        expected if isinstance(expected, tuple) else (expected,),
+    )
+    actual_tensors = cast(
+        tuple[Tensor, ...],
+        actual if isinstance(actual, tuple) else (actual,),
+    )
+    assert len(actual_tensors) == len(expected_tensors)
+    assert all(
+        torch.equal(a, e) for a, e in zip(actual_tensors, expected_tensors, strict=True)
+    )
+
+
 @pytest.mark.parametrize(("alpha", "upcast"), [(1, False), (0.5, True)])
 def test_add_passes_through_unless_its_alpha_scales(alpha: float, upcast: bool) -> None:
     left, right = torch.ones(2, 3), torch.full((2, 3), 0.25)
@@ -4008,6 +4164,9 @@ def test_floating_tensors_ignores_integer_leaves_in_nested_inputs() -> None:
 
     assert found == [floating]
     assert found[0] is floating
+    second = torch.zeros(3)
+    walked = _floating_tensors((second, 3.5, integer, [floating], None))
+    assert [id(tensor) for tensor in walked] == [id(second), id(floating)]
 
 
 def test_op_name_uses_final_namespace_component_before_overload() -> None:
