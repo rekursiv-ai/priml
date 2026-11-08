@@ -309,7 +309,10 @@ def test_tied_head_on_a_different_device_is_rejected() -> None:
 class _OtherDevice(torch.Tensor):
     """A CPU tensor reporting a different device, for the tied-head check."""
 
-    device = torch.device("meta")
+    @property
+    @override
+    def device(self) -> torch.device:
+        return torch.device("meta")
 
 
 class _CustomBlock(torch.nn.Module):
