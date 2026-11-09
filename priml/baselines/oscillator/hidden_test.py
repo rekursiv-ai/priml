@@ -87,6 +87,8 @@ def test_shooting_recovers_noiseless_motion_and_rejects_other_physics() -> None:
     cfg = HiddenData.Config(seq_len=60, pred_len=16, recent_steps=(40, 50))
     cfg.observation = NoisyPosition.Config(noise=(0.0, 0.0))
     cfg.stationary = 1.0
+    # Fewer substeps keep this under the 60 s test timeout on CI runners.
+    cfg.dynamics.substeps = 2
     data = cfg.make()
     episode = data.sample(count=4, seed=21)
     method = LibraryShooting.Config(visible_steps=40, iterations=400).make()
