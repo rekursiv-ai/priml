@@ -1,5 +1,7 @@
 """Check the hidden-partner generator, its latent information, and the reference."""
 
+import math
+
 import pytest
 import torch
 
@@ -12,6 +14,10 @@ from priml.baselines.oscillator.hidden import (
     NoisyPosition,
 )
 from priml.baselines.oscillator.regimes import RegimeDynamics
+
+
+def test_domain_bounds_keep_double_precision() -> None:
+    assert HiddenDomain.bounds(HiddenDomain.Config()).dtype == torch.float64
 
 
 def test_pool_is_nested_and_streams_are_distinct() -> None:
@@ -106,6 +112,27 @@ def test_shooting_recovers_noiseless_motion_and_rejects_other_physics() -> None:
         )
 
 
+def test_shooting_scores_the_same_residual_with_both_losses() -> None:
+    data = HiddenData.Config(seq_len=60, pred_len=8, recent_steps=(20, 40)).make()
+    episode = data.sample(count=1, seed=21)
+    state = episode.states[:, 0]
+    coefficients = torch.zeros_like(episode.before)
+    path = data.dynamics.forecast(state, coefficients=coefficients, steps=2)
+    target = torch.cat((state[:, None, 0], path[..., 0]), dim=1) + 2
+    for robust, expected in ((0.0, 4.0), (2.0, math.log(2))):
+        method = LibraryShooting.Config(robust=robust).make()
+        method.fit(episode.windows, validation=episode.windows, dynamics=data.dynamics)
+        loss = method._residual(
+            coefficients,
+            state,
+            target,
+            -1 + coefficients,
+            1 + coefficients,
+            dynamics=data.dynamics,
+        )
+        torch.testing.assert_close(loss, torch.full_like(loss, expected))
+
+
 def test_part_two_physics_prior_still_runs_on_the_coupled_data() -> None:
     data = HiddenData.Config(seq_len=60, pred_len=8, recent_steps=(20, 40)).make()
     episode = data.sample(count=3, seed=4)
@@ -157,3 +184,9 @@ def test_invalid_components_and_premature_prediction_are_rejected() -> None:
     method.fit(episode.windows, validation=episode.windows, dynamics=data.dynamics)
     with pytest.raises(ValueError, match="covering"):
         method.predict(torch.zeros(1, 20, 1))
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

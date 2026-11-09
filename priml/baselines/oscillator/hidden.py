@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Final, Protocol
 
 import math
 
@@ -22,13 +22,11 @@ from priml.baselines.oscillator.regimes import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from priml.baselines.oscillator.forced import ForcedDynamics
 
-
-COEFFICIENTS = 7
+COEFFICIENTS: Final = 7
 """Observed stiffness, damping, cubic, dry friction; coupling; partner stiffness, damping."""
 
-OBSERVED_TERMS = 4
+OBSERVED_TERMS: Final = 4
 """Leading coefficients that belong to the observed mass and may change."""
 
 
@@ -59,7 +57,7 @@ class HiddenDomain:
 
     def __init__(self, config: Config) -> None:
         bounds = self.bounds(config)
-        if (
+        if (  # house-ignore[tensor-value-guard] -- Validate CPU coefficient bounds at construction.
             not torch.isfinite(bounds).all()
             or (bounds < 0).any()
             or (bounds[:, 1] < bounds[:, 0]).any()
@@ -69,9 +67,17 @@ class HiddenDomain:
             raise ValueError("Coefficient ranges must be finite, physical and ordered.")
         self.config = config
 
-    @staticmethod
-    def bounds(config: Config) -> Tensor:
-        """Stack the ranges in the dynamics' coefficient order."""
+    @classmethod
+    def bounds(cls, config: Config) -> Tensor:
+        """Stack the ranges in the dynamics' coefficient order.
+
+        Args:
+          config: Coefficient ranges in the domain configuration.
+
+        Returns:
+          bounds: Double-precision tensor with one lower and upper bound per coefficient.
+
+        """
         return torch.tensor(
             [
                 config.stiffness,
@@ -113,7 +119,16 @@ class HiddenDynamics:
         self.config = config
 
     def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
-        """Advance one observation interval; differentiable in both arguments."""
+        """Advance one observation interval; differentiable in both arguments.
+
+        Args:
+          state: Current state for each episode.
+          coefficients: Dynamics coefficients for each episode.
+
+        Returns:
+          state: State after one observation interval.
+
+        """
         x1, v1, x2, v2 = state.unbind(dim=-1)
         k1, c1, a1, mu, kc, k2, c2 = coefficients.unbind(dim=-1)
         delta = self.config.step_size / self.config.substeps
@@ -134,7 +149,17 @@ class HiddenDynamics:
         return torch.stack((x1, v1, x2, v2), dim=-1)
 
     def forecast(self, state: Tensor, *, coefficients: Tensor, steps: int) -> Tensor:
-        """Roll out future states without reading any future observation."""
+        """Roll out future states without reading any future observation.
+
+        Args:
+          state: Initial state for each episode.
+          coefficients: Fixed dynamics coefficients for each episode.
+          steps: Number of future observation intervals.
+
+        Returns:
+          trajectory: Future states, excluding the initial state.
+
+        """
         if steps <= 0:
             raise ValueError("The forecast length must be positive.")
         frames: list[Tensor] = []
@@ -208,8 +233,12 @@ class HiddenData:
         low, high = config.recent_steps
         if (
             min(config.pred_len, config.velocity, config.partner) <= 0
-            or not 5 <= low <= high < config.seq_len
-            or not 0 <= config.stationary <= 1
+            or low < 5
+            or low > high
+            or high >= config.seq_len
+            or math.isnan(config.stationary)
+            or config.stationary < 0
+            or config.stationary > 1
             or config.amplitude[0] < 0
             or config.amplitude[1] <= config.amplitude[0]
         ):
@@ -231,8 +260,16 @@ class HiddenData:
         ``label`` holds noisy observations for fitting. Scores use the clean
         position in ``states``, so the noise is never part of the target.
 
+        Args:
+          count: Number of episodes in the pool.
+          seed: Independent random stream for this pool.
+          domain: Optional coefficient domain for the final regime.
+
+        Returns:
+          episodes: Episodes with observed windows and evaluator-only state.
+
         """
-        if count <= 0 or not 0 <= seed < 2**32:
+        if count <= 0 or seed < 0 or seed >= 2**32:
             raise ValueError("Episode count and random seed must be valid.")
         cfg = self.config
         steps = cfg.seq_len + cfg.pred_len
@@ -290,6 +327,24 @@ class HiddenData:
         )
 
 
+class _ShootingGeometry(Protocol):
+    @property
+    def step_size(self) -> float: ...
+
+
+class _ShootingDynamics(Protocol):
+    @property
+    def config(self) -> _ShootingGeometry: ...
+
+    def forecast(
+        self,
+        state: Tensor,
+        *,
+        coefficients: Tensor,
+        steps: int,
+    ) -> Tensor: ...
+
+
 class LibraryShooting:
     """Fit the full mechanism library and hidden partner by multiple-start shooting.
 
@@ -324,14 +379,14 @@ class LibraryShooting:
         robust: float = 0.0
         """Cauchy loss scale in position units; zero keeps squared error."""
 
-    dynamics_type: ClassVar[type] = HiddenDynamics
+    dynamics_type: ClassVar[type[_ShootingDynamics]] = HiddenDynamics
     """Equation form the library declares; other physics is rejected."""
 
     latent_draws: ClassVar[int] = 2
     """Uniform draws initializing the unobserved state of each restart."""
 
-    @staticmethod
-    def latent(start: Tensor) -> Tensor:
+    @classmethod
+    def latent(cls, start: Tensor) -> Tensor:
         """Map restart draws to the hidden partner's position and velocity."""
         return torch.stack((2 * start[:, 0] - 1, start[:, 1] - 0.5), dim=-1)
 
@@ -339,14 +394,15 @@ class LibraryShooting:
         if (
             config.visible_steps < 8
             or min(config.restarts, config.iterations) < 1
-            or not config.lr > 0
+            or math.isnan(config.lr)
+            or config.lr <= 0
             or config.robust < 0
             or len(config.lower) != len(config.upper)
             or any(b <= a for a, b in zip(config.lower, config.upper, strict=True))
         ):
             raise ValueError("Shooting needs a window, budgets and ordered bounds.")
         self.config = config
-        self.dynamics: HiddenDynamics | ForcedDynamics | None = None
+        self.dynamics: _ShootingDynamics | None = None
         self.coefficients = len(config.lower)
         self.pred_len = 0
 
@@ -355,9 +411,19 @@ class LibraryShooting:
         train: ObservedWindows,
         *,
         validation: ObservedWindows,
-        dynamics: HiddenDynamics | RegimeDynamics | ForcedDynamics,
+        dynamics: _ShootingDynamics,
     ) -> dict[str, int | float]:
-        """Take the time geometry and declared equation form; no training data."""
+        """Take the time geometry and declared equation form; no training data.
+
+        Args:
+          train: Observed fitting windows.
+          validation: Held-out windows for checkpoint selection, if used.
+          dynamics: Reference dynamics for the observation step and equation form.
+
+        Returns:
+          diagnostics: Fitting diagnostics, including the number of attempted updates.
+
+        """
         del validation
         if isinstance(dynamics, RegimeDynamics) or not isinstance(
             dynamics,
@@ -369,8 +435,17 @@ class LibraryShooting:
         return {"attempted_updates": 0}
 
     def predict(self, media: Tensor) -> Tensor:
-        """Identify each episode from its newest observations, then roll forward."""
-        if self.dynamics is None:
+        """Identify each episode from its newest observations, then roll forward.
+
+        Args:
+          media: Batch of observed histories.
+
+        Returns:
+          forecast: Forecast in the original observation units.
+
+        """
+        dynamics = self.dynamics
+        if dynamics is None:
             raise RuntimeError("Fit the shooting reference before predicting.")
         cfg = self.config
         if media.ndim != 3 or media.shape[2] != 1 or media.shape[1] < cfg.visible_steps:
@@ -391,7 +466,7 @@ class LibraryShooting:
         raw = torch.logit(
             start[:, : self.coefficients].clamp(0.02, 0.98),
         ).requires_grad_()
-        step = self.dynamics.config.step_size
+        step = dynamics.config.step_size
         state = torch.cat(
             (
                 target[:, :1],
@@ -403,13 +478,20 @@ class LibraryShooting:
         optimizer = torch.optim.Adam([raw, state], lr=cfg.lr)
         for _ in range(cfg.iterations):
             optimizer.zero_grad()
-            self._residual(raw, state, target, lower, upper).sum().backward()
+            self._residual(
+                raw,
+                state,
+                target,
+                lower,
+                upper,
+                dynamics=dynamics,
+            ).sum().backward()
             optimizer.step()
         with torch.no_grad():
-            loss = self._residual(raw, state, target, lower, upper)
+            loss = self._residual(raw, state, target, lower, upper, dynamics=dynamics)
             best = loss.view(batch, restarts).argmin(1) + torch.arange(batch) * restarts
             coefficients = lower + (upper - lower) * torch.sigmoid(raw[best])
-            path = self.dynamics.forecast(
+            path = dynamics.forecast(
                 state[best],
                 coefficients=coefficients,
                 steps=cfg.visible_steps - 1 + self.pred_len,
@@ -423,11 +505,12 @@ class LibraryShooting:
         target: Tensor,
         lower: Tensor,
         upper: Tensor,
+        *,
+        dynamics: _ShootingDynamics,
     ) -> Tensor:
         """Mean (robust) mismatch to the observed window for every restart."""
-        assert self.dynamics is not None
         coefficients = lower + (upper - lower) * torch.sigmoid(raw)
-        path = self.dynamics.forecast(
+        path = dynamics.forecast(
             state,
             coefficients=coefficients,
             steps=target.shape[1] - 1,

@@ -1,3 +1,4 @@
+# house-ignore[cli-shape] -- The documented interface is python -m.
 """Check part four or five's learnability with a privileged joint fit of each history.
 
 The fit knows every change time, shares the hidden chain and both tones across
@@ -9,7 +10,7 @@ restart, and the best restart's forecast skill against the zero forecast.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import argparse
 
@@ -41,32 +42,6 @@ class EpisodeCalibration:
     skill: float
 
 
-class _Recording(ChainedDynamics):
-    """Log each step's coefficients; only this evaluator-side check reads them."""
-
-    def __init__(self, config: ForcedDynamics.Config) -> None:
-        super().__init__(config)
-        self.used: list[Tensor] = []
-
-    @override
-    def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
-        self.used.append(coefficients)
-        return super().advance(state, coefficients)
-
-
-class _ForcedRecording(ForcedDynamics):
-    """Part four's dynamics with the same coefficient log."""
-
-    def __init__(self, config: ForcedDynamics.Config) -> None:
-        super().__init__(config)
-        self.used: list[Tensor] = []
-
-    @override
-    def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
-        self.used.append(coefficients)
-        return super().advance(state, coefficients)
-
-
 def calibrate(
     data: ForcedData,
     *,
@@ -76,7 +51,20 @@ def calibrate(
     seed: int,
     near_truth: bool = False,
 ) -> list[EpisodeCalibration]:
-    """Fit each episode jointly; ``near_truth`` starts at the truth with 1% jitter."""
+    """Fit each episode jointly; ``near_truth`` starts at the truth with 1% jitter.
+
+    Args:
+      data: Generator with the declared equation form.
+      episodes: Number of development episodes to fit.
+      restarts: Number of independent initializations per episode.
+      iterations: Number of optimizer updates per restart.
+      seed: Random stream for development episodes.
+      near_truth: Whether to start near the true hidden state and coefficients.
+
+    Returns:
+      calibrations: Fit and forecast diagnostics for each episode.
+
+    """
     cfg = data.config
     steps = cfg.seq_len
     dynamics = data.dynamics
@@ -147,7 +135,9 @@ def calibrate(
         )
     params = [obs_raw.requires_grad_(), per_raw.requires_grad_(), init.requires_grad_()]
 
-    def rollout() -> tuple[Tensor, Tensor, Tensor]:
+    def rollout() -> (
+        tuple[Tensor, Tensor, Tensor]
+    ):  # house-ignore[nested-def] -- The optimizer and scoring share this rollout over the same fit tensors.
         obs = lo[:6] + (hi[:6] - lo[:6]) * torch.sigmoid(obs_raw)
         per = lo[6:] + (hi[6:] - lo[6:]) * torch.sigmoid(per_raw)
         state, path = init, [init[:, 0]]
@@ -191,24 +181,18 @@ def calibrate(
     ]
 
 
-class _Flags(argparse.Namespace):
-    episodes: int
-    restarts: int
-    iterations: int
-    seed: int
-    near_truth: bool
-    part: str
-
-
 def main(argv: list[str] | None = None) -> int:
-    """Print one line per development episode of exp051's or exp053's generator."""
+    """Print one line per development episode of exp051's or exp053's generator.
+
+    Args:
+      argv: Arguments without the executable name, or None to read sys.argv.
+
+    Returns:
+      exit_code: Zero after printing the calibration results.
+
+    """
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
-    parser.add_argument("--episodes", type=int, default=8)
-    parser.add_argument("--restarts", type=int, default=8)
-    parser.add_argument("--iterations", type=int, default=1500)
-    parser.add_argument("--seed", type=int, default=777)
-    parser.add_argument("--near-truth", action="store_true")
-    parser.add_argument("--part", choices=("four", "five"), default="five")
+    _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args(argv))
     torch.set_num_threads(1)
     results = calibrate(
@@ -225,6 +209,50 @@ def main(argv: list[str] | None = None) -> int:
             f" best_loss={row.best_loss:.4f} skill={row.skill:.3f}",
         )
     return 0
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--episodes", type=int, default=8)
+    parser.add_argument("--restarts", type=int, default=8)
+    parser.add_argument("--iterations", type=int, default=1500)
+    parser.add_argument("--seed", type=int, default=777)
+    parser.add_argument("--near-truth", action="store_true")
+    parser.add_argument("--part", choices=("four", "five"), default="five")
+
+
+class _Recording(ChainedDynamics):
+    """Log each step's coefficients; only this evaluator-side check reads them."""
+
+    def __init__(self, config: ForcedDynamics.Config) -> None:
+        super().__init__(config)
+        self.used: list[Tensor] = []
+
+    @override
+    def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
+        self.used.append(coefficients)
+        return super().advance(state, coefficients)
+
+
+class _ForcedRecording(ForcedDynamics):
+    """Part four's dynamics with the same coefficient log."""
+
+    def __init__(self, config: ForcedDynamics.Config) -> None:
+        super().__init__(config)
+        self.used: list[Tensor] = []
+
+    @override
+    def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
+        self.used.append(coefficients)
+        return super().advance(state, coefficients)
+
+
+class _Flags(Protocol):
+    episodes: int
+    restarts: int
+    iterations: int
+    seed: int
+    near_truth: bool
+    part: str
 
 
 if __name__ == "__main__":

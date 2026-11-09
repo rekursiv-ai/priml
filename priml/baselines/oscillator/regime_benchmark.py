@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Literal, Protocol, Self, TypedDict, override, runtime_checkable
+from typing import (
+    Final,
+    Literal,
+    Protocol,
+    Self,
+    TypedDict,
+    override,
+    runtime_checkable,
+)
 
 import hashlib
 import json
@@ -30,6 +38,9 @@ from priml.baselines.oscillator.hidden import HiddenData, HiddenDomain
 from priml.baselines.oscillator.regimes import DynamicsDomain, RegimeData
 from priml.model.custom_types import propagate_attr
 from priml.paths import validated_output_path
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @runtime_checkable
@@ -87,7 +98,8 @@ class RegimeFamily:
         if (
             not re.fullmatch(r"[a-z][a-z0-9_]*", config.name)
             or config.episodes < 1
-            or not 0 <= config.seed < 2**32
+            or config.seed < 0
+            or config.seed >= 2**32
         ):
             raise ValueError(
                 "Evaluation families need a label, episodes, and a valid seed.",
@@ -115,7 +127,7 @@ class ObservedRecipe:
             not re.fullmatch(r"[a-z][a-z0-9_]*", config.name)
             or not config.seeds
             or len(config.seeds) != len(set(config.seeds))
-            or any(not 0 <= v < 2**32 for v in config.seeds)
+            or any(v < 0 or v >= 2**32 for v in config.seeds)
         ):
             raise ValueError("Recipes need a label and distinct valid seeds.")
         self.config = config
@@ -241,7 +253,7 @@ class RegimeBenchmark:
         if config.phase not in ("development", "audit") or not config.development:
             raise ValueError("A study needs a valid phase and development families.")
         seeds = [config.train_seed, config.validation_seed, *[f.seed for f in families]]
-        if len(seeds) != len(set(seeds)) or any(not 0 <= s < 2**32 for s in seeds):
+        if len(seeds) != len(set(seeds)) or any(s < 0 or s >= 2**32 for s in seeds):
             raise ValueError(
                 "Training, validation, and evaluation streams must be distinct.",
             )
@@ -265,6 +277,13 @@ class RegimeBenchmark:
         is an evaluator-only continuation check, never a competing learner.
         A failed seed invalidates its method's finite aggregate score.
 
+        Args:
+          directory: Override for the configured output directory.
+          resume: Whether to resume from existing attempt records.
+
+        Returns:
+          results: Benchmark results with attempt records and aggregate comparisons.
+
         """
         cfg = self.config
         output = validated_output_path(
@@ -274,10 +293,10 @@ class RegimeBenchmark:
         manifest = {
             "config_sha256": hashlib.sha256(config_text.encode()).hexdigest(),
             "source_sha256": {
-                str(p.relative_to(Path(__file__).resolve().parents[2])): hashlib.sha256(
+                str(p.relative_to(_CWD.parents[1])): hashlib.sha256(
                     p.read_bytes(),
                 ).hexdigest()
-                for p in sorted(Path(__file__).resolve().parents[2].rglob("*.py"))
+                for p in sorted(_CWD.parents[1].rglob("*.py"))
                 if "__pycache__" not in p.parts
             },
             "python": platform.python_version(),
@@ -390,7 +409,18 @@ class RegimeBenchmark:
         data: RegimeData | HiddenData | ForcedData,
         scale: Tensor,
     ) -> tuple[dict[str, EpisodeScores], dict[str, float]]:
-        """Keep evaluator-only parameters outside the forecaster's input."""
+        """Keep evaluator-only parameters outside the forecaster's input.
+
+        Args:
+          method: Fitted forecaster to evaluate.
+          data: Episode generator for this benchmark.
+          scale: Training position scale used to normalize errors.
+
+        Returns:
+          scores: Per-family episode scores.
+          oracle_errors: Per-family oracle errors.
+
+        """
         scores: dict[str, EpisodeScores] = {}
         diagnostics: dict[str, float] = {}
         cfg = self.config
@@ -404,13 +434,15 @@ class RegimeBenchmark:
             # Clean position: observations may carry sensor noise, scores never do.
             target = episode.states[:, cfg.data.seq_len :, 0]
             prediction = method.predict(episode.windows.media)
-            if (
+            if (  # house-ignore[tensor-value-guard] -- A nonfinite forecast must fail this evaluation attempt.
                 prediction.shape != episode.windows.label.shape
                 or not torch.isfinite(prediction).all()
             ):
                 raise ValueError("A method returned an invalid observed forecast.")
             errors = ((prediction[..., 0] - target) / scale).square()
-            if not torch.isfinite(errors).all():
+            if (
+                not torch.isfinite(errors).all()
+            ):  # house-ignore[tensor-value-guard] -- Do not persist nonfinite scores.
                 raise ValueError("A method produced nonfinite scored errors.")
             scores[family.name] = {
                 "scaled_mse": [float(v) for v in errors.mean(1)],
@@ -430,7 +462,15 @@ class RegimeBenchmark:
         return scores, diagnostics
 
     def summarize(self, records: list[RegimeRun]) -> list[dict[str, object]]:
-        """Average model seeds before resampling independent paired episodes."""
+        """Average model seeds before resampling independent paired episodes.
+
+        Args:
+          records: Retained fit and evaluation attempts.
+
+        Returns:
+          summary: Aggregate scores by method.
+
+        """
         cfg = self.config
         families = cfg.development if cfg.phase == "development" else cfg.audit
         expected = {f"{r.name}--{s}" for r in cfg.recipes for s in r.seeds}
@@ -456,7 +496,7 @@ class RegimeBenchmark:
                     horizon = torch.tensor(
                         record["families"][family.name]["horizon_scaled_mse"],
                     )
-                    if (
+                    if (  # house-ignore[tensor-value-guard] -- Validate retained CPU records before aggregation.
                         horizon.shape != (cfg.data.pred_len,)
                         or not torch.isfinite(horizon).all()
                         or (horizon < 0).any()
@@ -493,7 +533,16 @@ class RegimeBenchmark:
         *,
         name: str,
     ) -> dict[str, Tensor]:
-        """Average repeated fits without counting them as independent episodes."""
+        """Average repeated fits without counting them as independent episodes.
+
+        Args:
+          records: Retained fit and evaluation attempts.
+          name: Method whose episode scores are being combined.
+
+        Returns:
+          errors: Mean error by episode, grouped by family.
+
+        """
         cfg = self.config
         recipe = next(r for r in cfg.recipes if r.name == name)
         families = cfg.development if cfg.phase == "development" else cfg.audit
@@ -509,7 +558,7 @@ class RegimeBenchmark:
                 [r["families"][family.name]["scaled_mse"] for r in group],
                 dtype=torch.float64,
             )
-            if (
+            if (  # house-ignore[tensor-value-guard] -- Validate retained CPU records before aggregation.
                 errors.shape != (len(recipe.seeds), family.episodes)
                 or not torch.isfinite(errors).all()
                 or (errors < 0).any()
@@ -519,7 +568,16 @@ class RegimeBenchmark:
         return result
 
     def bootstrap(self, values: dict[str, Tensor]) -> tuple[float, list[float]]:
-        """Resample independent episodes within each declared family."""
+        """Resample independent episodes within each declared family.
+
+        Args:
+          values: Independent episode values grouped by family.
+
+        Returns:
+          mean: Mean across families.
+          interval: Lower and upper interval bounds.
+
+        """
         cfg = self.config
         generator = torch.Generator().manual_seed(cfg.bootstrap_seed)
         samples = torch.zeros(cfg.resamples, dtype=torch.float64)
@@ -539,7 +597,15 @@ class RegimeBenchmark:
         ]
 
     def compare(self, records: list[RegimeRun]) -> list[dict[str, object]]:
-        """Compare methods on the same episodes, retaining their paired errors."""
+        """Compare methods on the same episodes, retaining their paired errors.
+
+        Args:
+          records: Retained fit and evaluation attempts.
+
+        Returns:
+          comparisons: Paired comparisons by method and reference.
+
+        """
         comparisons: list[dict[str, object]] = []
         for method, reference in self.config.comparisons:
             group = [r for r in records if r["method"] in (method, reference)]
@@ -588,7 +654,16 @@ class RegimeCampaign:
         *,
         resume: bool = False,
     ) -> list[dict[str, object]]:
-        """Run every ablation and leave its per-episode evidence available."""
+        """Run every ablation and leave its per-episode evidence available.
+
+        Args:
+          directory: Override for the configured output directory.
+          resume: Whether to resume from existing attempt records.
+
+        Returns:
+          results: Results for each benchmark in the campaign.
+
+        """
         output = validated_output_path(
             self.config.working_dir if directory is None else directory,
         )

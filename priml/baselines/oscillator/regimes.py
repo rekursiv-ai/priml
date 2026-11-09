@@ -157,7 +157,16 @@ class RegimeDynamics:
         self.config = config
 
     def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
-        """Advance one observation interval with the supplied coefficients."""
+        """Advance one observation interval with the supplied coefficients.
+
+        Args:
+          state: Current state for each episode.
+          coefficients: Dynamics coefficients for each episode.
+
+        Returns:
+          state: State after one observation interval.
+
+        """
         position, velocity = state.unbind(dim=-1)
         stiffness, damping, cubic = coefficients.unbind(dim=-1)
         delta = self.config.step_size / self.config.substeps
@@ -170,7 +179,17 @@ class RegimeDynamics:
         return torch.stack((position, velocity), dim=-1)
 
     def forecast(self, state: Tensor, *, coefficients: Tensor, steps: int) -> Tensor:
-        """Roll out future states without reading any future observation."""
+        """Roll out future states without reading any future observation.
+
+        Args:
+          state: Initial state for each episode.
+          coefficients: Fixed dynamics coefficients for each episode.
+          steps: Number of future observation intervals.
+
+        Returns:
+          trajectory: Future states, excluding the initial state.
+
+        """
         if steps <= 0:
             raise ValueError("The forecast length must be positive.")
         frames: list[Tensor] = []
@@ -189,7 +208,7 @@ class ObservedWindows:
 
     def __post_init__(self) -> None:
         """Reject empty, nonfinite, or mismatched observations."""
-        if (
+        if (  # house-ignore[tensor-value-guard] -- Reject malformed windows at the data boundary.
             self.media.ndim != 3
             or self.label.ndim != 3
             or min(self.media.shape) <= 0
@@ -204,7 +223,13 @@ class ObservedWindows:
             raise ValueError("Expected finite paired observed sequences.")
 
     def channel_stats(self) -> tuple[Tensor, Tensor]:
-        """Fit channel scales using only the supplied fitting windows."""
+        """Fit channel scales using only the supplied fitting windows.
+
+        Returns:
+          means: Training means by channel.
+          scales: Training scales by channel.
+
+        """
         values = torch.cat((self.media, self.label), dim=1)
         return values.mean((0, 1), keepdim=True), values.std(
             (0, 1),
@@ -286,8 +311,16 @@ class RegimeData:
         masking velocity cannot change the underlying motion or random stream.
         Larger counts retain the smaller pool as a prefix.
 
+        Args:
+          count: Number of episodes in the pool.
+          seed: Independent random stream for this pool.
+          domain: Optional coefficient domain for the final regime.
+
+        Returns:
+          episodes: Episodes with observed windows and evaluator-only state.
+
         """
-        if count <= 0 or not 0 <= seed < 2**32:
+        if count <= 0 or seed < 0 or seed >= 2**32:
             raise ValueError("Episode count and random seed must be valid.")
         cfg = self.config
         draws = torch.rand(

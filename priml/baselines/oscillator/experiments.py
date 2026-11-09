@@ -1149,19 +1149,19 @@ def exp041() -> RegimeBenchmark.Config:
 
     fast = RegimeFamily.Config()
     fast.name = "stiffening"
-    fast.seed = 20261025
+    fast.seed = 20_261_025
     fast.domain.stiffness = (2.2, 3.2)
     soft = RegimeFamily.Config()
     soft.name = "softening"
-    soft.seed = 20261026
+    soft.seed = 20_261_026
     soft.domain.stiffness = (0.2, 0.45)
     drag = RegimeFamily.Config()
     drag.name = "strong_drag"
-    drag.seed = 20261027
+    drag.seed = 20_261_027
     drag.domain.damping = (0.35, 0.6)
     nonlinear_domain = RegimeFamily.Config()
     nonlinear_domain.name = "strong_cubic"
-    nonlinear_domain.seed = 20261028
+    nonlinear_domain.seed = 20_261_028
     nonlinear_domain.domain.cubic = (0.8, 1.2)
     cfg.audit = [fast, soft, drag, nonlinear_domain]
     return cfg
@@ -1356,19 +1356,19 @@ def exp049() -> RegimeBenchmark.Config:
     ]
     cfg.development = [RegimeFamily.Config(domain=HiddenDomain.Config())]
 
-    coupling = RegimeFamily.Config(name="strong_coupling", seed=20261101)
+    coupling = RegimeFamily.Config(name="strong_coupling", seed=20_261_101)
     coupling.domain = HiddenDomain.Config(coupling=(0.6, 1.0))
-    friction = RegimeFamily.Config(name="dry_friction", seed=20261102)
+    friction = RegimeFamily.Config(name="dry_friction", seed=20_261_102)
     friction.domain = HiddenDomain.Config(friction=(0.06, 0.12))
     # Matched frequencies make energy slosh between the masses (beating).
-    resonant = RegimeFamily.Config(name="resonant_partner", seed=20261103)
+    resonant = RegimeFamily.Config(name="resonant_partner", seed=20_261_103)
     resonant.domain = HiddenDomain.Config(
         stiffness=(0.95, 1.05),
         partner_stiffness=(0.95, 1.05),
         coupling=(0.3, 0.5),
         partner_damping=(0.0, 0.01),
     )
-    hardening = RegimeFamily.Config(name="hardening", seed=20261104)
+    hardening = RegimeFamily.Config(name="hardening", seed=20_261_104)
     hardening.domain = HiddenDomain.Config(stiffness=(2.0, 3.0), cubic=(0.8, 1.5))
     cfg.audit = [coupling, friction, resonant, hardening]
     return cfg
@@ -1421,7 +1421,7 @@ def exp051() -> RegimeBenchmark.Config:
     cfg.development = [RegimeFamily.Config(domain=ForcedDomain.Config())]
 
     # Classic chaotic Duffing settings: a forced, lightly damped double well.
-    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20261201)
+    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20_261_201)
     chaotic.domain = ForcedDomain.Config(
         stiffness=(-1.2, -0.8),
         damping=(0.1, 0.3),
@@ -1429,12 +1429,12 @@ def exp051() -> RegimeBenchmark.Config:
         drive=(0.3, 0.6),
         frequency=(1.0, 1.4),
     )
-    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20261202)
+    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20_261_202)
     asymmetric.domain = ForcedDomain.Config(quadratic=(0.3, 0.8))
     # Negative linear damping with amplitude-dependent drag: a limit cycle.
-    excited = RegimeFamily.Config(name="self_excited", seed=20261203)
+    excited = RegimeFamily.Config(name="self_excited", seed=20_261_203)
     excited.domain = ForcedDomain.Config(damping=(-0.2, -0.05), excitation=(0.3, 0.8))
-    fast = RegimeFamily.Config(name="fast_drive", seed=20261204)
+    fast = RegimeFamily.Config(name="fast_drive", seed=20_261_204)
     fast.domain = ForcedDomain.Config(drive=(0.3, 0.8), frequency=(2.5, 4.0))
     cfg.audit = [chaotic, asymmetric, excited, fast]
     return cfg
@@ -1486,7 +1486,7 @@ def exp053() -> RegimeBenchmark.Config:
             recipe.method = ChainedShooting.Config()
     cfg.development = [RegimeFamily.Config(domain=ChainedDomain.Config())]
 
-    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20261301)
+    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20_261_301)
     chaotic.domain = ChainedDomain.Config(
         stiffness=(-1.2, -0.8),
         damping=(0.1, 0.3),
@@ -1494,17 +1494,17 @@ def exp053() -> RegimeBenchmark.Config:
         drive=(0.3, 0.6),
         frequency=(1.0, 1.4),
     )
-    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20261302)
+    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20_261_302)
     asymmetric.domain = ChainedDomain.Config(quadratic=(0.3, 0.8))
-    excited = RegimeFamily.Config(name="self_excited", seed=20261303)
+    excited = RegimeFamily.Config(name="self_excited", seed=20_261_303)
     excited.domain = ChainedDomain.Config(
         damping=(-0.2, -0.05),
         excitation=(0.3, 0.8),
     )
     # Tones in the same band beat against each other.
-    beating = RegimeFamily.Config(name="beating_drive", seed=20261304)
+    beating = RegimeFamily.Config(name="beating_drive", seed=20_261_304)
     beating.domain = ChainedDomain.Config(second_frequency=(0.6, 1.6))
-    stiff = RegimeFamily.Config(name="stiff_far_mass", seed=20261305)
+    stiff = RegimeFamily.Config(name="stiff_far_mass", seed=20_261_305)
     stiff.domain = ChainedDomain.Config(
         far_stiffness=(4.0, 6.0),
         far_coupling=(0.5, 0.8),

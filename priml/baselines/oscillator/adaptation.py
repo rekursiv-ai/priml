@@ -208,7 +208,6 @@ class ObservedHistory(nn.Module):
         """Predict every observed variable at each future timestep."""
         del kwargs
         result = cast("Tensor", self.block(media.flatten(start_dim=1)))
-        assert isinstance(result, Tensor)
         return result.reshape(len(media), self.config.pred_len, self.config.channels)
 
 
@@ -291,7 +290,17 @@ class ObservedNeuralForecast:
         validation: ObservedWindows,
         dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
-        """Normalize on training only and restore the best validation state."""
+        """Normalize on training only and restore the best validation state.
+
+        Args:
+          train: Observed fitting windows.
+          validation: Held-out windows for checkpoint selection, if used.
+          dynamics: Reference dynamics for the observation step and equation form.
+
+        Returns:
+          diagnostics: Fitting diagnostics, including the number of attempted updates.
+
+        """
         del dynamics
         if self.step.global_step:
             raise RuntimeError("Build a fresh forecaster for every fit.")
@@ -355,7 +364,15 @@ class ObservedNeuralForecast:
         }
 
     def predict(self, media: Tensor) -> Tensor:
-        """Use the shared evaluation path and return original observation units."""
+        """Use the shared evaluation path and return original observation units.
+
+        Args:
+          media: Batch of observed histories.
+
+        Returns:
+          forecast: Forecast in the original observation units.
+
+        """
         if self.mean is None or self.scale is None:
             raise RuntimeError("Fit the observed forecaster before predicting.")
         with torch.no_grad():
@@ -392,7 +409,17 @@ class ObservedRidge:
         validation: ObservedWindows,
         dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
-        """Fit without reading validation targets or any test episode."""
+        """Fit without reading validation targets or any test episode.
+
+        Args:
+          train: Observed fitting windows.
+          validation: Held-out windows for checkpoint selection, if used.
+          dynamics: Reference dynamics for the observation step and equation form.
+
+        Returns:
+          diagnostics: Fitting diagnostics, including the number of attempted updates.
+
+        """
         del validation, dynamics
         features = train.media.flatten(start_dim=1).double()
         self.mean = features.mean(0)
@@ -409,7 +436,15 @@ class ObservedRidge:
         return {"attempted_updates": 0}
 
     def predict(self, media: Tensor) -> Tensor:
-        """Apply the pooled affine map to an unseen observed history."""
+        """Apply the pooled affine map to an unseen observed history.
+
+        Args:
+          media: Batch of observed histories.
+
+        Returns:
+          forecast: Forecast in the original observation units.
+
+        """
         if (
             self.weights is None
             or self.mean is None
@@ -466,7 +501,17 @@ class RecentPhysics:
         validation: ObservedWindows,
         dynamics: RegimeDynamics | HiddenDynamics | ForcedDynamics,
     ) -> dict[str, int | float]:
-        """Take only time geometry; the equation form is a declared prior."""
+        """Take only time geometry; the equation form is a declared prior.
+
+        Args:
+          train: Observed fitting windows.
+          validation: Held-out windows for checkpoint selection, if used.
+          dynamics: Reference dynamics for the observation step and equation form.
+
+        Returns:
+          diagnostics: Fitting diagnostics, including the number of attempted updates.
+
+        """
         del validation
         # The prior is the cubic single-mass law, whatever generated the data.
         self.dynamics = RegimeDynamics(
@@ -484,6 +529,13 @@ class RecentPhysics:
         Five-point finite differences use only observed cells. The solve and
         integration use float64 because acceleration divides by the time step
         squared. The missing velocity is inferred from backward differences.
+
+        Args:
+          media: Batch of observed histories.
+
+        Returns:
+          state: Latest inferred state.
+          coefficients: Fitted dynamics coefficients.
 
         """
         if self.dynamics is None:
@@ -531,7 +583,15 @@ class RecentPhysics:
         return self.observed_state(media), coefficients
 
     def observed_state(self, media: Tensor) -> Tensor:
-        """Infer the newest state using only coordinates in the observed history."""
+        """Infer the newest state using only coordinates in the observed history.
+
+        Args:
+          media: Batch of observed histories.
+
+        Returns:
+          state: Latest state, including velocity inferred from the observations.
+
+        """
         if self.dynamics is None:
             raise RuntimeError("Fit the physics control before predicting.")
         if media.ndim != 3 or media.shape[1] < 7 or media.shape[2] not in (1, 2):
@@ -554,7 +614,15 @@ class RecentPhysics:
         return torch.stack((position[:, -1], velocity), dim=-1)
 
     def predict(self, media: Tensor) -> Tensor:
-        """Predict observed coordinates using parameters inferred from this history."""
+        """Predict observed coordinates using parameters inferred from this history.
+
+        Args:
+          media: Batch of observed histories.
+
+        Returns:
+          forecast: Forecast in the original observation units.
+
+        """
         if self.dynamics is None:
             raise RuntimeError("Fit the physics control before predicting.")
         state, coefficients = self.identify(media)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field, replace
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, override
 
 import math
 
@@ -27,11 +27,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-COEFFICIENTS = 16
+COEFFICIENTS: Final = 16
 """Part four's eleven, then far coupling, far stiffness, far damping, second
 drive amplitude and second drive frequency."""
 
-LATENT = 6
+LATENT: Final = 6
 """Unobserved state: near partner position, velocity, drive phase, far partner
 position, velocity, second drive phase."""
 
@@ -58,12 +58,14 @@ class ChainedDomain(ForcedDomain):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         extra = self.bounds(config)[11:]
-        if (extra[[0, 2, 3], 0] < 0).any() or (extra[[1, 4], 0] <= 0).any():
+        if (
+            (extra[[0, 2, 3], 0] < 0).any() or (extra[[1, 4], 0] <= 0).any()
+        ):  # house-ignore[tensor-value-guard] -- Validate CPU coefficient bounds at construction.
             raise ValueError("Coefficient ranges must be finite, physical and ordered.")
 
-    @staticmethod
+    @classmethod
     @override
-    def bounds(config: ForcedDomain.Config) -> Tensor:
+    def bounds(cls, config: ForcedDomain.Config) -> Tensor:
         """Part four's rows, then the far mass and second tone."""
         assert isinstance(config, ChainedDomain.Config)
         extra = torch.tensor(
@@ -131,7 +133,13 @@ class StuckSensor(GlitchySensor):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        if not 0 <= config.stuck_rate <= 1 or not config.stuck_length >= 1:
+        if (
+            math.isnan(config.stuck_rate)
+            or config.stuck_rate < 0
+            or config.stuck_rate > 1
+            or math.isnan(config.stuck_length)
+            or config.stuck_length < 1
+        ):
             raise ValueError("Sensor ranges must be finite, nonnegative and ordered.")
         self.stuck_rate = config.stuck_rate
         self.stay = 1 - 1 / config.stuck_length
@@ -165,17 +173,17 @@ class ChainedData(ForcedData):
 
         # Lambdas: ty types a bare Makes config class as a Maker union.
         dynamics: ForcedDynamics.Config = field(
-            default_factory=lambda: ChainedDynamics.Config(),  # noqa: PLW0108
+            default_factory=lambda: ChainedDynamics.Config(),  # noqa: PLW0108 -- Keep the concrete factory return type.
         )
         """Reference motion shared by the targets and evaluator oracle."""
 
         domain: ForcedDomain.Config = field(
-            default_factory=lambda: ChainedDomain.Config(),  # noqa: PLW0108
+            default_factory=lambda: ChainedDomain.Config(),  # noqa: PLW0108 -- Keep the concrete factory return type.
         )
         """Training ranges; also every earlier regime of the observed mass."""
 
         observation: GlitchySensor.Config = field(
-            default_factory=lambda: StuckSensor.Config(),  # noqa: PLW0108
+            default_factory=lambda: StuckSensor.Config(),  # noqa: PLW0108 -- Keep the concrete factory return type.
         )
         """Sensor exposed to every method, including its training targets."""
 
@@ -194,7 +202,7 @@ class ChainedData(ForcedData):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         low, high = config.outage
-        if not 0 <= low <= high < config.recent_steps[0]:
+        if low < 0 or low > high or high >= config.recent_steps[0]:
             raise ValueError("Episode geometry, schedule and bounds must be valid.")
         self.outage = config.outage
 
@@ -254,20 +262,48 @@ class ChainedShooting(LibraryShooting):
         """Cauchy scale in position units, so glitches barely move the fit."""
 
         lower: tuple[float, ...] = (
-            -3.0, -0.5, 0.0, 0.0, -1.5, 0.0, 0.0, 0.05, 0.0, 0.0, 0.2,
-            0.0, 0.05, 0.0, 0.0, 0.2,
-        )  # fmt: skip
+            -3.0,
+            -0.5,
+            0.0,
+            0.0,
+            -1.5,
+            0.0,
+            0.0,
+            0.05,
+            0.0,
+            0.0,
+            0.2,
+            0.0,
+            0.05,
+            0.0,
+            0.0,
+            0.2,
+        )
         """Lower coefficient bounds shared across every tested domain."""
 
         upper: tuple[float, ...] = (
-            4.0, 0.6, 2.0, 0.3, 1.5, 1.5, 1.5, 4.0, 0.5, 1.0, 5.0,
-            1.5, 6.0, 0.5, 1.0, 5.0,
-        )  # fmt: skip
+            4.0,
+            0.6,
+            2.0,
+            0.3,
+            1.5,
+            1.5,
+            1.5,
+            4.0,
+            0.5,
+            1.0,
+            5.0,
+            1.5,
+            6.0,
+            0.5,
+            1.0,
+            5.0,
+        )
         """Upper coefficient bounds shared across every tested domain."""
 
-    @staticmethod
+    @classmethod
     @override
-    def latent(start: Tensor) -> Tensor:
+    def latent(cls, start: Tensor) -> Tensor:
         """Part four's latent draws for each hidden mass and tone in turn."""
         return torch.cat(
             (ForcedShooting.latent(start[:, :3]), ForcedShooting.latent(start[:, 3:])),

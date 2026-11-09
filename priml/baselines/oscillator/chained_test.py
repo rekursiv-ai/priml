@@ -125,3 +125,9 @@ def test_invalid_ranges_are_rejected() -> None:
     with pytest.raises(ValueError, match="nonnegative"):
         StuckSensor.Config(stuck_length=0.5).make()
     assert isinstance(ChainedDynamics.Config().make(), ForcedDynamics)
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

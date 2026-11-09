@@ -25,6 +25,10 @@ def small(**changes: object) -> ForcedData.Config:
     return cfg
 
 
+def test_domain_bounds_keep_double_precision() -> None:
+    assert ForcedDomain.bounds(ForcedDomain.Config()).dtype == torch.float64
+
+
 def test_pool_is_nested_and_streams_are_distinct() -> None:
     data = small().make()
     before = torch.get_rng_state().clone()
@@ -145,3 +149,9 @@ def test_invalid_components_and_unbounded_draws_are_rejected() -> None:
     runaway = ForcedDomain.Config(stiffness=(-200.0, -200.0), cubic=(0.0, 0.0))
     with pytest.raises(ValueError, match="unbounded"):
         data.sample(count=2, seed=1, domain=runaway)
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

@@ -12,7 +12,6 @@ from configgle import Makeable, PartialConfig
 import pytest
 import torch
 
-from priml.baselines.etth1.model import DLinear
 from priml.baselines.oscillator.adaptation import (
     FixedPhysics,
     LastObservation,
@@ -51,7 +50,6 @@ def test_dlinear_adapter_preserves_original_initialization_and_forward() -> None
         torch.default_generator.manual_seed(17)
         adapted = cfg.make()
     media = torch.arange(5 * 7 * 2).reshape(5, 7, 2).float() / 13
-    assert isinstance(original, DLinear)
     assert torch.equal(
         original(media),
         adapted(media=media, label=torch.zeros(5, 3, 2)),

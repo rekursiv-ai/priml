@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, ClassVar, override
+from typing import TYPE_CHECKING, ClassVar, Final, override
 
 import math
 
@@ -20,14 +20,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-COEFFICIENTS = 11
+COEFFICIENTS: Final = 11
 """Observed stiffness, damping, cubic, friction, quadratic, self-excitation;
 coupling; partner stiffness, damping; drive amplitude, drive frequency."""
 
-OBSERVED_TERMS = 6
+OBSERVED_TERMS: Final = 6
 """Leading coefficients that belong to the observed mass and may change."""
 
-LATENT = 3
+LATENT: Final = 3
 """Unobserved state besides the observed mass: partner position, velocity, drive phase."""
 
 
@@ -70,7 +70,7 @@ class ForcedDomain:
 
     def __init__(self, config: Config) -> None:
         bounds = self.bounds(config)
-        if (
+        if (  # house-ignore[tensor-value-guard] -- Validate CPU coefficient bounds at construction.
             not torch.isfinite(bounds).all()
             or (bounds[:, 1] < bounds[:, 0]).any()
             or (bounds[[2, 3, 5, 6, 8, 9], 0] < 0).any()
@@ -80,9 +80,17 @@ class ForcedDomain:
             raise ValueError("Coefficient ranges must be finite, physical and ordered.")
         self.config = config
 
-    @staticmethod
-    def bounds(config: Config) -> Tensor:
-        """Stack the ranges in the dynamics' coefficient order."""
+    @classmethod
+    def bounds(cls, config: Config) -> Tensor:
+        """Stack the ranges in the dynamics' coefficient order.
+
+        Args:
+          config: Coefficient ranges in the domain configuration.
+
+        Returns:
+          bounds: Double-precision tensor with one lower and upper bound per coefficient.
+
+        """
         return torch.tensor(
             [
                 config.stiffness,
@@ -128,7 +136,16 @@ class ForcedDynamics:
         self.config = config
 
     def advance(self, state: Tensor, coefficients: Tensor) -> Tensor:
-        """Advance one observation interval; differentiable in both arguments."""
+        """Advance one observation interval; differentiable in both arguments.
+
+        Args:
+          state: Current state for each episode.
+          coefficients: Dynamics coefficients for each episode.
+
+        Returns:
+          state: State after one observation interval.
+
+        """
         x1, v1, x2, v2, phase = state.unbind(dim=-1)
         k1, c1, a1, mu, q1, e1, kc, k2, c2, drive, omega = coefficients.unbind(dim=-1)
         delta = self.config.step_size / self.config.substeps
@@ -152,7 +169,17 @@ class ForcedDynamics:
         return torch.stack((x1, v1, x2, v2, phase), dim=-1)
 
     def forecast(self, state: Tensor, *, coefficients: Tensor, steps: int) -> Tensor:
-        """Roll out future states without reading any future observation."""
+        """Roll out future states without reading any future observation.
+
+        Args:
+          state: Initial state for each episode.
+          coefficients: Fixed dynamics coefficients for each episode.
+          steps: Number of future observation intervals.
+
+        Returns:
+          trajectory: Future states, excluding the initial state.
+
+        """
         if steps <= 0:
             raise ValueError("The forecast length must be positive.")
         frames: list[Tensor] = []
@@ -263,8 +290,10 @@ class ForcedData:
         earliest = config.seq_len - high - (len(config.changes) - 2) * gap_high
         if (
             min(config.pred_len, config.velocity, config.partner) <= 0
-            or not 5 <= low <= high
-            or not 1 <= gap_low <= gap_high
+            or low < 5
+            or low > high
+            or gap_low < 1
+            or gap_low > gap_high
             or len(config.changes) < 1
             or min(config.changes) < 0
             or not math.isclose(sum(config.changes), 1)
@@ -290,8 +319,16 @@ class ForcedData:
         ``before`` and ``change_at`` describe only the last change; ``label``
         holds sensor readings, and scores use the clean position in ``states``.
 
+        Args:
+          count: Number of episodes in the pool.
+          seed: Independent random stream for this pool.
+          domain: Optional coefficient domain for the final regime.
+
+        Returns:
+          episodes: Episodes with observed windows and evaluator-only state.
+
         """
-        if count <= 0 or not 0 <= seed < 2**32:
+        if count <= 0 or seed < 0 or seed >= 2**32:
             raise ValueError("Episode count and random seed must be valid.")
         cfg = self.config
         regimes = len(cfg.changes)
@@ -341,7 +378,9 @@ class ForcedData:
             state = self.dynamics.advance(state, table[rows, regime])
             frames.append(state)
         states = torch.stack(frames, dim=1)
-        if not torch.isfinite(states).all() or states[..., 0].abs().max() > 1e3:
+        if (
+            not torch.isfinite(states).all() or states[..., 0].abs().max() > 1e3
+        ):  # house-ignore[tensor-value-guard] -- Reject invalid CPU episodes before publication.
             raise ValueError("Sampled coefficients produced an unbounded trajectory.")
         observed = self.observation(states, level=u[:, 7], draws=readings)
         return EvaluatorEpisodes(
@@ -356,7 +395,16 @@ class ForcedData:
         )
 
     def initial_state(self, u: Tensor, extra: Tensor) -> Tensor:
-        """Both masses' positions and velocities, then the drive phase."""
+        """Both masses' positions and velocities, then the drive phase.
+
+        Args:
+          u: Uniform draws for the observed mass and first partner.
+          extra: Additional uniform draws for extended systems.
+
+        Returns:
+          state: Initial positions, velocities, and drive phase.
+
+        """
         del extra
         cfg = self.config
         low, high = cfg.amplitude
@@ -386,18 +434,38 @@ class ForcedShooting(LibraryShooting):
         """Cauchy scale in position units, so glitches barely move the fit."""
 
         lower: tuple[float, ...] = (
-            -3.0, -0.5, 0.0, 0.0, -1.5, 0.0, 0.0, 0.05, 0.0, 0.0, 0.2,
-        )  # fmt: skip
+            -3.0,
+            -0.5,
+            0.0,
+            0.0,
+            -1.5,
+            0.0,
+            0.0,
+            0.05,
+            0.0,
+            0.0,
+            0.2,
+        )
         """Lower coefficient bounds shared across every tested domain."""
 
         upper: tuple[float, ...] = (
-            4.0, 0.6, 2.0, 0.3, 1.5, 1.5, 1.5, 4.0, 0.5, 1.0, 5.0,
-        )  # fmt: skip
+            4.0,
+            0.6,
+            2.0,
+            0.3,
+            1.5,
+            1.5,
+            1.5,
+            4.0,
+            0.5,
+            1.0,
+            5.0,
+        )
         """Upper coefficient bounds shared across every tested domain."""
 
-    @staticmethod
+    @classmethod
     @override
-    def latent(start: Tensor) -> Tensor:
+    def latent(cls, start: Tensor) -> Tensor:
         """Partner position and velocity, then a uniformly drawn drive phase."""
         return torch.stack(
             (2 * start[:, 0] - 1, start[:, 1] - 0.5, 2 * math.pi * start[:, 2]),

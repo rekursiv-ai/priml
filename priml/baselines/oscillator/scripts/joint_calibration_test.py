@@ -1,5 +1,7 @@
 """Check the privileged joint calibration on a tiny, clean configuration."""
 
+from unittest.mock import Mock
+
 import pytest
 
 from priml.baselines.oscillator.chained import ChainedData, StuckSensor
@@ -78,3 +80,51 @@ def test_part_four_runs_with_its_own_library() -> None:
         near_truth=True,
     )
     assert all(r.skill > 0.5 for r in rows)
+
+
+def test_main_forwards_defaults_and_explicit_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calibrate = Mock(return_value=[])
+    monkeypatch.setattr(joint_calibration, "calibrate", calibrate)
+    assert joint_calibration.main([]) == 0
+    assert isinstance(calibrate.call_args.args[0], ChainedData)
+    assert calibrate.call_args.kwargs == {
+        "episodes": 8,
+        "restarts": 8,
+        "iterations": 1500,
+        "seed": 777,
+        "near_truth": False,
+    }
+
+    flags = [
+        "--part",
+        "four",
+        "--episodes",
+        "3",
+        "--restarts",
+        "2",
+        "--iterations",
+        "0",
+        "--seed",
+        "19",
+        "--near-truth",
+    ]
+    assert joint_calibration.main(flags) == 0
+    assert isinstance(calibrate.call_args.args[0], ForcedData)
+    assert calibrate.call_args.kwargs == {
+        "episodes": 3,
+        "restarts": 2,
+        "iterations": 0,
+        "seed": 19,
+        "near_truth": True,
+    }
+    for option in ("--episodes", "--restarts", "--iterations", "--seed", "--part"):
+        with pytest.raises(SystemExit, match="2"):
+            joint_calibration.main([option, "invalid"])
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)
