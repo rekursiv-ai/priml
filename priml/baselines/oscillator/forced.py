@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, ClassVar, override
 
 import math
 
@@ -214,6 +214,15 @@ class GlitchySensor:
 class ForcedData:
     """Draw episodes with up to several unannounced changes and latent forcing."""
 
+    coefficients: ClassVar[int] = COEFFICIENTS
+    """Coefficients per regime, in the dynamics' order."""
+
+    extra_draws: ClassVar[int] = 0
+    """Initial-state draws appended after part four's layout, keeping its stream."""
+
+    reading_draws: ClassVar[int] = 3
+    """Uniforms per reading consumed by the sensor."""
+
     class Config(Fig["ForcedData"]):
         seq_len: int = 256
         """Observed states before the forecast starts."""
@@ -289,7 +298,7 @@ class ForcedData:
         steps = cfg.seq_len + cfg.pred_len
         draws = torch.rand(
             count,
-            (regimes + 1) * COEFFICIENTS + 8 + regimes,
+            (regimes + 1) * self.coefficients + 8 + regimes + self.extra_draws,
             generator=torch.Generator().manual_seed(seed),
             dtype=torch.float64,
         )
@@ -297,17 +306,18 @@ class ForcedData:
         readings = torch.rand(
             count,
             steps,
-            3,
+            self.reading_draws,
             generator=torch.Generator().manual_seed(seed + 2**32),
             dtype=torch.float64,
         )
+        width = self.coefficients
         table = self.domain(
-            draws[:, : regimes * COEFFICIENTS].view(count, regimes, COEFFICIENTS),
+            draws[:, : regimes * width].view(count, regimes, width),
         )
         final = (self.domain if domain is None else domain.make())(
-            draws[:, regimes * COEFFICIENTS : (regimes + 1) * COEFFICIENTS],
+            draws[:, regimes * width : (regimes + 1) * width],
         )
-        u = draws[:, (regimes + 1) * COEFFICIENTS :]
+        u = draws[:, (regimes + 1) * width : (regimes + 1) * width + 8 + regimes]
         total = torch.bucketize(
             u[:, 0].contiguous(),
             torch.tensor(cfg.changes, dtype=torch.float64).cumsum(0)[:-1],
@@ -324,17 +334,7 @@ class ForcedData:
         times = cfg.seq_len - gaps[:, :-1].cumsum(1)
         later = torch.arange(regimes - 1) < total[:, None]
         times = torch.where(later, times, steps)
-        low, high = cfg.amplitude
-        state = torch.stack(
-            (
-                (low + (high - low) * u[:, 1]) * torch.where(u[:, 2] < 0.5, -1, 1),
-                (2 * u[:, 3] - 1) * cfg.velocity,
-                (2 * u[:, 4] - 1) * cfg.partner,
-                (2 * u[:, 5] - 1) * cfg.velocity,
-                2 * math.pi * u[:, 6],
-            ),
-            dim=-1,
-        )
+        state = self.initial_state(u, draws[:, (regimes + 1) * width + 8 + regimes :])
         frames = [state]
         for index in range(1, steps):
             regime = (times <= index).sum(1)
@@ -353,6 +353,22 @@ class ForcedData:
             before=table[rows, (total - 1).clamp_min(0)],
             after=final,
             change_at=torch.where(total > 0, times[:, :1].sum(1), 0),
+        )
+
+    def initial_state(self, u: Tensor, extra: Tensor) -> Tensor:
+        """Both masses' positions and velocities, then the drive phase."""
+        del extra
+        cfg = self.config
+        low, high = cfg.amplitude
+        return torch.stack(
+            (
+                (low + (high - low) * u[:, 1]) * torch.where(u[:, 2] < 0.5, -1, 1),
+                (2 * u[:, 3] - 1) * cfg.velocity,
+                (2 * u[:, 4] - 1) * cfg.partner,
+                (2 * u[:, 5] - 1) * cfg.velocity,
+                2 * math.pi * u[:, 6],
+            ),
+            dim=-1,
         )
 
 

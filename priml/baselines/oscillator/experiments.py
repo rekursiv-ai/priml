@@ -14,6 +14,11 @@ from priml.baselines.oscillator.adaptation import (
 )
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.calibration import CalibratedSimulator
+from priml.baselines.oscillator.chained import (
+    ChainedData,
+    ChainedDomain,
+    ChainedShooting,
+)
 from priml.baselines.oscillator.delayed import (
     DelayedCalibration,
     DelayedData,
@@ -1451,6 +1456,79 @@ def exp052() -> RegimeBenchmark.Config:
     """
     cfg = exp051()
     cfg.experiment_name = "exp052"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
+    return cfg
+
+
+def exp053() -> RegimeBenchmark.Config:
+    """Forecast a stuck, glitchy sensor on a two-tone driven chain of three masses.
+
+    Hypothesis:
+      A second hidden mass, a second hidden drive tone, frozen sensor bursts, up
+      to four changes and a 192-step horizon defeat every method that reached
+      positive skill on exp051, while the exact continuation still reproduces
+      every target and small identification errors cost little.
+
+    References:
+      exp051 for the single-partner, single-tone task this extends.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp051()
+    cfg.experiment_name = "exp053"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.data = ChainedData.Config()
+    for recipe in cfg.recipes:
+        if recipe.name == "library_shooting":
+            recipe.method = ChainedShooting.Config()
+    cfg.development = [RegimeFamily.Config(domain=ChainedDomain.Config())]
+
+    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20261301)
+    chaotic.domain = ChainedDomain.Config(
+        stiffness=(-1.2, -0.8),
+        damping=(0.1, 0.3),
+        cubic=(0.8, 1.2),
+        drive=(0.3, 0.6),
+        frequency=(1.0, 1.4),
+    )
+    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20261302)
+    asymmetric.domain = ChainedDomain.Config(quadratic=(0.3, 0.8))
+    excited = RegimeFamily.Config(name="self_excited", seed=20261303)
+    excited.domain = ChainedDomain.Config(
+        damping=(-0.2, -0.05),
+        excitation=(0.3, 0.8),
+    )
+    # Tones in the same band beat against each other.
+    beating = RegimeFamily.Config(name="beating_drive", seed=20261304)
+    beating.domain = ChainedDomain.Config(second_frequency=(0.6, 1.6))
+    stiff = RegimeFamily.Config(name="stiff_far_mass", seed=20261305)
+    stiff.domain = ChainedDomain.Config(
+        far_stiffness=(4.0, 6.0),
+        far_coupling=(0.5, 0.8),
+    )
+    cfg.audit = [chaotic, asymmetric, excited, beating, stiff]
+    return cfg
+
+
+def exp054() -> RegimeBenchmark.Config:
+    """exp053 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods fitted to the training ranges fail on chaotic wells, asymmetric
+      and self-excited mechanisms, beating drives and a stiff far mass.
+
+    References:
+      exp053.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp053()
+    cfg.experiment_name = "exp054"
     cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
     cfg.phase = "audit"
     return cfg

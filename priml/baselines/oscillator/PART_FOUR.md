@@ -88,6 +88,11 @@ falls short of that.
 
 ## Limits
 
+A later sixteen-episode calibration with every change time known
+([part five](PART_FIVE.md)) found six episodes where a fit at or below the
+truth's loss forecast badly. The eight-episode claim above, that the truth is
+never beaten, does not hold in general.
+
 The future is deterministic given the hidden state, and the evaluator checks
 that the exact continuation reproduces every target. The joint-fit
 calibration knew the change time, allowed exactly one change and used eight
