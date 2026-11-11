@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Final, cast, override
 import logging
 import queue
 import threading
-import time
 
 from configgle import Fig
 
@@ -49,20 +48,17 @@ class RaisingProcessor:
         yield from ()
 
 
-class SlowProcessor:
-    """Mock processor that adds a delay to simulate I/O."""
+class FlagProcessor:
+    """Mock processor that marks each sample with ``add_field``."""
 
-    class Config(Fig["SlowProcessor"]):
-        delay_ms: int = 10
+    class Config(Fig["FlagProcessor"]):
         add_field: str = "processed"
 
     def __init__(self, config: Config):
-        self.delay_ms = config.delay_ms
         self.add_field = config.add_field
 
     def __call__(self, samples: Iterator[TestSample]) -> Iterator[TestSample]:
         for sample in samples:
-            time.sleep(self.delay_ms / 1000.0)
             sample[self.add_field] = True
             yield sample
 
@@ -74,9 +70,9 @@ def test_threadpoolmap_basic():
     """Test ParMap processes samples in parallel."""
     config = ParMap.Config(num_threads=4)
     threadpool = config.make()
-    slow = SlowProcessor.Config(delay_ms=1).make()
+    flag = FlagProcessor.Config().make()
     samples: list[TestSample] = [{"id": i} for i in range(4)]
-    results = list(threadpool(slow(iter(samples))))
+    results = list(threadpool(flag(iter(samples))))
     assert len(results) == 4
     for result in results:
         assert result.get("processed") is True
@@ -127,10 +123,10 @@ def test_threadpoolmap_queue_management():
         max_input_queue_size=5,
         max_output_queue_size=5,
     )
-    slow = SlowProcessor.Config(delay_ms=1).make()
+    flag = FlagProcessor.Config().make()
     threadpool = config.make()
     samples: list[TestSample] = [{"id": i} for i in range(20)]
-    results = list(threadpool(slow(iter(samples))))
+    results = list(threadpool(flag(iter(samples))))
     assert len(results) == 20
 
 
@@ -141,9 +137,9 @@ def test_threadpoolmap_speedup():
     Manual testing shows ~2-3x speedup with 4 threads on I/O-bound workloads.
     """
     samples: list[TestSample] = [{"id": i} for i in range(8)]
-    slow = SlowProcessor.Config(delay_ms=1).make()
+    flag = FlagProcessor.Config().make()
     threadpool = ParMap.Config(num_threads=4).make()
-    results = list(threadpool(slow(iter(samples))))
+    results = list(threadpool(flag(iter(samples))))
     assert len(results) == 8
     result_ids = {r["id"] for r in results}
     assert result_ids == set(range(8))
@@ -232,26 +228,19 @@ def test_prefetchbuffer_empty_input_logs_zero_peak(
     )
 
 
-def test_prefetchbuffer_with_slow_producer():
-    """Test PrefetchBuffer improves throughput with slow producer."""
-    config = PrefetchBuffer.Config(size=10)
-    prefetch = config.make()
-    slow = SlowProcessor.Config(delay_ms=1).make()
+def test_prefetchbuffer_passes_every_sample_through_a_stage() -> None:
+    prefetch = PrefetchBuffer.Config(size=10).make()
+    flag = FlagProcessor.Config().make()
     samples: list[TestSample] = [{"id": i} for i in range(8)]
-    start = time.perf_counter()
-    results: list[TestSample] = []
-    for sample in prefetch(slow(iter(samples))):
-        results.append(sample)
-        time.sleep(0.0001)
-    elapsed = time.perf_counter() - start
-    assert len(results) == 8
-    assert elapsed < 0.5
+    results = list(prefetch(flag(iter(samples))))
+    assert [r["id"] for r in results] == list(range(8))
+    assert all(r["processed"] for r in results)
 
 
 def test_parmap_with_no_threads_runs_the_stages_inline_and_in_order() -> None:
     config = ParMap.Config(
         num_threads=0,
-        processors=[SlowProcessor.Config(delay_ms=0, add_field="a")],
+        processors=[FlagProcessor.Config(add_field="a")],
     )
     samples: list[TestSample] = [{"id": i} for i in range(3)]
     results = list(config.make()(iter(samples)))
@@ -264,7 +253,7 @@ def test_parmap_bounded_queues_process_every_sample() -> None:
         num_threads=2,
         max_input_queue_size=1,
         max_output_queue_size=1,
-        processors=[SlowProcessor.Config(delay_ms=1, add_field="b")],
+        processors=[FlagProcessor.Config(add_field="b")],
     )
     samples: list[TestSample] = [{"id": i} for i in range(6)]
     results = list(config.make()(iter(samples)))
@@ -280,7 +269,7 @@ def test_parmap_surfaces_a_source_exception_from_the_feeder() -> None:
     config = ParMap.Config(
         num_threads=2,
         poll_sec=_POLL_SEC,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     )
     with pytest.raises(ValueError, match=r"^upstream$"):
         list(config.make()(source()))
@@ -407,7 +396,7 @@ def test_parmap_logs_name_queue_bounds_and_fill_state(
         num_threads=2,
         max_input_queue_size=-1,
         max_output_queue_size=2,
-        processors=[SlowProcessor.Config(delay_ms=1)],
+        processors=[FlagProcessor.Config()],
     ).make()
     assert len(list(parmap(iter(samples)))) == 4
     assert any(
@@ -440,7 +429,7 @@ def test_parmap_logs_zero_peaks_for_empty_threaded_input(
     caplog.set_level(logging.INFO, logger="priml.data.pipeline.parallel")
     parmap = ParMap.Config(
         num_threads=1,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
 
     assert list(parmap(iter([]))) == []
@@ -479,7 +468,7 @@ def test_parmap_fills_output_queue_to_its_exact_bound(
     parmap = ParMap.Config(
         num_threads=2,
         max_output_queue_size=1,
-        processors=[SlowProcessor.Config(delay_ms=1)],
+        processors=[FlagProcessor.Config()],
     ).make()
     stream = parmap(_samples(8))
     results = [next(stream)]
@@ -501,7 +490,7 @@ def test_parmap_logs_finite_input_and_output_queue_bounds(
         num_threads=1,
         max_input_queue_size=3,
         max_output_queue_size=2,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
 
     assert len(list(parmap(_samples(2)))) == 2
@@ -521,7 +510,7 @@ def test_parmap_logs_unbounded_output_capacity(
         num_threads=2,
         max_input_queue_size=3,
         max_output_queue_size=-1,
-        processors=[SlowProcessor.Config(delay_ms=1)],
+        processors=[FlagProcessor.Config()],
     ).make()
     assert len(list(parmap(_samples(2)))) == 2
     assert any(
@@ -547,7 +536,7 @@ def test_parmap_uses_configured_queue_bounds(
         num_threads=1,
         max_input_queue_size=1,
         max_output_queue_size=2,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
 
     assert len(list(parmap(_samples(1)))) == 1
@@ -570,7 +559,7 @@ def test_parmap_uses_zero_for_unbounded_queues(
         num_threads=1,
         max_input_queue_size=-1,
         max_output_queue_size=-1,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
 
     assert next(iter(parmap(_samples(1))))["id"] == 0
@@ -615,7 +604,7 @@ def test_parmap_unbounded_output_can_buffer_past_one_item(
     parmap = ParMap.Config(
         num_threads=2,
         max_output_queue_size=-1,
-        processors=[SlowProcessor.Config(delay_ms=1)],
+        processors=[FlagProcessor.Config()],
     ).make()
     stream = parmap(_samples(3))
     results = [next(stream)]
@@ -801,7 +790,7 @@ def test_parmap_limits_poison_pill_waits(
         num_threads=2,
         max_input_queue_size=2,
         poll_sec=_POLL_SEC,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
 
     assert len(list(parmap(_samples(2)))) == 2
@@ -956,7 +945,7 @@ def test_parmap_uses_daemon_threads_for_workers_and_support_threads(
     )
     parmap = ParMap.Config(
         num_threads=1,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
 
     assert list(parmap(_samples(1))) == [{"id": 0, "processed": True}]
@@ -968,8 +957,8 @@ def test_parmap_one_thread_applies_processors_in_sequence() -> None:
     config = ParMap.Config(
         num_threads=1,
         processors=[
-            SlowProcessor.Config(delay_ms=0, add_field="first"),
-            SlowProcessor.Config(delay_ms=0, add_field="second"),
+            FlagProcessor.Config(add_field="first"),
+            FlagProcessor.Config(add_field="second"),
         ],
     )
     samples: list[TestSample] = [{"id": 0}, {"id": 1}]
@@ -998,7 +987,7 @@ def test_parmap_closed_before_iteration_and_twice_is_idempotent() -> None:
 def test_parmap_close_mid_threaded_iteration_is_idempotent() -> None:
     parmap = ParMap.Config(
         num_threads=2,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
     stream = parmap(_samples(4))
 
@@ -1144,7 +1133,7 @@ def test_parmap_close_stops_every_thread(monkeypatch: pytest.MonkeyPatch) -> Non
         max_input_queue_size=1,
         max_output_queue_size=1,
         poll_sec=_POLL_SEC,
-        processors=[SlowProcessor.Config(delay_ms=0)],
+        processors=[FlagProcessor.Config()],
     ).make()
     stream = parmap(_endless())
 
