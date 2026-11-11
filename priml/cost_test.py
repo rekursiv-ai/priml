@@ -6,7 +6,6 @@ from dataclasses import fields
 from typing import TYPE_CHECKING, Final, assert_type, cast
 
 import functools
-import gc
 import importlib
 import inspect
 import math
@@ -1199,7 +1198,6 @@ def test_set_cost_keeps_no_reference_to_the_function() -> None:
 
     alive = weakref.ref(act)
     del act
-    gc.collect()
 
     assert alive() is None
 

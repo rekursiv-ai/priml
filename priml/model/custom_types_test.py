@@ -364,7 +364,9 @@ def _channel_config_violations(root: Path) -> list[str]:
         if path.name.endswith("_test.py"):
             continue
         source = path.read_text(encoding="utf-8")
-        if source.isascii() and "Config" not in source:
+        # Every violation names a channel field or property; in ASCII source each
+        # name is spelled out, so a file without both words has none to parse for.
+        if source.isascii() and ("Config" not in source or "channels_" not in source):
             continue
         tree = ast.parse(source)
         for node in ast.walk(tree):

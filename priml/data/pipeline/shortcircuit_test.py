@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
-import gc
 import threading
 import weakref
 
@@ -517,7 +516,6 @@ def test_short_circuit_releases_consumed_samples():
     outputs = processor(_tracked_samples(4, refs))
     next(outputs)
     next(outputs)
-    gc.collect()
     assert refs[0]() is None
 
 

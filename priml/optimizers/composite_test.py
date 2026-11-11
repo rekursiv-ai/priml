@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Protocol, TypeGuard, cast, runtime_checkable
 
-import gc
 import weakref
 
 from configgle import PartialConfig
@@ -210,7 +209,6 @@ def test_member_group_addition_and_load_keep_scheduling_aliases() -> None:
 def test_a_discarded_composite_is_not_kept_alive_by_its_members() -> None:
     member = torch.optim.SGD([nn.Parameter(torch.ones(2))], lr=0.1)
     composite = weakref.ref(CompositeOptimizer([member]))
-    _ = gc.collect()
     assert composite() is None
 
 
