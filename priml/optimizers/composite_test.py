@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Protocol, TypeGuard, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeGuard, cast, override, runtime_checkable
 
 import weakref
 
-from configgle import PartialConfig
+from configgle import Makes, PartialConfig
 from torch import Tensor, nn
 
 import pytest
@@ -23,6 +23,15 @@ from priml.optimizers.parameter_filter import (
     excluding,
     matching,
 )
+from priml.optimizers.weight_programming import (
+    UpdateOutput,
+    WeightProgramming,
+    _no_batch,
+)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 
 def split_model() -> nn.Module:
@@ -596,6 +605,720 @@ def test_state_iterates_over_every_members_keys() -> None:
     assert {id(k) for k in keys} == {id(p) for p in model.parameters() if p.ndim >= 2}
     first = keys[0]
     assert isinstance(state[first], dict)
+
+
+class _EditProgram(WeightProgramming):
+    """Adds a fixed delta to each owned parameter."""
+
+    class Config(Makes["Callable[..., _EditProgram]"], WeightProgramming.Config):
+        """Fixed-delta programmer."""
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model, next_batch
+        for group in self.param_groups:
+            for param in cast("list[nn.Parameter]", group["params"]):
+                with torch.no_grad():
+                    param.add_(0.1)
+        return UpdateOutput(updated=True, metrics={"edits": 1.0})
+
+
+class _ObservingProgram(WeightProgramming):
+    """Records requires_grad and epoch state during lifecycle."""
+
+    class Config(
+        Makes["Callable[..., _ObservingProgram]"],
+        WeightProgramming.Config,
+    ):
+        """Observing programmer."""
+
+    @override
+    def __init__(
+        self,
+        params: Iterable[Tensor],
+        *,
+        config: WeightProgramming.Config,
+    ) -> None:
+        super().__init__(params, config=config)
+        self.observed_requires_grad: list[bool] = []
+        self.epoch_end_count: int = 0
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model, next_batch
+        self.observed_requires_grad = [
+            p.requires_grad
+            for group in self.param_groups
+            for p in cast("list[nn.Parameter]", group["params"])
+        ]
+        for group in self.param_groups:
+            for param in cast("list[nn.Parameter]", group["params"]):
+                with torch.no_grad():
+                    param.add_(0.01)
+        return UpdateOutput(updated=True, metrics={"observed": 1.0})
+
+    @override
+    def on_epoch_end(self) -> None:
+        self.epoch_end_count += 1
+
+
+class _FailingProgram(WeightProgramming):
+    """Raises during program_weights for failure-restoration tests."""
+
+    class Config(
+        Makes["Callable[..., _FailingProgram]"],
+        WeightProgramming.Config,
+    ):
+        """Failing programmer."""
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        raise RuntimeError("Calibration exploded")
+
+
+class _SequencedProgram(WeightProgramming):
+    """Return incrementing call counts per step."""
+
+    class Config(
+        Makes["Callable[..., _SequencedProgram]"],
+        WeightProgramming.Config,
+    ):
+        """Sequenced programmer."""
+
+    @override
+    def __init__(
+        self,
+        params: Iterable[Tensor],
+        *,
+        config: WeightProgramming.Config,
+    ) -> None:
+        super().__init__(params, config=config)
+        for group in self.param_groups:
+            group["call_count"] = 0
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model, next_batch
+        for group in self.param_groups:
+            call_count = cast(int, group["call_count"]) + 1
+            group["call_count"] = call_count
+            for param in cast("list[nn.Parameter]", group["params"]):
+                with torch.no_grad():
+                    param.add_(0.01 * call_count)
+        return UpdateOutput(
+            updated=True,
+            metrics={"call": float(cast(int, self.param_groups[0]["call_count"]))},
+        )
+
+
+class _AccumulatingProgram(WeightProgramming):
+    """Stores running count in Optimizer.state for continuation testing."""
+
+    class Config(
+        Makes["Callable[..., _AccumulatingProgram]"],
+        WeightProgramming.Config,
+    ):
+        """Accumulating programmer."""
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model, next_batch
+        for group in self.param_groups:
+            for param in cast("list[nn.Parameter]", group["params"]):
+                state = cast("dict[str, Tensor]", self.state[param])
+                if "count" not in state:
+                    state["count"] = torch.tensor(0)
+                state["count"] = state["count"] + 1
+                with torch.no_grad():
+                    param.add_(state["count"] * 0.01)
+        return UpdateOutput(updated=True)
+
+
+class _TensorMetricProgram(WeightProgramming):
+    """Emits a fresh tensor metric each step for lifetime testing."""
+
+    class Config(
+        Makes["Callable[..., _TensorMetricProgram]"],
+        WeightProgramming.Config,
+    ):
+        """Tensor-metric programmer."""
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model, next_batch
+        return UpdateOutput(updated=True, metrics={"value": torch.tensor(1.0)})
+
+
+class _NoChangeProgram(WeightProgramming):
+    """Returns updated=False without modifying parameters."""
+
+    class Config(
+        Makes["Callable[..., _NoChangeProgram]"],
+        WeightProgramming.Config,
+    ):
+        """No-change programmer."""
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model, next_batch
+        return UpdateOutput(updated=False)
+
+
+def test_mixed_recipe_routes_the_non_scorer_complement_to_sgd() -> None:
+    model = nn.Module()
+    model.add_module("body", nn.Linear(3, 4))
+    model.add_module("embedding", nn.Embedding(5, 3))
+    model.add_module("scorer", nn.Linear(4, 2))
+    model.register_parameter(
+        "frozen",
+        nn.Parameter(torch.ones(6), requires_grad=False),
+    )
+    sgd = PartialConfig(torch.optim.SGD)
+    sgd.lr = 0.001
+    config = CompositeOptimizer.Config()
+    config.optimizers = [sgd, Muon.Config(), _EditProgram.Config()]
+    on_muon = excluding(Muon.eligible_tensor, "scorer.", "embedding")
+    config.select = [
+        excluding(complement(on_muon), "scorer."),
+        on_muon,
+        matching("scorer."),
+    ]
+
+    optimizer = config.make()(model)
+
+    parameter_names = {
+        id(parameter): name for name, parameter in model.named_parameters()
+    }
+    routed_names: list[list[str]] = []
+    for member in optimizer.optimizers:
+        names: list[str] = []
+        for group in member.param_groups:
+            parameters = cast(list[Tensor], group["params"])
+            names.extend(parameter_names[id(parameter)] for parameter in parameters)
+        routed_names.append(names)
+    assert routed_names == [
+        ["body.bias", "embedding.weight"],
+        ["body.weight"],
+        ["scorer.weight", "scorer.bias"],
+    ]
+    assert not model.get_parameter("frozen").requires_grad
+
+
+def test_has_programming_false_for_gradient_only() -> None:
+    optimizer = split_optimizer(split_model())
+    assert not optimizer.has_programming
+
+
+def test_has_programming_true_with_a_programmer() -> None:
+    param = nn.Parameter(torch.randn(2, 3))
+    programmer = _EditProgram.Config().make()([param])
+    optimizer = CompositeOptimizer([programmer])
+    assert optimizer.has_programming
+
+
+def test_requires_gradients_true_for_gradient_only() -> None:
+    optimizer = split_optimizer(split_model())
+    assert optimizer.requires_gradients
+
+
+def test_requires_gradients_true_for_mixed() -> None:
+    param_a = nn.Parameter(torch.randn(2, 3))
+    param_b = nn.Parameter(torch.randn(4))
+    programmer = _EditProgram.Config().make()([param_a])
+    sgd = torch.optim.SGD([param_b], lr=0.1)
+    optimizer = CompositeOptimizer([sgd, programmer])
+    assert optimizer.requires_gradients
+
+
+def test_requires_gradients_false_for_programmers_only() -> None:
+    param = nn.Parameter(torch.randn(2, 3))
+    programmer = _EditProgram.Config().make()([param])
+    optimizer = CompositeOptimizer([programmer])
+    assert not optimizer.requires_gradients
+
+
+def test_programming_enables_programmer_step() -> None:
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+    before = model.weight.detach().clone()
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+    assert not torch.equal(model.weight.data, before)
+
+
+def test_programming_binds_multiple_programmers() -> None:
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    params_0 = list(model[0].parameters())
+    params_1 = list(model[1].parameters())
+    prog_0 = _ObservingProgram.Config().make()(params_0)
+    prog_1 = _ObservingProgram.Config().make()(params_1)
+    optimizer = CompositeOptimizer([prog_0, prog_1])
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+    assert prog_0.output.updated
+    assert prog_1.output.updated
+
+
+def test_programming_restores_on_exit() -> None:
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+    with pytest.raises(RuntimeError, match="requires a bound model"):
+        optimizer.step()
+
+
+def test_programming_restores_on_failure() -> None:
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _FailingProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+    with (
+        pytest.raises(RuntimeError, match="Calibration exploded"),
+        optimizer.programming(model, next_batch=_no_batch),
+    ):
+        optimizer.step()
+    with pytest.raises(RuntimeError, match="requires a bound model"):
+        optimizer.step()
+
+
+def test_programming_output_namespaced() -> None:
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    sgd = torch.optim.SGD(list(model[0].parameters()), lr=0.1)
+    programmer = _EditProgram.Config().make()(list(model[1].parameters()))
+    optimizer = CompositeOptimizer([sgd, programmer])
+    with optimizer.programming(model, next_batch=_no_batch):
+        model(torch.randn(2, 3)).sum().backward()
+        optimizer.step()
+    output = optimizer.programming_output
+    assert output.updated
+    assert output.metrics == {"programming/1/edits": 1.0}
+
+
+def test_programming_output_empty_without_programmers() -> None:
+    optimizer = split_optimizer(split_model())
+    assert optimizer.programming_output == UpdateOutput()
+
+
+def test_on_epoch_end_forwards_to_programmers() -> None:
+    param_a = nn.Parameter(torch.randn(2, 3))
+    param_b = nn.Parameter(torch.randn(4, 5))
+    prog_a = _ObservingProgram.Config().make()([param_a])
+    prog_b = _ObservingProgram.Config().make()([param_b])
+    sgd = torch.optim.SGD([nn.Parameter(torch.randn(2))], lr=0.1)
+    optimizer = CompositeOptimizer([prog_a, sgd, prog_b])
+    optimizer.on_epoch_end()
+    assert prog_a.epoch_end_count == 1
+    assert prog_b.epoch_end_count == 1
+    optimizer.on_epoch_end()
+    assert prog_a.epoch_end_count == 2
+
+
+def test_mixed_gradient_and_programmer_step() -> None:
+    """SGD uses backward gradients; programmer edits directly."""
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    sgd_params = list(model[0].parameters())
+    prog_params = list(model[1].parameters())
+    sgd = torch.optim.SGD(sgd_params, lr=0.01)
+    programmer = _EditProgram.Config().make()(prog_params)
+    optimizer = CompositeOptimizer([sgd, programmer])
+
+    sgd_before = sgd_params[0].detach().clone()
+    prog_before = prog_params[0].detach().clone()
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        output = model(torch.randn(2, 3))
+        output.sum().backward()
+        assert sgd_params[0].grad is not None
+        assert prog_params[0].grad is None
+        optimizer.step()
+
+    assert not torch.equal(sgd_params[0].data, sgd_before)
+    expected_prog = prog_before + 0.1
+    assert torch.equal(prog_params[0].data, expected_prog)
+
+
+def test_sibling_gradients_preserved() -> None:
+    """Programmer step does not disturb sibling optimizer gradients."""
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    sgd_params = list(model[0].parameters())
+    prog_params = list(model[1].parameters())
+    sgd = torch.optim.SGD(sgd_params, lr=0.01)
+    programmer = _EditProgram.Config().make()(prog_params)
+    optimizer = CompositeOptimizer([sgd, programmer])
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        output = model(torch.randn(2, 3))
+        output.sum().backward()
+        assert sgd_params[0].grad is not None
+        grad_before = sgd_params[0].grad.clone()
+        optimizer.step()
+
+    assert sgd_params[0].grad is not None
+    assert torch.equal(sgd_params[0].grad, grad_before)
+
+
+def test_pure_program_without_backward() -> None:
+    """A composite with only programmers needs no forward/backward."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+    before = model.weight.detach().clone()
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+
+    expected = before + 0.1
+    assert torch.equal(model.weight.data, expected)
+
+
+def test_programming_output_aggregates_multiple_steps() -> None:
+    """Two steps in one binding retain last-wins metrics."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _SequencedProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+        optimizer.step()
+
+    output = optimizer.programming_output
+    assert output.updated
+    assert output.metrics == {"programming/0/call": 2.0}
+
+
+def test_programming_output_empty_in_fresh_binding() -> None:
+    """A binding without steps produces an empty output."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+    assert optimizer.programming_output.updated
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        pass
+    assert optimizer.programming_output == UpdateOutput()
+
+
+def test_programming_output_includes_ordinary_member_fan_out() -> None:
+    """programming_output.updated reflects ordinary member execution."""
+    model = nn.Linear(3, 4)
+    assert model.bias is not None
+    sgd = torch.optim.SGD([model.weight], lr=0.1)
+    programmer = _NoChangeProgram.Config().make()([model.bias])
+    optimizer = CompositeOptimizer([sgd, programmer])
+
+    assert not optimizer.programming_output.updated
+
+    model.weight.grad = torch.ones_like(model.weight)
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+        assert optimizer.programming_output.updated
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        assert not optimizer.programming_output.updated
+
+
+def test_programming_output_keeps_both_member_namespaces() -> None:
+    """Repeated steps retain independently namespaced member metrics."""
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    prog_a = _SequencedProgram.Config().make()(list(model[0].parameters()))
+    prog_b = _SequencedProgram.Config().make()(list(model[1].parameters()))
+    optimizer = CompositeOptimizer([prog_a, prog_b])
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+        optimizer.step()
+
+    output = optimizer.programming_output
+    assert output.updated
+    assert output.metrics == {
+        "programming/0/call": 2.0,
+        "programming/1/call": 2.0,
+    }
+
+
+def test_programmer_add_param_group_through_composite() -> None:
+    """A programmer member accepts add_param_group; composite reflects it."""
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    programmer = _EditProgram.Config().make()(list(model[0].parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    new_param = nn.Parameter(torch.randn(2, 5))
+    cast(WeightProgramming, optimizer.optimizers[0]).add_param_group(
+        {"params": [new_param]},
+    )
+    assert not new_param.requires_grad
+    assert len(optimizer.param_groups) == 2
+
+
+def test_deepcopy_composite_preserves_programmer_state() -> None:
+    """Deepcopy preserves programmer state: exact numerical continuation."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _SequencedProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    before = model.weight.detach().clone()
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+    # Step 1: 0.01 * call_count(1) = 0.01.
+    assert torch.equal(model.weight.data, before + 0.01)
+
+    after_step1 = model.weight.detach().clone()
+    model_copy, optimizer_copy = deepcopy((model, optimizer))
+
+    with optimizer_copy.programming(model_copy, next_batch=_no_batch):
+        optimizer_copy.step()
+    # Step 2 on copy: 0.01 * call_count(2) = 0.02, proving count preserved.
+    assert torch.equal(model_copy.weight.data, after_step1 + 0.02)
+    # Original unchanged.
+    assert torch.equal(model.weight.data, after_step1)
+
+
+@pytest.mark.parametrize(
+    ("source_program", "target_program"),
+    [(True, False), (False, True), (True, True)],
+)
+def test_changed_programmer_identity_is_rejected_before_member_load(
+    source_program: bool,
+    target_program: bool,
+) -> None:
+    source_model = nn.Linear(3, 4)
+    target_model = nn.Linear(3, 4)
+    assert source_model.bias is not None
+    assert target_model.bias is not None
+    source_member = (
+        _AccumulatingProgram.Config().make()([source_model.bias])
+        if source_program
+        else torch.optim.SGD([source_model.bias], lr=0.25)
+    )
+    target_member = (
+        _EditProgram.Config().make()([target_model.bias])
+        if target_program
+        else torch.optim.SGD([target_model.bias], lr=0.25)
+    )
+    source = CompositeOptimizer(
+        [torch.optim.SGD([source_model.weight], lr=0.5), source_member],
+    )
+    ordinary = torch.optim.SGD([target_model.weight], lr=0.125)
+    target = CompositeOptimizer([ordinary, target_member])
+    before = deepcopy(target.state_dict())
+    calls: list[str] = []
+    _ = ordinary.register_load_state_dict_pre_hook(
+        lambda _, __: calls.append("ordinary"),
+    )
+
+    with pytest.raises(ValueError, match="programmer"):
+        target.load_state_dict(source.state_dict())
+
+    assert calls == []
+    assert target.state_dict() == before
+
+
+def test_stateful_programmer_resumes_through_composite() -> None:
+    """Per-parameter state survives save/load; next step continues."""
+    model = nn.Linear(2, 3, bias=False)
+    programmer = _AccumulatingProgram.Config().make()(list(model.parameters()))
+    composite = CompositeOptimizer([programmer])
+
+    with composite.programming(model, next_batch=_no_batch):
+        composite.step()
+        composite.step()
+
+    saved = composite.state_dict()
+
+    model2 = nn.Linear(2, 3, bias=False)
+    programmer2 = _AccumulatingProgram.Config().make()(list(model2.parameters()))
+    composite2 = CompositeOptimizer([programmer2])
+    composite2.load_state_dict(saved)
+
+    param = model2.weight
+    count = cast(Tensor, programmer2.state[param]["count"])
+    assert count.item() == 2
+
+    before = param.detach().clone()
+    with composite2.programming(model2, next_batch=_no_batch):
+        composite2.step()
+    count_after = cast(Tensor, programmer2.state[param]["count"])
+    assert count_after.item() == 3
+    # Resumed count=3: delta = 3 * 0.01 = 0.03, not 1 * 0.01 if state lost.
+    assert torch.equal(param.data, before + 0.03)
+
+
+def test_nested_programming_rejection_preserves_outer_output() -> None:
+    """Rejected nested programming() must not destroy the outer output."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+        assert optimizer.programming_output.updated
+
+        with (
+            pytest.raises(RuntimeError, match="already bound"),
+            optimizer.programming(model, next_batch=_no_batch),
+        ):
+            pass
+
+        assert optimizer.programming_output.updated
+        assert optimizer.programming_output.metrics == {"programming/0/edits": 1.0}
+
+
+def test_composite_closure_differentiates_programmer_weights() -> None:
+    """Fallback closure differentiates programmer-owned weights."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+    media = torch.ones(2, 3)
+    expected = model(media).square().sum().detach()
+
+    def closure() -> Tensor:
+        loss = model(media).square().sum()
+        loss.backward()
+        return loss
+
+    with optimizer.programming(model, next_batch=_no_batch), torch.no_grad():
+        result = optimizer.step(closure)
+    assert isinstance(result, Tensor)
+    assert torch.equal(result, expected)
+    assert model.weight.grad is not None
+    assert not model.weight.requires_grad
+
+
+def test_composite_closure_failure_refreezes_programmer_weights() -> None:
+    """Failed fallback closure refreezes programmer-owned weights."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _EditProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    def closure() -> Tensor:
+        model(torch.ones(2, 3)).sum().backward()
+        raise RuntimeError("closure failed")
+
+    with (
+        pytest.raises(RuntimeError, match="closure failed"),
+        optimizer.programming(model, next_batch=_no_batch),
+    ):
+        optimizer.step(closure)
+    assert not model.weight.requires_grad
+
+
+def test_mixed_closure_preserves_programmer_gradient_isolation() -> None:
+    """Mixed fallback closure does not restore programmer eligibility."""
+    model = nn.Linear(3, 4)
+    assert model.bias is not None
+    sgd = torch.optim.SGD([model.weight], lr=0.1)
+    programmer = _EditProgram.Config().make()([model.bias])
+    optimizer = CompositeOptimizer([sgd, programmer])
+    media = torch.randn(2, 3)
+
+    def closure() -> Tensor:
+        loss = model(media).sum()
+        loss.backward()
+        return loss
+
+    with optimizer.programming(model, next_batch=_no_batch), torch.no_grad():
+        _ = optimizer.step(closure)
+    assert model.weight.grad is not None
+    assert model.bias.grad is None
+    assert not model.bias.requires_grad
+
+
+def test_pure_programming_closure_runs_once() -> None:
+    """Fallback closure runs exactly once across two programmers."""
+    model = nn.Sequential(nn.Linear(3, 4, bias=False), nn.Linear(4, 2, bias=False))
+    prog_a = _EditProgram.Config().make()(list(model[0].parameters()))
+    prog_b = _EditProgram.Config().make()(list(model[1].parameters()))
+    optimizer = CompositeOptimizer([prog_a, prog_b])
+    calls: list[int] = []
+
+    def closure() -> Tensor:
+        calls.append(1)
+        loss = model(torch.ones(2, 3)).square().sum()
+        loss.backward()
+        return loss
+
+    with optimizer.programming(model, next_batch=_no_batch), torch.no_grad():
+        _ = optimizer.step(closure)
+    assert len(calls) == 1
+    for p in model.parameters():
+        assert p.grad is not None
+        assert not p.requires_grad
+
+
+def test_programming_output_does_not_retain_superseded_metric_tensors() -> None:
+    """Superseded metric tensors become collectible after last-wins replacement."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _TensorMetricProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+
+    with optimizer.programming(model, next_batch=_no_batch):
+        optimizer.step()
+        ref = weakref.ref(optimizer.programming_output.metrics["programming/0/value"])
+        optimizer.step()
+
+    assert ref() is None
+
+
+def test_deepcopy_composite_preserves_autograd_eligibility() -> None:
+    """Deepcopy preserves gradient eligibility: autograd works in the copy."""
+    model = nn.Linear(3, 4, bias=False)
+    programmer = _ObservingProgram.Config().make()(list(model.parameters()))
+    optimizer = CompositeOptimizer([programmer])
+    assert not model.weight.requires_grad
+
+    model_copy, optimizer_copy = deepcopy((model, optimizer))
+    prog_copy = cast(_ObservingProgram, optimizer_copy.optimizers[0])
+
+    before = model_copy.weight.detach().clone()
+    with optimizer_copy.programming(model_copy, next_batch=_no_batch):
+        optimizer_copy.step()
+    # requires_grad restored during program_weights in the copy.
+    assert prog_copy.observed_requires_grad == [True]
+    assert not torch.equal(model_copy.weight.data, before)
+    assert not model_copy.weight.requires_grad
+    # Original unchanged.
+    assert not model.weight.requires_grad
 
 
 if __name__ == "__main__":

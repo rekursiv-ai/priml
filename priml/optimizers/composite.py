@@ -22,6 +22,7 @@ frozen only if the recipe says so.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import field
 from functools import partial
 from typing import TYPE_CHECKING, TypedDict, cast, overload, override
@@ -32,10 +33,11 @@ from torch.optim import Optimizer
 import torch
 
 from priml.optimizers.parameter_filter import ParameterFilter, everything
+from priml.optimizers.weight_programming import UpdateOutput, WeightProgramming
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Generator, Sequence
 
     from torch import Tensor, nn
     from torch.nn import Parameter
@@ -133,7 +135,9 @@ class CompositeOptimizer(Optimizer):
 
     def __init__(self, optimizers: Sequence[Optimizer]) -> None:
         if not optimizers:
-            raise ValueError("CompositeOptimizer requires at least one optimizer.")
+            raise ValueError(
+                "CompositeOptimizer requires at least one optimizer.",  # mutmut: accept[diagnostic-text] -- Error wording, not a contractual string.
+            )
         _reject_shared_parameters(optimizers)
         self.optimizers = list(optimizers)
         # The base installs the hook registries ``register_step_pre_hook`` and
@@ -161,6 +165,8 @@ class CompositeOptimizer(Optimizer):
         self._state: dict[object, object] = _MemberState(self.optimizers)
         self.param_groups = self._groups
         self.state: dict[object, object] = self._state
+        self._programming_updated: bool = False
+        self._programming_metrics: dict[str, float | Tensor] = {}
         self._initialized = True
 
     # Hidden from type checkers: an override returning ``object`` would make
@@ -177,6 +183,16 @@ class CompositeOptimizer(Optimizer):
     def requires_closure(self) -> bool:
         """Report whether a member needs the loss-recomputing closure."""
         return any(getattr(o, "requires_closure", False) for o in self.optimizers)
+
+    @property
+    def has_programming(self) -> bool:
+        """Whether any member is a weight programmer."""
+        return any(isinstance(o, WeightProgramming) for o in self.optimizers)
+
+    @property
+    def requires_gradients(self) -> bool:
+        """Whether any member needs backward gradients."""
+        return any(not isinstance(o, WeightProgramming) for o in self.optimizers)
 
     @overload
     def step(self, closure: None = None) -> None: ...
@@ -212,13 +228,30 @@ class CompositeOptimizer(Optimizer):
         _reject_shared_parameters(self.optimizers)
         loss: Tensor | float | None = None
         if closure is not None and not self.requires_closure:
-            with torch.enable_grad():
-                loss = closure()
-        for optimizer in self.optimizers:
+            if not self.requires_gradients:
+                with ExitStack() as eligibility:
+                    for member in self.optimizers:
+                        if isinstance(member, WeightProgramming):
+                            eligibility.enter_context(member.restore_requires_grad())
+                    with torch.enable_grad():
+                        loss = closure()
+            else:
+                with torch.enable_grad():
+                    loss = closure()
+        has_programming = self.has_programming
+        for i, optimizer in enumerate(self.optimizers):
             if closure is not None and getattr(optimizer, "requires_closure", False):
                 loss = optimizer.step(closure)
             else:
                 optimizer.step()
+            if isinstance(optimizer, WeightProgramming):
+                self._programming_updated = (
+                    self._programming_updated or optimizer.output.updated
+                )
+                for key, value in optimizer.output.metrics.items():
+                    self._programming_metrics[f"programming/{i}/{key}"] = value
+            elif has_programming:
+                self._programming_updated = True
         return loss
 
     @override
@@ -226,6 +259,46 @@ class CompositeOptimizer(Optimizer):
         """Zero gradients across every member."""
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=set_to_none)
+
+    @contextmanager
+    def programming(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> Generator[None]:
+        """Bind every weight-programming member to the model and batch supplier.
+
+        Args:
+          model: The full model whose weights are being programmed.
+          next_batch: Lazy calibration-input supplier for input-dependent
+            programming.
+
+        Yields:
+          nothing: Used as a context manager.
+
+        """
+        with ExitStack() as stack:
+            for member in self.optimizers:
+                if isinstance(member, WeightProgramming):
+                    stack.enter_context(member.bind(model, next_batch=next_batch))
+            self._programming_updated = False
+            self._programming_metrics = {}
+            yield
+
+    @property
+    def programming_output(self) -> UpdateOutput:
+        """Aggregated output from programmer members across all steps."""
+        return UpdateOutput(
+            updated=self._programming_updated,
+            metrics=dict(self._programming_metrics),
+        )
+
+    def on_epoch_end(self) -> None:
+        """Forward epoch-end to every weight-programming member."""
+        for member in self.optimizers:
+            if isinstance(member, WeightProgramming):
+                member.on_epoch_end()
 
     class StateDict(TypedDict):
         """Every member's state, keyed by position."""
@@ -258,8 +331,8 @@ class CompositeOptimizer(Optimizer):
         """Restore state produced by :meth:`state_dict`, all members or none.
 
         Raises:
-          ValueError: If the checkpoint holds a different number of members,
-            which means the recipe changed and the state cannot be matched up.
+          ValueError: If the member count or programming method changed,
+            so the checkpoint state cannot be matched to this recipe.
 
         """
         loaded: OptimizerStateDict = {**state_dict}
@@ -273,6 +346,9 @@ class CompositeOptimizer(Optimizer):
                 f"has {len(self.optimizers)}; the recipe changed.",
             )
         current = [optimizer.state_dict() for optimizer in self.optimizers]
+        for index, member_state in enumerate(current):
+            if saved[index].get("programmer") != member_state.get("programmer"):
+                raise ValueError(f"Checkpoint programmer at member {index} changed.")
         try:
             for optimizer, member_state in zip(self.optimizers, saved, strict=True):
                 optimizer.load_state_dict(member_state)
