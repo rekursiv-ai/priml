@@ -92,9 +92,9 @@ names each method's choices.
 | clipped              | `A, u` | `−min(A(x), m(u) A(x))`                                  | `−A(x) ⋅ 1[unclipped]`                  |
 | KL-penalized         | `A, u` | `−A(x) + β ⋅` forward KL                                 | `−A(x) − β u`                           |
 | clipped + k3         | `A, u` | clipped `+ β ⋅` (reverse KL `+ (v − 1)`) at `v = k(x) u` | `−A(x) ⋅ 1[unclipped] − β log(k(x) u)`  |
-| g-regularized        | `A, u` | `−A(x) + β ⋅ g`                                          | `−A(x) + β T_g(u)`                      |
-| weighted g           | `A, u` | `w(x) ⋅ g`                                               | `w(x) T_g(u)`                           |
-| clipped + g          | `A, u` | clipped `+ β ⋅ g` at `v = k(x) u`                        | `−A(x) ⋅ 1[unclipped] + β T_g(k(x) u)`  |
+| g-regularized        | `A, u` | `−A(x) + β g(u)`                                         | `−A(x) + β T_g(u)`                      |
+| weighted g           | `A, u` | `w(x) g(u)`                                              | `w(x) T_g(u)`                           |
+| clipped + g          | `A, u` | clipped `+ β g(k(x) u)`                                  | `−A(x) ⋅ 1[unclipped] + β T_g(k(x) u)`  |
 
 `reads` names what `f(x, u)` depends on. Rows that do not read `u` are the
 `p̂ ≡ 0` slice: `u ≡ 0` and `T_f(x, 0) = f(x, 0)`. Rows that read only `u` are
@@ -123,33 +123,39 @@ sympy.
 
 ## Methods
 
-| method                                    | `f(x, u)`                                                        | `A(x)`                          | `p̂(x) = u ⋅ p(x; θ)`                  | unpublished                      |
-|-------------------------------------------|------------------------------------------------------------------|---------------------------------|---------------------------------------|----------------------------------|
-| [REINFORCE][REINFORCE]                    | linear, `b(x) = b` constant                                      | any                             | `0`                                   |                                  |
-| [RLOO][RLOO]                              | linear, `b(x)` leave-one-out                                     | `r(x)`                          | `0`                                   |                                  |
-| MLE                                       | forward KL                                                       | `0`                             | data                                  |                                  |
-| VI (ELBO)                                 | reverse KL                                                       | `0`                             | unnormalized posterior                |                                  |
-| [f-DPG][f-DPG]                            | dual of `g`                                                      | `0`                             | target, e.g. `π_ref(x) exp(r(x) / β)` |                                  |
-| [f-GAN][f-GAN]                            | any ratio-only `g`                                               | `0`                             | data, via `u ≈ D(x) / (1 − D(x))`     |                                  |
-| [RLHF][RLHF]                              | KL-regularized                                                   | `r(x)`, reward model            | `π_ref(x)`                            |                                  |
-| [RLVR][RLVR]                              | KL-regularized                                                   | `1[verifier accepts x]`         | `π_ref(x)`                            |                                  |
-| entropy-regularized                       | KL-regularized                                                   | any                             | `1`                                   |                                  |
-| [AWR][AWR]                                | weighted MLE, `w(x) = exp(A(x) / β)`                             | advantage from a critic         | data                                  |                                  |
-| [MPO][MPO] M-step                         | weighted MLE, `w(x) = exp(A(x) / η) / Z`                         | Q-value from a critic           | `p_old(x)`                            |                                  |
-| [ReST][ReST], [RAFT][RAFT]                | weighted MLE, `w(x) = 1[A(x) ≥ τ]`                               | `r(x)`                          | `p_old(x)`                            |                                  |
-| [PPO][PPO]                                | clipped, `ε_low = ε_high = ε`                                    | GAE, from a critic              | `p_old(x)`                            |                                  |
-| [PPO][PPO] with KL penalty                | KL-penalized                                                     | GAE, from a critic              | `p_old(x)`                            |                                  |
-| [DAPO][DAPO]                              | clipped, `ε_low < ε_high`                                        | `(r(x) − mean_G r) / std_G r`   | `p_old(x)`                            |                                  |
-| [GRPO][GRPO]                              | clipped + k3, `ε_low = ε_high = ε`                               | `(r(x) − mean_G r) / std_G r`   | `p_old(x)`                            |                                  |
-| [Dr. GRPO][Dr-GRPO]                       | clipped, `ε_low = ε_high = ε`                                    | `r(x) − mean_G r`               | `p_old(x)`                            |                                  |
-| PPO-GAN ([GAIL][GAIL] for Jensen–Shannon) | clipped, `ε_low = ε_high = ε`                                    | `−T_g(D(x) / (1 − D(x)))`       | `p_old(x)`                            | ✓ for `g` ≠ Jensen–Shannon       |
-| PPO-distillation                          | clipped, `ε_low = ε_high = ε`                                    | `−T_g(p_teacher(x) / p_old(x))` | `p_old(x)`                            | ✓ for `g` other than KL mixtures |
-| α-RLVR                                    | Amari α                                                          | `0`                             | `π_ref(x) 1[verifier accepts x]`      | ✓                                |
-| [FRPO][FRPO]                              | clipped + g, `ε_low = ε_high = ε`                                | `(r(x) − mean_G r) / std_G r`   | `p_old(x)`                            |                                  |
-| α-weighted MLE                            | weighted g, `g` Amari α, `w(x) = 1[A(x) ≥ τ]` or `exp(A(x) / β)` | `r(x)` or advantage             | `p_old(x)`                            | ✓                                |
+| method                                                                                            | `f(x, u)`                                                        | `A(x)`                                    | `p̂(x) = u ⋅ p(x; θ)`                  | unpublished                                            |
+|---------------------------------------------------------------------------------------------------|------------------------------------------------------------------|-------------------------------------------|---------------------------------------|--------------------------------------------------------|
+| [REINFORCE][REINFORCE]                                                                            | linear, `b(x) = b` constant                                      | any                                       | `0`                                   |                                                        |
+| [RLOO][RLOO]                                                                                      | linear, `b(x)` leave-one-out                                     | `r(x)`                                    | `0`                                   |                                                        |
+| MLE                                                                                               | forward KL                                                       | `0`                                       | data                                  |                                                        |
+| VI (ELBO)                                                                                         | reverse KL                                                       | `0`                                       | unnormalized posterior                |                                                        |
+| [f-DPG][f-DPG]                                                                                    | dual of `g`                                                      | `0`                                       | target, e.g. `π_ref(x) exp(r(x) / β)` |                                                        |
+| [f-GAN][f-GAN]                                                                                    | any ratio-only `g`                                               | `0`                                       | data, via `u ≈ D(x) / (1 − D(x))`     |                                                        |
+| [RLHF][RLHF]                                                                                      | KL-regularized                                                   | `r(x)`, reward model                      | `π_ref(x)`                            |                                                        |
+| [RLVR][RLVR]                                                                                      | KL-regularized                                                   | `1[verifier accepts x]`                   | `π_ref(x)`                            |                                                        |
+| entropy-regularized                                                                               | KL-regularized                                                   | any                                       | `1`                                   |                                                        |
+| `g`-regularized RLHF ([Wu et al. 2026][fRLHF], [χPO][chiPO])                                      | g-regularized                                                    | `r(x)`, reward model                      | `π_ref(x)`                            |                                                        |
+| [AWR][AWR]                                                                                        | weighted MLE, `w(x) = exp(A(x) / β)`                             | advantage from a critic                   | data                                  |                                                        |
+| [MPO][MPO] M-step                                                                                 | weighted MLE, `w(x) = exp(A(x) / η) / Z`                         | Q-value from a critic                     | `p_old(x)`                            |                                                        |
+| [ReST][ReST], [RAFT][RAFT]                                                                        | weighted MLE, `w(x) = 1[A(x) ≥ τ]`                               | `r(x)`                                    | `p_old(x)`                            |                                                        |
+| [PPO][PPO]                                                                                        | clipped, `ε_low = ε_high = ε`                                    | GAE, from a critic                        | `p_old(x)`                            |                                                        |
+| [PPO][PPO] with KL penalty                                                                        | KL-penalized                                                     | GAE, from a critic                        | `p_old(x)`                            |                                                        |
+| [DAPO][DAPO]                                                                                      | clipped, `ε_low < ε_high`                                        | `(r(x) − mean_G r) / std_G r`             | `p_old(x)`                            |                                                        |
+| [GRPO][GRPO]                                                                                      | clipped + k3, `ε_low = ε_high = ε`                               | `(r(x) − mean_G r) / std_G r`             | `p_old(x)`                            |                                                        |
+| [Dr. GRPO][Dr-GRPO]                                                                               | clipped, `ε_low = ε_high = ε`                                    | `r(x) − mean_G r`                         | `p_old(x)`                            |                                                        |
+| [FRPO][FRPO]                                                                                      | clipped + g, `ε_low = ε_high = ε`                                | `(r(x) − mean_G r) / std_G r`             | `p_old(x)`                            |                                                        |
+| PPO-GAN ([GAIL][GAIL], [f-MAX][f-MAX], [f-GAIL][f-GAIL])                                          | clipped, `ε_low = ε_high = ε`                                    | `−T_g(D(x) / (1 − D(x)))`                 | `p_old(x)`                            |                                                        |
+| [GKD][GKD]                                                                                        | Jensen–Shannon (skewed), on student samples                      | `0`                                       | `p_teacher(x)`                        |                                                        |
+| [RAL][RAL]                                                                                        | linear                                                           | co-trained LLM judge vs reference answers | `0`                                   |                                                        |
+| on-policy f-distillation ([f-distill][f-distill], [GKD][GKD], [PowerOPD][PowerOPD], [ABKD][ABKD]) | clipped, `ε_low = ε_high = ε`                                    | `−T_g(p_teacher(x) / p_old(x))`           | `p_old(x)`                            |                                                        |
+| divergence-regularized RLVR ([DPH-RL][DPH-RL], [APO][APO])                                        | g-regularized, `g` forward KL, JS or Amari α                     | `1[verifier accepts x]`                   | `π_ref(x)`                            |                                                        |
+| α-weighted MLE                                                                                    | weighted g, `g` Amari α, `w(x) = 1[A(x) ≥ τ]` or `exp(A(x) / β)` | `r(x)` or advantage                       | `p_old(x)`                            | ✓ (close: [IRIS][IRIS], [Tsallis offline RL][Tsallis]) |
 
-`unpublished` means not found in the references below; no exhaustive
-literature search was done.
+`unpublished` marks rows not found by a targeted literature search
+(Semantic Scholar + OpenAlex, 2026-11-11), run in each row's home field's
+terms: RLHF and RLVR regularization, imitation learning, knowledge
+distillation, reward-weighted regression. A ✓ is absence of evidence, not
+proof of novelty.
 
 where,
 
@@ -236,7 +242,8 @@ Nine consequences:
    `θ = θ_old`, `u = 1` and nothing is clipped, so
    `T_f(x, u) = −A(x) = T_g(p̂(x) / p(x; θ))`: the step starts on the exact
    `∇_θ D_g[p̂, p(·; θ)]`. With `g` Jensen–Shannon, `A(x) = −log(1 − D(x))`,
-   the [GAIL][GAIL] cost with [TRPO][TRPO] replaced by clipping. Forward KL
+   the [GAIL][GAIL] cost with [TRPO][TRPO] replaced by clipping. Other `g`
+   are [f-MAX][f-MAX] and [Ke et al. 2019][Ke]; [f-GAIL][f-GAIL] learns `g`. Forward KL
    gives `A(x) = D(x) / (1 − D(x))`, importance-weighted MLE in the spirit of
    [MaliGAN][MaliGAN].
 
@@ -291,6 +298,39 @@ outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
 - [CADENCE][CADENCE]: Kumar & Jha 2026, "CADENCE: Closing the Reasoning Gap
   via Coverage-Adaptive On-Policy Distillation". On-policy distillation with
   mixtures of forward and reverse KL.
+- [Wu et al. 2026][fRLHF]: "f-Divergence Regularized RLHF: Two Tales of
+  Sampling and Unified Analyses". Online RLHF with any f-divergence regularizer.
+- [χPO][chiPO]: Huang et al. 2024, "Correcting the Mythos of KL-Regularization:
+  Direct Alignment without Overoptimization via Chi-Squared Preference
+  Optimization". χ² in place of KL.
+- [GKD][GKD]: Agarwal et al. 2023, "On-Policy Distillation of Language Models:
+  Learning from Self-Generated Mistakes", ICLR. Generalized JSD on student samples.
+- [RAL][RAL]: Bou et al. 2026, "Learning to Reason from Reference Samples
+  Alone: Reinforced Adversarial Learning for Modern LLM Post-Training". A
+  co-trained judge as the sole reward.
+- [IRIS][IRIS]: Liao et al. 2026, "IRIS: Interpolative Rényi Iterative
+  Self-play for Large Language Model Fine-Tuning".
+- [f-MAX][f-MAX]: Ghasemipour et al. 2019, "A Divergence Minimization
+  Perspective on Imitation Learning Methods", CoRL. Adversarial imitation with
+  any f-divergence.
+- [Ke et al. 2019][Ke]: "Imitation Learning as f-Divergence Minimization",
+  WAFR. Reverse-KL adversarial imitation.
+- [f-GAIL][f-GAIL]: Zhang et al. 2020, "f-GAIL: Learning f-Divergence for
+  Generative Adversarial Imitation Learning", NeurIPS.
+- [f-distill][f-distill]: Wen et al. 2023, "f-Divergence Minimization for Sequence-Level Knowledge
+  Distillation", ACL.
+- [PowerOPD][PowerOPD]: Zhao et al. 2026, "PowerOPD: Stabilizing On-Policy Distillation with
+  Bounded Power Transformation", EMNLP. Box-Cox (α) rewards for on-policy distillation.
+- [ABKD][ABKD]: Wang et al. 2025, "ABKD: Pursuing a Proper Allocation of the Probability
+  Mass in Knowledge Distillation via α-β-Divergence", ICML.
+- [DPH-RL][DPH-RL]: Li et al. 2025, "The Choice of Divergence: A Neglected Key to Mitigating
+  Diversity Collapse in Reinforcement Learning with Verifiable Reward", ICLR.
+  Forward KL and JS to the initial policy in RLVR.
+- [APO][APO]: Wang 2025, "APO: Alpha-Divergence Preference Optimization". Amari α
+  interpolating forward and reverse KL, on math RL.
+- [Tsallis offline RL][Tsallis]: Zhu et al. 2024, "Offline Reinforcement
+  Learning via Tsallis Regularization", TMLR. Tsallis (α-family) regularized
+  policy extraction.
 - [f-GAN][f-GAN]: Nowozin et al. 2016, "f-GAN: Training Generative Neural
   Samplers using Variational Divergence Minimization", NeurIPS.
 - [GAIL][GAIL]: Ho & Ermon 2016, "Generative Adversarial Imitation Learning",
@@ -322,6 +362,20 @@ outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
 [DAPO]: https://arxiv.org/abs/2503.14476
 [DPO]: https://arxiv.org/abs/2305.18290
 [f-GAN]: https://arxiv.org/abs/1606.00709
+[Tsallis]: https://openreview.net/forum?id=HNqEKZDDRc
+[f-distill]: https://arxiv.org/abs/2307.15190
+[PowerOPD]: https://arxiv.org/abs/2606.17199
+[ABKD]: https://arxiv.org/abs/2505.04560
+[DPH-RL]: https://arxiv.org/abs/2509.07430
+[APO]: https://arxiv.org/abs/2512.22953
+[f-MAX]: https://arxiv.org/abs/1911.02256
+[Ke]: https://arxiv.org/abs/1905.12888
+[f-GAIL]: https://arxiv.org/abs/2010.01207
+[fRLHF]: https://arxiv.org/abs/2605.06977
+[chiPO]: https://arxiv.org/abs/2407.13399
+[GKD]: https://arxiv.org/abs/2306.13649
+[RAL]: https://arxiv.org/abs/2610.38851
+[IRIS]: https://arxiv.org/abs/2604.20933
 [FRPO]: https://arxiv.org/abs/2601.10201
 [CADENCE]: https://arxiv.org/abs/2607.16955
 [GAIL]: https://arxiv.org/abs/1606.03476
