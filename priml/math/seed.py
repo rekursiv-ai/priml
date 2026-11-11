@@ -169,7 +169,7 @@ def set_seed_local(seed: int | None = None) -> int:
     np.random.seed(salt("numpy_legacy", seed))  # noqa: NPY002 -- Existing callers use NumPy's legacy global generator and require reproducible reseeding.
     torch.manual_seed(salt("torch", seed))
 
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
+    if torch.cuda.is_initialized():
         # ``torch.cuda.manual_seed`` seeds the current device, so the
         # ``torch.cuda.device(i)`` context manager is required for the
         # per-device-unique salt to actually land on device ``i``.
@@ -296,7 +296,7 @@ def get_rng_state() -> RngState:
         "numpy": numpy_rng.bit_generator.state,
         "torch": torch.get_rng_state(),
     }
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
+    if torch.cuda.is_initialized():
         state["cuda"] = torch.cuda.get_rng_state_all()
         state["cuda_uuids"] = [
             _cuda_device_identity(i) for i in range(torch.cuda.device_count())

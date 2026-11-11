@@ -1313,6 +1313,30 @@ class _DeviceProperties:
     pci_bus_id: str
 
 
+def _seeded() -> None:
+    set_seed_local(7)
+
+
+def _captured() -> None:
+    get_rng_state()
+
+
+@pytest.mark.parametrize("touch", [_seeded, _captured], ids=["seed", "capture"])
+def test_an_uninitialized_cuda_is_never_probed_for_its_devices(
+    monkeypatch: pytest.MonkeyPatch,
+    touch: Callable[[], None],
+) -> None:
+    """A CPU run skips CUDA's RNG; asking the driver first cost 0.1 s a process."""
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        torch.cuda,
+        "is_available",
+        MagicMock(side_effect=AssertionError("asked the driver")),
+    )
+
+    touch()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

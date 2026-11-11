@@ -356,7 +356,9 @@ def _record_staircase(h: Harness) -> dict[str, Tensor]:
     ladder = h.generator("gen_a", seed=0)
     staircase = h.hypothesis_generator("gen_hypotheses", seed=0)
     h.harvest(ladder)
-    members = tuple(h.verifier(seed) for seed in range(3))
+    # One member: the threshold is that committee's own median, so a larger one
+    # replays to the same bytes. ``verifier_test`` owns the every-member rule.
+    members = (h.verifier(0),)
     cfg = StaircaseSieveEval.Config()
     cfg.experiment_name = "staircase"
     cfg.base_dir = h.scratch
