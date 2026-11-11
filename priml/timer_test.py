@@ -8,7 +8,6 @@ what a block charges, what survives a resume, and what deliberately does not.
 from __future__ import annotations
 
 import re
-import time
 
 from treekle import ReadError
 
@@ -17,13 +16,15 @@ import pytest
 from priml.timer import CheckpointableStepTimer
 
 
-def test_a_block_is_counted_and_charged() -> None:
+def test_a_block_is_counted_and_charged(monkeypatch: pytest.MonkeyPatch) -> None:
+    readings = iter((10.0, 10.5))
+    monkeypatch.setattr("priml.timer.time.perf_counter", lambda: next(readings))
     timer = CheckpointableStepTimer()
     with timer:
-        time.sleep(0.001)
+        pass
     assert timer.global_count == 1
     assert timer.local_count == 1
-    assert timer.global_sec > 0.0
+    assert timer.global_sec == 0.5
     assert timer.local_sec == timer.global_sec
 
 

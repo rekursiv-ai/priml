@@ -63,7 +63,7 @@ class TestTimer:
         """Test basic timer functionality."""
         caplog.set_level(logging.INFO)
         with Timer("test operation"):
-            time.sleep(0.01)
+            pass
 
         assert len(caplog.records) == 1
         assert "test operation" in caplog.text
@@ -75,7 +75,7 @@ class TestTimer:
         caplog.set_level(logging.INFO)
 
         with Timer("custom operation", logger=logger):
-            time.sleep(0.01)
+            pass
 
         assert len(caplog.records) == 1
         assert "custom operation" in caplog.text
@@ -89,15 +89,18 @@ class TestTimer:
 
         assert "string logger operation" in caplog.text
 
-    def test_timer_elapsed_time(self) -> None:
+    def test_timer_elapsed_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that elapsed time is recorded correctly."""
+        readings = iter((10.0, 10.25))
+        monkeypatch.setattr(
+            "priml.logger.time.perf_counter",
+            lambda: next(readings),
+        )
         timer = Timer("test")
         with timer:
-            time.sleep(0.01)
+            pass
 
-        assert timer.elapsed > 0
-        assert timer.elapsed >= 0.01
-        assert timer.stop > timer.start
+        assert (timer.start, timer.stop, timer.elapsed) == (10.0, 10.25, 0.25)
 
     def test_timer_defaults_and_logs_exact_elapsed(
         self,

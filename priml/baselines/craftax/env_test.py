@@ -574,7 +574,8 @@ def test_the_spin_budget_spans_spin_seconds_of_the_cycle_counter(
 
     def clock() -> int:
         if not reads:
-            time.sleep(0.02)
+            # The first read's kernel load, which the rate must not count.
+            time.sleep(0.02)  # house-ignore[sleep] -- See above.
         reads.append(time.perf_counter_ns())
         return reads[-1]
 

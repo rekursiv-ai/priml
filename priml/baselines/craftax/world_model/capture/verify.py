@@ -278,7 +278,8 @@ class ReplayVerifier:
                     f"complete and {starts - done} running, and no shard closed "
                     f"for {quiet_seconds:.0f} s.",
                 )
-            time.sleep(cfg.poll_seconds)
+            # Workers are other processes; only their shards on disk report progress.
+            time.sleep(cfg.poll_seconds)  # house-ignore[sleep] -- See above.
 
     def poll_once(self) -> list[ShardVerdict]:
         """Verify every published shard not yet verified.

@@ -468,7 +468,8 @@ def _group_survives(group: int, grace_sec: float) -> bool:
                 return False
             _reap(group)
             return True
-        time.sleep(POLL_SEC)
+        # The group is not our child; no event marks its exit.
+        time.sleep(POLL_SEC)  # house-ignore[sleep] -- See above.
 
 
 def _reap(group: int) -> None:

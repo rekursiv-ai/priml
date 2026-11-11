@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast, override
 from unittest.mock import MagicMock, _Call, call
 
 import logging
 import tempfile
 import threading
-import time
 
 import pytest
 
@@ -24,7 +23,7 @@ from priml.train.profiler import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     import torch
 
@@ -170,6 +169,48 @@ def _phase_timer_config(
     )
 
 
+@dataclass(slots=True, kw_only=True)
+class _Clock:
+    """Stands in for ``time.perf_counter``; time passes only when told to."""
+
+    now: float = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr("priml.train.profiler.time.perf_counter", fake)
+    return fake
+
+
+class _Heartbeats(logging.Handler):
+    """Sets ``seen`` on the first heartbeat record the profiler logs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen = threading.Event()
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        if "[phase] still in" in record.getMessage():
+            self.seen.set()
+
+
+@pytest.fixture
+def heartbeats() -> Iterator[_Heartbeats]:
+    handler = _Heartbeats()
+    logged = logging.getLogger("priml.train.profiler")
+    level = logged.level
+    logged.setLevel(logging.INFO)
+    logged.addHandler(handler)
+    yield handler
+    logged.removeHandler(handler)
+    logged.setLevel(level)
+
+
 class TestPhaseTimerDisabled:
     def test_heartbeat_intervals_come_from_config(self) -> None:
         config = _phase_timer_config(heartbeat_interval_sec=17.0)
@@ -196,38 +237,34 @@ class TestPhaseTimerDisabled:
         timer.record("test", 1.0)
         assert "test" not in timer.summary()
 
-    def test_summary_has_total(self):
+    def test_summary_has_total(self, clock: _Clock):
         timer = _phase_timer_config(enabled=False).make()
-        time.sleep(0.01)
-        s = timer.summary()
-        assert "total" in s
-        assert s["total"] >= 0.01
+        clock.now += 0.01
+        assert timer.summary() == {"total": pytest.approx(0.01)}
 
 
 class TestPhaseTimerEnabled:
-    def test_single_phase(self):
+    def test_single_phase(self, clock: _Clock):
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("work"):
-            time.sleep(0.01)
-        s = timer.summary()
-        assert "work" in s
-        assert s["work"] >= 0.01
+            clock.now += 0.01
+        assert timer.summary()["work"] == pytest.approx(0.01)
 
-    def test_accumulating_phases(self):
+    def test_accumulating_phases(self, clock: _Clock):
         timer = _phase_timer_config(enabled=True).make()
         for _ in range(3):
             with timer.phase("work"):
-                time.sleep(0.01)
+                clock.now += 0.01
         s = timer.summary()
-        assert s["work"] >= 0.03
+        assert s["work"] == pytest.approx(0.03)
         assert timer._counts["work"] == 3
 
     def test_multiple_phases(self):
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("a"):
-            time.sleep(0.01)
+            pass
         with timer.phase("b"):
-            time.sleep(0.01)
+            pass
         s = timer.summary()
         assert "a" in s
         assert "b" in s
@@ -259,13 +296,13 @@ class TestPhaseTimerEnabled:
         assert timer._interval_self_phases == {"outer": 4.5, "outer/inner": 0.5}
         assert timer._interval_counts == {"outer": 2, "outer/inner": 1}
 
-    def test_record_and_phase_combine(self):
+    def test_record_and_phase_combine(self, clock: _Clock):
         timer = _phase_timer_config(enabled=True).make()
         timer.record("work", 1.0)
         with timer.phase("work"):
-            time.sleep(0.01)
+            clock.now += 0.01
         s = timer.summary()
-        assert s["work"] >= 1.01
+        assert s["work"] == pytest.approx(1.01)
         assert timer._counts["work"] == 2
 
     def test_summary_subtracts_start_time(
@@ -496,7 +533,7 @@ class TestPhaseTimerLogging:
     def test_log_summary_format(self, caplog: pytest.LogCaptureFixture):
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("work"):
-            time.sleep(0.01)
+            pass
         with caplog.at_level(logging.INFO):
             timer.log_summary()
         assert any("Phase Timing Summary" in r.message for r in caplog.records)
@@ -527,15 +564,10 @@ class TestPhaseTimerLogging:
 
 
 class TestPhaseTimerHeartbeat:
-    def test_heartbeat_fires_for_slow_phase(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ):
-        timer = _phase_timer_config(heartbeat_interval_sec=0.02).make()
-        with caplog.at_level(logging.INFO), timer.phase("slow"):
-            time.sleep(0.07)
-        msgs = [r.message for r in caplog.records]
-        assert any("[phase] still in slow" in m for m in msgs)
+    def test_heartbeat_fires_for_slow_phase(self, heartbeats: _Heartbeats):
+        timer = _phase_timer_config(heartbeat_interval_sec=0.01).make()
+        with timer.phase("slow"):
+            assert heartbeats.seen.wait(5)
 
     def test_no_heartbeat_for_fast_phase(
         self,
@@ -546,59 +578,48 @@ class TestPhaseTimerHeartbeat:
             pass
         assert not any("still in" in r.message for r in caplog.records)
 
-    def test_heartbeat_disabled_by_zero_interval(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ):
+    def test_heartbeat_disabled_by_zero_interval(self):
+        before = threading.active_count()
         timer = _phase_timer_config(heartbeat_interval_sec=0.0).make()
-        with caplog.at_level(logging.INFO), timer.phase("slow"):
-            time.sleep(0.05)
-        assert not any("still in" in r.message for r in caplog.records)
+        with timer.phase("slow"):
+            assert threading.active_count() == before
 
     def test_heartbeat_thread_joined_on_exit(self):
         before = threading.active_count()
-        timer = _phase_timer_config(heartbeat_interval_sec=0.01).make()
+        timer = _phase_timer_config(heartbeat_interval_sec=60.0).make()
         with timer.phase("slow"):
-            time.sleep(0.03)
+            assert threading.active_count() == before + 1
         # The re-arming timer thread must be cancelled + joined on exit.
-        time.sleep(0.05)
         assert threading.active_count() == before
 
     def test_heartbeat_thread_joined_on_exception(self):
         before = threading.active_count()
-        timer = _phase_timer_config(heartbeat_interval_sec=0.01).make()
+        timer = _phase_timer_config(heartbeat_interval_sec=60.0).make()
 
         def _raise_inside_phase() -> None:
             with timer.phase("slow"):
-                time.sleep(0.03)
                 raise RuntimeError("boom")
 
         with pytest.raises(RuntimeError):
             _raise_inside_phase()
-        time.sleep(0.05)
         assert threading.active_count() == before
 
-    def test_non_zero_rank_emits_no_heartbeat(
-        self,
-        caplog: pytest.LogCaptureFixture,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
+    def test_non_zero_rank_emits_no_heartbeat(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
-        timer = _phase_timer_config(heartbeat_interval_sec=0.02).make()
-        with caplog.at_level(logging.INFO), timer.phase("slow"):
-            time.sleep(0.07)
-        assert not any("still in" in r.message for r in caplog.records)
+        before = threading.active_count()
+        timer = _phase_timer_config(heartbeat_interval_sec=0.01).make()
+        with timer.phase("slow"):
+            assert threading.active_count() == before
 
     def test_rank_zero_emits_heartbeat(
         self,
-        caplog: pytest.LogCaptureFixture,
+        heartbeats: _Heartbeats,
         monkeypatch: pytest.MonkeyPatch,
     ):
         monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: True)
-        timer = _phase_timer_config(heartbeat_interval_sec=0.02).make()
-        with caplog.at_level(logging.INFO), timer.phase("slow"):
-            time.sleep(0.07)
-        assert any("[phase] still in slow" in r.message for r in caplog.records)
+        timer = _phase_timer_config(heartbeat_interval_sec=0.01).make()
+        with timer.phase("slow"):
+            assert heartbeats.seen.wait(5)
 
     def test_heartbeat_lifecycle_starts_daemon_and_stops_rearming(
         self,
@@ -1027,7 +1048,7 @@ class TestPhaseTimerTotalCollision:
         """T-033: a phase literally named 'total' must not break log_summary."""
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("total"):
-            time.sleep(0.001)
+            pass
 
         with caplog.at_level(logging.INFO):
             timer.log_summary()  # Must not raise KeyError.
@@ -1351,14 +1372,19 @@ class TestPhaseTimerCudaPaths:
         timer.publish_summary(None, step=2)
         end.synchronize.assert_called_once()
 
-    def test_nested_phases_attribute_self_time_to_the_parent(self) -> None:
+    def test_nested_phases_attribute_self_time_to_the_parent(
+        self,
+        clock: _Clock,
+    ) -> None:
         timer = _phase_timer_config(enabled=True).make()
-        with timer.phase("outer"), timer.phase("inner"):
-            time.sleep(0.01)
+        with timer.phase("outer"):
+            clock.now += 0.02
+            with timer.phase("inner"):
+                clock.now += 0.01
         summary = timer.summary()
-        assert "outer/inner" in summary
-        assert summary["outer"] >= summary["outer/inner"]
-        assert timer._self_phases["outer"] <= summary["outer"] - summary["outer/inner"]
+        assert summary["outer"] == pytest.approx(0.03)
+        assert summary["outer/inner"] == pytest.approx(0.01)
+        assert timer._self_phases["outer"] == pytest.approx(0.02)
 
     def test_phases_closed_out_of_order_raise(self) -> None:
         timer = _phase_timer_config(enabled=True).make()

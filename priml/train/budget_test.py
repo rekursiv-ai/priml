@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, NoReturn, override
 
 import json
 import math
@@ -283,7 +283,7 @@ def test_interruptible_deadline_interrupts_blocking_work(tmp_path: Path) -> None
     ).make()
     before = signal.getsignal(signal.SIGALRM)
     with pytest.raises(TimeoutError), runtime, runtime.interruptible():
-        time.sleep(0.05)
+        _pause_until_signalled()
     assert signal.getsignal(signal.SIGALRM) is before
     assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
     assert (
@@ -323,7 +323,7 @@ def test_earlier_caller_alarm_runs_with_original_frame_then_budget_still_expires
     runtime = WallBudget.Config(seconds=0.025).make()
     signal.setitimer(signal.ITIMER_REAL, 0.003, 0.004)
     with pytest.raises(TimeoutError), runtime.interruptible():
-        time.sleep(0.06)
+        _pause_until_signalled()
     assert len(calls) >= 2
     assert all(
         signum == signal.SIGALRM and frame is not None for signum, frame in calls
@@ -432,7 +432,7 @@ def test_earlier_default_alarm_keeps_default_signal_dispatch(
         pytest.raises(LookupError, match="caller default action"),
         runtime.interruptible(),
     ):
-        time.sleep(0.02)
+        _pause_until_signalled()
     assert observed == [signal.SIGALRM]
     assert signal.getsignal(signal.SIGALRM) == signal.SIG_DFL
     assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
@@ -617,6 +617,12 @@ def test_budgeted_run_fails_its_receipt_when_no_update_ran(tmp_path: Path) -> No
     receipt = _json(tmp_path / "run" / "budget.json")
     assert receipt["status"] == "failed"
     assert receipt["metadata"] == {"completed": False, "steps": 0}
+
+
+def _pause_until_signalled() -> NoReturn:
+    """Block until a signal handler raises; a handler that returns is waited past."""
+    while True:
+        signal.pause()
 
 
 if __name__ == "__main__":

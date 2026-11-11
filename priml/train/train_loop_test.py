@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, TypedDict, cast, override
 
+import contextlib
 import faulthandler
 import functools
 import gc
@@ -24,7 +25,7 @@ import torch
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterator, Mapping
 
     from torch.distributed.device_mesh import DeviceMesh
 
@@ -1396,22 +1397,27 @@ class _SlowTerminalMetric(_ExtrasMetric):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.delay_update = config.delay_update
+        self.clock = _FakeClock()
+        """The clock this metric's slowness advances; the test installs it."""
 
     @override
     def update(self, logits: Tensor, **batch: object) -> None:
         if self.delay_update:
-            time.sleep(0.05)
+            self.clock.now += 1.0
         super().update(logits, **batch)
 
     @override
     def compute(self) -> dict[str, object]:
         if not self.delay_update:
-            time.sleep(0.05)
+            self.clock.now += 1.0
         return super().compute()
 
 
 @pytest.mark.parametrize("delay_update", [False, True])
-def test_terminal_metric_deadline_prevents_publication(delay_update: bool) -> None:
+def test_terminal_metric_deadline_prevents_publication(
+    delay_update: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = TrainLoop.Config(
         step=_WeightedEvalStep.Config(),
         dataset=_ScopedEvalDataset.Config(),
@@ -1427,6 +1433,9 @@ def test_terminal_metric_deadline_prevents_publication(delay_update: bool) -> No
     config.metrics_eval = {"": metric}
     config.tracker = _RecordingTracker.Config()
     loop = config.make()
+    slow = loop.metrics_eval[""]
+    assert isinstance(slow, _SlowTerminalMetric)
+    monkeypatch.setattr(time, "perf_counter", slow.clock)
     with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
         loop.train()
     assert isinstance(loop.tracker, _RecordingTracker)
@@ -2090,6 +2099,30 @@ class _FakeClock:
 
     def __call__(self) -> float:
         return self.now
+
+
+class _Logged(logging.Handler):
+    """Sets ``seen`` once the train loop logs a record containing ``text``."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+        self.seen = threading.Event()
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.text in record.getMessage():
+            self.seen.set()
+
+    @contextlib.contextmanager
+    def attached(self) -> Generator[None]:
+        """Listen on the train loop's logger for the block."""
+        logged = logging.getLogger("priml.train.train_loop")
+        logged.addHandler(self)
+        try:
+            yield
+        finally:
+            logged.removeHandler(self)
 
 
 def _make_max_time_loop_config() -> TrainLoop.Config:
@@ -4222,11 +4255,13 @@ def test_phase_heartbeat_fires_on_stall_and_names_phase(
     emit a per-rank heartbeat naming the exact phase, so a distributed hang is
     self-diagnosing from the logs alone (no external py-spy).
     """
+    beats = _Logged("STILL IN PHASE")
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
-        _phase_heartbeat("eval batch 5 eval_loss", interval_sec=0.02),
+        beats.attached(),
+        _phase_heartbeat("eval batch 5 eval_loss", interval_sec=0.01),
     ):
-        time.sleep(0.06)
+        assert beats.seen.wait(5)
     messages = [r.getMessage() for r in caplog.records]
     assert any("STILL IN PHASE" in m for m in messages)
     assert any("eval batch 5 eval_loss" in m for m in messages)
@@ -4241,7 +4276,7 @@ def test_phase_heartbeat_silent_when_block_is_fast(
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
         _phase_heartbeat("fast phase", interval_sec=5.0),
     ):
-        time.sleep(0.02)
+        pass
     assert not any("STILL IN PHASE" in r.getMessage() for r in caplog.records)
 
 
@@ -4266,7 +4301,8 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     ):
         deadline = time.perf_counter() + 0.08  # >3 watchdog periods.
         while time.perf_counter() < deadline:
-            time.sleep(0.002)  # Healthy: the GIL is released constantly.
+            # The C watchdog reads the real clock; this is the healthy loop it must spare.
+            time.sleep(0.002)  # house-ignore[sleep] -- See above.
     assert "Timeout (" not in capfd.readouterr().err
 
 
@@ -5438,11 +5474,13 @@ def test_startup_barrier_waits_when_a_group_is_live(
 def test_compile_heartbeat_reports_a_long_running_block(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    beats = _Logged("still running after")
     with (
         caplog.at_level(logging.INFO, logger="priml.train.train_loop"),
-        _compile_heartbeat("train step 1", interval_sec=0.02),
+        beats.attached(),
+        _compile_heartbeat("train step 1", interval_sec=0.01),
     ):
-        time.sleep(0.06)
+        assert beats.seen.wait(5)
     assert any("train step 1: still running after" in r.message for r in caplog.records)
 
 
@@ -5452,11 +5490,13 @@ def test_phase_heartbeat_names_this_rank_when_a_group_is_live(
 ) -> None:
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    beats = _Logged("STILL IN PHASE")
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
-        _phase_heartbeat("eval batch 1 eval_loss", interval_sec=0.02),
+        beats.attached(),
+        _phase_heartbeat("eval batch 1 eval_loss", interval_sec=0.01),
     ):
-        time.sleep(0.06)
+        assert beats.seen.wait(5)
     assert any("[rank 3] STILL IN PHASE" in r.message for r in caplog.records)
 
 

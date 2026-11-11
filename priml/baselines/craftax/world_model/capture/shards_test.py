@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Final
 import dataclasses
 import functools
 import threading
-import time
 
 import pytest
 import torch
@@ -163,16 +162,17 @@ def test_shards_publish_in_close_order(
     stream.add(first)
     stream.add(second)
     # Once only episode 0's decisions wait for an encoder, episode 1 is encoded
-    # and nothing but the publication order holds shard 1 back; the watch starts
-    # there rather than at an add, so a slow encoder cannot use it up.
-    deadline = time.monotonic() + 5
-    while writer.raw > len(first.actions):
-        assert time.monotonic() < deadline, "episode 1 was never encoded"
-        time.sleep(0.001)
-    deadline = time.monotonic() + 0.05
-    while time.monotonic() < deadline:
-        assert not read_manifest(tmp_path), "shard 1 was published before shard 0"
-        time.sleep(0.01)
+    # and nothing but the publication order holds shard 1 back: it must still be
+    # queued behind shard 0, never started.
+    with writer.room:
+        assert writer.room.wait_for(
+            lambda: writer.raw <= len(first.actions),
+            timeout=5,
+        ), "episode 1 was never encoded"
+    held = writer.shards[1]
+    assert not held.running(), "shard 1 started before shard 0"
+    assert not held.done(), "shard 1 finished before shard 0"
+    assert not read_manifest(tmp_path), "shard 1 was published before shard 0"
     gate[0].set()
     lines = [line for _, line in writer.finish()]
     assert [line.shard for line in read_manifest(tmp_path)] == [

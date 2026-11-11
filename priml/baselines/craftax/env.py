@@ -1015,7 +1015,8 @@ def ticks_per_second() -> float:
     """
     clock_numba()
     started, started_ticks = time.perf_counter(), clock_numba()
-    time.sleep(0.01)
+    # Measures the tick rate against real elapsed time.
+    time.sleep(0.01)  # house-ignore[sleep] -- See above.
     return (clock_numba() - started_ticks) / (time.perf_counter() - started)
 
 

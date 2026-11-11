@@ -185,7 +185,7 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
 # would be absent the instant ``pool(fn)`` returned.
 def _sentinel_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
     """Sleep, then write a per-rank sentinel file."""
-    time.sleep(0.01)
+    time.sleep(0.01)  # house-ignore[sleep] -- See above.
     (Path(result_dir_str) / f"rank_{mesh.get_rank()}").write_text("done")
 
 
