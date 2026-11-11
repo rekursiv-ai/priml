@@ -37,14 +37,12 @@ def test_module_entry_point(
 
 # End to end by design: the polyglot header re-executes the script through uv
 # from another directory, which no in-process call reaches; the in-process
-# `test_module_entry_point` above is the unit test of the same entry points.
+# `test_module_entry_point` above is the unit test of every entry point. One
+# script stands for all three: houselint's ``cli-shape`` holds each to the one
+# header, so a second run would execute the same header again.
 @pytest.mark.cli_uv
-@pytest.mark.parametrize("script", ["prepare_data", "evaluate", "verify_reference"])
-def test_executable_entry_point_from_another_directory(
-    script: str,
-    tmp_path: Path,
-) -> None:
-    executable = _CWD / f"{script}.py"
+def test_executable_entry_point_from_another_directory(tmp_path: Path) -> None:
+    executable = _CWD / "evaluate.py"
     result = subprocess.run(  # noqa: S603 -- Execute the known CLI scripts.
         [str(executable), "--help"],
         cwd=tmp_path,
