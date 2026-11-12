@@ -95,6 +95,50 @@ So weighting the score by `f(x, u)` is biased unless `∂_u f(x, u) = 0`; the
 unbiased weight is the tangent intercept `T_f(x, u)`: where the tangent to
 `u ↦ f(x, u)` crosses `u = 0`.
 
+The tangent intercept is the only such weight, up to a baseline, for a
+weight that must work for every model:
+
+**Claim.** Fix `θ`, write `p = p(·; θ)`, and let `w(x)` be a weight with
+`E_p[|w(X)|] < ∞` that may depend on `x` and on `p`, but not on which model
+passes through `p`. Then `E_p[w(X) s(X)] = ∇ L` for every smooth model
+through `p` if and only if `w(x) = T_f(x, u) + c` for `p`-almost every `x`,
+for some constant `c`. Off the support of `p`, `w` is unconstrained.
+
+**Proof.** Subtracting the identity above, `E_p[(w(X) − T_f(X, u)) s(X)] = 0`
+for every model through `p`. Take the model
+`p_ε(x) = p(x) (1 + ε φ(x))` with `φ` bounded and `E_p[φ(X)] = 0`; it is a
+density for small `ε`, and its score at `ε = 0` is `φ(x)`. So
+`E_p[g(X) φ(X)] = 0` for every bounded mean-zero `φ`, where
+`g(x) ≝ w(x) − T_f(x, u)`. Take `φ = g_M − E_p[g_M(X)]` with
+`g_M ≝ max(−M, min(g, M))`; then `E_p[g(X) φ(X)] = 0` for every `M`, and
+letting `M → ∞` (monotone convergence on `g g_M ≥ 0`, dominated convergence
+on `E_p[g_M(X)]`) gives `E_p[g(X)²] = E_p[g(X)]² < ∞`, i.e.
+`Var_p(g(X)) = 0`, so `g(x) = c` almost everywhere. Conversely,
+`T_f(x, u) + c` is unbiased for every model, by the identity above and
+`E_p[s(X)] = 0` (consequence 1). ∎
+
+Both directions need the regularity of the identity above (see Regularity
+at the end of [Methods](#methods)). Necessity needs `w` fixed across models: a
+weight allowed to change with the model is the fixed-model case below.
+
+The quantifier matters. For one fixed `k`-parameter model, unbiasedness
+imposes only `k` conditions: any `w(x)` with `w − T_f` orthogonal to the `k`
+components of `s(x; θ)` also works. The intercept is the one weight that
+works for every model.
+
+This is the semiparametric canonical gradient
+([van der Vaart 1998][vdV], ch. 25). Along any model through `p` with score
+`φ`, the pathwise derivative of `L` is `E_p[T_f(X, u) φ(X)]`, so
+
+  ```
+  ψ_p(x) ≝ T_f(x, u) − E_p[T_f(X, u)]
+  ```
+
+is the gradient of `L` at `p` in the nonparametric tangent space
+`{φ : E_p[φ(X)] = 0, E_p[φ(X)²] < ∞}`: its influence function. That space
+holds every score, so its gradient is unique (the claim). REINFORCE's weight
+is the influence function plus a baseline; centring removes the baseline.
+
 Geometrically, the tangent to `u ↦ f(x, u)` at `u` splits `f(x, u)` into two
 parts,
 
@@ -458,7 +502,8 @@ away from their optimum.
   Learning Perspective with Reward Rectification", ICLR. SFT's gradient as
   policy gradient with an inverse-probability reward.
 - [van der Vaart 1998][vdV]: "Asymptotic Statistics", Cambridge University
-  Press, ch. 5, "M- and Z-Estimators".
+  Press, ch. 5, "M- and Z-Estimators"; ch. 25, "Semiparametric Models"
+  (influence functions, canonical gradients).
 - [RLOO][RLOO]: Ahmadian et al. 2024, "Back to Basics: Revisiting REINFORCE
   Style Optimization for Learning from Human Feedback in LLMs".
 - [Dr. GRPO][Dr-GRPO]: Liu et al. 2025, "Understanding R1-Zero-Like
