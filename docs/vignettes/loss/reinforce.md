@@ -9,12 +9,13 @@ moves model mass, and one scalar weight, the tangent intercept
 is known for divergences; new here is reading every method through that one
 weight. `T_f` is the functional derivative of the loss in `p`; Euler's
 theorem splits `f` into this intercept and a slope on target mass, which `θ`
-cannot move. A
-method is three choices: a loss shape `f`, a reward `A`, and a target `p̂`.
-Maximum likelihood is the `A ≡ 0` slice, exact with no limit; REINFORCE is the
-`p̂ ≡ 0` slice. Between them sit variational inference, f-GANs, RLHF and RLVR,
-PPO, GRPO and DAPO, advantage-weighted and filtered regression, on-policy
-distillation, and adversarial imitation, each a row of one table. The
+cannot move; and the intercept is the only weight, up to a baseline, that is
+unbiased for every model. A method is three choices: a loss shape `f`, a
+reward `A`, and a target `p̂`. Maximum likelihood is the `A ≡ 0` slice, exact
+with no limit; REINFORCE is the `p̂ ≡ 0` slice. Between them sit variational
+inference, f-GANs, RLHF and RLVR, PPO, GRPO and DAPO, advantage-weighted and
+filtered regression, on-policy distillation, and adversarial imitation, each
+a row of one table. The
 pathwise form carries the same weight to models known only through their
 scores, `h_f(u) = −u ∂_u T_f(u)`, covering diffusion distillation (VSD, DMD,
 f-distill); diffusion training reaches the maximum-likelihood row through
@@ -95,14 +96,57 @@ So weighting the score by `f(x, u)` is biased unless `∂_u f(x, u) = 0`; the
 unbiased weight is the tangent intercept `T_f(x, u)`: where the tangent to
 `u ↦ f(x, u)` crosses `u = 0`.
 
-The tangent intercept is the only such weight, up to a baseline, for a
-weight that must work for every model:
+Geometrically, the tangent to `u ↦ f(x, u)` at `u` splits `f(x, u)` into two
+parts,
 
-**Claim.** Fix `θ`, write `p = p(·; θ)`, and let `w(x)` be a weight with
-`E_p[|w(X)|] < ∞` that may depend on `x` and on `p`, but not on which model
-passes through `p`. Then `E_p[w(X) s(X)] = ∇ L` for every smooth model
-through `p` if and only if `w(x) = T_f(x, u) + c` for `p`-almost every `x`,
-for some constant `c`. Off the support of `p`, `w` is unconstrained.
+  ```
+  f(x, u) = (f(x, u) − u ∂_u f(x, u)) + ∂_u f(x, u) ⋅ u
+          =         intercept         +    slope    ⋅ u
+  ```
+
+1. Intercept `T_f(x, u) = f(x, u) − u ∂_u f(x, u)`: the marginal cost of model
+   mass at `x`.
+2. Slope `∂_u f(x, u)`: the marginal cost of target mass at `x`.
+
+The split is Euler's theorem. With `m = p(x; θ)` and `n = p̂(x)`, the
+integrand `F(n, m) ≝ m f(x, n / m)` is homogeneous of degree 1 in `(n, m)`,
+so `F(n, m) = m ∂_m F(n, m) + n ∂_n F(n, m)`. The chain rule through
+`u = n / m` gives `∂_m F(n, m) = T_f(x, u)` and `∂_n F(n, m) = ∂_u f(x, u)`;
+dividing by `m` gives `f(x, u) = T_f(x, u) + ∂_u f(x, u) ⋅ u`.
+
+REINFORCE weights the score by the intercept because `θ` moves only model
+mass; target mass is fixed. [Csiszar f-divergences](csiszar.md) tabulates
+both parts per divergence.
+
+The two factors are the chain rule in function space. `θ` changes `L(θ)` only
+through `p(·; θ)`, so
+
+  ```
+  ∇_θ L(θ) = ∫ (δL/δp)(x) ∇_θ p(x; θ) dx = E_{p(X; θ)}[(δL/δp)(X) s(X; θ)]
+  ```
+
+where `(δL/δp)(x)` is the functional derivative: the change in `L(θ)` per
+unit of model mass added at `x`. For `L(θ) = ∫ p f(x, p̂ / p) dx` it is
+`∂_m [m f(x, n / m)] = T_f(x, u)`, the intercept from the Euler split. So:
+
+1. `T_f(x, u)` carries the loss: `f(x, u)`, `A(x)`, and `p̂(x)`. Methods
+   differ only here.
+2. `s(x; θ)` carries the model: how `θ` moves mass. No method changes it.
+3. `δL/δp` is defined only up to a constant, since `∫ ∇_θ p(x; θ) dx = 0`:
+   mass added at `x` is removed elsewhere. That constant is the baseline
+   (consequence 1).
+4. The [pathwise form](#pathwise-form) uses the same `δL/δp`, moving samples
+   instead of mass; its weight comes from `∇_x T_f(x, u)`.
+
+Among weights that must work for every model, the tangent intercept is the
+only unbiased one, up to a baseline:
+
+**Claim.** Fix `θ`, write `p = p(·; θ)`, and let `w(x)` be a weight that may
+depend on `x` and on `p`, but not on which model passes through `p`. Assume
+`E_p[|w(X)|] < ∞` and `E_p[|T_f(X, u)|] < ∞`. Then, along every smooth
+model through `p` with score `s(x)`, `E_p[w(X) s(X)]` equals the derivative
+of `L` along that model if and only if `w(x) = T_f(x, u) + c` for `p`-almost
+every `x`, for some constant `c`. Off the support of `p`, `w` is unconstrained.
 
 **Proof.** Subtracting the identity above, `E_p[(w(X) − T_f(X, u)) s(X)] = 0`
 for every model through `p`. Take the model
@@ -128,7 +172,8 @@ works for every model.
 
 This is the semiparametric canonical gradient
 ([van der Vaart 1998][vdV], ch. 25). Along any model through `p` with score
-`φ`, the pathwise derivative of `L` is `E_p[T_f(X, u) φ(X)]`, so
+`φ`, the derivative of `L` is `E_p[T_f(X, u) φ(X)]` (the function-space
+chain rule above), so
 
   ```
   ψ_p(x) ≝ T_f(x, u) − E_p[T_f(X, u)]
@@ -138,49 +183,6 @@ is the gradient of `L` at `p` in the nonparametric tangent space
 `{φ : E_p[φ(X)] = 0, E_p[φ(X)²] < ∞}`: its influence function. That space
 holds every score, so its gradient is unique (the claim). REINFORCE's weight
 is the influence function plus a baseline; centring removes the baseline.
-
-Geometrically, the tangent to `u ↦ f(x, u)` at `u` splits `f(x, u)` into two
-parts,
-
-  ```
-  f(x, u) = (f(x, u) − u ∂_u f(x, u)) + ∂_u f(x, u) ⋅ u
-          =         intercept         +    slope    ⋅ u
-  ```
-
-1. Intercept `T_f(x, u) = f(x, u) − u ∂_u f(x, u)`: the marginal cost of model
-   mass at `x`.
-2. Slope `∂_u f(x, u)`: the marginal cost of target mass at `x`.
-
-The split is Euler's theorem. With `m = p(x; θ)` and `n = p̂(x)`, the
-integrand `F(n, m) ≝ m f(x, n / m)` is homogeneous of degree 1 in `(n, m)`,
-so `F(n, m) = m ∂_m F(n, m) + n ∂_n F(n, m)`. The chain rule through
-`u = n / m` gives `∂_m F(n, m) = T_f(x, u)` and `∂_n F(n, m) = ∂_u f(x, u)`;
-dividing by `m` gives `f(x, u) = T_f(x, u) + ∂_u f(x, u) ⋅ u`.
-
-REINFORCE weights the score by the intercept because `θ` moves only model
-mass; target mass is fixed. See [Csiszar f-divergences](csiszar.md) for the
-derivation.
-
-The two factors are the chain rule in function space. `θ` changes `L(θ)` only
-through `p(·; θ)`, so
-
-  ```
-  ∇_θ L(θ) = ∫ (δL/δp)(x) ∇_θ p(x; θ) dx = E_{p(X; θ)}[(δL/δp)(X) s(X; θ)]
-  ```
-
-where `(δL/δp)(x)` is the functional derivative: the change in `L(θ)` per
-unit of model mass added at `x`. For `L(θ) = ∫ p f(x, p̂ / p) dx` it is
-`∂_m [m f(x, n / m)] = T_f(x, u)` (see [Csiszar f-divergences](csiszar.md)).
-So:
-
-1. `T_f(x, u)` carries the loss: `f(x, u)`, `A(x)`, and `p̂(x)`. Methods
-   differ only here.
-2. `s(x; θ)` carries the model: how `θ` moves mass. No method changes it.
-3. `δL/δp` is defined only up to a constant, since `∫ ∇_θ p(x; θ) dx = 0`:
-   mass added at `x` is removed elsewhere. That constant is the baseline
-   (consequence 1).
-4. The [pathwise form](#pathwise-form) uses the same `δL/δp`, moving samples
-   instead of mass; its weight comes from `∇_x T_f(x, u)`.
 
 ## Choices of f
 
@@ -375,9 +377,9 @@ Nine consequences:
    `T_f(x, u) = −A(x) = T_g(p̂(x) / p(x; θ))`: the step starts on the exact
    `∇_θ D_g[p̂, p(·; θ)]`. With `g` Jensen–Shannon, `A(x) = −log(1 − D(x))`,
    the [GAIL][GAIL] cost with [TRPO][TRPO] replaced by clipping. Other `g`
-   are [f-MAX][f-MAX] and [Ke et al. 2019][Ke]; [f-GAIL][f-GAIL] learns `g`. Forward KL
-   gives `A(x) = D(x) / (1 − D(x))`, importance-weighted MLE in the spirit of
-   [MaliGAN][MaliGAN].
+   are [f-MAX][f-MAX] and [Ke et al. 2019][Ke]; [f-GAIL][f-GAIL] learns `g`.
+   Forward KL gives `A(x) = D(x) / (1 − D(x))`, importance-weighted MLE in the
+   spirit of [MaliGAN][MaliGAN].
 
 Regularity: `p(x; θ)` differentiable in `θ` with support free of `θ`; `∇_θ`
 passes through `∫`; `p(x; θ) > 0` wherever `p̂(x) > 0`; `f(x, u)`
@@ -394,8 +396,8 @@ and per-token score `s_t ≝ ∇_θ log p(x_t | x_{<t}; θ)`, the update is
 That is an estimating equation without an objective. The GAN rows' ratio is
 different: it is exact only at the discriminator's optimum, so away from it
 the weight is the right form with the wrong value. Pairwise offline methods
-([DPO][DPO] and its variants, e.g. [f-PO][f-PO]) fall outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
-`E_{p(X; θ)}[f(X, u)]`.
+([DPO][DPO] and its variants, e.g. [f-PO][f-PO]) fall outside entirely: they
+differentiate `log p(x; θ)` at fixed data pairs, not `E_{p(X; θ)}[f(X, u)]`.
 
 ## Pathwise form
 
@@ -449,7 +451,8 @@ Six consequences:
 4. For diffusion, `p̂` and `p(·; θ)` are their noised versions at noise level
    `σ(t)`, `X = G(Z; θ) + σ(t) ε` with `ε ~ N(0, I)`, and the loss averages
    over `t`.
-5. Training a diffusion model on data is the forward-KL row. With likelihood
+5. Training a diffusion model on data reaches the forward-KL row through a
+   bound. With likelihood
    weighting, the denoising score-matching loss upper-bounds
    `−E_{p̂}[log p(X; θ)]` ([Song et al. 2021][Song-MLE]), so it is MLE on
    samples from `p̂`, as in consequence 3 above.
@@ -524,7 +527,8 @@ away from their optimum.
   Direct Alignment without Overoptimization via Chi-Squared Preference
   Optimization". χ² in place of KL.
 - [GKD][GKD]: Agarwal et al. 2023, "On-Policy Distillation of Language Models:
-  Learning from Self-Generated Mistakes", ICLR. Generalized JSD on student samples.
+  Learning from Self-Generated Mistakes", ICLR. Generalized JSD on student
+  samples.
 - [RAL][RAL]: Bou et al. 2026, "Learning to Reason from Reference Samples
   Alone: Reinforced Adversarial Learning for Modern LLM Post-Training". A
   co-trained judge as the sole reward.
@@ -537,17 +541,18 @@ away from their optimum.
   WAFR. Reverse-KL adversarial imitation.
 - [f-GAIL][f-GAIL]: Zhang et al. 2020, "f-GAIL: Learning f-Divergence for
   Generative Adversarial Imitation Learning", NeurIPS.
-- [f-distill][f-distill]: Wen et al. 2023, "f-Divergence Minimization for Sequence-Level Knowledge
-  Distillation", ACL.
-- [PowerOPD][PowerOPD]: Zhao et al. 2026, "PowerOPD: Stabilizing On-Policy Distillation with
-  Bounded Power Transformation", EMNLP. Box-Cox (α) rewards for on-policy distillation.
-- [ABKD][ABKD]: Wang et al. 2025, "ABKD: Pursuing a Proper Allocation of the Probability
-  Mass in Knowledge Distillation via α-β-Divergence", ICML.
-- [DPH-RL][DPH-RL]: Li et al. 2025, "The Choice of Divergence: A Neglected Key to Mitigating
-  Diversity Collapse in Reinforcement Learning with Verifiable Reward", ICLR.
-  Forward KL and JS to the initial policy in RLVR.
-- [APO][APO]: Wang 2025, "APO: Alpha-Divergence Preference Optimization". Amari α
-  interpolating forward and reverse KL, on math RL.
+- [f-distill][f-distill]: Wen et al. 2023, "f-Divergence Minimization for
+  Sequence-Level Knowledge Distillation", ACL.
+- [PowerOPD][PowerOPD]: Zhao et al. 2026, "PowerOPD: Stabilizing On-Policy
+  Distillation with Bounded Power Transformation", EMNLP. Box-Cox (α) rewards
+  for on-policy distillation.
+- [ABKD][ABKD]: Wang et al. 2025, "ABKD: Pursuing a Proper Allocation of the
+  Probability Mass in Knowledge Distillation via α-β-Divergence", ICML.
+- [DPH-RL][DPH-RL]: Li et al. 2025, "The Choice of Divergence: A Neglected Key
+  to Mitigating Diversity Collapse in Reinforcement Learning with Verifiable
+  Reward", ICLR. Forward KL and JS to the initial policy in RLVR.
+- [APO][APO]: Wang 2025, "APO: Alpha-Divergence Preference Optimization".
+  Amari α interpolating forward and reverse KL, on math RL.
 - [Tsallis offline RL][Tsallis]: Zhu et al. 2024, "Offline Reinforcement
   Learning via Tsallis Regularization", TMLR. Tsallis (α-family) regularized
   policy extraction.
