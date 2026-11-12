@@ -1,4 +1,62 @@
-# REINFORCE
+# Generalized REINFORCE: One Gradient for Likelihood, RL, and Divergence Learning
+
+**Abstract.** Most methods that learn a density, from Williams' REINFORCE
+(1992) to diffusion distillation (2025), share one gradient. Any loss
+`L(θ) = E_{p(X; θ)}[f(X, u)]` with `u = p̂(x) / p(x; θ)` has
+`∇_θ L(θ) = E_{p(X; θ)}[T_f(X, u) s(X; θ)]`: the score `s(x; θ)` says how `θ`
+moves model mass, and one scalar weight, the tangent intercept
+`T_f(x, u) = f(x, u) − u ∂_u f(x, u)`, says what the loss wants. The identity
+is known for divergences; new here is reading every method through that one
+weight. `T_f` is the functional derivative of the loss in `p`; Euler's
+theorem splits `f` into this intercept and a slope on target mass, which `θ`
+cannot move. A
+method is three choices: a loss shape `f`, a reward `A`, and a target `p̂`.
+Maximum likelihood is the `A ≡ 0` slice, exact with no limit; REINFORCE is the
+`p̂ ≡ 0` slice. Between them sit variational inference, f-GANs, RLHF and RLVR,
+PPO, GRPO and DAPO, advantage-weighted and filtered regression, on-policy
+distillation, and adversarial imitation, each a row of one table. The
+pathwise form carries the same weight to models known only through their
+scores, `h_f(u) = −u ∂_u T_f(u)`, covering diffusion distillation (VSD, DMD,
+f-distill); diffusion training reaches the maximum-likelihood row through
+its likelihood bound, and RL fine-tuning of diffusion is the existing table.
+Unifying gradients rather than objectives is the move from M- to
+Z-estimators: weights that read other samples, such as GRPO's group
+normalization, still solve an estimating equation without any objective.
+Outside: pairwise losses (DPO), integral probability metrics (Wasserstein,
+MMD), and hinge loss, which estimates a decision, not a density.
+
+This doc unifies methods by their gradients, not their objectives. Earlier
+unifications of MLE and RL work with objectives: [RAML][RAML] writes them as
+KL to an exponentiated reward in opposite directions, and
+[Tan et al. 2018][Tan] put both under one variational objective, recovering
+MLE as a δ-reward in the limit `α → 0`. Here every method is one weight,
+the tangent intercept `T_f(x, u)` defined below, on the score in one identity,
+`∇_θ L(θ) = E_{p(X; θ)}[T_f(X, u) s(X; θ)]`. For ratio-only `f(x, u)` the
+identity is known: it is [tail-adaptive f-VI][tail-f-VI] Prop. 4.2, whose
+`ρ_f` is `−T_f`, and [f-DPG][f-DPG] Thm. 1. LLM post-training has reached
+the gradient view from the reward side: [Lv et al. 2025][UPGE] write SFT and
+RL as one policy-gradient estimator, and [DFT][DFT] reads SFT as policy
+gradient with reward `1 / π`, the weight `−u` of consequence 3. Neither has
+`T_f`; new here is one weight covering both lines, divergences and rewards.
+
+This is the statistician's move from M-estimators (maximize a criterion) to
+Z-estimators (solve an estimating equation; [van der Vaart 1998][vdV], ch. 5).
+It buys four things:
+
+1. MLE is exact, with no limit: the `A ≡ 0` slice with `f(x, u) = u log u`.
+2. Distinct objectives can share one gradient, e.g. the two χ² rows
+   (consequence 2).
+3. Hybrids follow mechanically, since `f ↦ T_f` is linear.
+4. A weight needs no objective. GRPO's `std_G r`, DAPO's token count, and
+   PPO's per-token critic have no `f(x, u)`, but each still weights the
+   score (see Regularity).
+
+The objective view keeps what the gradient view hides: which distribution
+supplies the samples. MLE's identity holds only after `u` cancels the
+sampling from `p(·; θ)` (consequence 3); Tan et al.'s exploration picture
+shows this directly. Diffusion enters through the
+[pathwise form](#pathwise-form), which carries the same weight to models
+known only through their scores.
 
 REINFORCE for an objective that reads the model's own density follows from
 three facts:
@@ -49,9 +107,36 @@ parts,
    mass at `x`.
 2. Slope `∂_u f(x, u)`: the marginal cost of target mass at `x`.
 
+The split is Euler's theorem. With `m = p(x; θ)` and `n = p̂(x)`, the
+integrand `F(n, m) ≝ m f(x, n / m)` is homogeneous of degree 1 in `(n, m)`,
+so `F(n, m) = m ∂_m F(n, m) + n ∂_n F(n, m)`. The chain rule through
+`u = n / m` gives `∂_m F(n, m) = T_f(x, u)` and `∂_n F(n, m) = ∂_u f(x, u)`;
+dividing by `m` gives `f(x, u) = T_f(x, u) + ∂_u f(x, u) ⋅ u`.
+
 REINFORCE weights the score by the intercept because `θ` moves only model
 mass; target mass is fixed. See [Csiszar f-divergences](csiszar.md) for the
 derivation.
+
+The two factors are the chain rule in function space. `θ` changes `L(θ)` only
+through `p(·; θ)`, so
+
+  ```
+  ∇_θ L(θ) = ∫ (δL/δp)(x) ∇_θ p(x; θ) dx = E_{p(X; θ)}[(δL/δp)(X) s(X; θ)]
+  ```
+
+where `(δL/δp)(x)` is the functional derivative: the change in `L(θ)` per
+unit of model mass added at `x`. For `L(θ) = ∫ p f(x, p̂ / p) dx` it is
+`∂_m [m f(x, n / m)] = T_f(x, u)` (see [Csiszar f-divergences](csiszar.md)).
+So:
+
+1. `T_f(x, u)` carries the loss: `f(x, u)`, `A(x)`, and `p̂(x)`. Methods
+   differ only here.
+2. `s(x; θ)` carries the model: how `θ` moves mass. No method changes it.
+3. `δL/δp` is defined only up to a constant, since `∫ ∇_θ p(x; θ) dx = 0`:
+   mass added at `x` is removed elsewhere. That constant is the baseline
+   (consequence 1).
+4. The [pathwise form](#pathwise-form) uses the same `δL/δp`, moving samples
+   instead of mass; its weight comes from `∇_x T_f(x, u)`.
 
 ## Choices of f
 
@@ -129,6 +214,7 @@ sympy.
 | [RLOO][RLOO]                                                                                      | linear, `b(x)` leave-one-out                                     | `r(x)`                                    | `0`                                   |                                                        |
 | MLE                                                                                               | forward KL                                                       | `0`                                       | data                                  |                                                        |
 | VI (ELBO)                                                                                         | reverse KL                                                       | `0`                                       | unnormalized posterior                |                                                        |
+| f-VI ([f-VI][f-VI], [tail-adaptive][tail-f-VI])                                                   | any ratio-only `g`                                               | `0`                                       | unnormalized posterior                |                                                        |
 | [f-DPG][f-DPG]                                                                                    | dual of `g`                                                      | `0`                                       | target, e.g. `π_ref(x) exp(r(x) / β)` |                                                        |
 | [f-GAN][f-GAN]                                                                                    | any ratio-only `g`                                               | `0`                                       | data, via `u ≈ D(x) / (1 − D(x))`     |                                                        |
 | [RLHF][RLHF]                                                                                      | KL-regularized                                                   | `r(x)`, reward model                      | `π_ref(x)`                            |                                                        |
@@ -147,7 +233,7 @@ sympy.
 | PPO-GAN ([GAIL][GAIL], [f-MAX][f-MAX], [f-GAIL][f-GAIL])                                          | clipped, `ε_low = ε_high = ε`                                    | `−T_g(D(x) / (1 − D(x)))`                 | `p_old(x)`                            |                                                        |
 | [GKD][GKD]                                                                                        | Jensen–Shannon (skewed), on student samples                      | `0`                                       | `p_teacher(x)`                        |                                                        |
 | [RAL][RAL]                                                                                        | linear                                                           | co-trained LLM judge vs reference answers | `0`                                   |                                                        |
-| on-policy f-distillation ([f-distill][f-distill], [GKD][GKD], [PowerOPD][PowerOPD], [ABKD][ABKD]) | clipped, `ε_low = ε_high = ε`                                    | `−T_g(p_teacher(x) / p_old(x))`           | `p_old(x)`                            |                                                        |
+| on-policy f-distillation ([f-distill][f-distill], [GKD][GKD], [PowerOPD][PowerOPD], [ABKD][ABKD], [CADENCE][CADENCE]) | clipped, `ε_low = ε_high = ε`                                    | `−T_g(p_teacher(x) / p_old(x))`           | `p_old(x)`                            |                                                        |
 | divergence-regularized RLVR ([DPH-RL][DPH-RL], [APO][APO])                                        | g-regularized, `g` forward KL, JS or Amari α                     | `1[verifier accepts x]`                   | `π_ref(x)`                            |                                                        |
 | α-weighted MLE                                                                                    | weighted g, `g` Amari α, `w(x) = 1[A(x) ≥ τ]` or `exp(A(x) / β)` | `r(x)` or advantage                       | `p_old(x)`                            | ✓ (close: [IRIS][IRIS], [Tsallis offline RL][Tsallis]) |
 
@@ -209,6 +295,8 @@ Nine consequences:
    `E_{p(X; θ)}[−u s(X; θ)] = −(1 / n) Σᵢ s(xᵢ; θ)`.
    The gradient is exact, but a Monte Carlo estimate from `X ~ p(·; θ)` has
    variance growing with `u`; reverse KL's `T_f(x, u)` grows only as `log u`.
+   [RAML][RAML] reads MLE and entropy-regularized RL as KL in opposite
+   directions; [Tan et al. 2018][Tan] recover MLE as RL with a δ-reward.
 4. KL-regularized: `L(θ) = −E_{p(X; θ)}[A(X)] + β KL(p(·; θ) ‖ π_ref)`, the
    RLHF objective. Dropping the baseline `β`, its per-sample weight is
    `−(A(x) − β log(p(x; θ) / π_ref(x)))`: the reward minus the KL penalty.
@@ -254,12 +342,85 @@ set when `u` has a density). The assumption fails when `u` averages
 `p̂(x) / p(x; θ)` over several samples (importance-weighted bounds): then
 `f(x, u)` reads `p(·; θ)` at points other than `X`. Three pieces sit outside
 `f(x, u)`: GRPO's division by `std_G r`, which rescales each prompt by its
-other samples; PPO's critic, which uses time structure inside `x`; and the GAN
-rows' ratio, which is exact only at the discriminator's optimum. DAPO's
-token-level loss also sits outside, since it divides by the token count of
-the whole batch. Pairwise offline methods ([DPO][DPO] and its variants) fall
-outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
+other samples; PPO's critic, which uses time structure inside `x`; and DAPO's
+token-level loss, which divides by the token count of the whole batch. None
+reads `θ`, so each is still a weight on the score: with `x = (x₁, …, x_T)`
+and per-token score `s_t ≝ ∇_θ log p(x_t | x_{<t}; θ)`, the update is
+`E[Σ_t w_t s_t]` with `w_t` built from rewards, the critic, and batch counts.
+That is an estimating equation without an objective. The GAN rows' ratio is
+different: it is exact only at the discriminator's optimum, so away from it
+the weight is the right form with the wrong value. Pairwise offline methods
+([DPO][DPO] and its variants, e.g. [f-PO][f-PO]) fall outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
 `E_{p(X; θ)}[f(X, u)]`.
+
+## Pathwise form
+
+Diffusion models give scores `∇_x log p(x)`, not densities, so the identity
+above, which needs `u`, does not apply. When the sample is a differentiable
+function of noise, the same gradient has a second form that uses scores.
+
+Let,
+
+  ```
+  Z ∈ ℝᵈ            ~ p_Z, noise free of θ
+  G(z; θ) ∈ ℝᵈ      ≝ generator; X = G(Z; θ) has density p(x; θ)
+  J_G(z; θ) ∈ ℝᵈˣᵏ  ≝ ∂_θ G(z; θ), the Jacobian in θ ∈ ℝᵏ
+  θ₀                ≝ θ held fixed (no gradient)
+  ∇_x log u(x; θ)   ≝ ∇_x log p̂(x) − ∇_x log p(x; θ)    # score difference
+  h_f(u)            ≝ −u ∂_u T_f(u) = u² ∂²_u f(u)
+  ```
+
+and take a ratio-only `f(u)` (the `A ≡ 0` slice). Then,
+
+  ```
+  ∇_θ L(θ) = ∫ T_f(u(x; θ₀)) ∇_θ p(x; θ) dx
+           = ∇_θ E_{p_Z}[T_f(u(G(Z; θ); θ₀))]
+           = E_{p_Z}[J_G(Z; θ)ᵀ ∂_u T_f(u) ∇_x u(X; θ₀)]
+           = E_{p_Z}[−h_f(u) J_G(Z; θ)ᵀ ∇_x log u(X; θ)]
+  ```
+
+where the first step is the identity above written as an integral, the second
+holds because `∫ g(x) ∇_θ p(x; θ) dx = ∇_θ E_{p_Z}[g(G(Z; θ))]` for any `g`
+free of `θ`, the third is the chain rule through `X = G(Z; θ)`, and the
+fourth uses `∇_x u = u ∇_x log u`. The score-function form moves the density
+at a fixed sample; the pathwise form moves the sample under a fixed density.
+Where both apply they are the same gradient; the weight changes from the
+intercept `T_f(u)` to `h_f(u)`, minus `u` times its slope.
+
+Six consequences:
+
+1. Per row, `h_f(u)` is `1` (reverse KL), `u` (forward KL), `u / (1 + u)`
+   (Jensen–Shannon), `½ √u` (squared Hellinger), `2 u²` (Pearson χ²), and
+   `½ (1 + u)` (Jeffreys), checked with sympy. These match
+   [Xu et al. 2025][f-distill-diff] Table 1 up to the scale of `f`.
+2. Reverse KL alone has constant `h_f`, so its gradient needs only the score
+   difference, no value of `u`. That is [VSD][VSD] and [DMD][DMD]: a teacher
+   diffusion model supplies `∇_x log p̂`, a fake-score network trained on the
+   generator's samples supplies `∇_x log p(·; θ)`. Every other `f` needs `u`
+   too, which Xu et al. estimate with a discriminator, `u ≈ D(x) / (1 − D(x))`
+   as in consequence 8 above.
+3. Any continuous `h(u) ≥ 0` is some row's weight: `∂²_u f(u) = h(u) / u² ≥ 0`
+   integrates to a convex `f(u)` (Xu et al. Prop. 1). This is the pathwise
+   twin of choosing the weight first.
+4. For diffusion, `p̂` and `p(·; θ)` are their noised versions at noise level
+   `σ(t)`, `X = G(Z; θ) + σ(t) ε` with `ε ~ N(0, I)`, and the loss averages
+   over `t`.
+5. Training a diffusion model on data is the forward-KL row. With likelihood
+   weighting, the denoising score-matching loss upper-bounds
+   `−E_{p̂}[log p(X; θ)]` ([Song et al. 2021][Song-MLE]), so it is MLE on
+   samples from `p̂`, as in consequence 3 above.
+6. RL fine-tuning of a diffusion model uses the score-function form: each
+   denoising step is a Gaussian policy with tractable `log p`, so the Methods
+   rows apply to the chain of steps. [DDPO][DDPO] is the linear row (its
+   score-function variant) or the clipped row (its importance-sampled
+   variant); [DPOK][DPOK] is KL-regularized.
+
+Regularity: `p_Z` free of `θ`; `G(z; θ)` differentiable in `θ`; `x`
+continuous; `p̂(x)` and `p(x; θ)` differentiable in `x`; `∇_θ` passes through
+`E_{p_Z}`. Discrete `x` (tokens, actions) has no pathwise form, and rows with a
+reward need `∇_x A(x)`, which verifiers and environments do not give. Learned
+scores, like the GAN rows' ratio, give the right form with the wrong value
+away from their optimum.
 
 ## References
 
@@ -284,6 +445,20 @@ outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
   Language Modeling".
 - [RAFT][RAFT]: Dong et al. 2023, "RAFT: Reward rAnked FineTuning for
   Generative Foundation Model Alignment", TMLR.
+- [RAML][RAML]: Norouzi et al. 2016, "Reward Augmented Maximum Likelihood for
+  Neural Structured Prediction", NeurIPS. Eqs. 5-8: MLE and entropy-regularized
+  RL minimize KL to an exponentiated reward in opposite directions.
+- [Tan et al. 2018][Tan]: "Connecting the Dots Between MLE and RL for Sequence
+  Prediction". §3.2: MLE is entropy-regularized policy optimization with a
+  δ-reward, in the limit `α → 0`.
+- [Lv et al. 2025][UPGE]: "Towards a Unified View of Large Language Model
+  Post-Training". A Unified Policy Gradient Estimator: mask, reference
+  denominator, advantage, likelihood gradient.
+- [DFT][DFT]: Wu et al. 2025, "On the Generalization of SFT: A Reinforcement
+  Learning Perspective with Reward Rectification", ICLR. SFT's gradient as
+  policy gradient with an inverse-probability reward.
+- [van der Vaart 1998][vdV]: "Asymptotic Statistics", Cambridge University
+  Press, ch. 5, "M- and Z-Estimators".
 - [RLOO][RLOO]: Ahmadian et al. 2024, "Back to Basics: Revisiting REINFORCE
   Style Optimization for Learning from Human Feedback in LLMs".
 - [Dr. GRPO][Dr-GRPO]: Liu et al. 2025, "Understanding R1-Zero-Like
@@ -331,6 +506,19 @@ outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
 - [Tsallis offline RL][Tsallis]: Zhu et al. 2024, "Offline Reinforcement
   Learning via Tsallis Regularization", TMLR. Tsallis (α-family) regularized
   policy extraction.
+- [Xu et al. 2025][f-distill-diff]: Xu, Nie & Vahdat, "One-step Diffusion
+  Models with f-Divergence Distribution Matching". Thm. 1: the pathwise
+  gradient with weight `f″(u) u²`.
+- [VSD][VSD]: Wang et al. 2023, "ProlificDreamer: High-Fidelity and Diverse
+  Text-to-3D Generation with Variational Score Distillation", NeurIPS.
+- [DMD][DMD]: Yin et al. 2024, "One-Step Diffusion with Distribution Matching
+  Distillation", CVPR.
+- [Song et al. 2021][Song-MLE]: "Maximum Likelihood Training of Score-Based
+  Diffusion Models", NeurIPS.
+- [DDPO][DDPO]: Black et al. 2024, "Training Diffusion Models with
+  Reinforcement Learning", ICLR.
+- [DPOK][DPOK]: Fan et al. 2023, "DPOK: Reinforcement Learning for
+  Fine-tuning Text-to-Image Diffusion Models", NeurIPS.
 - [f-GAN][f-GAN]: Nowozin et al. 2016, "f-GAN: Training Generative Neural
   Samplers using Variational Divergence Minimization", NeurIPS.
 - [GAIL][GAIL]: Ho & Ermon 2016, "Generative Adversarial Imitation Learning",
@@ -338,7 +526,8 @@ outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
 - [MaliGAN][MaliGAN]: Che et al. 2017, "Maximum-Likelihood Augmented Discrete
   Generative Adversarial Networks".
 - [Tail-adaptive f-VI][tail-f-VI]: Wang et al. 2018, "Variational Inference
-  with Tail-adaptive f-Divergence", NeurIPS.
+  with Tail-adaptive f-Divergence", NeurIPS. Prop. 4.2:
+  `∇_θ D_f = −E_q[ρ_f(w) ∇_θ log q]` with `ρ_f(t) = f′(t) t − f(t)`.
 - [f-VI][f-VI]: Wan et al. 2020, "f-Divergence Variational Inference",
   NeurIPS.
 - [f-PO][f-PO]: Han et al. 2024, "f-PO: Generalizing Preference Optimization
@@ -357,11 +546,22 @@ outside entirely: they differentiate `log p(x; θ)` at fixed data pairs, not
 [MPO]: https://arxiv.org/abs/1806.06920
 [ReST]: https://arxiv.org/abs/2308.08998
 [RAFT]: https://arxiv.org/abs/2304.06767
+[RAML]: https://arxiv.org/abs/1609.00150
+[Tan]: https://arxiv.org/abs/1811.09740
+[UPGE]: https://arxiv.org/abs/2509.04419
+[DFT]: https://arxiv.org/abs/2508.05629
+[vdV]: https://doi.org/10.1017/CBO9780511802256
 [RLOO]: https://arxiv.org/abs/2402.14740
 [Dr-GRPO]: https://arxiv.org/abs/2503.20783
 [DAPO]: https://arxiv.org/abs/2503.14476
 [DPO]: https://arxiv.org/abs/2305.18290
 [f-GAN]: https://arxiv.org/abs/1606.00709
+[f-distill-diff]: https://arxiv.org/abs/2502.15681
+[VSD]: https://arxiv.org/abs/2305.16213
+[DMD]: https://arxiv.org/abs/2311.18828
+[Song-MLE]: https://arxiv.org/abs/2101.09258
+[DDPO]: https://arxiv.org/abs/2305.13301
+[DPOK]: https://arxiv.org/abs/2305.16381
 [Tsallis]: https://openreview.net/forum?id=HNqEKZDDRc
 [f-distill]: https://arxiv.org/abs/2307.15190
 [PowerOPD]: https://arxiv.org/abs/2606.17199

@@ -34,7 +34,7 @@ where both steps are the chain rule through `u = n / m`.
 
 So `T_f(u)` is how `D_f[p̂, p(·; θ)]` responds to more model mass at `x`; it
 is the weight on the score in `∇_θ D_f[p̂, p(·; θ)]` (see
-[REINFORCE](reinforce.md)).
+[Generalized REINFORCE](reinforce.md)).
 
 Geometrically, the tangent to `f` at `u` splits `f(u)` into two parts,
 
