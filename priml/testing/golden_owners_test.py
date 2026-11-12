@@ -84,7 +84,7 @@ def test_golden_call_on_a_tmp_test_file_claims_nothing(tmp_path: Path) -> None:
         ),
         # Only the parametrize naming ``case``, with rows it can read, counts.
         (
-            "@pytest.mark.slow\n"
+            "@pytest.mark.cli_git\n"
             '@pytest.mark.skipif("case", ["c"])\n'
             '@pytest.mark.parametrize("case")\n'
             '@pytest.mark.parametrize("n", [1, 2])\n'
