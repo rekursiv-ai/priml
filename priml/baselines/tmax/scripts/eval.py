@@ -390,7 +390,7 @@ def wait_for_server(
                 models = from_plain(
                     json_loads(response.read(), dict[str, object]).get("data"),
                     list[dict[str, object]],
-                    default=[],
+                    default=list[dict[str, object]](),
                 )
                 ready = any(model.get("id") == served_name for model in models)
             except (OSError, ValueError):

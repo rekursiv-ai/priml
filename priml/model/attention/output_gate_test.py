@@ -21,7 +21,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_output_gate_config_pprint() -> None:

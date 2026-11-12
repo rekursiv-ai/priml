@@ -27,7 +27,7 @@ from priml.testing.bfb import portable_half_precision
 from priml.testing.golden import assert_tensor_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable

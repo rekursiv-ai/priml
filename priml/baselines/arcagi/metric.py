@@ -483,7 +483,7 @@ class CanonicalPassK:
             for name, shape in from_plain(
                 state.get("hmap"),
                 dict[str, object],
-                default={},
+                default=dict[str, object](),
             ).items()
         }
         self._preds = {
@@ -1425,10 +1425,7 @@ def _parquet_grids_from_state(
 ) -> dict[str, NDArray[np.uint8]]:
     """Restore candidate tensors as owned CPU ARC arrays."""
     return {
-        name: cast(
-            NDArray[np.uint8],
-            grid.detach().to(torch.uint8).cpu().numpy().copy(),
-        )
+        name: grid.detach().to(torch.uint8).cpu().numpy().copy()
         for name, grid in grids.items()
     }
 

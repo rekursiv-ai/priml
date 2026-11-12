@@ -13,7 +13,7 @@ import pytest
 from priml.baselines.craftax import conftest
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _INTEGRATION: Final = _CWD / "world_model" / "codec_test.py"
 """A file of this package whose test the integration tier selects."""

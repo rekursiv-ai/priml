@@ -12,7 +12,7 @@ from priml.baselines.etth1.testing import golden_record
 from priml.testing.golden import write_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_mint_source_goldens(pytestconfig: pytest.Config) -> None:

@@ -32,7 +32,7 @@ from priml.testing.policy_gradient import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class _TermsOverrides(TypedDict, total=False):

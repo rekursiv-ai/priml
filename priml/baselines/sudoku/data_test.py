@@ -24,7 +24,7 @@ from priml.runtime import get_device
 from priml.testing.golden import assert_tensor_golden, stored
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.fixture

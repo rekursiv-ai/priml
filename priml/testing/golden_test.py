@@ -45,7 +45,7 @@ from priml.testing.golden import (
 )
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 

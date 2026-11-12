@@ -46,7 +46,7 @@ else:
     np = lazy_import("numpy")
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 def prepare_analog(input_path: Path, *, output: Path, version: str) -> None:

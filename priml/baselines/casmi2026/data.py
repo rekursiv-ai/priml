@@ -408,7 +408,7 @@ def molecule_bucket(key: str, *, modulus: int) -> int:
     return int.from_bytes(hashlib.sha256(key.encode()).digest(), "big") % modulus
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 

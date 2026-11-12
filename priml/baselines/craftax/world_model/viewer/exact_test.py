@@ -56,7 +56,7 @@ from priml.baselines.craftax.world_model.viewer.exact import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _DECISIONS: Final = len(testing.SCRIPT)
 

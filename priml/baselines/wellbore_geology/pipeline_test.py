@@ -767,7 +767,7 @@ def test_particle_inference_requires_a_prepared_test_cache(tmp_path: Path) -> No
         predict_family(particle, directory=directory, output=tmp_path / "inference")
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class Receipt(TypedDict):

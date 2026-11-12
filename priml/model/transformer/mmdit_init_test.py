@@ -14,7 +14,7 @@ from priml.testing import golden
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("cond_dim", [0, 4])

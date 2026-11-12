@@ -8,7 +8,7 @@ from typing import Final, cast
 import re
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _PREFIX: Final = "priml.baselines.casmi2026"
 _IMPORT: Final = re.compile(
     rf"^[ \t]*(?:from|import)[ \t]+{re.escape(_PREFIX)}\.([A-Za-z0-9_.]+)",

@@ -27,7 +27,7 @@ from priml.testing.golden import mismatches, read_tensors
 from priml.train.ema import EMA
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _GOLDEN: Final = _CWD / "testdata" / "dlinear_training.pt"
 

@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from priml.math.custom_types import TensorFn
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @set_cost(map_cost(primal=1, adjoint=1))

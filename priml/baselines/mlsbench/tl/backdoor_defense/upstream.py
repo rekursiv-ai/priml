@@ -57,7 +57,7 @@ DRIVER: Final = Path(
 )
 """The fixed driver, relative to the clone."""
 
-DEFENSE: Final = DRIVER.with_name("custom_backdoor_defense.py")
+DEFENSE: Final[Path] = DRIVER.with_name("custom_backdoor_defense.py")
 """The editable defense module the driver imports, relative to the clone."""
 
 EDITS: Final = Path("tasks/security-backdoor-defense/edits")

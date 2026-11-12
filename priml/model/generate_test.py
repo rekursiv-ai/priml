@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import LayerCache, TensorModule
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_generate_public_contract() -> None:

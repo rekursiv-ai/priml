@@ -129,7 +129,7 @@ else:
     np = lazy_import("numpy")
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _RULES: Final = {
     "all": "The main capture's episodes, by capture ordinal.",

@@ -272,7 +272,7 @@ def release_accelerator(device: str) -> None:
         torch.cuda.empty_cache()
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 class FamilyInference(Protocol):

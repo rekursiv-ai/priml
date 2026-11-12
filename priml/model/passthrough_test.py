@@ -21,7 +21,7 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.golden import assert_text_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @dataclass(kw_only=True, slots=True)

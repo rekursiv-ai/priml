@@ -185,7 +185,7 @@ class _TokenizerModel(Protocol):
     def tokenize(self, text: str) -> list[_TokenizerToken]: ...
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 RESERVED_TOKENS: Final = tuple(f"<|reserved_{index}|>" for index in range(16))

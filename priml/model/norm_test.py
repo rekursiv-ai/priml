@@ -36,7 +36,7 @@ def _config_id(value: object) -> str | None:
     return type(value).__qualname__ if isinstance(value, Fig) else None
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("affine", [False, True])

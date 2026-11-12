@@ -31,7 +31,7 @@ else:
 
 
 logger = logging.getLogger(__name__)
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 class EngineKeyChemistry:

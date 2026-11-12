@@ -66,5 +66,9 @@ def read_filter_reasons(sample: Mapping[str, object]) -> list[str]:
       reasons: Its string reasons, or ``[]`` when it has none.
 
     """
-    reasons = from_plain(sample.get("filter_reasons"), list[object], default=[])
+    reasons = from_plain(
+        sample.get("filter_reasons"),
+        list[object],
+        default=list[object](),
+    )
     return [reason for reason in reasons if isinstance(reason, str)]

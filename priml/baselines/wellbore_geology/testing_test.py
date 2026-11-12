@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from priml.baselines.wellbore_geology.train_loop import WellboreFoldLoop
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("rows", [None, 13])

@@ -52,7 +52,7 @@ def _layer_cache(
     return {module.depth_index: states}
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_multi_stream_config_pprint() -> None:

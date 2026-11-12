@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import partial
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
 from unittest.mock import Mock
@@ -29,6 +28,8 @@ if TYPE_CHECKING:
     from torch._ops import OpOverload
 
     from priml.math.custom_types import TensorFn
+
+from pathlib import Path
 
 from treekle import from_plain
 
@@ -83,7 +84,7 @@ from priml.testing.bfb import (
 from priml.testing.golden import expect_golden_mismatch, pack, tensor_bits_equal
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 

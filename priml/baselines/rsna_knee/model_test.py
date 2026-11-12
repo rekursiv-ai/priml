@@ -55,7 +55,7 @@ from priml.train.parallelism import NoParallel
 from priml.train.train_step import TrainStep
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def _r7_config() -> R7.Config:

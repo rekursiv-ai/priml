@@ -404,7 +404,11 @@ def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
         raise ValueError("attention_dropout must be finite and in [0, 1).")
     if YarnScaling.Config.from_hf(config) is not None:
         raise ValueError("Only default text rotary frequencies are supported.")
-    params = from_plain(config.get("rope_parameters"), dict[str, object], default={})
+    params = from_plain(
+        config.get("rope_parameters"),
+        dict[str, object],
+        default=dict[str, object](),
+    )
     fraction = from_plain(
         params.get("partial_rotary_factor"),
         float,

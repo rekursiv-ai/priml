@@ -28,7 +28,7 @@ from priml.train.ema import NoEMA
 from priml.train.parallelism import NoParallel
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class FakeTeacher(nn.Module):

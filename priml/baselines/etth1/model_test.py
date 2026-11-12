@@ -20,7 +20,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _GOLDEN: Final = _CWD / "testdata" / "dlinear_model.pt"
 

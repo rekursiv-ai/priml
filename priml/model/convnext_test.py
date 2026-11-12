@@ -35,7 +35,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def _binary64_drop_path(maximum: float, count: int) -> tuple[float, ...]:

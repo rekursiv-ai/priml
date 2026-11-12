@@ -93,7 +93,7 @@ from priml.baselines.craftax.world_model.scripts.reports import (
 from priml.paths import validated_output_path
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 STEPS: Final = ("baselines", "tiles", "matrix", "engine", "dreams")
 """The evaluation steps, in the order each checkpoint runs them."""

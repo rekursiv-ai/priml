@@ -42,7 +42,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
 from priml.paths import validated_output_path
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 # The whole preparation, parquet to tokenizer.json: 0.3 s even with the kernels

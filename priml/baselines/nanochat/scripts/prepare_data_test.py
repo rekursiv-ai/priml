@@ -109,7 +109,7 @@ from priml.train.train_loop import TrainLoop
 
 
 VOCAB: Final = 300
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def _text_table(documents: list[str]) -> Table:

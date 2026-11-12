@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import RotaryConfig
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 CU_SEQLENS: Final = (0, 3, 7, 8, 8, 8, 12, 16)
 """Two rows of 8: segments of 3, 4 and 1, two empty ones, then 4 and 4."""

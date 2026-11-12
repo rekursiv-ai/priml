@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from priml.baselines.tmax.train_step import TMaxDPPOTrainStep
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _FIXTURE: Final = _CWD.parent / "testdata" / "smoke_rollout.jsonl"
 
 

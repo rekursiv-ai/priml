@@ -374,7 +374,7 @@ def _kept_floors(episode: Episode, *, cap: int) -> list[dict[str, object]]:
             from_plain(
                 episode.summary.get("floors"),
                 list[dict[str, object]],
-                default=[],
+                default=list[dict[str, object]](),
             ),
             kept,
             strict=True,

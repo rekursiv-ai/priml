@@ -30,7 +30,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_tensor_golden, rng_fingerprint
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 BATCH: Final = 2
 NODES: Final = 3
 FEATURES: Final = 5

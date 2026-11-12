@@ -178,7 +178,7 @@ class Qwen3(Transformer):
             rope_params = from_plain(
                 config.get("rope_parameters"),
                 dict[str, object],
-                default={},
+                default=dict[str, object](),
             )
             rope_theta = config.get("rope_theta")
             if rope_theta is None:
@@ -347,7 +347,7 @@ def _reject_unsupported(config: Mapping[str, object]) -> None:
         raise ValueError("Attention projection biases are unsupported.")
     # HF ignores ``sliding_window`` unless ``use_sliding_window`` is set, and
     # Qwen3 checkpoints ship ``sliding_window: 4096`` with it off.
-    layer_types = from_plain(config.get("layer_types"), list[str], default=[])
+    layer_types = from_plain(config.get("layer_types"), list[str], default=list[str]())
     if from_plain(config.get("use_sliding_window"), bool, default=False) or any(
         layer != "full_attention" for layer in layer_types
     ):

@@ -26,7 +26,7 @@ from priml.testing.golden import (
 from priml.train.custom_types import TrainStepOutput
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 MAX_GOLDEN_BYTES: Final = 32 * 1024
 GOLDEN_SEED: Final = 2021
 

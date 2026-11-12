@@ -988,7 +988,11 @@ def parse_offline_aug(offline_aug: str) -> tuple[int, tuple[int, ...]]:
 
 
 def _pairs(value: object, name: str) -> list[ParquetPair]:
-    pairs = from_plain(value, list[dict[str, object]], default=[])
+    pairs = from_plain(
+        value,
+        list[dict[str, object]],
+        default=list[dict[str, object]](),
+    )
     result: list[ParquetPair] = []
     for pair_value in pairs:
         grid_in = _grid(pair_value.get("input"), f"{name}.input")

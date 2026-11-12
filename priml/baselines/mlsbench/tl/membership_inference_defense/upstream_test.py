@@ -30,7 +30,7 @@ from priml.baselines.mlsbench.tl.membership_inference_defense import (
 from priml.testing.golden import read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 DATA: Final = _CWD / "testdata"
 

@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepOutput
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 ORIGINAL: Final = _CWD / "testdata" / "train_step.pt"
 """``exp000``'s trajectory, minted from the original implementation at port time."""

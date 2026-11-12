@@ -56,7 +56,7 @@ import tempfile
 from treekle import json_loads
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 ARCHIVE_URL: Final = (
     "https://huggingface.co/allenai/tmax-9b/resolve/main/"

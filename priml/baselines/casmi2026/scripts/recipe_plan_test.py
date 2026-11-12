@@ -35,7 +35,7 @@ from priml.baselines.casmi2026.scripts.recipe_plan import (
 from priml.baselines.casmi2026.testing import retrieval_inputs
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray

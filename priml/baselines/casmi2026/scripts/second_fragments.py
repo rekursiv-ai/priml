@@ -43,7 +43,7 @@ else:
     parquet = lazy_import("pyarrow.parquet")
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 def prepare_second_fragments(input_path: Path, *, output: Path, version: str) -> None:

@@ -23,7 +23,7 @@ from priml.baselines.convextok.testing import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_held_out_text_segments_as_upstream() -> None:

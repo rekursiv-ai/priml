@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 AGENTS: Final = 6
 HORIZON: Final = 4

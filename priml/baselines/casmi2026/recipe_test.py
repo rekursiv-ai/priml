@@ -160,7 +160,7 @@ if TYPE_CHECKING:
     from priml.baselines.casmi2026.custom_types import ReactionRequest
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

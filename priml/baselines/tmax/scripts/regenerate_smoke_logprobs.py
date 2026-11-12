@@ -39,7 +39,7 @@ from priml.baselines.tmax.train_step import TMaxDPPOTrainStep
 from priml.math.seed import set_seed_local
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from priml.baselines.tmax.experiments import TMaxTrainLoop

@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from priml.baselines.craftax.model import Policy
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 AGENTS: Final = 5
 HORIZON: Final = 4

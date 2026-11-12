@@ -79,7 +79,7 @@ from priml.testing.golden import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _BASELINE: Final = _CWD
 

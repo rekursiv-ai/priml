@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import AttentionKernel
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("name", ["latent_attention", "multi_head_latent_attention"])

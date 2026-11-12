@@ -3125,7 +3125,7 @@ def test_train_metrics_accumulate_over_the_log_cadence() -> None:
             totals_at_compute.append(metric.total)
             return original_compute()
 
-        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
+        metric.compute = spy_compute  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
         tracker = cast(_RecordingTracker, loop.tracker)
 
         loop.train()
@@ -3170,7 +3170,7 @@ def test_train_metrics_compute_and_reset_on_every_rank(
             totals_at_compute.append(metric.total)
             return original_compute()
 
-        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
+        metric.compute = spy_compute  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
         tracker = cast(_RecordingTracker, loop.tracker)
 
         loop.train()
@@ -3826,7 +3826,7 @@ def test_final_eval_improvement_refreshes_the_end_of_run_save() -> None:
             writes.append(step)
             original_write(target, step, after_write=after_write)
 
-        loop.checkpointer._write = spy_write  # ty: ignore[invalid-assignment] -- The test spies on a bound method.  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
+        loop.checkpointer._write = spy_write  # pyrefly: ignore[method-assign] -- The test spies on a bound method.
         loop.train()
 
         assert writes == [3, 3]

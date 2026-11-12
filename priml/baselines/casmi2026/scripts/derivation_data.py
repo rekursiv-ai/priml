@@ -36,7 +36,7 @@ else:
     parquet = lazy_import("pyarrow.parquet")
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 class DerivationRequest(TypedDict):

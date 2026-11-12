@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from priml.math.seed import RngState
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_fold_configuration_declares_inputs_without_live_trials() -> None:
