@@ -10,4 +10,4 @@ equation chains, then regularity.
 
 ## Gradient estimators
 
-- [REINFORCE for losses that read the model density](reinforce.md)
+- [Generalized REINFORCE: One Gradient for Likelihood, RL, and Divergence Learning](reinforce.md)
