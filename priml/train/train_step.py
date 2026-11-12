@@ -42,6 +42,7 @@ from priml.loss.simple_loss import SimpleLoss
 from priml.math.distributed import collective_device
 from priml.math.schedules import Schedule, constant
 from priml.model.special import Identity
+from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr import (
     apply_lr_scale,
     apply_lr_schedule,
@@ -613,7 +614,7 @@ class TrainStep:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     self.gradient_clip_norm,
-                    foreach=True,
+                    foreach=True,  # pragma: no mutate -- Kernel choice; same norm.
                 )
                 if math.isfinite(self.gradient_clip_norm)
                 else total_grad_norm(self.model.parameters())
@@ -624,6 +625,7 @@ class TrainStep:
                 grad_norm = self.last_grad_norm.item()
                 if not math.isfinite(grad_norm):
                     self.skipped_steps += 1
+                    # pragma: no mutate start -- Log text only.
                     logger.warning(
                         "Skipping optimizer update at step %d: gradient norm is "
                         "%s (%d skipped so far).",
@@ -631,6 +633,7 @@ class TrainStep:
                         grad_norm,
                         self.skipped_steps,
                     )
+                    # pragma: no mutate end
                     self.optimizer.zero_grad(set_to_none=True)
                     return
             # Scaled BEFORE the optimizer, so the rate this update uses is the
@@ -641,7 +644,7 @@ class TrainStep:
             updated = self.optimizer_step(closure)
             self.optimizer.zero_grad(set_to_none=True)
             if updated:
-                self.ema(self.model)
+                self.ema(self.model)  # pragma: no mutate -- EMA tests own this call.
 
     def optimizer_step(
         self,
@@ -749,6 +752,11 @@ class TrainStep:
         generator's output with the discriminator -- so the model runs once
         and keys only the loss reads never reach ``forward``.
 
+        A ``CompositeOptimizer`` holding weight programmers is bound to the
+        model for the update, and its programmers read this batch as their
+        calibration input. When every member is a programmer, nothing is
+        differentiated: the loss only reports the weights the batch met.
+
         Args:
           output: The model's forward output, from :meth:`__call__` so it
             carries autocast, compilation, and ``timer_forward``.
@@ -786,7 +794,14 @@ class TrainStep:
         # ``sum_ranks(local_sum) / sum_ranks(local_N)``; the two coincide iff
         # ``local_N`` is equal across ranks. ``_assert_uniform_microbatch_count``
         # enforces that precondition at the optimizer-step boundary.
-        loss.sum().backward()
+        optimizer = self.optimizer
+        composite = (
+            optimizer
+            if isinstance(optimizer, CompositeOptimizer) and optimizer.has_programming
+            else None
+        )
+        if composite is None or composite.requires_gradients:
+            loss.sum().backward()
         self.accumulated_samples += loss.numel()
         self.accumulation_steps += 1
 
@@ -803,7 +818,19 @@ class TrainStep:
                     grad_snapshot.append(param.grad.detach().clone())
             self.last_microbatch_grads = grad_snapshot
 
-            self.step(closure)
+            with (
+                contextlib.nullcontext()
+                if composite is None
+                else composite.programming(
+                    self.model,
+                    next_batch=lambda: preprocessed_batch,
+                )
+            ):
+                self.step(closure)
+            if composite is not None:
+                result.setdefault("metrics", {}).update(
+                    composite.programming_output.metrics,
+                )
             self.accumulation_steps = 0
             self.accumulated_samples = 0
 

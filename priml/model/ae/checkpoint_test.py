@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 
 import hashlib
 import io
+import pickle
 
 from safetensors.torch import save_file
 
@@ -15,6 +16,7 @@ import torch
 
 from priml.model.ae.checkpoint import (
     CheckpointFile,
+    CheckpointWeights,
     HubFile,
     LocalFile,
     UrlFile,
@@ -23,6 +25,7 @@ from priml.model.ae.checkpoint import (
     read_state,
     sha256_file,
 )
+from priml.model.linear import Linear
 
 
 if TYPE_CHECKING:
@@ -321,6 +324,70 @@ def test_read_json_parses_the_object_a_source_names(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     _ = path.write_text('{"hidden": 8, "name": "ae"}')
     assert read_json(LocalFile.Config(path=path)) == {"hidden": 8, "name": "ae"}
+
+
+def _weights_config(
+    tmp_path: Path,
+    payload: object,
+    *,
+    state_path: tuple[str, ...] = (),
+) -> CheckpointWeights.Config:
+    path = tmp_path / "parent.pt"
+    torch.save(payload, path)
+    config = CheckpointWeights.Config()
+    config.model = Linear.Config(3, 2)
+    config.source = LocalFile.Config(path=path, sha256=sha256_file(path))
+    config.state_path = state_path
+    return config
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_checkpoint_weights_replace_the_built_initialization(
+    tmp_path: Path,
+    *,
+    nested: bool,
+) -> None:
+    parent = Linear.Config(3, 2).make().state_dict()
+    config = (
+        _weights_config(
+            tmp_path,
+            {"step": {"model": parent}},
+            state_path=("step", "model"),
+        )
+        if nested
+        else _weights_config(tmp_path, parent)
+    )
+
+    model = config.make()
+
+    state = model.state_dict()
+    assert state.keys() == parent.keys()
+    assert all(torch.equal(state[name], parent[name]) for name in parent)
+
+
+def test_checkpoint_weights_reject_a_partial_state(tmp_path: Path) -> None:
+    parent = Linear.Config(3, 2).make().state_dict()
+    _ = parent.popitem()
+    with pytest.raises(RuntimeError, match="Missing key"):
+        _ = _weights_config(tmp_path, parent).make()
+
+
+class _Opaque:
+    """An arbitrary pickled object; a weights-only load must refuse it."""
+
+
+def test_checkpoint_weights_refuse_arbitrary_pickles(tmp_path: Path) -> None:
+    with pytest.raises(pickle.UnpicklingError, match=r"^Weights only load failed"):
+        _ = _weights_config(tmp_path, {"weight": _Opaque()}).make()
+
+
+def test_checkpoint_weights_reject_meta_construction(tmp_path: Path) -> None:
+    config = _weights_config(tmp_path, Linear.Config(3, 2).make().state_dict())
+    message = (
+        r"^CheckpointWeights cannot load into meta tensors; build the model eagerly\.$"
+    )
+    with torch.device("meta"), pytest.raises(ValueError, match=message):
+        _ = config.make()
 
 
 if __name__ == "__main__":
