@@ -6,8 +6,9 @@ network.
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, override, runtime_checkable
 from urllib import parse
 
 import functools
@@ -24,10 +25,11 @@ from priml.data.ensure import (
     resumable_http_download,
 )
 from priml.hub import get_cache_dir
+from priml.model.special import Identity
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from torch import Tensor
 
@@ -301,6 +303,51 @@ class LocalFile:
 
         """
         return {"sha256": self.config.sha256 or sha256_file(self.path())}
+
+
+class CheckpointWeights:
+    """A model built from its config, then given a checkpoint file's weights."""
+
+    class Config(Fig["torch.nn.Module"]):
+        """The architecture, and where its weights come from."""
+
+        model: Makeable[torch.nn.Module] = field(default_factory=Identity.Config)
+        """Builds the module; its initialization is then overwritten."""
+
+        source: Makeable[CheckpointFile] = field(default_factory=LocalFile.Config)
+        """The ``torch.save``-d file, digest-verified when the model is made."""
+
+        state_path: tuple[str, ...] = ()
+        """Keys leading to the model state inside the file; empty for a flat
+        state dict, ``("step", "model")`` for a ``TrainLoop`` checkpoint."""
+
+        @override
+        def make(self) -> torch.nn.Module:
+            """Build the model and load the selected state into it, strictly.
+
+            Returns:
+              model: The built module, carrying the checkpoint's weights.
+
+            Raises:
+              ValueError: The model was built on the meta device, where a
+                load copies nothing.
+
+            """
+            final = self.finalized()
+            model = final.model.make()
+            if any(tensor.is_meta for tensor in model.state_dict().values()):
+                raise ValueError(
+                    "CheckpointWeights cannot load into meta tensors; build the "
+                    "model eagerly.",
+                )
+            # Both defaults are the contract: ``torch.load`` unpickles tensors
+            # and containers only, and ``load_state_dict`` rejects a missing or
+            # unexpected key.
+            state = cast("Mapping[str, object]", torch.load(final.source.make().path()))
+            for key in final.state_path:
+                state = cast("Mapping[str, object]", state[key])
+            model.load_state_dict(cast("Mapping[str, Tensor]", state))
+            return model
 
 
 def sha256_file(path: Path) -> str:

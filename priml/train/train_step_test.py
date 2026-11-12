@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, overload, over
 
 import functools
 import math
+import re
 import tempfile
 
 from configgle import Fig, InlineConfig, Makes, MutableNamespace, PartialConfig
@@ -20,8 +21,11 @@ import torch.distributed as dist
 from priml import runtime
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.model.linear import Linear
+from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.lr import learning_rate
 from priml.optimizers.lr_schedule import RecursiveCosine
+from priml.optimizers.parameter_filter import complement, matching
+from priml.optimizers.weight_programming import UpdateOutput, WeightProgramming
 from priml.testing.golden import tensor_bits_equal
 from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA
@@ -694,7 +698,9 @@ def _unequal_micro_batches() -> tuple[Tensor, Tensor, list[int]]:
     return x, label, [7, 3]
 
 
-def test_grad_accum_equals_single_batch_unequal_micro_sizes() -> None:
+def test_grad_accum_equals_single_batch_unequal_micro_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """T-020: accumulate(N unequal micro-batches) == one big batch, exactly.
 
     The load-bearing invariant. With per-element loss summed across
@@ -702,6 +708,11 @@ def test_grad_accum_equals_single_batch_unequal_micro_sizes() -> None:
     UNEQUAL micro-batch sizes must still reproduce the single-batch gradient.
     Mean-of-means would fail this specific case.
     """
+    checked_counts: list[int] = []
+    monkeypatch.setattr(
+        "priml.train.train_step._assert_uniform_microbatch_count",
+        checked_counts.append,
+    )
     x, label, splits = _unequal_micro_batches()
 
     def build() -> TrainStep:
@@ -731,6 +742,12 @@ def test_grad_accum_equals_single_batch_unequal_micro_sizes() -> None:
         offset += n
     acc_grads = acc.last_microbatch_grads
 
+    # Zero weights put every logit at 0, so each residual is 0.5 - label.
+    residual = 0.5 - label
+    torch.testing.assert_close(ref_grads[0], (residual[:, None] * x).mean(0)[None])
+    torch.testing.assert_close(ref_grads[1], residual.mean()[None])
+    assert checked_counts == [len(x), len(x)]
+    assert acc.accumulation_steps == acc.accumulated_samples == 0
     assert len(ref_grads) == len(acc_grads)
     # The math is identical (sum of per-element grads / grand-total count). The
     # only difference is float reduction GROUPING: one 10-element reduction vs
@@ -1144,6 +1161,74 @@ def test_closure_reaches_an_optimizer_that_requires_it() -> None:
     assert recomputed.requires_grad
 
 
+class _BatchMeanProgram(WeightProgramming):
+    """Writes the trained batch's mean into every owned parameter."""
+
+    class Config(Makes["Callable[..., _BatchMeanProgram]"], WeightProgramming.Config):
+        """Batch-mean programmer."""
+
+    @override
+    def program_weights(
+        self,
+        model: nn.Module,
+        *,
+        next_batch: Callable[[], dict[str, object]],
+    ) -> UpdateOutput:
+        del model
+        x = next_batch()["x"]
+        assert isinstance(x, Tensor)
+        mean = x.mean()
+        with torch.no_grad():
+            for group in self.param_groups:
+                for parameter in cast("list[Tensor]", group["params"]):
+                    parameter.fill_(mean)
+        return UpdateOutput(updated=True, metrics={"mean": mean})
+
+
+def test_programming_composite_writes_the_trained_batch_without_backward() -> None:
+    composite = CompositeOptimizer.Config()
+    composite.optimizers = [_BatchMeanProgram.Config()]
+    step = _linear_step(optimizer=composite)
+
+    result = step.train_step(
+        x=torch.tensor([[1.0, 2.0], [3.0, 6.0]]),
+        label=torch.tensor([0.0, 1.0]),
+    )
+
+    for parameter in step.model.parameters():
+        assert torch.equal(parameter, torch.full_like(parameter, 3.0))
+        assert parameter.grad is None
+    assert step.global_step == 1
+    metrics = result.get("metrics", {})
+    assert list(metrics) == ["programming/0/mean"]
+    assert torch.equal(
+        torch.as_tensor(metrics["programming/0/mean"]),
+        torch.tensor(3.0),
+    )
+
+
+def test_mixed_composite_backpropagates_its_gradient_member() -> None:
+    composite = CompositeOptimizer.Config()
+    composite.optimizers = [
+        _BatchMeanProgram.Config(),
+        PartialConfig(torch.optim.SGD, lr=1.0),
+    ]
+    composite.select = [matching("weight"), complement(matching("weight"))]
+    step = _linear_step(optimizer=composite)
+    parameters = dict(step.model.named_parameters())
+    weight = parameters["linear.weight"].detach().clone()
+    bias = parameters["linear.bias"].detach().clone()
+    x = torch.tensor([[1.0, 2.0], [3.0, 6.0]])
+    label = torch.tensor([0.0, 1.0])
+
+    step.train_step(x=x, label=label)
+
+    logits = x @ weight.T + bias
+    expected_bias = bias - (logits.squeeze(-1).sigmoid() - label).mean()
+    assert torch.allclose(parameters["linear.bias"], expected_bias)
+    assert torch.equal(parameters["linear.weight"], torch.full_like(weight, 3.0))
+
+
 def _record_output(
     outputs: list[Tensor],
     module: nn.Module,
@@ -1300,7 +1385,11 @@ def test_a_scalar_loss_is_refused() -> None:
         return {"loss": output.mean()}
 
     step = _linear_step(loss=PartialConfig(reduced))
-    with pytest.raises(ValueError, match="Loss must be unreduced"):
+    message = (
+        "Loss must be unreduced (per-element), got scalar. "
+        "Use reduction='none' in your loss function."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         step.train_step(x=torch.randn(4, 2))
 
 
