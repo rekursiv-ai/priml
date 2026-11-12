@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def hf_config(**overrides: object) -> dict[str, object]:

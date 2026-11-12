@@ -43,7 +43,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden, mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _TESTDATA: Final = _CWD / "testdata"
 _REFERENCE_COMMIT: Final = "a4d18c4db766419cbe7cb8c02cd9f7ceb0ec9041"

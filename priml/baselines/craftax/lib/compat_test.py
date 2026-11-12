@@ -39,7 +39,7 @@ from priml.testing.policy_gradient import random_minibatch
 from priml.testing.triton_interpreter import is_jit, triton_interpreter
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 if TYPE_CHECKING:

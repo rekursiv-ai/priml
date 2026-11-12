@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 FIXTURES: Final = _CWD / "testdata" / "fixtures.pt"
 """The evaluation goldens' trained generators, verifiers, and harvest shard."""

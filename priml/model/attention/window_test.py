@@ -27,7 +27,7 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.golden import assert_text_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class _Window(nn.Module):

@@ -103,7 +103,7 @@ def test_float_literals_are_float32() -> None:
     assert NOISE_PI2.view(np.uint32) == 0x40C90FDB
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _LAYOUT_GOLDEN = _CWD.parent / "testdata" / "state_layout.json"
 """``offsetof``/``sizeof`` of every field, measured from the C structs."""
 

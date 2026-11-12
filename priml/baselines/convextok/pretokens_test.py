@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_count_pretokens_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

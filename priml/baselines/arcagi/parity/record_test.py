@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _CASE: Final = "::"
 """Separates a case name from a leaf path; neither contains it."""

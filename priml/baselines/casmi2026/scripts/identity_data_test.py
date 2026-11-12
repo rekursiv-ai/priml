@@ -18,7 +18,7 @@ from priml.baselines.casmi2026.isolated import IDENTITY_RDKIT, SIMULATOR_RDKIT
 from priml.baselines.casmi2026.scripts import identity_data
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray

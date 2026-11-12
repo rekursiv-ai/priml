@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from priml.math.custom_types import TensorFn
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("probability", [0.0, 0.25, 1.0])

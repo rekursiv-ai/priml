@@ -67,7 +67,7 @@ type Ballots = Mapping[str, Mapping[str, Sequence[tuple[str, float]]]]
 type Leaf = Tensor | str
 type Capture = dict[str, Leaf]
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 GOLDEN: Final = _CWD / "testdata" / "data.pt"
 """Frozen reference arrays and tensors, keyed by capture then case."""

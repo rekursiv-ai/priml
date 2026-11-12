@@ -40,7 +40,7 @@ from priml.baselines.convextok.testing import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 # The whole fit with presolve and PDLP: 0.3 s with the kernels interpreted, past the

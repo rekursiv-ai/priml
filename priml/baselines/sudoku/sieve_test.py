@@ -45,7 +45,7 @@ from priml.testing.golden import assert_tensor_golden
 from priml.train.train_loop import EvalTimeLimitError
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable

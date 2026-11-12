@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _SEEN_AT_START: Final = pytest.StashKey[bool]()
 """Set once this conftest saw the session start; a worker's controller then compiled."""

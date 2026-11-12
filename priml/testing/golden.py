@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 
 _INDEX: Final = "index"
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 class NativeDraws(TorchDispatchMode):

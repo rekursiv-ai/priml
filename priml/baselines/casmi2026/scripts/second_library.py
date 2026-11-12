@@ -33,7 +33,7 @@ else:
     parquet = lazy_import("pyarrow.parquet")
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _ELEMENT_MASSES: Final = {
     element: ELEMENT_MASSES[element]
     for element in (*FORMULA_ELEMENTS, "Si", "Se", "Na", "K", "B", "As", "Fe", "D")

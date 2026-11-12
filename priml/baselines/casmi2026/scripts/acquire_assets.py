@@ -12,7 +12,7 @@ from priml.data.ensure import DataSpec, FileSpec, ensure_data
 from priml.paths import resolve_working_dir
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

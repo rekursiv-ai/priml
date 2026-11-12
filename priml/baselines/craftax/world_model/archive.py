@@ -730,7 +730,11 @@ def _summary(text: str) -> EpisodeSummary:
     line = json_loads(text, dict[str, object])
     changes = [
         from_plain(c, list[int])
-        for c in from_plain(line.get("floors"), list[list[int]], default=[])
+        for c in from_plain(
+            line.get("floors"),
+            list[list[int]],
+            default=list[list[int]](),
+        )
     ]
     floors = (
         FloorTrace(

@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("factory", [experiments.exp013, experiments.exp022])

@@ -13,7 +13,7 @@ from typing import Final
 import re
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 _ROOT: Final = _CWD.parents[1]

@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def _parameter(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Parameter:

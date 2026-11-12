@@ -67,7 +67,7 @@ else:
     )
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 def prepare_intrinsic(input_path: Path, *, output: Path, version: str) -> None:

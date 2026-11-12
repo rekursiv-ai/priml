@@ -30,7 +30,7 @@ from priml.baselines.craftax.world_model.viewer.exact import read_manifest
 
 
 RECORD: Final = 7858
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def aux_row(**values: int) -> torch.Tensor:

@@ -35,7 +35,7 @@ from priml.model.ae.invae_test import tiny
 from priml.model.ae.latent_norm import LatentNormalizer, ScaleLatents
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _SIZE: Final = 16
 """Crop side the fake autoencoder asks for; square because center_crop cuts squares."""
 

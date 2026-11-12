@@ -19,7 +19,7 @@ from priml.baselines.oscillator.scripts import comparison
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_smoke_run_writes_configs_records_and_provenance(

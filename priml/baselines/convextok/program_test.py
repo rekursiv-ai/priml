@@ -35,7 +35,7 @@ from priml.baselines.convextok.testing import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_program_matches_upstream_golden() -> None:

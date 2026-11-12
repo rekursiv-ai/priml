@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD.parent / "testdata"
 

@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from numpy.lib.npyio import NpzFile
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class _ProtocolConfig(Protocol):

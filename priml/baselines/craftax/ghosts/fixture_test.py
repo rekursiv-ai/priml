@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from priml.baselines.craftax.ghosts.extract import Ghost
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _FIXTURE: Final = _CWD / "testdata" / "fixture"
 

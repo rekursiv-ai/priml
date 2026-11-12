@@ -10,7 +10,7 @@ import sys
 import pytest
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("script", ["prepare_data", "evaluate", "verify_reference"])

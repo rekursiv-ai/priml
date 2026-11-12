@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from priml.baselines.casmi2026.custom_types import AtomicRow, GlacierRow
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[AtomicRow, AtomicRow]:

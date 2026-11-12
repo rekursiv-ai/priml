@@ -26,7 +26,7 @@ from priml.baselines.mlsbench.dl.vision.upstream_test import (
 from priml.testing.golden import mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD / "testdata"
 

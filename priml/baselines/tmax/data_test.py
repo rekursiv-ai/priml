@@ -27,7 +27,7 @@ from priml.baselines.tmax.train_step import TMaxDPPOTrainStep, tiny_qwen35_confi
 from priml.train.parallelism import NoParallel
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepProtocol

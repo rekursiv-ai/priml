@@ -101,7 +101,7 @@ if TYPE_CHECKING:
     from priml.baselines.wellbore_geology.custom_types import Batch
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_nexus_augmented_inputs_and_rng_golden() -> None:

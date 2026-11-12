@@ -25,7 +25,7 @@ from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import assert_tensor_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 # Marked: the golden was recorded against REG's own run at these sizes, so a

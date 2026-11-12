@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _TESTDATA: Final = _CWD / "testdata"
 

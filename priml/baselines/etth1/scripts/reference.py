@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 SOURCE_COMMIT: Final = "da9e67442b95af76488b8e4e1806cc3185723dd9"
 _SOURCE_FILES: Final = (
     "models/DLinear.py",

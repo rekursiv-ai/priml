@@ -25,7 +25,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_spatial_cost_accounts_for_a_global_pool_before_an_affine() -> None:

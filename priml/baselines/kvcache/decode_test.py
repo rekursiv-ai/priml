@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import DepthIndex
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 VOCAB: Final = 7
 WIDTH: Final = 12
 NUM_HEADS: Final = 6

@@ -35,7 +35,7 @@ else:
     GenMACCSKeys = lazy_import("rdkit.Chem.MACCSkeys", "GenMACCSKeys")
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 def prepare_second_fingerprints(
@@ -241,7 +241,7 @@ def prepare_second_pool(
             if valid[cached_row]:
                 keys.append(key)
                 smiles.append(value)
-                masses.append(cast(float, cached_mass.item(cached_row)))
+                masses.append(cast(float, cached_mass.item(cached_row)))  # ty: ignore[redundant-cast] -- Basedpyright reads numpy's `.item()` as Any.
                 origins.append(2)
                 source_rows.append(cached_row)
     mass = np.array(masses)

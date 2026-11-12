@@ -42,7 +42,7 @@ from priml.testing.golden import mismatches, read_tensors
 from priml.train.parallelism import NoParallel
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from torch import Tensor

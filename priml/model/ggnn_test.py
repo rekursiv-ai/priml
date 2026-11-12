@@ -22,7 +22,7 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_tensor_golden, rng_fingerprint
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 HIDDEN: Final = 5
 INPUT: Final = 3
 EDGE_TYPES: Final = 4

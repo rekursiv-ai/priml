@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import DepthIndex, LayerCache
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class _Cache(nn.Module):

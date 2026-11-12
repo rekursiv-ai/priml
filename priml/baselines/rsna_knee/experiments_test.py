@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     import pytest
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_released_recipe_pins_every_finalized_field() -> None:

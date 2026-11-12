@@ -23,7 +23,7 @@ from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.testing.golden import assert_tensor_golden, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Callable

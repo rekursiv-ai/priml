@@ -43,7 +43,7 @@ else:
     CalcMolFormula = lazy_import("rdkit.Chem.rdMolDescriptors", "CalcMolFormula")
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 
 def prepare_glacier_graphs(

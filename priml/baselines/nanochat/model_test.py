@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import HasAttention
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 VOCAB: Final = 5
 SEQ: Final = 3
 GOLDEN_VOCAB: Final = 3

@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from priml.loss.custom_types import LossOutput
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 class RecordingCompiler:

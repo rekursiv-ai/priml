@@ -42,7 +42,7 @@ from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.convextok.scaling import ScaledProgram, scale_program
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 # Measured on this LP: iterates within 7e-15 of cuOpt's (relative to their largest
 # entry) at every check; the bound leaves room for other devices' reduction orders.
 _ITERATE_TOLERANCE: Final = 1e-12

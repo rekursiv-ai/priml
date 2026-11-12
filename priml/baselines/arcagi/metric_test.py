@@ -69,7 +69,7 @@ from priml.data.color_dihedral import ColorDihedral
 from priml.train.checkpointer import SyncLocalStateDictStorer
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 if TYPE_CHECKING:

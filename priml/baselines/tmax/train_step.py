@@ -887,11 +887,13 @@ def _tokenizer_pad_token_id(checkpoint: Path) -> int:
         raise ValueError(f"{path} could not be read: {error}.") from error
     token = tokenizer_config.get("pad_token")
     if not isinstance(token, str):
-        token = from_plain(token, dict[str, object], default={}).get("content")
+        token = from_plain(token, dict[str, object], default=dict[str, object]()).get(
+            "content",
+        )
     decoder = from_plain(
         tokenizer_config.get("added_tokens_decoder"),
         dict[str, dict[str, object]],
-        default={},
+        default=dict[str, dict[str, object]](),
     )
     if isinstance(token, str):
         # The decoder maps every special token's id to its record, which is

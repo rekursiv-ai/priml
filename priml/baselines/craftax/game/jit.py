@@ -88,7 +88,7 @@ import numba.core.types as nbtypes
 import numpy as np
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     from numba.core.typing.templates import Signature
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 """``game/``: the package whose sources stamp every kernel's cache."""
 
 

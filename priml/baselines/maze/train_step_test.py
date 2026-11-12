@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from priml.baselines.maze.train_step import BoundaryLossTrainStep
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 SIDE: Final = 2
 SLOTS: Final = 3

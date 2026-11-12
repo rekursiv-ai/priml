@@ -48,7 +48,7 @@ from priml.train import parallelism
 from priml.train.parallelism import FullySharded, NoParallel
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepOutput

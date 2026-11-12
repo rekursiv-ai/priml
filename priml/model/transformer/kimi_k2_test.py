@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def hf_config(**overrides: object) -> dict[str, object]:

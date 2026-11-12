@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 
     from priml.baselines.craftax.game.state import Array1
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _SLOTS: Final = 3
 _ADD_ONE: Final = (
     "from priml.baselines.craftax.game.jit import jit\n\n\n"

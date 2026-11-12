@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from priml.model.custom_types import DepthIndex, TensorModule
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def _head(tie: bool = False) -> Sequential.Config:

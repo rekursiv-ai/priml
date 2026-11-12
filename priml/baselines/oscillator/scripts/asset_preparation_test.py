@@ -20,7 +20,7 @@ from priml.baselines.oscillator.pretrained_test import _assets
 from priml.baselines.oscillator.scripts import asset_preparation
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 

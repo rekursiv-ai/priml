@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from priml.baselines.mlsbench.dl.vision.upstream import Batches
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD.parent / "testdata"
 

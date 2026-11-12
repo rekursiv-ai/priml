@@ -27,7 +27,7 @@ from priml.baselines.mlsbench.tl.poison_robust_learning.scripts import (
 from priml.testing.golden import mismatches, read_tensors
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD / "testdata"
 

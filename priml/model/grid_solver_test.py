@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from priml.model.prefix import PrefixConfig
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _GOLDEN_DIR: Final = _CWD.parent / "baselines" / "sudoku" / "testdata"
 
 

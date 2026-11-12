@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 GOLDEN: Final = _CWD / "testdata" / "synthetic_pixels.pt"
 SYNSETS: Final = ("n00000000", "n00000001", "n00000002")
 SIDES: Final = (5, 9)

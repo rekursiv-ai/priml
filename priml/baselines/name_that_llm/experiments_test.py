@@ -34,7 +34,7 @@ from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import assert_pprint_golden, assert_tensor_golden_part
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_exp000_pprint() -> None:

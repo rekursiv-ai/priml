@@ -32,7 +32,7 @@ else:
     torch = lazy_import("torch")
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def main(argv: list[str] | None = None) -> int:

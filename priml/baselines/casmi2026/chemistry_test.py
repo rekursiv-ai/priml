@@ -78,7 +78,7 @@ if TYPE_CHECKING:
     from priml.baselines.casmi2026.custom_types import IdentityRow
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_complete_numeric_chemical_assets_and_selected_bit_order(

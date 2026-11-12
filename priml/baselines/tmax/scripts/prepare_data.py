@@ -250,7 +250,11 @@ def _verify_staged_assets(
         raise ValueError(f"{manifest_path} could not be read: {error}.") from error
     _verify_manifest_identity(payload, manifest_path)
     try:
-        recorded = from_plain(payload.get("files"), dict[str, str], default={})
+        recorded = from_plain(
+            payload.get("files"),
+            dict[str, str],
+            default=dict[str, str](),
+        )
     except ReadError as error:
         raise TypeError(f"{manifest_path} records no file map.") from error
     # The writer records each SHA-256 hash as a 64-character string.

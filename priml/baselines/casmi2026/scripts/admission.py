@@ -19,7 +19,7 @@ from priml.baselines.casmi2026.scripts.manifest import (
 from priml.paths import validated_output_path
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 if TYPE_CHECKING:
