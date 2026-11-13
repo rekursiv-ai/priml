@@ -370,19 +370,6 @@ repos:
         require_serial: true
         types_or: [python, pyi, jupyter]
 
-  # TypeScript, JavaScript and CSS formatting; settings and exclusions live in
-  # biome.json. `files` narrows upstream's list, which also formats JSON goldens
-  # and OpenAPI schemas that drift tests compare byte for byte. HTML stays out:
-  # Biome cannot parse the Liquid and Python templates most of it holds. An
-  # export's `biome_format` transform re-wraps what its rewrites changed.
-  - repo: https://github.com/biomejs/pre-commit
-    rev: v2.6.7
-    hooks:
-      - id: biome-format
-        name: biome-format
-        stages: [pre-commit]
-        files: \.(tsx?|[cm]ts|jsx?|[cm]js|css)$
-
   - repo: local
     hooks:
       # The Copybarista-PR-Title/Body trailer is replayed into the PUBLIC export
@@ -599,6 +586,19 @@ repos:
           - codedoctor.affected
           - --fixer
           - codedoctor.assert_isinstance
+
+  # TypeScript, JavaScript and CSS formatting; settings and exclusions live in
+  # biome.json. `files` narrows upstream's list, which also formats JSON goldens
+  # and OpenAPI schemas that drift tests compare byte for byte. HTML stays out:
+  # Biome cannot parse the Liquid and Python templates most of it holds. An
+  # export's `biome_format` transform re-wraps what its rewrites changed.
+  - repo: https://github.com/biomejs/pre-commit
+    rev: v2.6.7
+    hooks:
+      - id: biome-format
+        name: biome-format
+        stages: [pre-commit]
+        files: \.(tsx?|[cm]ts|jsx?|[cm]js|css)$
 
   # rustfmt rewrites in place, then clippy denies every warning, each once per
   # crate a change touches: the nearest `Cargo.toml` above each file.
