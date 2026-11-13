@@ -118,7 +118,7 @@ function recorder() {
   };
   ctx.translate = (x, y) => ctx.transform(1, 0, 0, 1, x, y);
   // A sheet sprite at (sx, sy) of 16-pixel cells is sprite sy + sx / 16.
-  ctx.drawImage = (image, sx, sy, sw, sh, dx, dy, dw, dh) => {
+  ctx.drawImage = (_image, sx, sy, _sw, _sh, dx, dy, dw, dh) => {
     const corners = [
       [dx, dy],
       [dx + dw, dy],
@@ -229,8 +229,11 @@ async function mounted(
 function windowOf(ops) {
   const cells = {},
     dark = [];
-  for (const [op, id, x, y, w, h] of ops) {
-    if (op === "image" && y < 144) (cells[`${y / 16},${x / 16}`] ??= []).push(id);
+  for (const [op, id, x, y] of ops) {
+    if (op === "image" && y < 144) {
+      cells[`${y / 16},${x / 16}`] ??= [];
+      cells[`${y / 16},${x / 16}`].push(id);
+    }
     if (op === "rect" && id === "#111719") dark.push(`${y / 16},${x / 16}`);
   }
   return { cells, dark };
@@ -673,7 +676,7 @@ test("a v2 bundle turns each projectile the way it flies, as original Craftax do
   const bytes = Buffer.alloc(5 * V2);
   for (let t = 0; t < 5; t++) cut.copy(bytes, t * V2, t * RECORD, (t + 1) * RECORD);
   const placed = [];
-  kinds.forEach(([value, sprite], kind) =>
+  kinds.forEach(([value, sprite], kind) => {
     [1, 2, 3, 4].forEach((facing, k) => {
       for (const [channel, shift] of [
         [6, 0],
@@ -685,8 +688,8 @@ test("a v2 bundle turns each projectile the way it flies, as original Craftax do
         bytes[V2 + RECORD + cell] |= facing << shift;
         placed.push({ cell, sprite, facing });
       }
-    }),
-  );
+    });
+  });
   const { view, ctx } = await mounted(zlib.gzipSync(bytes));
   assert.equal(view.decisions, 4);
   ctx.ops.length = 0;

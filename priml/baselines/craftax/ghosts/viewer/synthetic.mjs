@@ -181,7 +181,7 @@ function episode(rand, base, tier, window) {
     col = 24,
     facing = 3,
     creatures = [];
-  const escape = Math.floor(rand() * length);
+  const escapeAt = Math.floor(rand() * length);
   floorFirst[0] = 0;
   for (let t = 0; ; t++) {
     states.set([floor, row, col, facing], t * 4);
@@ -200,7 +200,9 @@ function episode(rand, base, tier, window) {
         c[2] = Math.max(0, Math.min(47, c[2] + Math.floor(rand() * 3) - 1));
         c[3] = Math.max(0, Math.min(47, c[3] + Math.floor(rand() * 3) - 1));
       }
-      const into = (windows[Math.floor(t / window)] ??= new Bytes());
+      const slot = Math.floor(t / window);
+      windows[slot] ??= new Bytes();
+      const into = windows[slot];
       into.push(creatures.length);
       for (const [klass, species, r, c, facing] of creatures)
         into.push((klass << 4) | species, r, c, facing);
@@ -253,7 +255,7 @@ function episode(rand, base, tier, window) {
           byte |= 0x40;
         }
       }
-      if (t === escape) {
+      if (t === escapeAt) {
         row = Math.floor(rand() * MAP);
         col = Math.floor(rand() * MAP);
         facing = 1 + Math.floor(rand() * 4);
@@ -327,13 +329,13 @@ function keptRuns(rand, decisions) {
     if (keep || stop === decisions) runs.push([at, stop]);
     at = stop;
   }
-  return runs.reduce(
-    (merged, run) =>
-      merged.length && merged.at(-1)[1] === run[0]
-        ? ((merged.at(-1)[1] = run[1]), merged)
-        : [...merged, run],
-    [],
-  );
+  const merged = [];
+  for (const run of runs) {
+    const last = merged.at(-1);
+    if (last && last[1] === run[0]) last[1] = run[1];
+    else merged.push(run);
+  }
+  return merged;
 }
 
 function stats(episodes) {

@@ -406,9 +406,9 @@ async function check(chrome, url, out, failures, only) {
   if (run("twoRows") && (await open(chrome, url)))
     report.twoRows = await twoRows(chrome, url, out, failures);
   if (run("follow") && (await open(chrome, url)))
-    report.follow = await followLayout(chrome, url, out, failures, 3);
+    report.follow = await followLayout(chrome, out, 3);
   if (run("follow") && (await open(chrome, url)))
-    report.followTwo = await followLayout(chrome, url, out, failures, 2);
+    report.followTwo = await followLayout(chrome, out, 2);
   if (run("wins") && (await open(chrome, url)))
     report.wins = await winsView(chrome, out, failures);
   if (run("loop") && (await open(chrome, url)))
@@ -432,12 +432,7 @@ async function check(chrome, url, out, failures, only) {
   if (run("autoplay"))
     report.autoplay = await autoplayCase(chrome, `${url}__embed-fit.html`, failures);
   if (run("outlines"))
-    report.outlines = await outlineCase(
-      chrome,
-      `${url}__embed-fit.html`,
-      out,
-      failures,
-    );
+    report.outlines = await outlineCase(chrome, `${url}__embed-fit.html`);
   return report;
 }
 
@@ -951,7 +946,7 @@ const OUTLINES = `(async () => {
     legible.push([key, id, +share.toFixed(2)]);
   }
   return { ...found, legible }; })()`;
-async function outlineCase(chrome, url, out, failures) {
+async function outlineCase(chrome, url) {
   const report = [];
   for (const [width, height, mobile] of [
     [1440, 900, false],
@@ -1581,7 +1576,7 @@ const floorsFrom = (first, boards) =>
 // up, the boards are the window the rule gives and the run's board is
 // outlined. Then the conveyor in playback (conveyor). Screenshots it at
 // 1,440 px.
-async function followLayout(chrome, url, out, failures, boards) {
+async function followLayout(chrome, out, boards) {
   const report = { boards, sizes: [], steps: [] },
     name = boards === 3 ? "follow" : `follow-${boards}`;
   await chrome.evaluate(`(() => { ghosts.setFollowBoards(${boards}); const s = document.getElementById('layout'); s.value = 'follow'; s.dispatchEvent(new Event('change'));
@@ -2426,7 +2421,8 @@ async function main() {
       only,
     );
   } finally {
-    Object.assign((report ??= {}), { errors: chrome.errors, failures });
+    report ??= {};
+    Object.assign(report, { errors: chrome.errors, failures });
     fs.writeFileSync(
       path.join(out, "render-check.json"),
       `${JSON.stringify(report, null, 1)}\n`,

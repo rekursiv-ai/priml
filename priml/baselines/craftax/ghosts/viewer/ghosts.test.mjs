@@ -76,8 +76,8 @@ function load(dir, tierName, setName, groups, sleep = false) {
   }));
   const set = D.episodeSet(world, loaded, manifest),
     run = D.precompute(set);
-  let step;
-  while (!(step = run.next()).done);
+  let step = run.next();
+  while (!step.done) step = run.next();
   return { manifest, tier, world, set, pre: step.value };
 }
 
@@ -302,9 +302,9 @@ test("the summary of each set and count equals the manifest's stats", () => {
 test("every decoded synthetic state equals the generator's, escapes included", () => {
   for (const tier of ["early", "high"]) {
     const { set } = load(synthetic, tier, "all", 2);
-    truth[tier].forEach((episode, e) =>
-      same(D.decodeEpisode(set, e).states, episode.states, `${tier} episode ${e}`),
-    );
+    truth[tier].forEach((episode, e) => {
+      same(D.decodeEpisode(set, e).states, episode.states, `${tier} episode ${e}`);
+    });
   }
   assert.ok(truth.high.some((e) => e.escapes.length));
 });
@@ -601,9 +601,9 @@ test("the light is the brightest of the world's and each living run's own, throu
 test("creature windows index every synthetic sample and reject a corrupt run", () => {
   const { tier, set } = load(synthetic, "high", "all", 2);
   const samples = creatureSamples(synthetic, tier, set);
-  truth.high.forEach((episode, e) =>
-    assert.deepEqual(samples[e], episode.samples, `episode ${e}`),
-  );
+  truth.high.forEach((episode, e) => {
+    assert.deepEqual(samples[e], episode.samples, `episode ${e}`);
+  });
   assert.ok(
     samples
       .flat()
