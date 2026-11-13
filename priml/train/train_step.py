@@ -625,7 +625,7 @@ class TrainStep:
                 grad_norm = self.last_grad_norm.item()
                 if not math.isfinite(grad_norm):
                     self.skipped_steps += 1
-                    # pragma: no mutate start -- Log text only.
+                    # pragma: no mutate[diagnostic-text] start
                     logger.warning(
                         "Skipping optimizer update at step %d: gradient norm is "
                         "%s (%d skipped so far).",
