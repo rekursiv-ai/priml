@@ -854,7 +854,9 @@ def _nan_grad_step(*, skip_step_on_nonfinite_grad: bool) -> TrainStep:
     return config.make()
 
 
-def test_nonfinite_grad_skips_update_when_enabled() -> None:
+def test_nonfinite_grad_skips_update_when_enabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     torch.manual_seed(0)
     trainable = _nan_grad_step(skip_step_on_nonfinite_grad=True)
     before = [p.detach().clone() for p in trainable.model.parameters()]
@@ -867,6 +869,17 @@ def test_nonfinite_grad_skips_update_when_enabled() -> None:
     assert trainable.skipped_steps == 1
     assert trainable.global_step == 1
     assert result.get("metrics") == {"skipped_steps": 1}
+    (args,) = [
+        record.args
+        for record in caplog.records
+        if record.name == TrainStep.__module__ and record.levelname == "WARNING"
+    ]
+    assert isinstance(args, tuple)
+    attempted_step, grad_norm, skipped_steps = args
+    assert attempted_step == 1
+    assert isinstance(grad_norm, float)
+    assert math.isnan(grad_norm)
+    assert skipped_steps == 1
 
 
 def test_nonfinite_grad_reads_the_norm_once(monkeypatch: pytest.MonkeyPatch) -> None:
