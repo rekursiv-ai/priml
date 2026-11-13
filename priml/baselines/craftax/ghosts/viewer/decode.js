@@ -13,6 +13,7 @@
 // set (the wins set, FORMAT.md keeps.bin) episode e shows, at u < L_e, the
 // state before the u-th decision its kept runs cover, and has ended at
 // u >= L_e; decisionAt is that map, stepOf its inverse.
+// biome-ignore lint/correctness/noUnusedVariables: a classic script's global, which ghosts.js and the checks read
 var GhostDecode = (() => {
   const MAP = 48,
     FLOORS = 9,
@@ -453,10 +454,10 @@ var GhostDecode = (() => {
       cur.targetCol = col + STEP_COL[facing];
       flags = INTERACTED;
     }
-    const escape = set.escape[e],
+    const escapeEvent = set.escape[e],
       k = cur.escape[e];
-    if (k < escape.decision.length && escape.decision[k] === t) {
-      const [floors, rows, cols, facings] = escape.state;
+    if (k < escapeEvent.decision.length && escapeEvent.decision[k] === t) {
+      const [floors, rows, cols, facings] = escapeEvent.state;
       if (floors[k] !== floor) flags |= NEW_FLOOR | ENTERED;
       else if (rows[k] !== row || cols[k] !== col) flags |= ENTERED;
       cur.floor[e] = floors[k];
@@ -695,12 +696,12 @@ var GhostDecode = (() => {
     for (const { tile } of runs) for (const at of tile) tileStart[at + 1]++;
     for (let at = 0; at < TILES; at++) tileStart[at + 1] += tileStart[at];
     const fill = tileStart.slice(0, TILES);
-    runs.forEach(({ tile }, e) =>
+    runs.forEach(({ tile }, e) => {
       tile.forEach((at, k) => {
         tileRun[fill[at]] = e;
         tileChange[fill[at]++] = k;
-      }),
-    );
+      });
+    });
     return { runs, tileStart, tileRun, tileChange };
   }
 
@@ -1047,7 +1048,10 @@ var GhostDecode = (() => {
       j--
     ) {
       const cell = states[4 * j + 1] * MAP + states[4 * j + 2];
-      if (cell !== last) out.push((last = cell));
+      if (cell !== last) {
+        last = cell;
+        out.push(cell);
+      }
     }
     return Int32Array.from(out.reverse());
   }

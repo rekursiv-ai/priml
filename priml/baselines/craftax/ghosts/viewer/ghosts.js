@@ -299,7 +299,9 @@
       drawTurned(ctx, app.sprites, id, x + 1, y + 1, 9, facing);
       if (kind) ring(ctx, x + 5.5, y + 5.5, kind, scale);
     };
-    PLAYER_SPRITES.forEach((id, facing) => mark(0, facing, "#fff", id, "ghost"));
+    PLAYER_SPRITES.forEach((id, facing) => {
+      mark(0, facing, "#fff", id, "ghost");
+    });
     mark(0, 4, "#b8c4ff", ASLEEP, "ghost");
     for (let klass = 0; klass < 5; klass++) {
       for (let facing = 0; facing < (klass < 3 ? 1 : 5); facing++) {
@@ -327,9 +329,8 @@
       { pad, cell } = atlas;
     let [image, x, y] = [atlas, col * cell, row * cell];
     if (shade > 0) {
-      const scratch = (app.shadeScratch ??= document
-        .createElement("canvas")
-        .getContext("2d"));
+      app.shadeScratch ??= document.createElement("canvas").getContext("2d");
+      const scratch = app.shadeScratch;
       scratch.canvas.width = scratch.canvas.height = cell;
       scratch.drawImage(atlas, x, y, cell, cell, 0, 0, cell, cell);
       scratch.globalCompositeOperation = "source-atop";
@@ -638,7 +639,7 @@
       mapped = !!collection.time_map;
     Object.assign(app, { tier, collection, count });
     if (app.page) updatePickers();
-    useFollows(mapped, entering);
+    showFollows(mapped, entering);
     const note = $("set-note");
     if (note) note.hidden = !mapped;
     if (note && mapped) {
@@ -676,8 +677,7 @@
       const set = D.episodeSet(app.world, loaded, app.manifest),
         run = D.precompute(set);
       const quiet = mapped ? null : D.parseTimeline(timeline, set.maxDecisions);
-      let step;
-      while (!(step = run.next()).done) {
+      for (let step = run.next(); !step.done; step = run.next()) {
         setStatus(`Decoding ${title(tier.name)}: ${Math.round(100 * step.value)}%`);
         await new Promise((resolve) => setTimeout(resolve));
         if (version !== generation) return;
@@ -703,7 +703,7 @@
       });
       allocate(set);
       follow($("follow")?.value ?? app.o.follow);
-      useTimeline();
+      applyTimeline();
       if (app.page) renderStats();
       // The page opens where the runs have spread out: a tenth of the median
       // run, at most 1,000 steps.
@@ -739,7 +739,7 @@
   // The follow choices and quiet-stretch toggle a set offers: a time-mapped
   // set adds its pinned unbroken run, the default on entering it, and has no
   // quiet stretches to skip.
-  function useFollows(mapped, entering) {
+  function showFollows(mapped, entering) {
     const select = $("follow"),
       pinned = select?.querySelector('option[value="pinned"]'),
       skip = $("skip-quiet")?.closest("label");
@@ -785,7 +785,7 @@
 
   // Every display step, or the builder's timeline with quiet stretches
   // collapsed; a time-mapped set has every step.
-  function useTimeline() {
+  function applyTimeline() {
     app.timeline =
       app.skipQuiet && app.quiet ? app.quiet.timeline : D.realTime(app.set.maxSteps);
     const seek = $("seek"),
@@ -813,8 +813,10 @@
     ensureWindows();
     app.frameTimes.push(performance.now() - start);
     if (app.frameTimes.length > 4000) app.frameTimes.splice(0, 2000);
-    if (app.policy?.view && !$("policy-panel").hidden)
-      app.policy.view.show((app.policyShown = followedDecision()), followedSample());
+    if (app.policy?.view && !$("policy-panel").hidden) {
+      app.policyShown = followedDecision();
+      app.policy.view.show(app.policyShown, followedSample());
+    }
     app.o.onDecision?.(followedDecision(), { playing, sample: followedSample() });
   }
 
@@ -1310,9 +1312,9 @@
       col = states[4 * s + 2],
       ctx = ctxs[floor],
       z = followScale(ctx);
-    app.panels.forEach((panel, f) =>
-      panel.article.classList.toggle("followed", f === floor),
-    );
+    app.panels.forEach((panel, f) => {
+      panel.article.classList.toggle("followed", f === floor);
+    });
     const points = D.pathTail(states, s, FOLLOWED_MOVES),
       bands = Array.from({ length: 16 }, () => new Path2D());
     for (let i = 1; i < points.length; i++) {
@@ -2220,7 +2222,7 @@
     on("skip-quiet", "change", (event) => {
       app.skipQuiet = event.target.checked;
       if (!app.pb) return;
-      useTimeline();
+      applyTimeline();
       goTo(app.pb.t);
     });
     on("show-sleep", "change", (event) => {
@@ -2708,8 +2710,10 @@
           `the policy view holds ${policy.view.decisions} decisions, not the ${policy.decisions} its manifest says.`,
         );
     }
-    if (app.pb)
-      policy.view.show((app.policyShown = followedDecision()), followedSample());
+    if (app.pb) {
+      app.policyShown = followedDecision();
+      policy.view.show(app.policyShown, followedSample());
+    }
   }
 
   // The structure an embed's markup needs, injected once; the host page's

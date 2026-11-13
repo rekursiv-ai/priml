@@ -90,6 +90,7 @@ function drawTurned(ctx, sprites, id, row, col, size, facing) {
 // necromancer in sight. With facings at cells[facings] (one byte per cell, the
 // enemy projectile's facing in bits 0-3, the player's in bits 4-7; -1 for
 // none), each projectile is turned the way it flies.
+// biome-ignore lint/correctness/noUnusedVariables: a classic script's global, which viewer.html and policy_view.js call
 function drawWindow(
   ctx,
   sprites,
@@ -226,6 +227,7 @@ function inventoryItem(label, icon, count) {
   card.append(name);
   return card;
 }
+// biome-ignore lint/correctness/noUnusedVariables: a classic script's global, which viewer.html and policy_view.js call
 function renderHud(i) {
   const base = at(i, 0);
   $("resources").replaceChildren(
