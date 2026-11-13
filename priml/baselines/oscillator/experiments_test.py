@@ -31,11 +31,17 @@ from priml.baselines.oscillator.experiments import (
     exp_smoke,
 )
 from priml.baselines.oscillator.forces import CorrectedOscillator
+from priml.baselines.oscillator.hidden import HiddenData, HiddenDomain, LibraryShooting
 from priml.baselines.oscillator.nonlinear import (
     HistoryAblation,
     KernelCorrection,
     NeuralForecast,
     PolynomialKernel,
+)
+from priml.baselines.oscillator.regime_benchmark import (
+    RegimeBenchmark,
+    RegimeCampaign,
+    RegimeFamily,
 )
 from priml.baselines.oscillator.suite import BenchmarkSuite
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
@@ -53,9 +59,15 @@ def test_each_experiment_names_itself_and_pins_no_seed() -> None:
     assert ForecastStudy.Config().experiment_name == ""
     assert ForecastStudy.Config().seed is None
     names = [name for name in vars(experiments) if name.startswith("exp")]
-    assert set(names) == {f"exp{index:03d}" for index in range(41)} | {"exp_smoke"}
+    assert set(names) == {f"exp{index:03d}" for index in range(55)} | {"exp_smoke"}
     for name in names:
         cfg = resolve_config(f"{experiments.__name__}.{name}")
+        if isinstance(cfg, RegimeCampaign.Config):
+            assert name in {"exp045", "exp046", "exp047", "exp048"}
+            continue
+        if isinstance(cfg, RegimeBenchmark.Config):
+            assert cfg.experiment_name == name
+            continue
         if name == "exp040":
             assert isinstance(cfg, BenchmarkSuite.Config)
             assert all(recipe.study.seed is None for recipe in cfg.recipes)
@@ -316,6 +328,55 @@ def _known_equation(task: DelayedStudy.Config) -> DelayedCalibration.Config:
     simulator = task.data.reference.copy_tree()
     simulator.gain = 0.0
     return DelayedCalibration.Config(simulator=simulator)
+
+
+def test_exp049_pins_the_hidden_partner_benchmark() -> None:
+    cfg = experiments.exp049()
+    baseline = experiments.exp044()
+    assert cfg.working_dir == baseline.working_dir.with_name("exp049")
+    assert cfg.data == HiddenData.Config()
+    assert cfg.recipes[:-1] == [
+        recipe
+        for recipe in baseline.recipes
+        if recipe.name not in {"fixed_physics", "whole_history_physics"}
+    ]
+    shooting = cfg.recipes[-1]
+    assert shooting.name == "library_shooting"
+    assert shooting.method == LibraryShooting.Config()
+    assert shooting.seeds == [2021]
+    assert cfg.comparisons == [
+        *((recipe.name, "dlinear") for recipe in cfg.recipes[1:]),
+        ("library_shooting", "ridge"),
+        ("library_shooting", "history_net"),
+    ]
+    assert cfg.development == [RegimeFamily.Config(domain=HiddenDomain.Config())]
+    assert cfg.audit == [
+        RegimeFamily.Config(
+            name="strong_coupling",
+            seed=20_261_101,
+            domain=HiddenDomain.Config(coupling=(0.6, 1.0)),
+        ),
+        RegimeFamily.Config(
+            name="dry_friction",
+            seed=20_261_102,
+            domain=HiddenDomain.Config(friction=(0.06, 0.12)),
+        ),
+        RegimeFamily.Config(
+            name="resonant_partner",
+            seed=20_261_103,
+            domain=HiddenDomain.Config(
+                stiffness=(0.95, 1.05),
+                partner_stiffness=(0.95, 1.05),
+                coupling=(0.3, 0.5),
+                partner_damping=(0.0, 0.01),
+            ),
+        ),
+        RegimeFamily.Config(
+            name="hardening",
+            seed=20_261_104,
+            domain=HiddenDomain.Config(stiffness=(2.0, 3.0), cubic=(0.8, 1.5)),
+        ),
+    ]
 
 
 if __name__ == "__main__":
