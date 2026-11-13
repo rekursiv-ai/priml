@@ -1,69 +1,38 @@
-#!/bin/sh
-# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
-# fmt: off
-'''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
-Check that every priml text golden has exactly the test that owns it.
+"""Check that every priml text golden has exactly the test that owns it.
 
 A golden is a ``testdata/<name>.txt`` beside the ``*_test.py`` that reads or
 asserts it. Two failures are possible: a test claims a golden that is not
 there, or a golden lies in ``testdata/`` that no test claims. Both are local to
-one directory -- a test claims goldens only in its own ``testdata/`` -- so
-checking the directories a change touches checks everything it can break.
-
-Examples:
-  python -m priml.testing.golden_owners priml/a/b_test.py
-  python -m priml.testing.golden_owners priml/a/testdata/c.txt
-
-'''
-# fmt: on
+one directory -- a test claims goldens only in its own ``testdata/`` -- so the
+package's test checks it directory by directory.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
 
-import argparse
 import ast
 import re
-import sys
 
 
-_THIS: Final[Path] = Path(__file__).resolve()
-_CWD: Final[Path] = _THIS.parent
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+__all__ = ["golden_directories", "ownership"]
 
 
-__all__ = ["main", "ownership"]
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Check the golden owners of each directory ``argv``'s paths touch.
+def golden_directories(package: Path) -> list[Path]:
+    """Return every directory of ``package`` holding tests or goldens.
 
     Args:
-      argv: Changed paths; defaults to the process arguments.
+      package: A package root.
 
     Returns:
-      exit_code: 0 when every checked directory's goldens have exact owners.
+      directories: Each directory with a ``*_test.py`` or a ``testdata/``, sorted.
 
     """
-    parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2] if __doc__ else None,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    return sorted(
+        {test.parent for test in package.rglob("*_test.py")}
+        | {data.parent for data in package.rglob("testdata")},
     )
-    _add_arguments(parser)
-    flags = cast(_Flags, parser.parse_args(argv))
-    failures: list[str] = []
-    for directory in _directories(flags.paths):
-        missing, unclaimed = ownership(directory)
-        failures.extend(f"{path}: claimed, but no such golden" for path in missing)
-        failures.extend(f"{path}: no test claims this golden" for path in unclaimed)
-    for failure in sorted(failures):
-        print(failure, file=sys.stderr)  # noqa: T201 -- the gate's report.
-    return 1 if failures else 0
 
 
 def ownership(directory: Path) -> tuple[set[Path], set[Path]]:
@@ -114,32 +83,6 @@ def ownership(directory: Path) -> tuple[set[Path], set[Path]]:
         pprint_claims - text_goldens,
         text_goldens - pprint_claims - other_text_claims,
     )
-
-
-# A change to this rule itself rechecks every directory of the package it lives in.
-def _directories(paths: Iterable[str]) -> list[Path]:
-    """Return the test directory each changed test file or golden belongs to."""
-    directories: set[Path] = set()
-    for name in paths:
-        path = Path(name)
-        if path.parent.name == "testdata":
-            directories.add(path.parent.parent)
-        elif path.name.endswith("_test.py"):
-            directories.add(path.parent)
-        elif path.name == _THIS.name:
-            package = path.parent.parent
-            directories.update(test.parent for test in package.rglob("*_test.py"))
-            directories.update(data.parent for data in package.rglob("testdata"))
-    return sorted(directories)
-
-
-class _Flags(Protocol):
-    paths: list[str]
-
-
-def _add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Register flags on ``parser``."""
-    parser.add_argument("paths", nargs="*", help="Changed test files or goldens.")
 
 
 def _call_name(call: ast.Call) -> str | None:
@@ -362,8 +305,3 @@ def _used_text_paths(scan: _TreeScan, test_file: Path) -> set[Path]:
     if scan.reads_sites:
         claims.add(test_file.parent / "testdata" / "reference_sites.txt")
     return claims
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-# vim: ft=python

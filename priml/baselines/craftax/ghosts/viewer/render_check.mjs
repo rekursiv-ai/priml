@@ -55,23 +55,44 @@
 //
 // Writes OUT_DIR/render-check.json; exits 1 on any failed check, console
 // error, uncaught exception or crash.
-import { spawn } from 'node:child_process';
-import fs from 'node:fs';
-import http from 'node:http';
-import os from 'node:os';
-import path from 'node:path';
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // The types the Artifact host serves for this site's files; it refuses any other.
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.txt': 'text/plain' };
-const SKELETON = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">',
-  '<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px/1.4 system-ui,sans-serif;background:#fafaf7}img{max-width:100%}[hidden]{display:none!important}</style></head><body>',
-  '</body></html>'];
+const TYPES = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".txt": "text/plain",
+};
+const SKELETON = [
+  '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">',
+  "<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px/1.4 system-ui,sans-serif;background:#fafaf7}img{max-width:100%}[hidden]{display:none!important}</style></head><body>",
+  "</body></html>",
+];
 
 // The embed's test page: the figure two screens down, between spacers.
 function embedPage(manifest) {
-  const tier = manifest.tiers.at(-1), set = tier.sets.find(s => s.name === 'short') ?? tier.sets[0];
-  const floors = ['#4f9a3d', '#8b7b67', '#b48b3b', '#3c8e86', '#c9a227', '#7f5b9c', '#d5582b', '#5aa6d5', '#6f7192'].map((c, f) => `--floor-${f}:${c}`).join(';');
+  const tier = manifest.tiers.at(-1),
+    set = tier.sets.find((s) => s.name === "short") ?? tier.sets[0];
+  const floors = [
+    "#4f9a3d",
+    "#8b7b67",
+    "#b48b3b",
+    "#3c8e86",
+    "#c9a227",
+    "#7f5b9c",
+    "#d5582b",
+    "#5aa6d5",
+    "#6f7192",
+  ]
+    .map((c, f) => `--floor-${f}:${c}`)
+    .join(";");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Embed check</title>
 <style>:root{--surface:#14171b;--ink:#f5f5f1;--ink-3:#bec2c7;--accent:#3fb89c;--rule:#20242a;--rule-strong:#2c3137;--death:#ff5a4c;${floors}}
 body{margin:0;background:#0a0c0e;color:#f5f5f1;font:15px/1.5 system-ui,sans-serif}.spacer{height:250vh;padding:16px}figure{margin:0 16px}</style></head><body>
@@ -91,90 +112,219 @@ body{margin:0;background:#0a0c0e;color:#f5f5f1;font:15px/1.5 system-ui,sans-seri
 // plot, following the pinned run of the last tier's unbroken (else wins) set
 // in the Follow layout with `boards` boards (?boards=3, else 2, as the blog).
 function embedFitPage(manifest, root, boards) {
-  const tier = manifest.tiers.find(t => t.sets.some(s => s.time_map?.unbroken != null)) ?? manifest.tiers.at(-1);
-  const set = tier.sets.find(s => s.name === 'unbroken') ?? tier.sets.find(s => s.time_map?.unbroken != null) ?? tier.sets[0];
-  const panel = fs.existsSync(path.join(root, 'policy-view.json')) && fs.existsSync(path.join(root, 'policy_view.js'));
-  const floors = ['#4f9a3d', '#8b7b67', '#b48b3b', '#3c8e86', '#c9a227', '#7f5b9c', '#d5582b', '#5aa6d5', '#6f7192'].map((c, f) => `--floor-${f}:${c}`).join(';');
+  const tier =
+    manifest.tiers.find((t) => t.sets.some((s) => s.time_map?.unbroken != null)) ??
+    manifest.tiers.at(-1);
+  const set =
+    tier.sets.find((s) => s.name === "unbroken") ??
+    tier.sets.find((s) => s.time_map?.unbroken != null) ??
+    tier.sets[0];
+  const panel =
+    fs.existsSync(path.join(root, "policy-view.json")) &&
+    fs.existsSync(path.join(root, "policy_view.js"));
+  const floors = [
+    "#4f9a3d",
+    "#8b7b67",
+    "#b48b3b",
+    "#3c8e86",
+    "#c9a227",
+    "#7f5b9c",
+    "#d5582b",
+    "#5aa6d5",
+    "#6f7192",
+  ]
+    .map((c, f) => `--floor-${f}:${c}`)
+    .join(";");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fitted embed check</title>
 <style>:root{--surface:#ffffff;--ink:#0b0d10;--ink-3:#4a5058;--accent:#1d8a73;--rule:#e4e6e2;--rule-strong:#cfd2cc;--death:#d93a30;--bg:#fafaf7;${floors}}
 body{margin:0;background:#fafaf7;color:#0b0d10;font:15px/1.5 system-ui,sans-serif}nav{position:sticky;top:0;z-index:50;height:60px;background:#fafaf7;border-bottom:1px solid #e4e6e2}
 main{max-width:640px;margin:0 auto;padding:0 16px}.intro{margin:0;height:100vh}figure{--bleed:12px;margin:0 calc(-1 * var(--bleed));padding:12px calc(var(--bleed) - 1px);border:1px solid #e4e6e2;border-radius:10px;background:#f4f4f0}@media (max-width:600px){figure{--bleed:8px}}figure h3{margin:0 0 8px;text-align:center}figure > [data-ghost-policy]{display:none}</style></head><body>
 <nav>Header</nav><main><p class="intro">Intro.</p>
-<figure id="fig"><h3>Winning games in one world</h3>${panel ? '<div data-ghost-policy data-bundle="policy-view.bin.gz.b64.txt" data-layout="side"></div>' : ''}
+<figure id="fig"><h3>Winning games in one world</h3>${panel ? '<div data-ghost-policy data-bundle="policy-view.bin.gz.b64.txt" data-layout="side"></div>' : ""}
 <div data-ghost-embed data-data-base="./" data-transport="b64" data-tier="${tier.name}" data-set="${set.name}" data-count="${set.counts.at(-1)}" data-follow="pinned" data-layout="follow" data-follow-boards="${boards}" data-controls="top" data-fit="column" data-scrubber="plot" data-speeds="10,50,100,250" data-speed="50"></div></figure>
 <p class="intro"></p></main>
-<script src="decode.js"></script>${panel ? '<script src="policy_view.js"></script>' : ''}<script src="ghosts.js"></script></body></html>`;
+<script src="decode.js"></script>${panel ? '<script src="policy_view.js"></script>' : ""}<script src="ghosts.js"></script></body></html>`;
 }
 
 function serve(root) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8')), here = path.dirname(new URL(import.meta.url).pathname);
+  const manifest = JSON.parse(
+      fs.readFileSync(path.join(root, "manifest.json"), "utf8"),
+    ),
+    here = path.dirname(new URL(import.meta.url).pathname);
   const server = http.createServer((request, response) => {
-    const name = decodeURIComponent(new URL(request.url, 'http://x').pathname).replace(/^\/$/, '/index.html');
-    if (name === '/__embed.html') { response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' }); response.end(embedPage(manifest)); return; }
-    if (name === '/__embed-fit.html') { response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' }); response.end(embedFitPage(manifest, root, new URL(request.url, 'http://x').searchParams.get('boards') === '3' ? 3 : 2)); return; }
-    const file = name === '/__policy_stub.js' ? path.join(here, 'policy_stub.js') : path.join(root, path.normalize(name));
-    if (!(file.startsWith(root) || file.startsWith(here)) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { response.writeHead(404); response.end(); return; }
+    const name = decodeURIComponent(new URL(request.url, "http://x").pathname).replace(
+      /^\/$/,
+      "/index.html",
+    );
+    if (name === "/__embed.html") {
+      response.writeHead(200, {
+        "Content-Type": "text/html",
+        "Cache-Control": "no-store",
+      });
+      response.end(embedPage(manifest));
+      return;
+    }
+    if (name === "/__embed-fit.html") {
+      response.writeHead(200, {
+        "Content-Type": "text/html",
+        "Cache-Control": "no-store",
+      });
+      response.end(
+        embedFitPage(
+          manifest,
+          root,
+          new URL(request.url, "http://x").searchParams.get("boards") === "3" ? 3 : 2,
+        ),
+      );
+      return;
+    }
+    const file =
+      name === "/__policy_stub.js"
+        ? path.join(here, "policy_stub.js")
+        : path.join(root, path.normalize(name));
+    if (
+      !(file.startsWith(root) || file.startsWith(here)) ||
+      !fs.existsSync(file) ||
+      fs.statSync(file).isDirectory()
+    ) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
     let body = fs.readFileSync(file);
-    if (name === '/index.html') body = Buffer.from(SKELETON[0] + SKELETON[1] + body.toString('utf8') + SKELETON[2]);
-    if (!TYPES[path.extname(file)]) { response.writeHead(415); response.end(); return; }
-    const headers = { 'Content-Type': TYPES[path.extname(file)], 'Cache-Control': 'no-store' };
+    if (name === "/index.html")
+      body = Buffer.from(
+        SKELETON[0] + SKELETON[1] + body.toString("utf8") + SKELETON[2],
+      );
+    if (!TYPES[path.extname(file)]) {
+      response.writeHead(415);
+      response.end();
+      return;
+    }
+    const headers = {
+      "Content-Type": TYPES[path.extname(file)],
+      "Cache-Control": "no-store",
+    };
     response.writeHead(200, headers);
     response.end(body);
   });
-  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server)));
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
 async function launch(binary) {
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ghosts-check-'));
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "ghosts-check-"));
   // Port 0, read back from the profile's DevToolsActivePort: a random port can be
   // taken. No deadline of our own: a live Chrome that has not opened DevTools yet
   // is slow, not broken (a cold first launch took up to 35 s on a CI runner),
   // and one that exited fails at once.
-  const proc = spawn(binary, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-    '--no-first-run', '--no-default-browser-check', '--window-size=1440,1000', 'about:blank'], { stdio: 'ignore' });
+  const proc = spawn(
+    binary,
+    [
+      "--headless=new",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profile}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--window-size=1440,1000",
+      "about:blank",
+    ],
+    { stdio: "ignore" },
+  );
   let exited = null;
-  proc.on('exit', (code, signal) => { exited = signal ?? code; });
-  proc.on('error', error => { exited = error.message; });
+  proc.on("exit", (code, signal) => {
+    exited = signal ?? code;
+  });
+  proc.on("error", (error) => {
+    exited = error.message;
+  });
   // A signal skips main's finally, and a Chrome left running is the user's own
   // Chrome app to macOS: it receives the links they open. Kill it on the way out.
-  const kill = () => { if (exited === null) proc.kill(); };
-  process.on('exit', kill);
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { kill(); process.exit(128 + os.constants.signals[signal]); });
+  const kill = () => {
+    if (exited === null) proc.kill();
+  };
+  process.on("exit", kill);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+    process.on(signal, () => {
+      kill();
+      process.exit(128 + os.constants.signals[signal]);
+    });
   let target;
   while (!target) {
-    if (exited !== null) throw Error(`Chrome exited (${exited}) before opening a debugging target.`);
+    if (exited !== null)
+      throw Error(`Chrome exited (${exited}) before opening a debugging target.`);
     await sleep(200);
     try {
-      const port = Number(fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]);
-      if (port) target = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === 'page');
-    } catch { /* not up */ }
+      const port = Number(
+        fs
+          .readFileSync(path.join(profile, "DevToolsActivePort"), "utf8")
+          .split("\n")[0],
+      );
+      if (port)
+        target = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(
+          (t) => t.type === "page",
+        );
+    } catch {
+      /* not up */
+    }
   }
   const ws = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
-  const pending = new Map(), errors = [];
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
+  });
+  const pending = new Map(),
+    errors = [];
   let id = 0;
-  ws.onmessage = event => {
+  ws.onmessage = (event) => {
     const m = JSON.parse(event.data);
-    if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
-    else if (m.method === 'Runtime.exceptionThrown') errors.push(m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text);
-    else if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') errors.push(m.params.args.map(a => a.value ?? a.description).join(' '));
-    else if (m.method === 'Inspector.targetCrashed') errors.push('The page crashed.');
+    if (m.id && pending.has(m.id)) {
+      pending.get(m.id)(m);
+      pending.delete(m.id);
+    } else if (m.method === "Runtime.exceptionThrown")
+      errors.push(
+        m.params.exceptionDetails.exception?.description ??
+          m.params.exceptionDetails.text,
+      );
+    else if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")
+      errors.push(m.params.args.map((a) => a.value ?? a.description).join(" "));
+    else if (m.method === "Inspector.targetCrashed") errors.push("The page crashed.");
   };
   // A command unanswered in 5 minutes fails the check instead of stalling it.
-  const send = (method, params = {}) => new Promise((resolve, reject) => {
-    const n = ++id, timer = setTimeout(() => { pending.delete(n); reject(Error(`${method} got no answer in 300 s.`)); }, 300_000);
-    pending.set(n, m => { clearTimeout(timer); if (m.error) reject(Error(`${method}: ${m.error.message}`)); else resolve(m.result); });
-    ws.send(JSON.stringify({ id: n, method, params }));
-  });
-  const evaluate = async expression => {
-    const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (r.exceptionDetails) throw Error(`${expression.slice(0, 80)}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const n = ++id,
+        timer = setTimeout(() => {
+          pending.delete(n);
+          reject(Error(`${method} got no answer in 300 s.`));
+        }, 300_000);
+      pending.set(n, (m) => {
+        clearTimeout(timer);
+        if (m.error) reject(Error(`${method}: ${m.error.message}`));
+        else resolve(m.result);
+      });
+      ws.send(JSON.stringify({ id: n, method, params }));
+    });
+  const evaluate = async (expression) => {
+    const r = await send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (r.exceptionDetails)
+      throw Error(
+        `${expression.slice(0, 80)}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`,
+      );
     return r.result.value;
   };
-  const close = async () => { ws.close(); proc.kill(); await sleep(500); fs.rmSync(profile, { recursive: true, force: true }); };
-  await send('Runtime.enable');
-  await send('Page.enable');
-  await send('Inspector.enable');
+  const close = async () => {
+    ws.close();
+    proc.kill();
+    await sleep(500);
+    fs.rmSync(profile, { recursive: true, force: true });
+  };
+  await send("Runtime.enable");
+  await send("Page.enable");
+  await send("Inspector.enable");
   return { send, evaluate, close, errors };
 }
 
@@ -195,7 +345,8 @@ const PIXELS = `(() => {
   return { base: all('base').map(c => count(c, true)), layer: [...all('layer'), ...all('heat')].map(c => count(c, false)), ghosts: all('ghosts').map(c => count(c, false)) };
 })()`;
 const LOADED = `(tier, set, count) => document.getElementById('status').textContent.startsWith('Loaded') && ghosts.tier.name === tier && ghosts.collection.id === set && ghosts.count === count`;
-const click = (container, key) => `document.querySelector('#${container} [data-key="${key}"]').click()`;
+const click = (container, key) =>
+  `document.querySelector('#${container} [data-key="${key}"]').click()`;
 const WINDOWS = `[...ghosts.windows.values()].every(w => w.index)`;
 
 async function seekTo(chrome, fraction) {
@@ -208,43 +359,85 @@ async function seekTo(chrome, fraction) {
 }
 
 async function screenshot(chrome, file) {
-  const { cssContentSize: size } = await chrome.send('Page.getLayoutMetrics');
-  const { data } = await chrome.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 } });
-  fs.writeFileSync(file, Buffer.from(data, 'base64'));
+  const { cssContentSize: size } = await chrome.send("Page.getLayoutMetrics");
+  const { data } = await chrome.send("Page.captureScreenshot", {
+    format: "png",
+    captureBeyondViewport: true,
+    clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
+  });
+  fs.writeFileSync(file, Buffer.from(data, "base64"));
 }
 
-const quantile = (values, q) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(q * values.length))];
-const timing = values => ({ n: values.length, mean: +(values.reduce((a, b) => a + b, 0) / Math.max(1, values.length)).toFixed(2), p50: +quantile(values, 0.5)?.toFixed(2), p95: +quantile(values, 0.95)?.toFixed(2), max: +Math.max(...values).toFixed(2) });
+const quantile = (values, q) =>
+  [...values].sort((a, b) => a - b)[
+    Math.min(values.length - 1, Math.floor(q * values.length))
+  ];
+const timing = (values) => ({
+  n: values.length,
+  mean: +(values.reduce((a, b) => a + b, 0) / Math.max(1, values.length)).toFixed(2),
+  p50: +quantile(values, 0.5)?.toFixed(2),
+  p95: +quantile(values, 0.95)?.toFixed(2),
+  max: +Math.max(...values).toFixed(2),
+});
 
 // Load the page afresh; the marker keeps the previous document's status from passing.
 async function open(chrome, url) {
-  await chrome.evaluate('window.previous = true');
-  await chrome.send('Page.navigate', { url });
-  return until(chrome, `!window.previous && document.getElementById('status')?.textContent.startsWith('Loaded')`, 180);
+  await chrome.evaluate("window.previous = true");
+  await chrome.send("Page.navigate", { url });
+  return until(
+    chrome,
+    `!window.previous && document.getElementById('status')?.textContent.startsWith('Loaded')`,
+    180,
+  );
 }
 
 async function check(chrome, url, out, failures, only) {
-  const report = { url, combos: [] }, run = name => !only || only.includes(name);
-  if (run('timing') && await open(chrome, url)) report.timing = await timingRuns(chrome, out, failures);
-  if (run('pages')) await pages(chrome, url, out, failures, report);
-  if (run('phone') && await open(chrome, url)) report.phone = await phone(chrome, out, failures);
-  if (run('oneRow') && await open(chrome, url)) report.oneRow = await rowLayout(chrome, url, out, failures);
-  if (run('reward') && await open(chrome, url)) report.reward = await rewardPlot(chrome, failures);
-  if (run('twoRows') && await open(chrome, url)) report.twoRows = await twoRows(chrome, url, out, failures);
-  if (run('follow') && await open(chrome, url)) report.follow = await followLayout(chrome, url, out, failures, 3);
-  if (run('follow') && await open(chrome, url)) report.followTwo = await followLayout(chrome, url, out, failures, 2);
-  if (run('wins') && await open(chrome, url)) report.wins = await winsView(chrome, out, failures);
-  if (run('loop') && await open(chrome, url)) report.loop = await loopCase(chrome, failures);
-  if (run('items') && await open(chrome, url)) report.items = await itemsCase(chrome, failures);
-  if (run('projectiles') && await open(chrome, url)) report.projectiles = await projectileCase(chrome, failures);
-  if (run('dark') && await open(chrome, url)) report.dark = await darkCase(chrome, failures);
-  if (run('replay') && await open(chrome, url)) report.replay = await replayCase(chrome, failures);
-  if (run('shade') && await open(chrome, url)) report.shade = await shadeCase(chrome, out, failures);
-  if (run('sleep') && await open(chrome, url)) report.sleep = await sleepCase(chrome, out, failures);
-  if (run('embed')) report.embed = await embedCase(chrome, `${url}__embed.html`, out, failures);
-  if (run('fit')) report.fit = await fitCase(chrome, `${url}__embed-fit.html`, out, failures);
-  if (run('autoplay')) report.autoplay = await autoplayCase(chrome, `${url}__embed-fit.html`, failures);
-  if (run('outlines')) report.outlines = await outlineCase(chrome, `${url}__embed-fit.html`, out, failures);
+  const report = { url, combos: [] },
+    run = (name) => !only || only.includes(name);
+  if (run("timing") && (await open(chrome, url)))
+    report.timing = await timingRuns(chrome, out, failures);
+  if (run("pages")) await pages(chrome, url, out, failures, report);
+  if (run("phone") && (await open(chrome, url)))
+    report.phone = await phone(chrome, out, failures);
+  if (run("oneRow") && (await open(chrome, url)))
+    report.oneRow = await rowLayout(chrome, url, out, failures);
+  if (run("reward") && (await open(chrome, url)))
+    report.reward = await rewardPlot(chrome, failures);
+  if (run("twoRows") && (await open(chrome, url)))
+    report.twoRows = await twoRows(chrome, url, out, failures);
+  if (run("follow") && (await open(chrome, url)))
+    report.follow = await followLayout(chrome, url, out, failures, 3);
+  if (run("follow") && (await open(chrome, url)))
+    report.followTwo = await followLayout(chrome, url, out, failures, 2);
+  if (run("wins") && (await open(chrome, url)))
+    report.wins = await winsView(chrome, out, failures);
+  if (run("loop") && (await open(chrome, url)))
+    report.loop = await loopCase(chrome, failures);
+  if (run("items") && (await open(chrome, url)))
+    report.items = await itemsCase(chrome, failures);
+  if (run("projectiles") && (await open(chrome, url)))
+    report.projectiles = await projectileCase(chrome, failures);
+  if (run("dark") && (await open(chrome, url)))
+    report.dark = await darkCase(chrome, failures);
+  if (run("replay") && (await open(chrome, url)))
+    report.replay = await replayCase(chrome, failures);
+  if (run("shade") && (await open(chrome, url)))
+    report.shade = await shadeCase(chrome, out, failures);
+  if (run("sleep") && (await open(chrome, url)))
+    report.sleep = await sleepCase(chrome, out, failures);
+  if (run("embed"))
+    report.embed = await embedCase(chrome, `${url}__embed.html`, out, failures);
+  if (run("fit"))
+    report.fit = await fitCase(chrome, `${url}__embed-fit.html`, out, failures);
+  if (run("autoplay"))
+    report.autoplay = await autoplayCase(chrome, `${url}__embed-fit.html`, failures);
+  if (run("outlines"))
+    report.outlines = await outlineCase(
+      chrome,
+      `${url}__embed-fit.html`,
+      out,
+      failures,
+    );
   return report;
 }
 
@@ -252,23 +445,46 @@ async function check(chrome, url, out, failures, only) {
 // every tier, set and count loads and draws.
 async function pages(chrome, url, out, failures, report) {
   report.opened = await open(chrome, url);
-  if (!report.opened) failures.push(`never loaded: ${await chrome.evaluate(`document.getElementById('status')?.textContent`)}`);
+  if (!report.opened)
+    failures.push(
+      `never loaded: ${await chrome.evaluate(`document.getElementById('status')?.textContent`)}`,
+    );
   if (!report.opened) return;
   const first = await chrome.evaluate(PIXELS);
   report.baseColours = first.base;
-  if (first.base.some(c => c < 8)) failures.push(`a base map is blank: ${first.base}`);
-  report.columnsDesktop = await chrome.evaluate(`getComputedStyle(document.getElementById('floors')).gridTemplateColumns.split(' ').length`);
-  if (report.columnsDesktop !== 3) failures.push(`desktop shows ${report.columnsDesktop} floor columns, not 3`);
+  if (first.base.some((c) => c < 8))
+    failures.push(`a base map is blank: ${first.base}`);
+  report.columnsDesktop = await chrome.evaluate(
+    `getComputedStyle(document.getElementById('floors')).gridTemplateColumns.split(' ').length`,
+  );
+  if (report.columnsDesktop !== 3)
+    failures.push(`desktop shows ${report.columnsDesktop} floor columns, not 3`);
   // The buttons work: the first tier's last count, picked by clicks.
-  const [tier0, set0, count0] = await chrome.evaluate(`(() => { const t = ghosts.manifest.tiers[0], s = ghosts.setsOf(t)[0]; return [t.name, s.id, s.counts.at(-1)]; })()`);
-  await chrome.evaluate(click('tiers', tier0));
-  await until(chrome, `ghosts.tier.name === ${JSON.stringify(tier0)} && !!document.querySelector('#counts [data-key="${count0}"]')`, 60);
-  await chrome.evaluate(click('sets', set0));
-  await chrome.evaluate(click('counts', count0));
-  report.clicked = await until(chrome, `(${LOADED})(${JSON.stringify(tier0)}, ${JSON.stringify(set0)}, ${count0})`, 300);
-  if (!report.clicked) failures.push(`clicking ${tier0}, ${set0} and ${count0} did not load them`);
-  const combos = await chrome.evaluate(`ghosts.manifest.tiers.flatMap(t => ghosts.setsOf(t).flatMap(s => s.counts.map((c, i) => [t.name, s.id, c, i === s.counts.length - 1])))`);
-  for (const [tier, set, count, last] of combos) report.combos.push(await combination(chrome, tier, set, count, last, out, failures));
+  const [tier0, set0, count0] = await chrome.evaluate(
+    `(() => { const t = ghosts.manifest.tiers[0], s = ghosts.setsOf(t)[0]; return [t.name, s.id, s.counts.at(-1)]; })()`,
+  );
+  await chrome.evaluate(click("tiers", tier0));
+  await until(
+    chrome,
+    `ghosts.tier.name === ${JSON.stringify(tier0)} && !!document.querySelector('#counts [data-key="${count0}"]')`,
+    60,
+  );
+  await chrome.evaluate(click("sets", set0));
+  await chrome.evaluate(click("counts", count0));
+  report.clicked = await until(
+    chrome,
+    `(${LOADED})(${JSON.stringify(tier0)}, ${JSON.stringify(set0)}, ${count0})`,
+    300,
+  );
+  if (!report.clicked)
+    failures.push(`clicking ${tier0}, ${set0} and ${count0} did not load them`);
+  const combos = await chrome.evaluate(
+    `ghosts.manifest.tiers.flatMap(t => ghosts.setsOf(t).flatMap(s => s.counts.map((c, i) => [t.name, s.id, c, i === s.counts.length - 1])))`,
+  );
+  for (const [tier, set, count, last] of combos)
+    report.combos.push(
+      await combination(chrome, tier, set, count, last, out, failures),
+    );
 }
 
 const EMBED_STATE = `(() => { const g = window.ghosts; return { loaded: !!g?.pb, playing: !!g?.playing, t: g?.pb?.t ?? -1, selected: g?.selected ?? -1,
@@ -288,8 +504,19 @@ const EMBED_STATE = `(() => { const g = window.ghosts; return { loaded: !!g?.pb,
 // in bounds, no slider and no sideways scroll; and a change of the window's
 // height alone (FIT_HEIGHTS) leaves the figure's layout and every pixel its
 // canvases hold unchanged.
-const FIT_SIZES = [[1440, 900, false], [1920, 1080, false], [2560, 1440, false], [1536, 864, false], [1280, 720, false], [768, 1024, true], [390, 844, true]];
-const FIT_HEIGHTS = [[1440, 900, 600, false], [390, 844, 600, true]];
+const FIT_SIZES = [
+  [1440, 900, false],
+  [1920, 1080, false],
+  [2560, 1440, false],
+  [1536, 864, false],
+  [1280, 720, false],
+  [768, 1024, true],
+  [390, 844, true],
+];
+const FIT_HEIGHTS = [
+  [1440, 900, 600, false],
+  [390, 844, 600, true],
+];
 const FIT_ALIGN = `(() => { const fig = document.getElementById('fig'), header = document.querySelector('nav').getBoundingClientRect().bottom; window.scrollTo({ top: fig.getBoundingClientRect().top + scrollY - header, behavior: 'instant' }); })()`;
 const FIT_GEOMETRY = `(() => { const fig = document.getElementById('fig'), r = el => el?.getBoundingClientRect(), edges = b => b && [+b.left.toFixed(1), +b.right.toFixed(1)];
   const boards = [...fig.querySelectorAll('.floor.in-strip .board')].map(r).filter(b => b.width).sort((a, b) => a.left - b.left), canvas = fig.querySelector('.agent canvas'), cell = r(fig.querySelector('.agent'));
@@ -310,14 +537,35 @@ const FIT_PRINT = `(async () => { const fig = document.getElementById('fig'), f 
   return { size: [f.width, f.height].map(v => +v.toFixed(2)), boxes, pixels }; })()`;
 async function fitSizes(chrome, url, boards, report, fail, out) {
   Object.assign(report, { sizes: [], heights: [] });
-  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-  await chrome.send('Page.navigate', { url });
+  await chrome.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await chrome.send("Page.navigate", { url });
   await until(chrome, 'document.readyState === "complete" && !!window.ghosts', 30);
   await chrome.evaluate(FIT_ALIGN);
-  if (!await until(chrome, 'window.ghosts?.pb && (!document.querySelector(\'[data-ghost-policy]\') || ghosts.policyView)', 180)) { fail(`the fitted figure with ${boards} boards did not load`); return false; }
-  await chrome.evaluate('(() => { ghosts.held = true; ghosts.stop(); ghosts.goTo(Math.round(ghosts.set.maxSteps / 3)); })()');
+  if (
+    !(await until(
+      chrome,
+      "window.ghosts?.pb && (!document.querySelector('[data-ghost-policy]') || ghosts.policyView)",
+      180,
+    ))
+  ) {
+    fail(`the fitted figure with ${boards} boards did not load`);
+    return false;
+  }
+  await chrome.evaluate(
+    "(() => { ghosts.held = true; ghosts.stop(); ghosts.goTo(Math.round(ghosts.set.maxSteps / 3)); })()",
+  );
   const at = async (width, height, mobile) => {
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(600);
     await chrome.evaluate(FIT_ALIGN);
     await sleep(300);
@@ -326,23 +574,57 @@ async function fitSizes(chrome, url, boards, report, fail, out) {
     await at(width, height, mobile);
     const g = await chrome.evaluate(FIT_GEOMETRY);
     report.sizes.push(g);
-    const id = `${width}x${height} with ${boards} boards`, near = (a, b) => !!a && !!b && Math.abs(a[0] - b[0]) <= 1 && Math.abs(a[1] - b[1]) <= 1;
+    const id = `${width}x${height} with ${boards} boards`,
+      near = (a, b) =>
+        !!a && !!b && Math.abs(a[0] - b[0]) <= 1 && Math.abs(a[1] - b[1]) <= 1;
     const column = g.column[1] - g.column[0];
-    if (g.count !== boards || !g.square || !g.joined || !g.centred || g.above === false) fail(`at ${id} the boards are not ${boards} equal squares edge to edge, centred under the agent's view: ${JSON.stringify(g)}`);
-    if (!g.canvas || Math.abs(g.canvas[0] - g.cell[0]) > 1) fail(`at ${id} the agent's view is not as wide as its cell: ${JSON.stringify(g)}`);
+    if (g.count !== boards || !g.square || !g.joined || !g.centred || g.above === false)
+      fail(
+        `at ${id} the boards are not ${boards} equal squares edge to edge, centred under the agent's view: ${JSON.stringify(g)}`,
+      );
+    if (!g.canvas || Math.abs(g.canvas[0] - g.cell[0]) > 1)
+      fail(
+        `at ${id} the agent's view is not as wide as its cell: ${JSON.stringify(g)}`,
+      );
     if (boards === 2) {
       const widest = g.view[1] - g.view[0] > g.strip[1] - g.strip[0] ? g.view : g.strip;
-      if (Math.abs(g.side - Math.floor(column / 2)) > 1 || Math.abs(g.canvas[1] - g.side) > 1) fail(`at ${id} the boards and the agent's view are not half the column (${column} px) tall: ${JSON.stringify(g)}`);
-      if (!near(g.timeline, widest) || !near(g.reward, widest)) fail(`at ${id} the timeline and the reward plot are not as wide as the widest element: ${JSON.stringify(g)}`);
-      if (Math.abs(g.content[0] - g.column[0] - (g.column[1] - g.content[1])) > 1 || g.content[1] - g.content[0] > column + 1) fail(`at ${id} the figure is not centred in the column: ${JSON.stringify(g)}`);
+      if (
+        Math.abs(g.side - Math.floor(column / 2)) > 1 ||
+        Math.abs(g.canvas[1] - g.side) > 1
+      )
+        fail(
+          `at ${id} the boards and the agent's view are not half the column (${column} px) tall: ${JSON.stringify(g)}`,
+        );
+      if (!near(g.timeline, widest) || !near(g.reward, widest))
+        fail(
+          `at ${id} the timeline and the reward plot are not as wide as the widest element: ${JSON.stringify(g)}`,
+        );
+      if (
+        Math.abs(g.content[0] - g.column[0] - (g.column[1] - g.content[1])) > 1 ||
+        g.content[1] - g.content[0] > column + 1
+      )
+        fail(`at ${id} the figure is not centred in the column: ${JSON.stringify(g)}`);
     } else {
-      if (!near(g.strip, g.reward) || !near(g.strip, g.column)) fail(`at ${id} the boards do not span the column and the reward plot's width: ${JSON.stringify(g)}`);
-      if (Math.abs(g.canvas[1] - Math.floor(Math.min(1.2 * g.side, column * 144 / 260))) > 1.5) fail(`at ${id} the agent's view is not 1.2 boards tall: ${JSON.stringify(g)}`);
+      if (!near(g.strip, g.reward) || !near(g.strip, g.column))
+        fail(
+          `at ${id} the boards do not span the column and the reward plot's width: ${JSON.stringify(g)}`,
+        );
+      if (
+        Math.abs(
+          g.canvas[1] - Math.floor(Math.min(1.2 * g.side, (column * 144) / 260)),
+        ) > 1.5
+      )
+        fail(`at ${id} the agent's view is not 1.2 boards tall: ${JSON.stringify(g)}`);
     }
     if (g.overflow > 0) fail(`at ${id} the page scrolls sideways by ${g.overflow} px`);
-    if (g.badge.font < 7 || g.badge.font > 18 || (width < 600 && g.badge.share > 0.16)) fail(`at ${id} the win badge is out of bounds: ${JSON.stringify(g.badge)}`);
+    if (g.badge.font < 7 || g.badge.font > 18 || (width < 600 && g.badge.share > 0.16))
+      fail(`at ${id} the win badge is out of bounds: ${JSON.stringify(g.badge)}`);
     if (g.slider) fail(`at ${id} the figure has a slider though its plot scrubs`);
-    if (width === 1440 || width === 390) await screenshot(chrome, path.join(out, `${path.basename(out)}-fit-${boards}-${width}.png`));
+    if (width === 1440 || width === 390)
+      await screenshot(
+        chrome,
+        path.join(out, `${path.basename(out)}-fit-${boards}-${width}.png`),
+      );
   }
   for (const [width, tall, short, mobile] of FIT_HEIGHTS) {
     await at(width, tall, mobile);
@@ -352,8 +634,18 @@ async function fitSizes(chrome, url, boards, report, fail, out) {
     await at(width, tall, mobile);
     const back = await chrome.evaluate(FIT_PRINT);
     report.heights.push({ width, tall, short, size: [before.size, after.size] });
-    const moved = before.boxes.filter((b, k) => b !== after.boxes[k]).length + Math.abs(before.boxes.length - after.boxes.length);
-    if (before.size.join() !== after.size.join() || moved || before.pixels.join() !== after.pixels.join() || after.pixels.join() !== back.pixels.join()) fail(`with ${boards} boards, resizing the window from ${width}x${tall} to ${width}x${short} changed the figure: size ${before.size} -> ${after.size}, ${moved} boxes moved, pixels ${before.pixels.join() === after.pixels.join() ? 'kept' : 'changed'}`);
+    const moved =
+      before.boxes.filter((b, k) => b !== after.boxes[k]).length +
+      Math.abs(before.boxes.length - after.boxes.length);
+    if (
+      before.size.join() !== after.size.join() ||
+      moved ||
+      before.pixels.join() !== after.pixels.join() ||
+      after.pixels.join() !== back.pixels.join()
+    )
+      fail(
+        `with ${boards} boards, resizing the window from ${width}x${tall} to ${width}x${short} changed the figure: size ${before.size} -> ${after.size}, ${moved} boxes moved, pixels ${before.pixels.join() === after.pixels.join() ? "kept" : "changed"}`,
+      );
   }
   return true;
 }
@@ -363,8 +655,13 @@ async function fitSizes(chrome, url, boards, report, fail, out) {
 // it; with two, its bounds through a resize sequence; the plot as scrubber,
 // by drag and by keys, with no slider; and restart while playing and paused.
 async function fitCase(chrome, url, out, failures) {
-  const report = { three: {}, two: {}, resizes: [] }, fail = message => failures.push(`fit: ${message}`);
-  if (!await fitSizes(chrome, `${url}?boards=3`, 3, report.three, fail, out) || !await fitSizes(chrome, url, 2, report.two, fail, out)) return report;
+  const report = { three: {}, two: {}, resizes: [] },
+    fail = (message) => failures.push(`fit: ${message}`);
+  if (
+    !(await fitSizes(chrome, `${url}?boards=3`, 3, report.three, fail, out)) ||
+    !(await fitSizes(chrome, url, 2, report.two, fail, out))
+  )
+    return report;
   // Resizes: everything stays in the figure's box, the plots' backing stores
   // follow their size, the boards stay square, the content is centred in the
   // text column and no wider, the card (bordered all round, rounded) bleeds --bleed past it on
@@ -380,39 +677,97 @@ async function fitCase(chrome, url, out, failures) {
       column: Math.abs(content.left - column.left - (column.right - content.right)) <= 1 && content.width <= column.width + 1,
       card: bleed > 0 && Math.abs(column.left - box.left - bleed) <= 1 && Math.abs(box.right - column.right - bleed) <= 1 && parseFloat(cs.borderTopLeftRadius) > 0 && borders,
       bleed, overflow: document.documentElement.scrollWidth - innerWidth, width: Math.round(box.width) }; })()`;
-  for (const [width, height, mobile] of [[1920, 1080, false], [1280, 720, false], [1440, 900, false], [390, 844, true], [961, 900, false], [1600, 900, false], [1920, 1080, false], [2560, 1440, false]]) {
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+  for (const [width, height, mobile] of [
+    [1920, 1080, false],
+    [1280, 720, false],
+    [1440, 900, false],
+    [390, 844, true],
+    [961, 900, false],
+    [1600, 900, false],
+    [1920, 1080, false],
+    [2560, 1440, false],
+  ]) {
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(700);
     const b = await chrome.evaluate(BOUNDS);
     report.resizes.push({ width, ...b });
-    if (b.out.length || b.stores.length || !b.square || !b.column || !b.card || b.overflow > 0) fail(`after resizing to ${width}x${height}: ${JSON.stringify(b)}`);
+    if (
+      b.out.length ||
+      b.stores.length ||
+      !b.square ||
+      !b.column ||
+      !b.card ||
+      b.overflow > 0
+    )
+      fail(`after resizing to ${width}x${height}: ${JSON.stringify(b)}`);
   }
-  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await chrome.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await sleep(600);
   await chrome.evaluate(FIT_ALIGN);
   await sleep(300);
-  report.speeds = await chrome.evaluate(`(() => { const s = document.querySelector('[data-g="speed"]'); return { options: [...s.options].map(o => Number(o.value)), value: Number(s.value) }; })()`);
-  if (report.speeds.options.join() !== '10,50,100,250' || report.speeds.value !== 50) fail(`the speed menu is not 10, 50, 100, 250 at 50: ${JSON.stringify(report.speeds)}`);
+  report.speeds = await chrome.evaluate(
+    `(() => { const s = document.querySelector('[data-g="speed"]'); return { options: [...s.options].map(o => Number(o.value)), value: Number(s.value) }; })()`,
+  );
+  if (report.speeds.options.join() !== "10,50,100,250" || report.speeds.value !== 50)
+    fail(
+      `the speed menu is not 10, 50, 100, 250 at 50: ${JSON.stringify(report.speeds)}`,
+    );
   report.scrub = await scrubCase(chrome, fail);
   report.cursors = [];
-  for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true]]) {
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+  for (const [width, height, mobile] of [
+    [1440, 900, false],
+    [390, 844, true],
+  ]) {
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(600);
     for (const fraction of [0, 0.5, 1]) {
-      await chrome.evaluate(`(() => { ghosts.stop(); ghosts.goTo(ghosts.timeline.toDecision(Math.round(ghosts.timeline.length * ${fraction}))); })()`);
+      await chrome.evaluate(
+        `(() => { ghosts.stop(); ghosts.goTo(ghosts.timeline.toDecision(Math.round(ghosts.timeline.length * ${fraction}))); })()`,
+      );
       await sleep(150);
       const c = await chrome.evaluate(CURSORS);
       report.cursors.push({ width, fraction, ...c });
       for (const [name, plot] of Object.entries(c)) {
-        if (plot.caret === null || plot.line === null || Math.abs(plot.caret - plot.line) > 0.5 || plot.line < plot.left - 0.5 || plot.line > plot.right + 0.5) fail(`at ${width} px, ${fraction} of the way, the ${name} play head's caret (${plot.caret}) is not centred on its line (${plot.line}) inside the plot area: ${JSON.stringify(plot)}`);
+        if (
+          plot.caret === null ||
+          plot.line === null ||
+          Math.abs(plot.caret - plot.line) > 0.5 ||
+          plot.line < plot.left - 0.5 ||
+          plot.line > plot.right + 0.5
+        )
+          fail(
+            `at ${width} px, ${fraction} of the way, the ${name} play head's caret (${plot.caret}) is not centred on its line (${plot.line}) inside the plot area: ${JSON.stringify(plot)}`,
+          );
       }
     }
   }
-  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await chrome.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await sleep(600);
   report.restart = await restartCase(chrome, fail);
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
-  console.log(`fit: side/view ${[3, 2].map(n => `${n} boards ${report[n === 3 ? 'three' : 'two'].sizes.map(g => `${g.innerWidth}x${g.innerHeight} ${g.side}/${g.canvas?.[1]}`).join(', ')}`).join('; ')}; height-only resizes ${report.two.heights.map(h => `${h.width}x${h.tall}->${h.short} ${h.size[0].join('x')}->${h.size[1].join('x')}`).join(', ')}; resizes ${report.resizes.map(r => `${r.width}:${r.side}`).join(' ')}; scrub ${JSON.stringify(report.scrub)}; restart ${JSON.stringify(report.restart)}`);
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
+  console.log(
+    `fit: side/view ${[3, 2].map((n) => `${n} boards ${report[n === 3 ? "three" : "two"].sizes.map((g) => `${g.innerWidth}x${g.innerHeight} ${g.side}/${g.canvas?.[1]}`).join(", ")}`).join("; ")}; height-only resizes ${report.two.heights.map((h) => `${h.width}x${h.tall}->${h.short} ${h.size[0].join("x")}->${h.size[1].join("x")}`).join(", ")}; resizes ${report.resizes.map((r) => `${r.width}:${r.side}`).join(" ")}; scrub ${JSON.stringify(report.scrub)}; restart ${JSON.stringify(report.restart)}`,
+  );
   return report;
 }
 
@@ -425,52 +780,100 @@ const STAGE_STATE = `(() => { const r = el => el.getBoundingClientRect(), agent 
   return { playing: ghosts.playing, t: ghosts.pb?.t ?? -1, agentShows: agent.top < innerHeight && agent.bottom > 0, boardsShow: floors.top < innerHeight && floors.bottom > 0 }; })()`;
 async function autoplayCase(chrome, url, failures) {
   const report = [];
-  for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true]]) {
-    const fail = message => failures.push(`autoplay at ${width}x${height}: ${message}`), state = () => chrome.evaluate(STAGE_STATE);
-    const scroll = expression => chrome.evaluate(`window.scrollTo({ top: ${expression}, behavior: 'instant' })`);
+  for (const [width, height, mobile] of [
+    [1440, 900, false],
+    [390, 844, true],
+  ]) {
+    const fail = (message) =>
+        failures.push(`autoplay at ${width}x${height}: ${message}`),
+      state = () => chrome.evaluate(STAGE_STATE);
+    const scroll = (expression) =>
+      chrome.evaluate(`window.scrollTo({ top: ${expression}, behavior: 'instant' })`);
     // The policy view's bottom at the window's: the boards below it, unseen.
     const toAgent = `document.querySelector('.agent').getBoundingClientRect().bottom + scrollY - innerHeight + 2`;
     const toStage = `document.querySelector('[data-g="stage"]').getBoundingClientRect().top + scrollY - 70`;
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
-    await chrome.send('Page.navigate', { url });
-    if (!await until(chrome, 'document.readyState === "complete" && !!window.ghosts?.pb && !!document.querySelector(".agent canvas")', 120)) { fail('the figure did not load'); continue; }
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
+    await chrome.send("Page.navigate", { url });
+    if (
+      !(await until(
+        chrome,
+        'document.readyState === "complete" && !!window.ghosts?.pb && !!document.querySelector(".agent canvas")',
+        120,
+      ))
+    ) {
+      fail("the figure did not load");
+      continue;
+    }
     const r = { width };
     r.before = await state();
-    if (r.before.playing) fail('played before its stage showed');
+    if (r.before.playing) fail("played before its stage showed");
     await scroll(toAgent);
     r.agentOnly = await state();
-    r.agentPlays = await until(chrome, 'ghosts.playing && ghosts.pb.t > 0', 10);
-    if (!r.agentOnly.agentShows || r.agentOnly.boardsShow) fail(`the scroll did not show the policy view alone: ${JSON.stringify(r.agentOnly)}`);
-    else if (!r.agentPlays) fail(`did not play with its policy view in view: ${JSON.stringify(await state())}`);
+    r.agentPlays = await until(chrome, "ghosts.playing && ghosts.pb.t > 0", 10);
+    if (!r.agentOnly.agentShows || r.agentOnly.boardsShow)
+      fail(
+        `the scroll did not show the policy view alone: ${JSON.stringify(r.agentOnly)}`,
+      );
+    else if (!r.agentPlays)
+      fail(
+        `did not play with its policy view in view: ${JSON.stringify(await state())}`,
+      );
     await scroll(toStage);
     await sleep(500);
     await chrome.evaluate(`document.querySelector('[data-g="play"]').click()`);
     await sleep(200);
     r.paused = await state();
-    if (r.paused.playing) fail('the play button did not pause it');
+    if (r.paused.playing) fail("the play button did not pause it");
     await scroll(0);
     await sleep(1000);
     await scroll(toStage);
     await sleep(1500);
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width: width - 40, height: height - 100, deviceScaleFactor: mobile ? 2 : 1, mobile });
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width: width - 40,
+      height: height - 100,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(800);
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await scroll(toStage);
     await sleep(1500);
     r.stillPaused = await state();
-    if (r.stillPaused.playing || r.stillPaused.t !== r.paused.t) fail(`after the reader's pause, a scroll away and back and a resize, it is ${r.stillPaused.playing ? 'playing' : 'paused'} at ${r.stillPaused.t}, not paused at ${r.paused.t}`);
+    if (r.stillPaused.playing || r.stillPaused.t !== r.paused.t)
+      fail(
+        `after the reader's pause, a scroll away and back and a resize, it is ${r.stillPaused.playing ? "playing" : "paused"} at ${r.stillPaused.t}, not paused at ${r.paused.t}`,
+      );
     await chrome.evaluate(`document.querySelector('[data-g="play"]').click()`);
-    r.replays = await until(chrome, `ghosts.playing && ghosts.pb.t > ${r.paused.t}`, 10);
-    if (!r.replays) fail('the play button did not play it again');
+    r.replays = await until(
+      chrome,
+      `ghosts.playing && ghosts.pb.t > ${r.paused.t}`,
+      10,
+    );
+    if (!r.replays) fail("the play button did not play it again");
     await scroll(0);
-    r.awayPauses = await until(chrome, '!ghosts.playing', 5);
+    r.awayPauses = await until(chrome, "!ghosts.playing", 5);
     await scroll(toStage);
-    r.backPlays = await until(chrome, 'ghosts.playing', 10);
-    if (!r.awayPauses || !r.backPlays) fail(`after the reader's play, scrolled away it ${r.awayPauses ? 'paused' : 'kept playing'} and back it ${r.backPlays ? 'played' : 'stayed paused'}`);
+    r.backPlays = await until(chrome, "ghosts.playing", 10);
+    if (!r.awayPauses || !r.backPlays)
+      fail(
+        `after the reader's play, scrolled away it ${r.awayPauses ? "paused" : "kept playing"} and back it ${r.backPlays ? "played" : "stayed paused"}`,
+      );
     report.push(r);
   }
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
-  console.log(`autoplay: ${report.map(r => `${r.width}: policy view alone ${r.agentPlays ? 'plays' : 'paused'}; reader pause held at ${r.stillPaused?.t} (${r.stillPaused?.playing ? 'playing' : 'paused'}); play again ${r.replays}, away ${r.awayPauses}, back ${r.backPlays}`).join('; ')}`);
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
+  console.log(
+    `autoplay: ${report.map((r) => `${r.width}: policy view alone ${r.agentPlays ? "plays" : "paused"}; reader pause held at ${r.stillPaused?.t} (${r.stillPaused?.playing ? "playing" : "paused"}); play again ${r.replays}, away ${r.awayPauses}, back ${r.backPlays}`).join("; ")}`,
+  );
   return report;
 }
 
@@ -550,26 +953,72 @@ const OUTLINES = `(async () => {
   return { ...found, legible }; })()`;
 async function outlineCase(chrome, url, out, failures) {
   const report = [];
-  for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true]]) {
-    const fail = message => failures.push(`outlines at ${width}x${height}: ${message}`);
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
-    await chrome.send('Page.navigate', { url });
-    if (!await until(chrome, 'document.readyState === "complete" && !!window.ghosts?.pb', 120)) { fail('the figure did not load'); continue; }
-    const found = await chrome.evaluate(OUTLINES), { followed, ghost, enemy } = found;
-    if (!found.legible) { fail('the markers were not measured'); continue; }
-    report.push({ width, ...found });
-    if (!followed || !ghost || !enemy) { fail(`no lone ${['followed', 'ghost', 'enemy'].filter(k => !found[k]).join(', ')} marker to measure`); continue; }
-    // followed > ghost > enemy, each by a margin, in every measure.
-    for (const [measure, margin] of [['width', 0.3], ['bright', 25], ['opacity', 0.1]]) {
-      const [a, b, c] = [followed, ghost, enemy].map(m => m[measure]);
-      if (!(a >= b + (measure === 'opacity' ? 0 : margin) && b >= c + margin)) fail(`${measure} does not rank followed (${a}) > ghost (${b}) > enemy (${c})`);
+  for (const [width, height, mobile] of [
+    [1440, 900, false],
+    [390, 844, true],
+  ]) {
+    const fail = (message) =>
+      failures.push(`outlines at ${width}x${height}: ${message}`);
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
+    await chrome.send("Page.navigate", { url });
+    if (
+      !(await until(
+        chrome,
+        'document.readyState === "complete" && !!window.ghosts?.pb',
+        120,
+      ))
+    ) {
+      fail("the figure did not load");
+      continue;
     }
-    if (!(ghost.width >= 0.5 && enemy.width >= 0.5 && enemy.lines.every(([count]) => count > 0))) fail(`a ghost's or an enemy's outline is missing or not red: ghost ${JSON.stringify(ghost)}, enemy ${JSON.stringify(enemy)}`);
+    const found = await chrome.evaluate(OUTLINES),
+      { followed, ghost, enemy } = found;
+    if (!found.legible) {
+      fail("the markers were not measured");
+      continue;
+    }
+    report.push({ width, ...found });
+    if (!followed || !ghost || !enemy) {
+      fail(
+        `no lone ${["followed", "ghost", "enemy"].filter((k) => !found[k]).join(", ")} marker to measure`,
+      );
+      continue;
+    }
+    // followed > ghost > enemy, each by a margin, in every measure.
+    for (const [measure, margin] of [
+      ["width", 0.3],
+      ["bright", 25],
+      ["opacity", 0.1],
+    ]) {
+      const [a, b, c] = [followed, ghost, enemy].map((m) => m[measure]);
+      if (!(a >= b + (measure === "opacity" ? 0 : margin) && b >= c + margin))
+        fail(`${measure} does not rank followed (${a}) > ghost (${b}) > enemy (${c})`);
+    }
+    if (
+      !(
+        ghost.width >= 0.5 &&
+        enemy.width >= 0.5 &&
+        enemy.lines.every(([count]) => count > 0)
+      )
+    )
+      fail(
+        `a ghost's or an enemy's outline is missing or not red: ghost ${JSON.stringify(ghost)}, enemy ${JSON.stringify(enemy)}`,
+      );
     const hidden = found.legible.filter(([, , share]) => share < MARK_LEGIBLE);
-    if (!found.legible.length || hidden.length) fail(`markers whose sprite does not show on its disk (atlas cell, sprite, share of its pixels that do): ${JSON.stringify(hidden.length ? hidden : 'none measured')}`);
+    if (!found.legible.length || hidden.length)
+      fail(
+        `markers whose sprite does not show on its disk (atlas cell, sprite, share of its pixels that do): ${JSON.stringify(hidden.length ? hidden : "none measured")}`,
+      );
   }
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
-  console.log(`outlines: ${report.map(r => `${r.width}: ${['followed', 'ghost', 'enemy'].map(k => r[k] ? `${k} ${r[k].width} px, ${r[k].bright}, opacity ${r[k].opacity}` : `${k} none`).join('; ')}; sprites shown ${(r.legible ?? []).map(([key, , share]) => `${key}:${share}`).join(' ')}`).join(' | ')}`);
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
+  console.log(
+    `outlines: ${report.map((r) => `${r.width}: ${["followed", "ghost", "enemy"].map((k) => (r[k] ? `${k} ${r[k].width} px, ${r[k].bright}, opacity ${r[k].opacity}` : `${k} none`)).join("; ")}; sprites shown ${(r.legible ?? []).map(([key, , share]) => `${key}:${share}`).join(" ")}`).join(" | ")}`,
+  );
   return report;
 }
 
@@ -587,30 +1036,85 @@ const CURSORS = `(() => { const out = {}, dpr = devicePixelRatio, red = (d, i) =
 // The plot as scrubber: a press at 40% and a drag to 75% of its width seek
 // there; keys move the play head; aria-valuenow follows.
 async function scrubCase(chrome, fail) {
-  const box = await chrome.evaluate(`(() => { const b = document.querySelector('.scrub canvas').getBoundingClientRect(); return { x: b.left, y: b.top + b.height / 2, w: b.width }; })()`);
-  const at = f => box.x + f * box.w, state = `({ u: ghosts.u, t: ghosts.pb.t, span: ghosts.timeline.length, now: Number(document.querySelector('.scrub').getAttribute('aria-valuenow')), playing: ghosts.playing })`;
-  await chrome.evaluate('ghosts.stop()');
-  await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at(0.4), y: box.y, button: 'left', buttons: 1, clickCount: 1 });
+  const box = await chrome.evaluate(
+    `(() => { const b = document.querySelector('.scrub canvas').getBoundingClientRect(); return { x: b.left, y: b.top + b.height / 2, w: b.width }; })()`,
+  );
+  const at = (f) => box.x + f * box.w,
+    state = `({ u: ghosts.u, t: ghosts.pb.t, span: ghosts.timeline.length, now: Number(document.querySelector('.scrub').getAttribute('aria-valuenow')), playing: ghosts.playing })`;
+  await chrome.evaluate("ghosts.stop()");
+  await chrome.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: at(0.4),
+    y: box.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
   await sleep(150);
   const pressed = await chrome.evaluate(state);
-  await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at(0.75), y: box.y, button: 'left', buttons: 1 });
+  await chrome.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: at(0.75),
+    y: box.y,
+    button: "left",
+    buttons: 1,
+  });
   await sleep(150);
-  await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at(0.75), y: box.y, button: 'left', buttons: 0, clickCount: 1 });
+  await chrome.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: at(0.75),
+    y: box.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
   await sleep(150);
   const dragged = await chrome.evaluate(state);
-  const near = (s, f) => Math.abs(s.u - f * s.span) <= Math.max(2, s.span / box.w * 2);
-  if (!near(pressed, 0.4) || !near(dragged, 0.75) || dragged.now !== dragged.u) fail(`dragging the plot does not seek: ${JSON.stringify({ pressed, dragged })}`);
+  const near = (s, f) =>
+    Math.abs(s.u - f * s.span) <= Math.max(2, (s.span / box.w) * 2);
+  if (!near(pressed, 0.4) || !near(dragged, 0.75) || dragged.now !== dragged.u)
+    fail(`dragging the plot does not seek: ${JSON.stringify({ pressed, dragged })}`);
   await chrome.evaluate(`document.querySelector('.scrub').focus()`);
   const key = async (k, code, modifiers = 0) => {
-    await chrome.send('Input.dispatchKeyEvent', { type: 'keyDown', key: k, code, modifiers, windowsVirtualKeyCode: { Home: 36, End: 35, ArrowRight: 39, ' ': 32 }[k] });
-    await chrome.send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, code, modifiers });
+    await chrome.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: k,
+      code,
+      modifiers,
+      windowsVirtualKeyCode: { Home: 36, End: 35, ArrowRight: 39, " ": 32 }[k],
+    });
+    await chrome.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: k,
+      code,
+      modifiers,
+    });
     await sleep(120);
     return chrome.evaluate(state);
   };
-  const home = await key('Home', 'Home'), right = await key('ArrowRight', 'ArrowRight'), far = await key('ArrowRight', 'ArrowRight', 8), end = await key('End', 'End'), space = await key(' ', 'Space');
-  if (home.u !== 0 || right.u !== 1 || far.u !== 101 || end.u !== end.span || !space.playing) fail(`keys on the plot do not step it: ${JSON.stringify({ home, right, far, end, space })}`);
-  await chrome.evaluate('ghosts.stop()');
-  return { pressed: pressed.u, dragged: dragged.u, span: dragged.span, keys: [home.u, right.u, far.u, end.u], space: space.playing };
+  const home = await key("Home", "Home"),
+    right = await key("ArrowRight", "ArrowRight"),
+    far = await key("ArrowRight", "ArrowRight", 8),
+    end = await key("End", "End"),
+    space = await key(" ", "Space");
+  if (
+    home.u !== 0 ||
+    right.u !== 1 ||
+    far.u !== 101 ||
+    end.u !== end.span ||
+    !space.playing
+  )
+    fail(
+      `keys on the plot do not step it: ${JSON.stringify({ home, right, far, end, space })}`,
+    );
+  await chrome.evaluate("ghosts.stop()");
+  return {
+    pressed: pressed.u,
+    dragged: dragged.u,
+    span: dragged.span,
+    keys: [home.u, right.u, far.u, end.u],
+    space: space.playing,
+  };
 }
 
 // Restart while playing keeps playing from step 0; while paused stays at 0;
@@ -620,91 +1124,175 @@ async function restartCase(chrome, fail) {
   const STATE = `(() => { const g = ghosts, longest = Math.max(...Array.from(g.pb.trailLength)); let heat = 0; for (const v of g.pb.heat) heat += v;
     return { t: g.pb.t, playing: g.playing, won: g.won, strip: g.strip.at, panel: g.policyShown ?? null, trail: longest, heat }; })()`;
   const click = `document.querySelector('[data-g="restart"]').click()`;
-  await chrome.evaluate(`(() => { const s = document.querySelector('[data-g="speed"]'); s.value = s.options[s.options.length - 1].value; ghosts.goTo(Math.round(ghosts.set.maxSteps * 0.6)); ghosts.play(); })()`);
+  await chrome.evaluate(
+    `(() => { const s = document.querySelector('[data-g="speed"]'); s.value = s.options[s.options.length - 1].value; ghosts.goTo(Math.round(ghosts.set.maxSteps * 0.6)); ghosts.play(); })()`,
+  );
   await sleep(500);
   const before = await chrome.evaluate(STATE);
   await chrome.evaluate(click);
   const playing = await chrome.evaluate(STATE);
   await sleep(300);
   const after = await chrome.evaluate(STATE);
-  await chrome.evaluate(`(() => { ghosts.stop(); ghosts.goTo(Math.round(ghosts.set.maxSteps * 0.6)); })()`);
+  await chrome.evaluate(
+    `(() => { ghosts.stop(); ghosts.goTo(Math.round(ghosts.set.maxSteps * 0.6)); })()`,
+  );
   await sleep(200);
   await chrome.evaluate(click);
   await sleep(200);
   const paused = await chrome.evaluate(STATE);
-  const fresh = s => s.won === 0 && s.strip === 0 && s.trail <= 1 && (s.panel === null || s.panel === 0);
-  if (!(playing.t === 0 && fresh(playing) && after.playing && after.t > 0 && after.t < before.t)) fail(`restart while playing: ${JSON.stringify({ before, playing, after })}`);
-  if (!(paused.t === 0 && !paused.playing && fresh(paused))) fail(`restart while paused: ${JSON.stringify(paused)}`);
-  return { before: before.t, playing: [playing.t, after.playing, after.t], paused: [paused.t, paused.playing] };
+  const fresh = (s) =>
+    s.won === 0 && s.strip === 0 && s.trail <= 1 && (s.panel === null || s.panel === 0);
+  if (
+    !(
+      playing.t === 0 &&
+      fresh(playing) &&
+      after.playing &&
+      after.t > 0 &&
+      after.t < before.t
+    )
+  )
+    fail(`restart while playing: ${JSON.stringify({ before, playing, after })}`);
+  if (!(paused.t === 0 && !paused.playing && fresh(paused)))
+    fail(`restart while paused: ${JSON.stringify(paused)}`);
+  return {
+    before: before.t,
+    playing: [playing.t, after.playing, after.t],
+    paused: [paused.t, paused.playing],
+  };
 }
 
 async function embedCase(chrome, url, out, failures) {
-  const report = {}, fail = message => failures.push(`embed: ${message}`), shot = name => screenshot(chrome, path.join(out, `${path.basename(out)}-embed-${name}.png`));
+  const report = {},
+    fail = (message) => failures.push(`embed: ${message}`),
+    shot = (name) =>
+      screenshot(chrome, path.join(out, `${path.basename(out)}-embed-${name}.png`));
   // Instant: a page with smooth scrolling would still be on its way.
   const reveal = `document.querySelector('[data-ghost-embed]').scrollIntoView({ block: 'center', behavior: 'instant' })`;
-  await chrome.send('Page.navigate', { url });
+  await chrome.send("Page.navigate", { url });
   await until(chrome, 'document.readyState === "complete" && !!window.ghosts', 30);
   await sleep(1500);
   report.beforeScroll = await chrome.evaluate(EMBED_STATE);
-  if (report.beforeScroll.loaded) fail('loaded its data while two screens away');
+  if (report.beforeScroll.loaded) fail("loaded its data while two screens away");
   await chrome.evaluate(reveal);
-  report.playing = await until(chrome, 'window.ghosts?.playing && ghosts.pb.t > 0', 120);
-  if (!report.playing) fail(`did not play once in view: ${JSON.stringify(await chrome.evaluate(EMBED_STATE))}`);
+  report.playing = await until(
+    chrome,
+    "window.ghosts?.playing && ghosts.pb.t > 0",
+    120,
+  );
+  if (!report.playing)
+    fail(
+      `did not play once in view: ${JSON.stringify(await chrome.evaluate(EMBED_STATE))}`,
+    );
   const samples = [];
-  for (let i = 0; i < 5; i++) { await sleep(300); samples.push(await chrome.evaluate(EMBED_STATE)); }
+  for (let i = 0; i < 5; i++) {
+    await sleep(300);
+    samples.push(await chrome.evaluate(EMBED_STATE));
+  }
   report.samples = samples;
   const last = samples.at(-1);
-  if (last.shortest >= 0 ? last.selected !== last.shortest || last.outcome !== 'win' : last.selected < 0) fail(`follows run ${last.selected} (${last.outcome}), not the shortest win ${last.shortest}`);
-  if (samples.some(s => s.panel !== s.followed)) fail(`the panel left the followed run's decision: ${JSON.stringify(samples.map(s => [s.t, s.followed, s.panel]))}`);
-  await shot('playing');
+  if (
+    last.shortest >= 0
+      ? last.selected !== last.shortest || last.outcome !== "win"
+      : last.selected < 0
+  )
+    fail(
+      `follows run ${last.selected} (${last.outcome}), not the shortest win ${last.shortest}`,
+    );
+  if (samples.some((s) => s.panel !== s.followed))
+    fail(
+      `the panel left the followed run's decision: ${JSON.stringify(samples.map((s) => [s.t, s.followed, s.panel]))}`,
+    );
+  await shot("playing");
   await chrome.evaluate(`window.scrollTo({ top: 0, behavior: 'instant' })`);
-  report.pausedAway = await until(chrome, '!ghosts.playing', 5);
-  if (!report.pausedAway) fail('kept playing when scrolled away');
-  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-  await chrome.send('Page.navigate', { url });
+  report.pausedAway = await until(chrome, "!ghosts.playing", 5);
+  if (!report.pausedAway) fail("kept playing when scrolled away");
+  await chrome.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
+  await chrome.send("Page.navigate", { url });
   await until(chrome, 'document.readyState === "complete" && !!window.ghosts', 30);
   await chrome.evaluate(reveal);
-  await until(chrome, 'window.ghosts?.pb && ghosts.pb.t > 300', 120);
+  await until(chrome, "window.ghosts?.pb && ghosts.pb.t > 300", 120);
   report.phone = await chrome.evaluate(EMBED_STATE);
-  if (report.phone.columns !== 3 || report.phone.scrollWidth > report.phone.innerWidth) fail(`at 390 px: ${report.phone.columns} columns, ${report.phone.scrollWidth} px wide`);
+  if (report.phone.columns !== 3 || report.phone.scrollWidth > report.phone.innerWidth)
+    fail(
+      `at 390 px: ${report.phone.columns} columns, ${report.phone.scrollWidth} px wide`,
+    );
   await chrome.evaluate(reveal);
-  await shot('phone');
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
-  await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
-  await chrome.send('Page.navigate', { url });
+  await shot("phone");
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
+  await chrome.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+  });
+  await chrome.send("Page.navigate", { url });
   await until(chrome, 'document.readyState === "complete" && !!window.ghosts', 30);
   await chrome.evaluate(reveal);
-  await until(chrome, '!!window.ghosts?.pb', 120);
+  await until(chrome, "!!window.ghosts?.pb", 120);
   await sleep(1000);
   report.reducedMotion = await chrome.evaluate(EMBED_STATE);
-  if (report.reducedMotion.playing || report.reducedMotion.t !== 0) fail('played for a reader who prefers reduced motion');
-  await chrome.send('Emulation.setEmulatedMedia', { features: [] });
-  console.log(`embed: ${failures.filter(f => f.startsWith('embed')).length ? 'failed' : 'ok'}; follows ${last.selected} (${last.outcome}); panel in step at ${samples.map(s => s.t).join(', ')}`);
+  if (report.reducedMotion.playing || report.reducedMotion.t !== 0)
+    fail("played for a reader who prefers reduced motion");
+  await chrome.send("Emulation.setEmulatedMedia", { features: [] });
+  console.log(
+    `embed: ${failures.filter((f) => f.startsWith("embed")).length ? "failed" : "ok"}; follows ${last.selected} (${last.outcome}); panel in step at ${samples.map((s) => s.t).join(", ")}`,
+  );
   return report;
 }
 
 // Load one tier, set and count; seek to its first, middle and last position.
 async function combination(chrome, tier, set, count, last, out, failures) {
   const t0 = Date.now();
-  await chrome.evaluate(`ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`);
-  const id = `${tier}/${set}/${count}`, loaded = await until(chrome, `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`, 300);
-  const combo = { tier, set, count, loaded, loadSeconds: (Date.now() - t0) / 1000, status: await chrome.evaluate(`document.getElementById('status').textContent`) };
+  await chrome.evaluate(
+    `ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+  );
+  const id = `${tier}/${set}/${count}`,
+    loaded = await until(
+      chrome,
+      `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+      300,
+    );
+  const combo = {
+    tier,
+    set,
+    count,
+    loaded,
+    loadSeconds: (Date.now() - t0) / 1000,
+    status: await chrome.evaluate(`document.getElementById('status').textContent`),
+  };
   if (!loaded) {
     failures.push(`${id} did not load: ${combo.status}`);
     return combo;
   }
-  Object.assign(combo, await chrome.evaluate(`({ decisions: ghosts.stats.decisions, longest: ghosts.set.maxDecisions, shown: ghosts.timeline.length })`), { seeks: [] });
+  Object.assign(
+    combo,
+    await chrome.evaluate(
+      `({ decisions: ghosts.stats.decisions, longest: ghosts.set.maxDecisions, shown: ghosts.timeline.length })`,
+    ),
+    { seeks: [] },
+  );
   for (const fraction of [0, 0.5, 1]) {
-    const pixels = await seekTo(chrome, fraction), ghostPixels = pixels.ghosts.reduce((a, b) => a + b), layerPixels = pixels.layer.reduce((a, b) => a + b);
+    const pixels = await seekTo(chrome, fraction),
+      ghostPixels = pixels.ghosts.reduce((a, b) => a + b),
+      layerPixels = pixels.layer.reduce((a, b) => a + b);
     combo.seeks.push({ fraction, ghostPixels, layerPixels });
-    if (!ghostPixels) failures.push(`${id} at ${fraction}: no ghosts or end marks drawn`);
-    if (fraction > 0 && !layerPixels) failures.push(`${id} at ${fraction}: no heat or map changes drawn`);
+    if (!ghostPixels)
+      failures.push(`${id} at ${fraction}: no ghosts or end marks drawn`);
+    if (fraction > 0 && !layerPixels)
+      failures.push(`${id} at ${fraction}: no heat or map changes drawn`);
   }
   if (last) {
     await seekTo(chrome, 0.3);
-    await screenshot(chrome, path.join(out, `${path.basename(out)}-${tier}-${set}-${count}.png`));
+    await screenshot(
+      chrome,
+      path.join(out, `${path.basename(out)}-${tier}-${set}-${count}.png`),
+    );
   }
-  console.log(`${id}: loaded in ${combo.loadSeconds.toFixed(1)} s, ${combo.decisions} decisions, ${combo.shown + 1} of ${combo.longest + 1} states shown`);
+  console.log(
+    `${id}: loaded in ${combo.loadSeconds.toFixed(1)} s, ${combo.decisions} decisions, ${combo.shown + 1} of ${combo.longest + 1} states shown`,
+  );
   return combo;
 }
 
@@ -713,28 +1301,74 @@ async function combination(chrome, tier, set, count, last, out, failures) {
 // page's work per frame (seek plus draw) and the browser's frame intervals,
 // and time 20 random seeks. Screenshots the heaviest set mid-play.
 async function timingRuns(chrome, out, failures) {
-  const sets = await chrome.evaluate(`ghosts.manifest.tiers.flatMap(t => t.sets.map(s => [t.name, s.name, s.counts.at(-1), s.decisions])).sort((a, b) => b[3] - a[3])`);
+  const sets = await chrome.evaluate(
+    `ghosts.manifest.tiers.flatMap(t => t.sets.map(s => [t.name, s.name, s.counts.at(-1), s.decisions])).sort((a, b) => b[3] - a[3])`,
+  );
   const results = [];
   for (const [tier, set, count] of sets) {
     // Each set loads cold here: download, base64 and gzip decoding, then decode.js.
     const t0 = Date.now();
-    await chrome.evaluate(`ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`);
-    await until(chrome, `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`, 300);
-    const loadSeconds = (Date.now() - t0) / 1000, id = `${tier}/${set}/${count}`;
+    await chrome.evaluate(
+      `ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+    );
+    await until(
+      chrome,
+      `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+      300,
+    );
+    const loadSeconds = (Date.now() - t0) / 1000,
+      id = `${tier}/${set}/${count}`;
     console.log(`cold load ${id}: ${loadSeconds.toFixed(2)} s`);
     for (const skip of [true, false]) {
-      const played = await playFor(chrome, { skip, speed: 3000, from: 0, seconds: 4 }, `${id} skip ${skip ? 'on' : 'off'}`, failures);
-      if (!results.length) await screenshot(chrome, path.join(out, `${path.basename(out)}-playing.png`));
-      const seeks = skip ? [] : await chrome.evaluate(`(() => { const out = []; for (let i = 0; i < 20; i++) { ghosts.goTo(Math.floor(Math.random() * ghosts.set.maxDecisions)); out.push(ghosts.frameTimes.at(-1)); } return out; })()`);
-      const result = { tier, set, count, skip, loadSeconds, reachedDecision: played.t, heatSamples: played.samples, workMs: timing(played.work), frameIntervalMs: timing(played.intervals), ...(seeks.length ? { seekMs: timing(seeks) } : {}) };
-      if (result.workMs.p95 > 33) failures.push(`${id}: p95 frame work ${result.workMs.p95} ms exceeds 33 ms`);
-      console.log(`timing ${id} skip ${skip ? 'on' : 'off'} to decision ${played.t}: work ${JSON.stringify(result.workMs)}; intervals ${JSON.stringify(result.frameIntervalMs)}${seeks.length ? `; seeks ${JSON.stringify(result.seekMs)}` : ''}`);
+      const played = await playFor(
+        chrome,
+        { skip, speed: 3000, from: 0, seconds: 4 },
+        `${id} skip ${skip ? "on" : "off"}`,
+        failures,
+      );
+      if (!results.length)
+        await screenshot(chrome, path.join(out, `${path.basename(out)}-playing.png`));
+      const seeks = skip
+        ? []
+        : await chrome.evaluate(
+            `(() => { const out = []; for (let i = 0; i < 20; i++) { ghosts.goTo(Math.floor(Math.random() * ghosts.set.maxDecisions)); out.push(ghosts.frameTimes.at(-1)); } return out; })()`,
+          );
+      const result = {
+        tier,
+        set,
+        count,
+        skip,
+        loadSeconds,
+        reachedDecision: played.t,
+        heatSamples: played.samples,
+        workMs: timing(played.work),
+        frameIntervalMs: timing(played.intervals),
+        ...(seeks.length ? { seekMs: timing(seeks) } : {}),
+      };
+      if (result.workMs.p95 > 33)
+        failures.push(`${id}: p95 frame work ${result.workMs.p95} ms exceeds 33 ms`);
+      console.log(
+        `timing ${id} skip ${skip ? "on" : "off"} to decision ${played.t}: work ${JSON.stringify(result.workMs)}; intervals ${JSON.stringify(result.frameIntervalMs)}${seeks.length ? `; seeks ${JSON.stringify(result.seekMs)}` : ""}`,
+      );
       results.push(result);
     }
     // Slower speeds, from a third of the way in, for the heat check only.
     for (const speed of [30, 300]) {
-      const from = await chrome.evaluate('Math.round(ghosts.set.maxDecisions / 3)');
-      results.push({ tier, set, count, speed, heatSamples: (await playFor(chrome, { skip: false, speed, from, seconds: 1.5 }, `${id} at ${speed}/s`, failures)).samples });
+      const from = await chrome.evaluate("Math.round(ghosts.set.maxDecisions / 3)");
+      results.push({
+        tier,
+        set,
+        count,
+        speed,
+        heatSamples: (
+          await playFor(
+            chrome,
+            { skip: false, speed, from, seconds: 1.5 },
+            `${id} at ${speed}/s`,
+            failures,
+          )
+        ).samples,
+      });
     }
   }
   return results;
@@ -759,9 +1393,17 @@ async function playFor(chrome, { skip, speed, from, seconds }, label, failures) 
     await sleep(seconds * 200);
     const sample = await chrome.evaluate(HEAT_STATE);
     samples.push(sample);
-    if (sample.missing || sample.drawnAt !== sample.t) failures.push(`${label}: at decision ${sample.t} the heat shown is for ${sample.drawnAt} and misses ${sample.missing} of ${sample.alive} living ghosts' tiles`);
+    if (sample.missing || sample.drawnAt !== sample.t)
+      failures.push(
+        `${label}: at decision ${sample.t} the heat shown is for ${sample.drawnAt} and misses ${sample.missing} of ${sample.alive} living ghosts' tiles`,
+      );
   }
-  return { samples, ...await chrome.evaluate(`(() => { ghosts.stop(); return { work: ghosts.frameTimes.slice(), intervals: window.intervals.slice(1), t: ghosts.pb.t }; })()`) };
+  return {
+    samples,
+    ...(await chrome.evaluate(
+      `(() => { ghosts.stop(); return { work: ghosts.frameTimes.slice(), intervals: window.intervals.slice(1), t: ghosts.pb.t }; })()`,
+    )),
+  };
 }
 
 // "One row" at 1,440 and 1,920 px and on a 390 px phone: nine square boards
@@ -772,21 +1414,50 @@ async function rowLayout(chrome, url, out, failures) {
   const ROW = `(() => { const boards = [...document.querySelectorAll('.floor:not(.tally) .board')].map(b => b.getBoundingClientRect());
     return { innerWidth, scrollWidth: document.documentElement.scrollWidth, tops: new Set(boards.map(b => Math.round(b.top))).size,
       width: boards[0].width, height: boards[0].height, left: boards[0].left, right: boards.at(-1).right }; })()`;
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'row'; s.dispatchEvent(new Event('change')); })()`);
-  for (const [width, height, mobile] of [[1440, 1000, false], [1920, 1080, false], [390, 844, true]]) {
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'row'; s.dispatchEvent(new Event('change')); })()`,
+  );
+  for (const [width, height, mobile] of [
+    [1440, 1000, false],
+    [1920, 1080, false],
+    [390, 844, true],
+  ]) {
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(400);
     const row = await chrome.evaluate(ROW);
     report.push({ width, ...row });
-    if (row.scrollWidth > row.innerWidth || row.tops !== 1 || Math.abs(row.left) > 0.5 || Math.abs(row.right - row.innerWidth) > 0.5 || Math.abs(row.width - row.height) > 0.5) {
-      failures.push(`one row at ${width} px is not nine square boards across the window: ${JSON.stringify(row)}`);
+    if (
+      row.scrollWidth > row.innerWidth ||
+      row.tops !== 1 ||
+      Math.abs(row.left) > 0.5 ||
+      Math.abs(row.right - row.innerWidth) > 0.5 ||
+      Math.abs(row.width - row.height) > 0.5
+    ) {
+      failures.push(
+        `one row at ${width} px is not nine square boards across the window: ${JSON.stringify(row)}`,
+      );
     }
-    if (!mobile) await screenshot(chrome, path.join(out, `${path.basename(out)}-one-row-${width}.png`));
+    if (!mobile)
+      await screenshot(
+        chrome,
+        path.join(out, `${path.basename(out)}-one-row-${width}.png`),
+      );
   }
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
-  const kept = await open(chrome, url) && await chrome.evaluate(`document.getElementById('page').classList.contains('one-row')`);
-  if (!kept) failures.push('one row did not survive a reload');
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`);
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
+  const kept =
+    (await open(chrome, url)) &&
+    (await chrome.evaluate(
+      `document.getElementById('page').classList.contains('one-row')`,
+    ));
+  if (!kept) failures.push("one row did not survive a reload");
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`,
+  );
   return { sizes: report, keptAfterReload: kept };
 }
 
@@ -805,8 +1476,16 @@ async function rewardPlot(chrome, failures) {
     await seekTo(chrome, fraction);
     report.push(await chrome.evaluate(STATE));
   }
-  if (report.some(r => r.colours < 20 || !r.cursor || !r.runs) || new Set(report.map(r => r.x)).size !== 3) failures.push(`the reward plot is blank or its cursor does not follow the seek bar: ${JSON.stringify(report)}`);
-  console.log(`reward plot: ${report.map(r => `cursor at ${r.x} px for step ${r.u}, ${r.colours} colours`).join('; ')}`);
+  if (
+    report.some((r) => r.colours < 20 || !r.cursor || !r.runs) ||
+    new Set(report.map((r) => r.x)).size !== 3
+  )
+    failures.push(
+      `the reward plot is blank or its cursor does not follow the seek bar: ${JSON.stringify(report)}`,
+    );
+  console.log(
+    `reward plot: ${report.map((r) => `cursor at ${r.x} px for step ${r.u}, ${r.colours} colours`).join("; ")}`,
+  );
   return report;
 }
 
@@ -821,40 +1500,78 @@ async function twoRows(chrome, url, out, failures) {
     return { innerWidth, scrollWidth: document.documentElement.scrollWidth, boards: boards.length, tops: tops.length, perRow: tops.map(t => boards.filter(b => Math.round(b.top) === t).length),
       widths: [...new Set(boards.map(b => Math.round(b.width)))], square: boards.every(b => Math.abs(b.width - b.height) <= 0.5), left: Math.min(...boards.map(b => b.left)), right: Math.max(...boards.map(b => b.right)),
       tallyLast: [...document.querySelectorAll('.floors .floor')].at(-1).classList.contains('tally') }; })()`;
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'two-rows'; s.dispatchEvent(new Event('change')); })()`);
-  for (const [width, height, mobile] of [[1440, 1000, false], [1920, 1080, false], [390, 844, true]]) {
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'two-rows'; s.dispatchEvent(new Event('change')); })()`,
+  );
+  for (const [width, height, mobile] of [
+    [1440, 1000, false],
+    [1920, 1080, false],
+    [390, 844, true],
+  ]) {
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(400);
     const g = await chrome.evaluate(GEOMETRY);
     report.sizes.push({ width, ...g });
-    if (g.scrollWidth > g.innerWidth || g.boards !== 10 || g.tops !== 2 || g.perRow.join() !== '5,5' || g.widths.length !== 1 || !g.square || Math.abs(g.left) > 0.5 || Math.abs(g.right - g.innerWidth) > 0.5 || !g.tallyLast) {
-      failures.push(`two rows at ${width} px are not ten equal squares, five to a row, across the window: ${JSON.stringify(g)}`);
+    if (
+      g.scrollWidth > g.innerWidth ||
+      g.boards !== 10 ||
+      g.tops !== 2 ||
+      g.perRow.join() !== "5,5" ||
+      g.widths.length !== 1 ||
+      !g.square ||
+      Math.abs(g.left) > 0.5 ||
+      Math.abs(g.right - g.innerWidth) > 0.5 ||
+      !g.tallyLast
+    ) {
+      failures.push(
+        `two rows at ${width} px are not ten equal squares, five to a row, across the window: ${JSON.stringify(g)}`,
+      );
     }
   }
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
   const COUNT = `(() => ({ u: ghosts.pb.t, tally: ghosts.tally.won, readout: Number(document.getElementById('position').textContent.match(/([\\d,]+) won/)[1].replace(/,/g, '')),
     brute: Array.from({ length: ghosts.set.n }, (_, e) => ghosts.set.outcome[e] === 2 && ghosts.set.length[e] <= ghosts.pb.t).filter(Boolean).length }))()`;
   for (const fraction of [0, 0.35, 0.7, 1]) {
     await seekTo(chrome, fraction);
     report.counts.push(await chrome.evaluate(COUNT));
   }
-  if (report.counts.some(c => c.tally !== c.brute || c.readout !== c.brute)) failures.push(`the tally, readout and wins disagree: ${JSON.stringify(report.counts)}`);
-  if (!report.counts.at(-1).brute) failures.push('two rows: no run has won by the end of the last tier');
+  if (report.counts.some((c) => c.tally !== c.brute || c.readout !== c.brute))
+    failures.push(
+      `the tally, readout and wins disagree: ${JSON.stringify(report.counts)}`,
+    );
+  if (!report.counts.at(-1).brute)
+    failures.push("two rows: no run has won by the end of the last tier");
   await seekTo(chrome, 0.45);
   await screenshot(chrome, path.join(out, `${path.basename(out)}-two-rows.png`));
-  report.keptAfterReload = await open(chrome, url) && await chrome.evaluate(`document.getElementById('page').classList.contains('two-rows')`);
-  if (!report.keptAfterReload) failures.push('two rows did not survive a reload');
-  console.log(`two rows: ${report.sizes.map(s => `${s.width} px boards ${s.widths[0]} px`).join(', ')}; tally ${report.counts.map(c => c.tally).join(', ')}`);
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`);
+  report.keptAfterReload =
+    (await open(chrome, url)) &&
+    (await chrome.evaluate(
+      `document.getElementById('page').classList.contains('two-rows')`,
+    ));
+  if (!report.keptAfterReload) failures.push("two rows did not survive a reload");
+  console.log(
+    `two rows: ${report.sizes.map((s) => `${s.width} px boards ${s.widths[0]} px`).join(", ")}; tally ${report.counts.map((c) => c.tally).join(", ")}`,
+  );
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`,
+  );
   return report;
 }
 
 // The first floor of the Follow window of `boards` floors at every state of
 // the followed run, by the rule (keep the run in view, move as little as
 // needed, start on floor 0), computed here apart from the page's own.
-const STRIP_WINDOWS = boards => `(() => { const st = ghosts.selectedStates, end = ghosts.set.decisions[ghosts.selected], out = [];
+const STRIP_WINDOWS = (
+  boards,
+) => `(() => { const st = ghosts.selectedStates, end = ghosts.set.decisions[ghosts.selected], out = [];
   for (let s = 0, first = 0; s <= end; s++) { const f = st[4 * s]; first = f > first + ${boards - 1} ? f - ${boards - 1} : f < first ? f : first; out.push(first); } return out; })()`;
-const floorsFrom = (first, boards) => Array.from({ length: boards }, (_, k) => first + k).join();
+const floorsFrom = (first, boards) =>
+  Array.from({ length: boards }, (_, k) => first + k).join();
 
 // "Follow" with `boards` boards (3 as the page offers it, 2 as the blog's
 // embed sets it) on the last tier's runs, following the shortest win (or the
@@ -865,31 +1582,61 @@ const floorsFrom = (first, boards) => Array.from({ length: boards }, (_, k) => f
 // outlined. Then the conveyor in playback (conveyor). Screenshots it at
 // 1,440 px.
 async function followLayout(chrome, url, out, failures, boards) {
-  const report = { boards, sizes: [], steps: [] }, name = boards === 3 ? 'follow' : `follow-${boards}`;
+  const report = { boards, sizes: [], steps: [] },
+    name = boards === 3 ? "follow" : `follow-${boards}`;
   await chrome.evaluate(`(() => { ghosts.setFollowBoards(${boards}); const s = document.getElementById('layout'); s.value = 'follow'; s.dispatchEvent(new Event('change'));
     const f = document.getElementById('follow'); f.value = 'shortest-win'; f.dispatchEvent(new Event('change')); })()`);
-  for (const [width, height, mobile] of [[1440, 1000, false], [1920, 1080, false], [390, 844, true]]) {
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+  for (const [width, height, mobile] of [
+    [1440, 1000, false],
+    [1920, 1080, false],
+    [390, 844, true],
+  ]) {
+    await chrome.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
     await sleep(400);
     const g = await chrome.evaluate(STRIP);
     report.sizes.push({ width, ...g });
-    if (g.scrollWidth > g.innerWidth || g.floors.length !== boards || g.tops !== 1 || g.widths.length !== 1 || !g.square || Math.abs(g.left) > 0.5 || Math.abs(g.right - g.innerWidth) > 0.5) {
-      failures.push(`${name} at ${width} px is not ${boards} equal squares across the window: ${JSON.stringify(g)}`);
+    if (
+      g.scrollWidth > g.innerWidth ||
+      g.floors.length !== boards ||
+      g.tops !== 1 ||
+      g.widths.length !== 1 ||
+      !g.square ||
+      Math.abs(g.left) > 0.5 ||
+      Math.abs(g.right - g.innerWidth) > 0.5
+    ) {
+      failures.push(
+        `${name} at ${width} px is not ${boards} equal squares across the window: ${JSON.stringify(g)}`,
+      );
     }
   }
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
-  const steps = await chrome.evaluate(`(() => { const st = ghosts.selectedStates, e = ghosts.selected, end = ghosts.set.decisions[e], out = [0, end, Math.round(end / 3), Math.round(2 * end / 3)];
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
+  const steps =
+    await chrome.evaluate(`(() => { const st = ghosts.selectedStates, e = ghosts.selected, end = ghosts.set.decisions[e], out = [0, end, Math.round(end / 3), Math.round(2 * end / 3)];
     for (let t = 1; t <= end; t++) if (st[4 * t] < st[4 * (t - 1)] && st[4 * (t - 1)] >= 3) { out.push(t - 1, t, t + 1); break; }
     return out.map(t => GhostDecode.stepOf(ghosts.set, e, Math.min(t, end))); })()`);
   await strips(chrome, steps, report.steps, failures, boards);
-  if (steps.length < 7) failures.push(`${name}: the followed run never climbs back up from floor 3 or below, so no climb was checked`);
+  if (steps.length < 7)
+    failures.push(
+      `${name}: the followed run never climbs back up from floor 3 or below, so no climb was checked`,
+    );
   report.moves = await conveyor(chrome, out, failures, boards);
-  await chrome.evaluate(`(() => { const f = document.getElementById('follow'); f.value = 'shortest-win'; f.dispatchEvent(new Event('change')); })()`);
+  await chrome.evaluate(
+    `(() => { const f = document.getElementById('follow'); f.value = 'shortest-win'; f.dispatchEvent(new Event('change')); })()`,
+  );
   await chrome.evaluate(`ghosts.goTo(${steps[2]})`);
   await sleep(600);
   await screenshot(chrome, path.join(out, `${path.basename(out)}-${name}.png`));
-  console.log(`${name}: ${report.sizes.map(s => `${s.width} px boards ${s.widths[0]} px`).join(', ')}; floors ${report.steps.map(s => `${s.u}:${s.floor}->${s.floors.join('')}`).join(' ')}`);
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`);
+  console.log(
+    `${name}: ${report.sizes.map((s) => `${s.width} px boards ${s.widths[0]} px`).join(", ")}; floors ${report.steps.map((s) => `${s.u}:${s.floor}->${s.floors.join("")}`).join(" ")}`,
+  );
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`,
+  );
   return report;
 }
 
@@ -900,13 +1647,23 @@ async function strips(chrome, steps, report, failures, boards) {
   for (const u of steps) {
     await chrome.evaluate(`ghosts.goTo(${u})`);
     await sleep(300);
-    const g = await chrome.evaluate(STRIP), first = windows[g.decision];
+    const g = await chrome.evaluate(STRIP),
+      first = windows[g.decision];
     report.push(g);
-    if (g.floors.join() !== floorsFrom(first, boards)) failures.push(`follow (${boards}) at step ${u}: the run is on floor ${g.floor} and the window starts at ${first}, but the boards show ${g.floors}`);
-    if (g.outlined !== g.floor) failures.push(`follow (${boards}) at step ${u}: the run on floor ${g.floor} is not the outlined board (${g.outlined})`);
+    if (g.floors.join() !== floorsFrom(first, boards))
+      failures.push(
+        `follow (${boards}) at step ${u}: the run is on floor ${g.floor} and the window starts at ${first}, but the boards show ${g.floors}`,
+      );
+    if (g.outlined !== g.floor)
+      failures.push(
+        `follow (${boards}) at step ${u}: the run on floor ${g.floor} is not the outlined board (${g.outlined})`,
+      );
     // The followed run's trail is drawn at the board's size, not while its
     // board was hidden (where its strokes would flood the board in green).
-    if (!(g.flood >= 0 && g.flood < 0.15)) failures.push(`follow (${boards}) at step ${u}: ${Math.round(100 * g.flood)}% of the followed board is the followed run's green`);
+    if (!(g.flood >= 0 && g.flood < 0.15))
+      failures.push(
+        `follow (${boards}) at step ${u}: ${Math.round(100 * g.flood)}% of the followed board is the followed run's green`,
+      );
   }
 }
 
@@ -949,54 +1706,119 @@ async function conveyor(chrome, out, failures, boards) {
     await chrome.evaluate(`ghosts.goTo(${after}, true)`);
     await sleep(150);
     const mid = await chrome.evaluate(STATE);
-    if (kind === 'on') await screenshot(chrome, path.join(out, `${path.basename(out)}-follow${boards === 3 ? '' : `-${boards}`}-moving.png`));
+    if (kind === "on")
+      await screenshot(
+        chrome,
+        path.join(
+          out,
+          `${path.basename(out)}-follow${boards === 3 ? "" : `-${boards}`}-moving.png`,
+        ),
+      );
     await sleep(900);
-    const end = await chrome.evaluate(STATE), first = windows[end.decision];
+    const end = await chrome.evaluate(STATE),
+      first = windows[end.decision];
     report.push({ kind, before, after, start, mid, end });
-    const fail = message => failures.push(`follow (${boards}) ${kind} at step ${after}: ${message}: ${JSON.stringify({ start, mid, end })}`);
-    if (kind === 'within' && (mid.moving || mid.floors.join() !== start.floors.join())) fail('the strip moved while the run stayed in view');
-    if (kind !== 'within' && (mid.boards < boards + 1 || !mid.moving)) fail(`mid-move the strip is not ${boards + 1} or more moving boards`);
-    if ((kind === 'on' || kind === 'again') && mid.lefts[0] >= 0) fail('mid-move the leftmost board is not partly out of the strip');
-    if (kind === 'back' && mid.lefts.at(-1) + mid.width / boards <= mid.width) fail('mid-move the rightmost board is not partly out of the strip');
-    const rest = Array.from({ length: boards }, (_, k) => Math.round(k * end.width / boards)).join();
-    if (end.boards !== boards || end.moving || end.floors.join() !== floorsFrom(first, boards) || end.lefts.join() !== rest) fail(`the strip does not rest on floors ${first}-${first + boards - 1}`);
-    if (end.outlined !== end.floor) fail(`the run on floor ${end.floor} is not the outlined board`);
-    if (kind === 'back' && end.floors[0] !== end.floor) fail('after sliding back the run is not on the left board');
+    const fail = (message) =>
+      failures.push(
+        `follow (${boards}) ${kind} at step ${after}: ${message}: ${JSON.stringify({ start, mid, end })}`,
+      );
+    if (kind === "within" && (mid.moving || mid.floors.join() !== start.floors.join()))
+      fail("the strip moved while the run stayed in view");
+    if (kind !== "within" && (mid.boards < boards + 1 || !mid.moving))
+      fail(`mid-move the strip is not ${boards + 1} or more moving boards`);
+    if ((kind === "on" || kind === "again") && mid.lefts[0] >= 0)
+      fail("mid-move the leftmost board is not partly out of the strip");
+    if (kind === "back" && mid.lefts.at(-1) + mid.width / boards <= mid.width)
+      fail("mid-move the rightmost board is not partly out of the strip");
+    const rest = Array.from({ length: boards }, (_, k) =>
+      Math.round((k * end.width) / boards),
+    ).join();
+    if (
+      end.boards !== boards ||
+      end.moving ||
+      end.floors.join() !== floorsFrom(first, boards) ||
+      end.lefts.join() !== rest
+    )
+      fail(`the strip does not rest on floors ${first}-${first + boards - 1}`);
+    if (end.outlined !== end.floor)
+      fail(`the run on floor ${end.floor} is not the outlined board`);
+    if (kind === "back" && end.floors[0] !== end.floor)
+      fail("after sliding back the run is not on the left board");
   };
   let windows = await chrome.evaluate(STRIP_WINDOWS(boards));
   const moves = await chrome.evaluate(FIND);
-  for (const [kind, before, after] of moves.filter(([k]) => k === 'on' || k === 'within')) await play(kind, before, after, windows);
+  for (const [kind, before, after] of moves.filter(
+    ([k]) => k === "on" || k === "within",
+  ))
+    await play(kind, before, after, windows);
   // A run of the middle tier that climbs above its window, followed by hand.
-  const tier = await chrome.evaluate(`(() => { const t = ghosts.manifest.tiers.find(t => t.name === 'medium') ?? ghosts.manifest.tiers[0]; return [t.name, t.sets.find(s => s.name === 'all').counts[0]]; })()`);
+  const tier = await chrome.evaluate(
+    `(() => { const t = ghosts.manifest.tiers.find(t => t.name === 'medium') ?? ghosts.manifest.tiers[0]; return [t.name, t.sets.find(s => s.name === 'all').counts[0]]; })()`,
+  );
   await chrome.evaluate(`ghosts.load(${JSON.stringify(tier[0])}, 'all', ${tier[1]})`);
-  await until(chrome, `(${LOADED})(${JSON.stringify(tier[0])}, 'all', ${tier[1]})`, 300);
-  const climber = await chrome.evaluate(`(() => { const set = ghosts.set; for (let e = 0; e < set.n; e++) { const st = GhostDecode.decodeEpisode(set, e).states;
+  await until(
+    chrome,
+    `(${LOADED})(${JSON.stringify(tier[0])}, 'all', ${tier[1]})`,
+    300,
+  );
+  const climber =
+    await chrome.evaluate(`(() => { const set = ghosts.set; for (let e = 0; e < set.n; e++) { const st = GhostDecode.decodeEpisode(set, e).states;
       for (let s = 1, first = 0; s <= set.decisions[e]; s++) { const f = st[4 * s]; if (f < first) return e; first = f > first + ${boards - 1} ? f - ${boards - 1} : first; } } return -1; })()`);
-  if (climber < 0) failures.push(`follow (${boards}): no ${tier[0]} run climbs above its window, so no slide back was checked`);
+  if (climber < 0)
+    failures.push(
+      `follow (${boards}): no ${tier[0]} run climbs above its window, so no slide back was checked`,
+    );
   else {
     await chrome.evaluate(`ghosts.select(${climber})`);
     windows = await chrome.evaluate(STRIP_WINDOWS(boards));
-    for (const [kind, before, after] of (await chrome.evaluate(FIND)).filter(([k]) => k === 'back' || k === 'again')) await play(kind, before, after, windows);
+    for (const [kind, before, after] of (await chrome.evaluate(FIND)).filter(
+      ([k]) => k === "back" || k === "again",
+    ))
+      await play(kind, before, after, windows);
   }
-  const kinds = report.map(r => r.kind);
-  for (const kind of ['on', 'within', 'back', 'again']) if (!kinds.includes(kind)) failures.push(`follow (${boards}): no ${kind} move was found to check`);
-  console.log(`follow (${boards}) conveyor: ${report.map(r => `${r.kind} at step ${r.after}: ${r.start.floors.join('')} -> mid ${r.mid.floors.join('')} at ${r.mid.lefts.join('/')} -> ${r.end.floors.join('')}, run on ${r.end.floor}`).join('; ')}`);
+  const kinds = report.map((r) => r.kind);
+  for (const kind of ["on", "within", "back", "again"])
+    if (!kinds.includes(kind))
+      failures.push(`follow (${boards}): no ${kind} move was found to check`);
+  console.log(
+    `follow (${boards}) conveyor: ${report.map((r) => `${r.kind} at step ${r.after}: ${r.start.floors.join("")} -> mid ${r.mid.floors.join("")} at ${r.mid.lefts.join("/")} -> ${r.end.floors.join("")}, run on ${r.end.floor}`).join("; ")}`,
+  );
   return report;
 }
 
 // Playback that reaches the end holds it, then starts again from step 0 and
 // keeps playing; a reader who stopped it at the end stays there.
 async function loopCase(chrome, failures) {
-  await chrome.evaluate(`(() => { document.getElementById('speed').value = '3000'; ghosts.goTo(Math.max(0, ghosts.set.maxSteps - 600)); ghosts.play(); })()`);
-  const reachedEnd = await until(chrome, 'ghosts.pb.t === ghosts.set.maxSteps', 20);
-  const wrapped = await until(chrome, 'ghosts.playing && ghosts.pb.t > 0 && ghosts.pb.t < 2000', 20);
-  const after = await chrome.evaluate('({ t: ghosts.pb.t, playing: ghosts.playing, trails: Array.from(ghosts.pb.trailLength).reduce((a, b) => Math.max(a, b), 0) })');
-  await chrome.evaluate('(() => { ghosts.stop(); ghosts.goTo(ghosts.set.maxSteps); })()');
+  await chrome.evaluate(
+    `(() => { document.getElementById('speed').value = '3000'; ghosts.goTo(Math.max(0, ghosts.set.maxSteps - 600)); ghosts.play(); })()`,
+  );
+  const reachedEnd = await until(chrome, "ghosts.pb.t === ghosts.set.maxSteps", 20);
+  const wrapped = await until(
+    chrome,
+    "ghosts.playing && ghosts.pb.t > 0 && ghosts.pb.t < 2000",
+    20,
+  );
+  const after = await chrome.evaluate(
+    "({ t: ghosts.pb.t, playing: ghosts.playing, trails: Array.from(ghosts.pb.trailLength).reduce((a, b) => Math.max(a, b), 0) })",
+  );
+  await chrome.evaluate(
+    "(() => { ghosts.stop(); ghosts.goTo(ghosts.set.maxSteps); })()",
+  );
   await sleep(2500);
-  const held = await chrome.evaluate('({ t: ghosts.pb.t, playing: ghosts.playing, end: ghosts.set.maxSteps })');
-  if (!reachedEnd || !wrapped) failures.push(`loop: playback did not start again from the start: ${JSON.stringify(after)}`);
-  if (held.playing || held.t !== held.end) failures.push(`loop: a stopped viewer at the end moved on: ${JSON.stringify(held)}`);
-  console.log(`loop: wrapped to step ${after.t}, still playing ${after.playing}; stopped at the end stays at ${held.t}`);
+  const held = await chrome.evaluate(
+    "({ t: ghosts.pb.t, playing: ghosts.playing, end: ghosts.set.maxSteps })",
+  );
+  if (!reachedEnd || !wrapped)
+    failures.push(
+      `loop: playback did not start again from the start: ${JSON.stringify(after)}`,
+    );
+  if (held.playing || held.t !== held.end)
+    failures.push(
+      `loop: a stopped viewer at the end moved on: ${JSON.stringify(held)}`,
+    );
+  console.log(
+    `loop: wrapped to step ${after.t}, still playing ${after.playing}; stopped at the end stays at ${held.t}`,
+  );
   return { reachedEnd, wrapped, after, held };
 }
 
@@ -1016,9 +1838,15 @@ async function loopCase(chrome, failures) {
 // so a match is the closest, not an exact one), ties allowed where turns
 // look alike.
 const UPSTREAM_PROJECTILES = [51, 99, 100, 101, 51, 102, 100, 101];
-const FACINGS = [[1, 0, -1], [2, 0, 1], [3, -1, 0], [4, 1, 0]];
+const FACINGS = [
+  [1, 0, -1],
+  [2, 0, 1],
+  [3, -1, 0],
+  [4, 1, 0],
+];
 async function projectileCase(chrome, failures) {
-  const report = await chrome.evaluate(`(() => { const g = ghosts, sheet = g.sprites, out = { turned: [], atlas: [] };
+  const report =
+    await chrome.evaluate(`(() => { const g = ghosts, sheet = g.sprites, out = { turned: [], atlas: [] };
     const read = (size, draw) => { const x = Object.assign(document.createElement('canvas'), { width: size, height: size }).getContext('2d'); x.imageSmoothingEnabled = false; draw(x); return x.getImageData(0, 0, size, size).data; };
     for (const id of new Set(${JSON.stringify(UPSTREAM_PROJECTILES)})) {
       const base = read(16, x => x.drawImage(sheet, (id % 16) * 16, Math.floor(id / 16) * 16, 16, 16, 0, 0, 16, 16));
@@ -1052,10 +1880,23 @@ async function projectileCase(chrome, failures) {
       out.atlas.push([klass, facing, type, scores]);
     }
     return out; })()`);
-  const bad = report.turned.filter(([, , diff]) => diff > 0), off = report.atlas.filter(([, facing, , scores]) => !(scores[facing - 1] <= Math.min(...scores)) || !Number.isFinite(scores[facing - 1]));
-  if (bad.length) failures.push(`projectiles: turned sprites differ from Craftax's flip-then-transpose (sprite, facing, max difference): ${JSON.stringify(bad)}`);
-  if (off.length) failures.push(`projectiles: atlas cells that match another facing better (class, facing, type, mean difference to each facing 1-4): ${JSON.stringify(off.slice(0, 12))}`);
-  console.log(`projectiles: ${report.turned.length} turned sprites, ${bad.length} wrong; ${report.atlas.length} atlas cells, ${off.length} wrong`);
+  const bad = report.turned.filter(([, , diff]) => diff > 0),
+    off = report.atlas.filter(
+      ([, facing, , scores]) =>
+        !(scores[facing - 1] <= Math.min(...scores)) ||
+        !Number.isFinite(scores[facing - 1]),
+    );
+  if (bad.length)
+    failures.push(
+      `projectiles: turned sprites differ from Craftax's flip-then-transpose (sprite, facing, max difference): ${JSON.stringify(bad)}`,
+    );
+  if (off.length)
+    failures.push(
+      `projectiles: atlas cells that match another facing better (class, facing, type, mean difference to each facing 1-4): ${JSON.stringify(off.slice(0, 12))}`,
+    );
+  console.log(
+    `projectiles: ${report.turned.length} turned sprites, ${bad.length} wrong; ${report.atlas.length} atlas cells, ${off.length} wrong`,
+  );
   return report;
 }
 
@@ -1068,13 +1909,36 @@ async function projectileCase(chrome, failures) {
 // projectile is drawn, disk and ring included; at 128 each is drawn, its
 // marker's pixels darkened as its tile is, by the shade 0.7 (1 - 128 / 255)
 // of SHADE_RGB over them. Players show at both, unshaded.
-const DARK_KINDS = { projectile: 'm[4] >= 4', melee: 'm[4] === 1', passive: 'm[4] === 2', ranged: 'm[4] === 3', ghost: "m[0] === 'ghost'", followed: "m[0] === 'followed'" };
+const DARK_KINDS = {
+  projectile: "m[4] >= 4",
+  melee: "m[4] === 1",
+  passive: "m[4] === 2",
+  ranged: "m[4] === 3",
+  ghost: "m[0] === 'ghost'",
+  followed: "m[0] === 'followed'",
+};
 async function darkCase(chrome, failures) {
-  const fail = message => failures.push(`dark: ${message}`), [tier, set, count] = ['boss', 'all', 100];
-  await chrome.evaluate(`ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`);
-  if (!await until(chrome, `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`, 300)) { fail('the boss tier did not load'); return null; }
+  const fail = (message) => failures.push(`dark: ${message}`),
+    [tier, set, count] = ["boss", "all", 100];
+  await chrome.evaluate(
+    `ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+  );
+  if (
+    !(await until(
+      chrome,
+      `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+      300,
+    ))
+  ) {
+    fail("the boss tier did not load");
+    return null;
+  }
   const report = await chrome.evaluate(`(async () => {
-    const g = ghosts, wait = () => new Promise(r => setTimeout(r, 60)), kinds = { ${Object.entries(DARK_KINDS).map(([k, test]) => `${k}: m => ${test}`).join(', ')} }, found = {};
+    const g = ghosts, wait = () => new Promise(r => setTimeout(r, 60)), kinds = { ${Object.entries(
+      DARK_KINDS,
+    )
+      .map(([k, test]) => `${k}: m => ${test}`)
+      .join(", ")} }, found = {};
     Object.assign(g.show, { trails: false, deaths: false, fog: false }); g.marks = []; g.held = true; g.stop();
     for (let k = 1; k < 200 && Object.keys(found).length < Object.keys(kinds).length; k++) {
       g.goTo(Math.round(k / 200 * g.set.maxSteps)); await wait();
@@ -1117,16 +1981,35 @@ async function darkCase(chrome, failures) {
   })()`);
   for (const kind of Object.keys(DARK_KINDS)) {
     const r = report[kind];
-    if (!r) { fail(`no lone ${kind} marker was found to check`); continue; }
-    const player = kind === 'ghost' || kind === 'followed';
-    if (player) {
-      if (!r.darkPixels || r.unchanged) fail(`a ${kind} player is hidden or shaded by its tile's light (${r.darkPixels} pixels at light 12, ${r.unchanged} the largest change from light 128): ${JSON.stringify(r)}`);
+    if (!r) {
+      fail(`no lone ${kind} marker was found to check`);
       continue;
     }
-    if (r.darkPixels) fail(`a ${kind} on a tile of light 12 has ${r.darkPixels} pixels drawn: ${JSON.stringify(r)}`);
-    if (!r.litPixels || r.litDiff > 3) fail(`a ${kind} on a tile of light 128 is not darkened as its tile is (max channel difference ${r.litDiff}): ${JSON.stringify(r)}`);
+    const player = kind === "ghost" || kind === "followed";
+    if (player) {
+      if (!r.darkPixels || r.unchanged)
+        fail(
+          `a ${kind} player is hidden or shaded by its tile's light (${r.darkPixels} pixels at light 12, ${r.unchanged} the largest change from light 128): ${JSON.stringify(r)}`,
+        );
+      continue;
+    }
+    if (r.darkPixels)
+      fail(
+        `a ${kind} on a tile of light 12 has ${r.darkPixels} pixels drawn: ${JSON.stringify(r)}`,
+      );
+    if (!r.litPixels || r.litDiff > 3)
+      fail(
+        `a ${kind} on a tile of light 128 is not darkened as its tile is (max channel difference ${r.litDiff}): ${JSON.stringify(r)}`,
+      );
   }
-  console.log(`dark: ${Object.entries(report).map(([kind, r]) => `${kind} (step ${r.step}, floor ${r.floor}): light 12 ${r.darkPixels} px; ${kind === 'ghost' || kind === 'followed' ? `unchanged at 128 (max ${r.unchanged})` : `light 128 ${r.litPixels} px within ${r.litDiff}`}, opacity ${r.opacity}`).join('; ')}`);
+  console.log(
+    `dark: ${Object.entries(report)
+      .map(
+        ([kind, r]) =>
+          `${kind} (step ${r.step}, floor ${r.floor}): light 12 ${r.darkPixels} px; ${kind === "ghost" || kind === "followed" ? `unchanged at 128 (max ${r.unchanged})` : `light 128 ${r.litPixels} px within ${r.litDiff}`}, opacity ${r.opacity}`,
+      )
+      .join("; ")}`,
+  );
   return report;
 }
 
@@ -1136,11 +2019,27 @@ async function darkCase(chrome, failures) {
 // a frame, pixel for pixel (every run has ended, so no ghost trail, whose
 // history a seek replays only from a keyframe, is drawn).
 async function replayCase(chrome, failures) {
-  const [tier, set] = ['boss', 'unbroken'];
-  const count = await chrome.evaluate(`ghosts.manifest.tiers.find(t => t.name === ${JSON.stringify(tier)})?.sets.find(s => s.name === ${JSON.stringify(set)})?.counts.at(-1) ?? 0`);
-  if (!count) { failures.push(`replay: no ${tier}/${set} set`); return null; }
-  await chrome.evaluate(`ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`);
-  if (!await until(chrome, `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`, 300)) { failures.push('replay: the set did not load'); return null; }
+  const [tier, set] = ["boss", "unbroken"];
+  const count = await chrome.evaluate(
+    `ghosts.manifest.tiers.find(t => t.name === ${JSON.stringify(tier)})?.sets.find(s => s.name === ${JSON.stringify(set)})?.counts.at(-1) ?? 0`,
+  );
+  if (!count) {
+    failures.push(`replay: no ${tier}/${set} set`);
+    return null;
+  }
+  await chrome.evaluate(
+    `ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+  );
+  if (
+    !(await until(
+      chrome,
+      `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+      300,
+    ))
+  ) {
+    failures.push("replay: the set did not load");
+    return null;
+  }
   const report = await chrome.evaluate(`(async () => {
     const g = ghosts, last = g.set.maxSteps, layers = () => g.panels.map(p => p.ghosts.getImageData(0, 0, 528, 528).data);
     g.held = true; g.stop();
@@ -1152,8 +2051,13 @@ async function replayCase(chrome, failures) {
     const played = layers();
     return sought.map((a, f) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== played[f][i] || a[i + 1] !== played[f][i + 1] || a[i + 2] !== played[f][i + 2] || a[i + 3] !== played[f][i + 3]) n++; return n; });
   })()`);
-  if (report.some(n => n)) failures.push(`replay: at the last step the ghost layers sought there and played there differ (pixels per floor ${report.join(', ')})`);
-  console.log(`replay: ${tier}/${set} at its last step, sought vs played, differing pixels per floor ${report.join(', ')}`);
+  if (report.some((n) => n))
+    failures.push(
+      `replay: at the last step the ghost layers sought there and played there differ (pixels per floor ${report.join(", ")})`,
+    );
+  console.log(
+    `replay: ${tier}/${set} at its last step, sought vs played, differing pixels per floor ${report.join(", ")}`,
+  );
   return report;
 }
 
@@ -1179,26 +2083,46 @@ const SHADE_STATE = `(() => { const g = ghosts, fogged = Math.round(255 * 0.9), 
   }
   return out; })()`;
 async function shadeCase(chrome, out, failures) {
-  const report = { steps: [] }, fail = message => failures.push(`shade: ${message}`);
-  const at = async u => { await chrome.evaluate(`(() => { ghosts.stop(); ghosts.goTo(${u}); })()`); await sleep(150); };
-  const maxSteps = await chrome.evaluate('ghosts.set.maxSteps');
-  for (const [name, u] of [['start', 0], ['mid', Math.round(maxSteps / 2)], ['late', maxSteps]]) {
+  const report = { steps: [] },
+    fail = (message) => failures.push(`shade: ${message}`);
+  const at = async (u) => {
+    await chrome.evaluate(`(() => { ghosts.stop(); ghosts.goTo(${u}); })()`);
+    await sleep(150);
+  };
+  const maxSteps = await chrome.evaluate("ghosts.set.maxSteps");
+  for (const [name, u] of [
+    ["start", 0],
+    ["mid", Math.round(maxSteps / 2)],
+    ["late", maxSteps],
+  ]) {
     await at(u);
     const g = await chrome.evaluate(SHADE_STATE);
     report.steps.push({ name, u, ...g });
-    if (g.mismatches) fail(`at step ${u}, ${g.mismatches} of ${g.sampled} tiles are not shaded by the rule, first ${JSON.stringify(g.first)}`);
-    for (const scheme of ['light', 'dark']) {
-      await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+    if (g.mismatches)
+      fail(
+        `at step ${u}, ${g.mismatches} of ${g.sampled} tiles are not shaded by the rule, first ${JSON.stringify(g.first)}`,
+      );
+    for (const scheme of ["light", "dark"]) {
+      await chrome.send("Emulation.setEmulatedMedia", {
+        features: [{ name: "prefers-color-scheme", value: scheme }],
+      });
       await sleep(200);
-      await screenshot(chrome, path.join(out, `${path.basename(out)}-shade-${name}-${scheme}.png`));
+      await screenshot(
+        chrome,
+        path.join(out, `${path.basename(out)}-shade-${name}-${scheme}.png`),
+      );
     }
   }
-  await chrome.send('Emulation.setEmulatedMedia', { features: [] });
-  if (!report.steps[0].fogged || report.steps[0].fogged <= report.steps[2].fogged) fail(`the fog does not lift over time: ${report.steps.map(s => s.fogged).join(' -> ')} fogged tiles`);
-  if (!report.steps.some(s => s.dimmed)) fail('no tile is dimmed by the light');
+  await chrome.send("Emulation.setEmulatedMedia", { features: [] });
+  if (!report.steps[0].fogged || report.steps[0].fogged <= report.steps[2].fogged)
+    fail(
+      `the fog does not lift over time: ${report.steps.map((s) => s.fogged).join(" -> ")} fogged tiles`,
+    );
+  if (!report.steps.some((s) => s.dimmed)) fail("no tile is dimmed by the light");
   // A torch: a light change on a tile no other run lights, so it brightens
   // the tile at the step it shows and the run's end takes the light away.
-  report.torch = await chrome.evaluate(`(async () => { const g = ghosts, D = GhostDecode, L = g.pre.light, wait = () => new Promise(r => setTimeout(r, 60)), alpha = tile => { const c = tile % 2304;
+  report.torch =
+    await chrome.evaluate(`(async () => { const g = ghosts, D = GhostDecode, L = g.pre.light, wait = () => new Promise(r => setTimeout(r, 60)), alpha = tile => { const c = tile % 2304;
       return g.panels[Math.floor(tile / 2304)].shade.getImageData((c % 48) * 11 + 5, Math.floor(c / 48) * 11 + 5, 1, 1).data[3]; };
     const only = (tile, e) => { for (let i = L.tileStart[tile]; i < L.tileStart[tile + 1]; i++) if (L.tileRun[i] !== e) return false; return true; };
     for (let e = 0, tries = 0; e < g.set.n && tries < 40; e++) {
@@ -1215,18 +2139,22 @@ async function shadeCase(chrome, out, failures) {
     }
     return null; })()`);
   const t = report.torch;
-  if (!t) fail('no torch brightened a tile and went dark again with its run');
-  else if (!(t.lit[1] < t.before[1] && t.ended[1] > t.lit[1])) fail(`a torch's light does not show in the shade: ${JSON.stringify(t)}`);
+  if (!t) fail("no torch brightened a tile and went dark again with its run");
+  else if (!(t.lit[1] < t.before[1] && t.ended[1] > t.lit[1]))
+    fail(`a torch's light does not show in the shade: ${JSON.stringify(t)}`);
   // The toggles.
   await at(Math.round(maxSteps / 4));
-  for (const off of ['show-fog', 'show-light']) {
+  for (const off of ["show-fog", "show-light"]) {
     await chrome.evaluate(`document.getElementById('${off}').click()`);
     await sleep(150);
     const g = await chrome.evaluate(SHADE_STATE);
     report[off] = g;
-    if (g.mismatches || (off === 'show-light' && g.dimmed)) fail(`with ${off} off the shade is wrong: ${JSON.stringify(g)}`);
+    if (g.mismatches || (off === "show-light" && g.dimmed))
+      fail(`with ${off} off the shade is wrong: ${JSON.stringify(g)}`);
   }
-  console.log(`shade: ${report.steps.map(s => `${s.name} (step ${s.u}) ${s.fogged} fogged, ${s.dimmed} dimmed, ${s.mismatches} wrong`).join('; ')}; torch ${t ? `of run ${t.e} at step ${t.shows}: light ${t.before[0]} -> ${t.lit[0]} -> ${t.ended[0]} at its end, alpha ${t.before[1]} -> ${t.lit[1]} -> ${t.ended[1]}` : 'none'}`);
+  console.log(
+    `shade: ${report.steps.map((s) => `${s.name} (step ${s.u}) ${s.fogged} fogged, ${s.dimmed} dimmed, ${s.mismatches} wrong`).join("; ")}; torch ${t ? `of run ${t.e} at step ${t.shows}: light ${t.before[0]} -> ${t.lit[0]} -> ${t.ended[0]} at its end, alpha ${t.before[1]} -> ${t.lit[1]} -> ${t.ended[1]}` : "none"}`,
+  );
   return report;
 }
 
@@ -1262,10 +2190,24 @@ async function itemsCase(chrome, failures) {
         diff: same(g.panels[floor].layer.canvas, torch % 2304, expect(Math.floor(code / D.ITEMS), sprite[1], g.changeAlpha[k], false)) }); }
     return out; })()`;
   const tiles = await chrome.evaluate(CHECK);
-  for (const t of tiles) if (t.diff > 2) failures.push(`items: the ${t.what} on floor ${t.floor} does not draw as sprite ${t.sprite} (max channel difference ${t.diff})`);
-  if (!tiles.some(t => t.what === 'torch')) failures.push('items: no run placed a torch to check');
-  if (tiles.some(t => t.what !== 'torch' && t.item !== (t.what === 'ladder down' ? 2 : 3))) failures.push(`items: the world's ladders are not where its ladder table says: ${JSON.stringify(tiles)}`);
-  console.log(`items: ${tiles.map(t => `${t.what} on floor ${t.floor} as sprite ${t.sprite}, max difference ${t.diff}`).join('; ')}`);
+  for (const t of tiles)
+    if (t.diff > 2)
+      failures.push(
+        `items: the ${t.what} on floor ${t.floor} does not draw as sprite ${t.sprite} (max channel difference ${t.diff})`,
+      );
+  if (!tiles.some((t) => t.what === "torch"))
+    failures.push("items: no run placed a torch to check");
+  if (
+    tiles.some(
+      (t) => t.what !== "torch" && t.item !== (t.what === "ladder down" ? 2 : 3),
+    )
+  )
+    failures.push(
+      `items: the world's ladders are not where its ladder table says: ${JSON.stringify(tiles)}`,
+    );
+  console.log(
+    `items: ${tiles.map((t) => `${t.what} on floor ${t.floor} as sprite ${t.sprite}, max difference ${t.diff}`).join("; ")}`,
+  );
   return tiles;
 }
 
@@ -1276,43 +2218,81 @@ async function itemsCase(chrome, failures) {
 // draws another frame than the decision's. Screenshots it mid-sleep in the
 // Follow layout.
 async function sleepCase(chrome, out, failures) {
-  const found = await chrome.evaluate(`(() => { const t = ghosts.manifest.tiers.find(t => t.sets.some(s => s.sleep_map)); if (!t) return null;
+  const found =
+    await chrome.evaluate(`(() => { const t = ghosts.manifest.tiers.find(t => t.sets.some(s => s.sleep_map)); if (!t) return null;
     const s = t.sets.find(s => s.name === 'unbroken') ?? t.sets.find(s => s.sleep_map); return [t.name, s.name, s.counts.at(-1)]; })()`);
   if (!found) return null;
-  const [tier, set, count] = found, loaded = `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`;
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'follow'; s.dispatchEvent(new Event('change')); })()`);
-  await chrome.evaluate(`ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`);
+  const [tier, set, count] = found,
+    loaded = `(${LOADED})(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`;
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'follow'; s.dispatchEvent(new Event('change')); })()`,
+  );
+  await chrome.evaluate(
+    `ghosts.load(${JSON.stringify(tier)}, ${JSON.stringify(set)}, ${count})`,
+  );
   await until(chrome, loaded, 300);
-  await chrome.evaluate(`(() => { const s = document.getElementById('show-sleep'); s.checked = true; s.dispatchEvent(new Event('change')); })()`);
-  if (!await until(chrome, `${loaded} && ghosts.set.sleepView`, 300)) {
-    failures.push(`sleep: the view that shows sleep did not load: ${await chrome.evaluate(`document.getElementById('status').textContent`)}`);
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('show-sleep'); s.checked = true; s.dispatchEvent(new Event('change')); })()`,
+  );
+  if (!(await until(chrome, `${loaded} && ghosts.set.sleepView`, 300))) {
+    failures.push(
+      `sleep: the view that shows sleep did not load: ${await chrome.evaluate(`document.getElementById('status').textContent`)}`,
+    );
     return null;
   }
   const PANEL = `(() => { const c = document.querySelector('#policy-panel canvas'); if (!c || document.getElementById('policy-panel').hidden) return null;
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let h = 0; for (let i = 0; i < d.length; i += 7) h = (h * 31 + d[i]) >>> 0; return h; })()`;
-  const state = await chrome.evaluate(`(() => { const g = ghosts, s = g.set, e = g.selected, D = GhostDecode, steps = s.length[e];
+  const state =
+    await chrome.evaluate(`(() => { const g = ghosts, s = g.set, e = g.selected, D = GhostDecode, steps = s.length[e];
     let at = -1; for (let u = 0; u < steps && at < 0; u++) if (D.sampleAt(s, e, u) === 2) at = u;
     const decisions = new Set(Array.from({ length: steps }, (_, u) => D.decisionAt(s, e, u)));
     return { maxSteps: s.maxSteps, mapSteps: g.collection.sleep_map.steps, decisions: s.decisions[e], every: decisions.size === s.decisions[e], at }; })()`);
   const report = { tier, set, ...state, samples: [] };
-  if (state.maxSteps !== state.mapSteps) failures.push(`sleep: the view plays ${state.maxSteps} steps, not its sleep_map's ${state.mapSteps}`);
-  if (!state.every) failures.push('sleep: the pinned run skips a decision when sleep shows');
-  if (state.at < 0) failures.push('sleep: the pinned run never sleeps through two samples');
+  if (state.maxSteps !== state.mapSteps)
+    failures.push(
+      `sleep: the view plays ${state.maxSteps} steps, not its sleep_map's ${state.mapSteps}`,
+    );
+  if (!state.every)
+    failures.push("sleep: the pinned run skips a decision when sleep shows");
+  if (state.at < 0)
+    failures.push("sleep: the pinned run never sleeps through two samples");
   else {
     for (const u of [state.at - 2, state.at - 1, state.at]) {
       await chrome.evaluate(`ghosts.goTo(${u})`);
       await until(chrome, WINDOWS, 30);
       await sleep(300);
-      report.samples.push({ u, ...(await chrome.evaluate(`({ decision: ghosts.pb.decision[ghosts.selected], sample: GhostDecode.sampleAt(ghosts.set, ghosts.selected, ghosts.pb.t), tile: ghosts.pb.cur.row[ghosts.selected] * 48 + ghosts.pb.cur.col[ghosts.selected], info: document.getElementById('episode-info').textContent })`)), panel: await chrome.evaluate(PANEL) });
+      report.samples.push({
+        u,
+        ...(await chrome.evaluate(
+          `({ decision: ghosts.pb.decision[ghosts.selected], sample: GhostDecode.sampleAt(ghosts.set, ghosts.selected, ghosts.pb.t), tile: ghosts.pb.cur.row[ghosts.selected] * 48 + ghosts.pb.cur.col[ghosts.selected], info: document.getElementById('episode-info').textContent })`,
+        )),
+        panel: await chrome.evaluate(PANEL),
+      });
     }
     const [before, , asleep] = report.samples;
-    if (asleep.decision !== before.decision + 0 && asleep.decision !== report.samples[1].decision) failures.push(`sleep: the run left its decision mid-sleep: ${JSON.stringify(report.samples)}`);
-    if (asleep.tile !== report.samples[1].tile || !asleep.info.includes('asleep')) failures.push(`sleep: the run moved or does not read as asleep mid-sleep: ${JSON.stringify(report.samples)}`);
-    if (asleep.panel === null || asleep.panel === before.panel) failures.push(`sleep: the policy view did not draw a sleep frame: ${JSON.stringify(report.samples)}`);
+    if (
+      asleep.decision !== before.decision + 0 &&
+      asleep.decision !== report.samples[1].decision
+    )
+      failures.push(
+        `sleep: the run left its decision mid-sleep: ${JSON.stringify(report.samples)}`,
+      );
+    if (asleep.tile !== report.samples[1].tile || !asleep.info.includes("asleep"))
+      failures.push(
+        `sleep: the run moved or does not read as asleep mid-sleep: ${JSON.stringify(report.samples)}`,
+      );
+    if (asleep.panel === null || asleep.panel === before.panel)
+      failures.push(
+        `sleep: the policy view did not draw a sleep frame: ${JSON.stringify(report.samples)}`,
+      );
     await screenshot(chrome, path.join(out, `${path.basename(out)}-sleep.png`));
   }
-  console.log(`sleep: ${tier}/${set} ${state.maxSteps} steps (sleep_map ${state.mapSteps}); pinned run every decision ${state.every}; mid-sleep ${JSON.stringify(report.samples.map(s => [s.u, s.decision, s.sample]))}`);
-  await chrome.evaluate(`(() => { const s = document.getElementById('show-sleep'); s.checked = false; s.dispatchEvent(new Event('change')); })()`);
+  console.log(
+    `sleep: ${tier}/${set} ${state.maxSteps} steps (sleep_map ${state.mapSteps}); pinned run every decision ${state.every}; mid-sleep ${JSON.stringify(report.samples.map((s) => [s.u, s.decision, s.sample]))}`,
+  );
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('show-sleep'); s.checked = false; s.dispatchEvent(new Event('change')); })()`,
+  );
   return report;
 }
 
@@ -1322,20 +2302,37 @@ async function sleepCase(chrome, out, failures) {
 // gone; the policy view, when shipped, on the followed run's decision. Two
 // rows, screenshotted early, midway and at the end.
 async function winsView(chrome, out, failures) {
-  const found = await chrome.evaluate(`(() => { const t = ghosts.manifest.tiers.find(t => t.sets.some(s => s.time_map)); return t ? [t.name, t.sets.find(s => s.time_map).counts.at(-1)] : null; })()`);
+  const found = await chrome.evaluate(
+    `(() => { const t = ghosts.manifest.tiers.find(t => t.sets.some(s => s.time_map)); return t ? [t.name, t.sets.find(s => s.time_map).counts.at(-1)] : null; })()`,
+  );
   if (!found) return null;
-  const [tier, count] = found, report = { tier, count, seeks: [] };
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'two-rows'; s.dispatchEvent(new Event('change')); })()`);
+  const [tier, count] = found,
+    report = { tier, count, seeks: [] };
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'two-rows'; s.dispatchEvent(new Event('change')); })()`,
+  );
   await chrome.evaluate(`ghosts.load(${JSON.stringify(tier)}, 'wins', ${count})`);
-  if (!await until(chrome, `(${LOADED})(${JSON.stringify(tier)}, 'wins', ${count})`, 300)) {
-    failures.push(`wins view did not load: ${await chrome.evaluate(`document.getElementById('status').textContent`)}`);
+  if (
+    !(await until(
+      chrome,
+      `(${LOADED})(${JSON.stringify(tier)}, 'wins', ${count})`,
+      300,
+    ))
+  ) {
+    failures.push(
+      `wins view did not load: ${await chrome.evaluate(`document.getElementById('status').textContent`)}`,
+    );
     return report;
   }
   const STATE = `(() => { const g = ghosts, e = g.selected, s = g.set; return { u: g.pb.t, steps: s.maxSteps, budget: g.collection.time_map.rule.steps, selected: e, seed: s.seeds[e],
     want: document.getElementById('page').dataset.followSeedWins, unbroken: s.shown[e] === null && s.length[e] === s.decisions[e], decisions: s.decisions[e], decision: g.pb.decision[e],
     alive: g.pb.alive(e), panel: document.getElementById('policy-panel').hidden ? null : g.policyShown, policy: !!g.policy, skipHidden: document.getElementById('skip-quiet').closest('label').hidden,
     follow: document.getElementById('follow').value, won: g.won }; })()`;
-  for (const [fraction, name] of [[0.1, 'early'], [0.5, 'mid'], [1, 'end']]) {
+  for (const [fraction, name] of [
+    [0.1, "early"],
+    [0.5, "mid"],
+    [1, "end"],
+  ]) {
     await seekTo(chrome, fraction);
     await sleep(300);
     const state = await chrome.evaluate(STATE);
@@ -1343,49 +2340,97 @@ async function winsView(chrome, out, failures) {
     await screenshot(chrome, path.join(out, `${path.basename(out)}-wins-${name}.png`));
   }
   const [first, , last] = report.seeks;
-  if (first.steps > first.budget) failures.push(`wins view plays ${first.steps} steps, over its ${first.budget}-step budget`);
-  if (first.follow !== 'pinned' || (first.want && first.seed !== first.want) || !first.unbroken) failures.push(`wins view does not follow its pinned unbroken run: ${JSON.stringify(first)}`);
-  if (report.seeks.some(s => s.alive && s.decision !== s.u)) failures.push(`the pinned run skips a decision: ${JSON.stringify(report.seeks.map(s => [s.u, s.decision]))}`);
-  if (last.alive || last.decision !== last.decisions) failures.push(`the pinned run has not ended at the end: ${JSON.stringify(last)}`);
-  if (!first.skipHidden) failures.push('wins view shows the quiet-stretch toggle');
-  if (first.policy && report.seeks.some(s => s.panel !== s.decision)) failures.push(`the policy view left the followed run's decision: ${JSON.stringify(report.seeks.map(s => [s.decision, s.panel]))}`);
-  console.log(`wins view: ${tier} ${count} runs in ${first.steps} steps, follows seed ${first.seed} (${first.decisions} decisions, unbroken ${first.unbroken}), policy view ${first.policy ? 'in step' : 'absent'}; ${last.won} won at the end`);
-  await chrome.evaluate(`(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`);
+  if (first.steps > first.budget)
+    failures.push(
+      `wins view plays ${first.steps} steps, over its ${first.budget}-step budget`,
+    );
+  if (
+    first.follow !== "pinned" ||
+    (first.want && first.seed !== first.want) ||
+    !first.unbroken
+  )
+    failures.push(
+      `wins view does not follow its pinned unbroken run: ${JSON.stringify(first)}`,
+    );
+  if (report.seeks.some((s) => s.alive && s.decision !== s.u))
+    failures.push(
+      `the pinned run skips a decision: ${JSON.stringify(report.seeks.map((s) => [s.u, s.decision]))}`,
+    );
+  if (last.alive || last.decision !== last.decisions)
+    failures.push(`the pinned run has not ended at the end: ${JSON.stringify(last)}`);
+  if (!first.skipHidden) failures.push("wins view shows the quiet-stretch toggle");
+  if (first.policy && report.seeks.some((s) => s.panel !== s.decision))
+    failures.push(
+      `the policy view left the followed run's decision: ${JSON.stringify(report.seeks.map((s) => [s.decision, s.panel]))}`,
+    );
+  console.log(
+    `wins view: ${tier} ${count} runs in ${first.steps} steps, follows seed ${first.seed} (${first.decisions} decisions, unbroken ${first.unbroken}), policy view ${first.policy ? "in step" : "absent"}; ${last.won} won at the end`,
+  );
+  await chrome.evaluate(
+    `(() => { const s = document.getElementById('layout'); s.value = 'grid'; s.dispatchEvent(new Event('change')); })()`,
+  );
   return report;
 }
 
 async function phone(chrome, out, failures) {
   // The phone view also shows the light theme; the desktop screenshots show Chrome's default.
-  await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
-  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await chrome.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-color-scheme", value: "light" }],
+  });
+  await chrome.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
   await sleep(400);
-  const layout = await chrome.evaluate(`({ scrollWidth: document.documentElement.scrollWidth, innerWidth, columns: getComputedStyle(document.getElementById('floors')).gridTemplateColumns.split(' ').length })`);
-  if (layout.scrollWidth > layout.innerWidth) failures.push(`phone width scrolls sideways: ${layout.scrollWidth} > ${layout.innerWidth}`);
-  if (layout.columns !== 1) failures.push(`phone width shows ${layout.columns} floor columns`);
+  const layout = await chrome.evaluate(
+    `({ scrollWidth: document.documentElement.scrollWidth, innerWidth, columns: getComputedStyle(document.getElementById('floors')).gridTemplateColumns.split(' ').length })`,
+  );
+  if (layout.scrollWidth > layout.innerWidth)
+    failures.push(
+      `phone width scrolls sideways: ${layout.scrollWidth} > ${layout.innerWidth}`,
+    );
+  if (layout.columns !== 1)
+    failures.push(`phone width shows ${layout.columns} floor columns`);
   await screenshot(chrome, path.join(out, `${path.basename(out)}-phone.png`));
-  await chrome.send('Emulation.setEmulatedMedia', { features: [] });
-  await chrome.send('Emulation.clearDeviceMetricsOverride');
+  await chrome.send("Emulation.setEmulatedMedia", { features: [] });
+  await chrome.send("Emulation.clearDeviceMetricsOverride");
   return layout;
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  let binary = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', only = null;
-  if (args[0] === '--chrome') binary = args.splice(0, 2)[1];
-  if (args[0] === '--only') only = args.splice(0, 2)[1].split(',');
+  let binary = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    only = null;
+  if (args[0] === "--chrome") binary = args.splice(0, 2)[1];
+  if (args[0] === "--only") only = args.splice(0, 2)[1].split(",");
   const [out, site] = args;
   if (!binary || !out || !site || args.length !== 2) {
-    console.error('Usage: node render_check.mjs [--chrome PATH] [--only CASES] OUT_DIR SITE_DIR');
+    console.error(
+      "Usage: node render_check.mjs [--chrome PATH] [--only CASES] OUT_DIR SITE_DIR",
+    );
     process.exit(1);
   }
   fs.mkdirSync(out, { recursive: true });
-  const server = await serve(path.resolve(site)), chrome = await launch(binary), failures = [];
+  const server = await serve(path.resolve(site)),
+    chrome = await launch(binary),
+    failures = [];
   let report;
   try {
-    report = await check(chrome, `http://127.0.0.1:${server.address().port}/`, out, failures, only);
+    report = await check(
+      chrome,
+      `http://127.0.0.1:${server.address().port}/`,
+      out,
+      failures,
+      only,
+    );
   } finally {
-    Object.assign(report ??= {}, { errors: chrome.errors, failures });
-    fs.writeFileSync(path.join(out, 'render-check.json'), JSON.stringify(report, null, 1) + '\n');
+    Object.assign((report ??= {}), { errors: chrome.errors, failures });
+    fs.writeFileSync(
+      path.join(out, "render-check.json"),
+      `${JSON.stringify(report, null, 1)}\n`,
+    );
     await chrome.close();
     server.close();
   }

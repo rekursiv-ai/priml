@@ -1,17 +1,40 @@
-"""Tests for the golden-ownership gate."""
+"""Every priml text golden has exactly the test that owns it."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Final
 
 import pytest
 
-from priml.testing import golden_owners
-from priml.testing.golden_owners import main, ownership
+from priml.testing.golden_owners import golden_directories, ownership
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
+_CWD: Final[Path] = Path(__file__).resolve().parent
+
+_PRIML: Final[Path] = _CWD.parent
+
+
+@pytest.mark.compute_large_fixture
+def test_every_priml_golden_has_its_owner() -> None:
+    """A test claims no missing golden, and no golden lies unclaimed."""
+    failures = {
+        directory: found
+        for directory in golden_directories(_PRIML)
+        if any(found := ownership(directory))
+    }
+
+    assert failures == {}
+
+
+def test_golden_directories_hold_tests_or_goldens(tmp_path: Path) -> None:
+    """A directory of only tests, or only goldens, counts; one of neither does not."""
+    for directory in ("a", "b/testdata", "c"):
+        (tmp_path / directory).mkdir(parents=True)
+    (tmp_path / "a" / "a_test.py").write_text("", encoding="utf-8")
+    (tmp_path / "c" / "c.py").write_text("", encoding="utf-8")
+
+    assert golden_directories(tmp_path) == [tmp_path / "a", tmp_path / "b"]
 
 
 def _model(tmp_path: Path, source: str, goldens: tuple[str, ...] = ()) -> Path:
@@ -246,77 +269,6 @@ def test_a_test_file_with_no_golden_call_is_not_parsed(tmp_path: Path) -> None:
     model = _model(tmp_path, "def test_case(:\n", ("orphan.txt",))
 
     assert ownership(model) == (set(), {model / "testdata" / "orphan.txt"})
-
-
-def test_main_checks_the_directory_of_each_changed_test_or_golden(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """An unrelated file selects nothing; a clean directory reports nothing."""
-    model = _model(
-        tmp_path,
-        "def test_case():\n    assert_pprint_golden(name='gone', config=None)\n",
-        ("orphan.txt",),
-    )
-    clean = tmp_path / "clean"
-    clean.mkdir()
-    (clean / "clean_test.py").write_text("", encoding="utf-8")
-
-    assert main([str(tmp_path / "notes.md"), str(clean / "clean_test.py")]) == 0
-    for changed in (model / "example_test.py", model / "testdata" / "orphan.txt"):
-        assert main([str(changed)]) == 1
-        assert capsys.readouterr().err.splitlines() == [
-            f"{model / 'testdata' / 'gone.txt'}: claimed, but no such golden",
-            f"{model / 'testdata' / 'orphan.txt'}: no test claims this golden",
-        ]
-
-
-@pytest.mark.parametrize(
-    ("docstring", "after_usage"),
-    [
-        (golden_owners.__doc__, "Check that every priml text golden"),
-        (None, "positional arguments:"),
-    ],
-    ids=["docstring", "optimized away"],
-)
-def test_help_describes_the_gate_from_its_docstring(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    docstring: str | None,
-    after_usage: str,
-) -> None:
-    """``python -OO`` strips the docstring; the help then has no description."""
-    monkeypatch.setattr(golden_owners, "__doc__", docstring)
-
-    with pytest.raises(SystemExit):
-        main(["--help"])
-
-    out = capsys.readouterr().out
-    assert out.split("\n\n")[1].startswith(after_usage)
-    assert ("golden_owners priml/a/b_test.py" in out) == bool(docstring)
-    assert "Changed test files or goldens." in out
-
-
-def test_a_change_to_the_rule_checks_its_whole_package(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Directories holding only tests, or only goldens, are both rechecked."""
-    rule = tmp_path / "testing" / golden_owners.__file__.rsplit("/", 1)[1]
-    rule.parent.mkdir()
-    (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "a_test.py").write_text(
-        "def test_a():\n    assert_pprint_golden(name='gone', config=None)\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "b" / "testdata").mkdir(parents=True)
-    (tmp_path / "b" / "testdata" / "orphan.txt").write_text("", encoding="utf-8")
-
-    assert main([str(rule)]) == 1
-    assert capsys.readouterr().err.splitlines() == [
-        f"{tmp_path / 'a' / 'testdata' / 'gone.txt'}: claimed, but no such golden",
-        f"{tmp_path / 'b' / 'testdata' / 'orphan.txt'}: no test claims this golden",
-    ]
 
 
 if __name__ == "__main__":
