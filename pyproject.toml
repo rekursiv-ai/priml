@@ -115,7 +115,7 @@ test = [
 typecheck = [
     "basedpyright>=1.40.2",
     "pyrefly>=1.4.0",
-    "ty>=0.0.101",
+    "ty>=0.0.104",
     "rekursiv-ai-typings>=0.1.11",
     "safetensors>=0.8.0",
 ]
