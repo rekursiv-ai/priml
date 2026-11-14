@@ -478,7 +478,7 @@ def _chain(
     stream: Iterator[Any] = samples  # pyright: ignore[reportExplicitAny] -- The stage chain is typed pairwise; the running stream has no single element type.
     for processor in processors:
         stream = processor(stream)
-    return stream  # ty: ignore[unsound-return-statement] -- The last stage's output shape is what the pipeline yields.
+    return stream  # ty: ignore[unsound-return] -- The last stage's output shape is what the pipeline yields.
 
 
 # A bounded put may block; time out so a dead-worker stop_event is observed
