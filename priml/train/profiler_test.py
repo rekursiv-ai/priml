@@ -660,6 +660,29 @@ class TestPhaseTimerHeartbeat:
         assert timer.start.call_count == 1
         assert caplog.records[-1].message == "[phase] still in work (2s elapsed)"
 
+    def test_a_tick_while_the_phase_is_open_rearms_and_stop_cancels_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        armed: list[_TimerMock] = []
+
+        def make_timer(interval: float, callback: Callable[..., object]) -> _TimerMock:
+            del interval, callback
+            armed.append(_TimerMock())
+            return armed[-1]
+
+        monkeypatch.setattr("priml.train.profiler.threading.Timer", make_timer)
+        heartbeat = _PhaseHeartbeat("work", start=0.0, interval_sec=1.0)
+        heartbeat.start()
+
+        heartbeat._tick()
+        heartbeat.stop()
+
+        assert len(armed) == 2
+        armed[1].start.assert_called_once()
+        armed[1].cancel.assert_called_once()
+        armed[0].cancel.assert_not_called()
+
 
 class TestPhaseTimerRankGating:
     """Phase enter/exit narrative is rank-0 only; errors stay all-ranks."""
