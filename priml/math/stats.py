@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, cast
+
+import math
+import statistics
 
 from torch import Tensor, linalg
 
+import numpy as np
 import torch
 
 from priml.math.basic import reduction_dims
@@ -16,7 +22,15 @@ from priml.memory import convert_to_tensor
 
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
+
+    from scipy.stats import t
+
     from priml.math.custom_types import Tensorable
+else:
+    from wrapt import lazy_import
+
+    t = lazy_import("scipy.stats", "t")
 
 
 type PcaDecompose = Callable[[Tensor], tuple[Tensor, Tensor]]
@@ -445,6 +459,275 @@ def holm(p_values: Tensorable) -> Tensor:
     return torch.empty_like(adjusted).scatter_(-1, order, adjusted)
 
 
+def paired_bootstrap_interval(
+    differences: Sequence[float],
+    *,
+    clusters: Sequence[Hashable],
+    estimand: Literal["cluster_mean", "observation_mean"],
+    resamples: int,
+    seed: int,
+    level: float,
+) -> tuple[float, float, float]:
+    """Estimate a mean paired difference with a percentile bootstrap over clusters.
+
+    Each resample draws as many clusters as were observed, with replacement.
+    The bounds index the sorted resample estimates at ``int(tail * resamples)``
+    and ``int((1 - tail) * resamples)``, the latter clamped to the last
+    resample, without interpolation.
+
+    Args:
+      differences: Complete paired differences, treated minus control. The
+        caller removes or rejects incomplete pairs; none are imputed here.
+      clusters: One cluster label per difference. Distinct labels treat the
+        observations as independent.
+      estimand: ``"cluster_mean"`` weighs clusters equally: the mean of
+        cluster means. ``"observation_mean"`` weighs observations equally: the
+        resampled clusters' difference totals over their observation counts.
+      resamples: Bootstrap resamples of clusters.
+      seed: Seed of the resampling generator.
+      level: Two-sided interval coverage, strictly between 0 and 1.
+
+    Returns:
+      estimate: The estimand over the observed clusters.
+      low: Lower percentile bound.
+      high: Upper percentile bound.
+
+    Raises:
+      ValueError: No differences, a nonpositive resample count, a level
+        outside the open unit interval, or not one label per difference.
+
+    References:
+      Efron 1979, "Bootstrap methods: another look at the jackknife."
+
+    """
+    if not differences:
+        raise ValueError("No paired differences.")
+    if resamples < 1:
+        raise ValueError(f"Resamples must be positive, got {resamples}.")
+    _check_level(level)
+    grouped: dict[Hashable, list[float]] = {}
+    for label, difference in zip(clusters, differences, strict=True):
+        grouped.setdefault(label, []).append(difference)
+    groups = list(grouped.values())
+    # numpy's generator, not torch's: seeded intervals already reported must
+    # keep their exact draws, which a torch generator would change.
+    draws = np.random.default_rng(seed).integers(
+        low=0,
+        high=len(groups),
+        size=(resamples, len(groups)),
+    )
+    if estimand == "cluster_mean":
+        means = [statistics.fmean(group) for group in groups]
+        estimate = statistics.fmean(means)
+        boot = np.sort(np.array(means)[draws].mean(axis=1))
+    else:
+        totals = np.array([math.fsum(group) for group in groups])
+        counts = np.array([len(group) for group in groups])
+        estimate = statistics.fmean(differences)
+        boot = np.sort(totals[draws].sum(axis=1) / counts[draws].sum(axis=1))
+    tail = (1 - level) / 2
+    high_index = min(int((1 - tail) * resamples), resamples - 1)
+    return (
+        estimate,
+        cast(float, boot[int(tail * resamples)]),
+        cast(float, boot[high_index]),
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PairedTInterval:
+    """Mean paired difference with its two-sided Student t interval.
+
+    Attributes:
+      count: Paired differences observed.
+      mean: Their mean; NaN when there are none.
+      bounds: Lower and upper bounds, or None below the minimum pair count.
+
+    """
+
+    count: int
+    mean: float
+    bounds: tuple[float, float] | None
+
+
+def paired_t_interval(
+    differences: Sequence[float],
+    *,
+    level: float,
+    min_pairs: int,
+) -> PairedTInterval:
+    """Estimate a mean paired difference with a two-sided Student t interval.
+
+    Args:
+      differences: Complete paired differences, treated minus control.
+      level: Two-sided interval coverage, strictly between 0 and 1.
+      min_pairs: Fewest differences that get bounds. The interval has
+        ``count - 1`` degrees of freedom, so meaningful values start at 2.
+
+    Returns:
+      interval: Count, mean and bounds; the bounds are None below
+        ``min_pairs``.
+
+    Raises:
+      ValueError: A level outside the open unit interval.
+
+    References:
+      Student 1908, "The probable error of a mean."
+
+    """
+    _check_level(level)
+    count = len(differences)
+    if count < min_pairs:
+        mean = statistics.fmean(differences) if differences else math.nan
+        return PairedTInterval(count=count, mean=mean, bounds=None)
+    mean = statistics.fmean(differences)
+    se = statistics.stdev(differences) / cast(float, count**0.5)
+    margin = float(t.ppf((1 + level) / 2, df=count - 1)) * se
+    return PairedTInterval(
+        count=count,
+        mean=mean,
+        bounds=(mean - margin, mean + margin),
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PairedBinaryTable:
+    """Paired binary outcomes of a reference and a candidate over the same units.
+
+    Attributes:
+      rescued: Units only the candidate succeeded on.
+      lost: Units only the reference succeeded on.
+      both: Units both succeeded on.
+      neither: Units neither succeeded on.
+
+    """
+
+    rescued: int
+    lost: int
+    both: int
+    neither: int
+
+    @property
+    def net(self) -> int:
+        """Rescued minus lost units."""
+        return self.rescued - self.lost
+
+
+def paired_binary_table(
+    reference: Sequence[bool],
+    candidate: Sequence[bool],
+) -> PairedBinaryTable:
+    """Count rescued, lost, shared and shared-failure units of paired outcomes.
+
+    Args:
+      reference: Reference success per unit.
+      candidate: Candidate success on the same units, in the same order.
+
+    Returns:
+      table: Counts per outcome pair; an interval on the net change is the
+        bootstrap of ``candidate - reference``.
+
+    Raises:
+      ValueError: The two outcome vectors differ in length.
+
+    """
+    pairs = Counter(zip(reference, candidate, strict=True))
+    return PairedBinaryTable(
+        rescued=pairs[False, True],
+        lost=pairs[True, False],
+        both=pairs[True, True],
+        neither=pairs[False, False],
+    )
+
+
+def exact_binomial_bounds(
+    successes: int,
+    *,
+    count: int,
+    tail: float,
+) -> tuple[float, float]:
+    """Return exact binomial rate bounds with ``tail`` probability in each tail.
+
+    The bounds follow the definition: ``low`` is the rate at which
+    ``P(X >= successes)`` equals ``tail`` (0 when ``successes`` is 0), and
+    ``high`` the rate at which ``P(X <= successes)`` equals ``tail`` (1 when
+    ``successes`` is ``count``). Each tail is a float64 ``logsumexp`` of
+    ``lgamma`` log-pmfs, solved by bisection over the float64 bit patterns of
+    the rate, which ends at adjacent floats within 64 steps.
+
+    Args:
+      successes: Observed successes, from 0 through ``count``.
+      count: Observed trials, at least 1.
+      tail: Probability outside each bound, strictly between 0 and 0.5, so
+        coverage is ``1 - 2 * tail``.
+
+    Returns:
+      low: Lower rate bound.
+      high: Upper rate bound.
+
+    Raises:
+      ValueError: Successes outside ``[0, count]``, no trials, or a tail
+        outside the open interval (0, 0.5).
+
+    References:
+      Clopper & Pearson 1934, "The use of confidence or fiducial limits
+        illustrated in the case of the binomial."
+
+    """
+    if count < 1 or successes < 0 or successes > count:
+        raise ValueError(
+            f"Successes must lie in [0, count] with count at least 1, "
+            f"got {successes} of {count}.",
+        )
+    if math.isnan(tail) or tail <= 0 or 2 * tail >= 1:
+        raise ValueError(f"Tail must lie strictly between 0 and 0.5, got {tail}.")
+    low = (
+        _binomial_tail_root(successes, count, count=count, tail=tail, rising=True)
+        if successes
+        else 0.0
+    )
+    high = (
+        _binomial_tail_root(0, successes, count=count, tail=tail, rising=False)
+        if successes < count
+        else 1.0
+    )
+    return low, high
+
+
+def rate_difference_lower_bound(
+    candidate: int,
+    *,
+    reference: int,
+    count: int,
+    tail: float,
+) -> tuple[float, float]:
+    """Bound ``candidate_rate - reference_rate`` from below, conservatively.
+
+    The bound is the candidate's exact lower bound minus the reference's exact
+    upper bound, each with ``tail`` beyond it, so it holds with probability at
+    least ``1 - 2 * tail``. Margins and splits of alpha across comparisons stay
+    with the caller.
+
+    Args:
+      candidate: Candidate successes.
+      reference: Reference successes.
+      count: Trials in each arm.
+      tail: Probability beyond each of the two exact bounds.
+
+    Returns:
+      lower: Lower bound on the rate difference.
+      difference: Observed rate difference.
+
+    References:
+      Clopper & Pearson 1934, "The use of confidence or fiducial limits
+        illustrated in the case of the binomial."
+
+    """
+    candidate_low, _ = exact_binomial_bounds(candidate, count=count, tail=tail)
+    _, reference_high = exact_binomial_bounds(reference, count=count, tail=tail)
+    return candidate_low - reference_high, (candidate - reference) / count
+
+
 def ema_update(current: float, new_value: float, alpha: float = 0.3) -> float:
     """Exponential moving average step.
 
@@ -662,3 +945,40 @@ def _householder_qr(mat: Tensor) -> tuple[Tensor, Tensor]:
 def _rayleigh(sigma: Tensor, basis: Tensor) -> Tensor:
     """Estimate eigenvalues along the basis columns."""
     return (basis * (sigma @ basis)).sum(dim=0)
+
+
+# ``rising`` says the tail mass grows with the rate. The returned float is the bisection
+# end whose mass is at least ``tail``.
+def _binomial_tail_root(
+    first: int,
+    last: int,
+    *,
+    count: int,
+    tail: float,
+    rising: bool,
+) -> float:
+    """Return the rate at which ``P(first <= X <= last)`` crosses ``tail``."""
+    k = torch.arange(first, last + 1, dtype=torch.float64)
+    n = torch.tensor(count, dtype=torch.float64)
+    log_choose = torch.lgamma(n + 1) - torch.lgamma(k + 1) - torch.lgamma(n - k + 1)
+    log_tail = math.log(tail)
+    bracket = torch.tensor((0.0, 1.0), dtype=torch.float64).view(torch.int64)
+    low_bits, high_bits = int(bracket[0]), int(bracket[1])
+    while high_bits - low_bits > 1:
+        mid_bits = (low_bits + high_bits) // 2
+        rate = float(torch.tensor(mid_bits).view(torch.float64))
+        log_mass = torch.logsumexp(
+            log_choose + k * math.log(rate) + (n - k) * math.log1p(-rate),
+            dim=0,
+        )
+        if (float(log_mass) < log_tail) == rising:
+            low_bits = mid_bits
+        else:
+            high_bits = mid_bits
+    return float(torch.tensor(high_bits if rising else low_bits).view(torch.float64))
+
+
+def _check_level(level: float) -> None:
+    """Reject an interval coverage outside the open unit interval."""
+    if math.isnan(level) or level <= 0 or level >= 1:
+        raise ValueError(f"Level must lie strictly between 0 and 1, got {level}.")

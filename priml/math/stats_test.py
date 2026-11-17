@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, override
 from unittest.mock import Mock
 
 import functools
 import math
 
 from torch import Tensor
-from torch._subclasses.fake_tensor import FakeTensorMode
 
 import pytest
 import torch
 
 from priml.math.stats import (
+    PairedTInterval,
     SlidingWindow,
     _householder_qr,
     average_ranks,
@@ -22,14 +22,19 @@ from priml.math.stats import (
     entropy_logits,
     entropy_logits_mean_all_to_all,
     entropy_probs,
+    exact_binomial_bounds,
     holm,
     jsd,
     ordinal_ranks,
+    paired_binary_table,
+    paired_bootstrap_interval,
+    paired_t_interval,
     pca,
     pca_eigh,
     pca_power,
     pca_svd,
     quantile_normalize,
+    rate_difference_lower_bound,
     spearman,
     total_variation,
 )
@@ -511,11 +516,20 @@ def test_pca_svd_uses_thin_factorization_for_tall_inputs(
     assert svd.call_args.kwargs["full_matrices"] is False
 
 
+class _MpsReportingTensor(Tensor):
+    """A CPU tensor that reports an MPS device, as ``pca_svd``'s guard reads it."""
+
+    @property
+    @override
+    def device(self) -> torch.device:
+        """Report MPS without MPS hardware."""
+        return torch.device("mps")
+
+
 def test_pca_svd_device_guard_message() -> None:
-    with FakeTensorMode():
-        mps_input = torch.empty((2, 3), device="mps")
-        with pytest.raises(RuntimeError) as error:
-            pca_svd(mps_input)
+    mps_input = torch.zeros(2, 3).as_subclass(_MpsReportingTensor)
+    with pytest.raises(RuntimeError) as error:
+        pca_svd(mps_input)
     assert str(error.value) == (
         "pca_svd is not supported on MPS; use pca_power instead."
     )
@@ -1081,6 +1095,406 @@ _EMPTY_DIM_REDUCERS: list[Callable[[Tensor], Tensor]] = [
 def test_reducers_reject_an_empty_dim(reduce: Callable[[Tensor], Tensor]) -> None:
     with pytest.raises(ValueError, match="at least one axis"):
         reduce(torch.zeros(2, 3))
+
+
+def test_paired_bootstrap_estimands_differ_for_unequal_cluster_sizes() -> None:
+    # Cluster "a" holds three differences of 1 and "b" one difference of 4.
+    differences = [1.0, 1.0, 1.0, 4.0]
+    clusters = ["a", "a", "a", "b"]
+    by_cluster = paired_bootstrap_interval(
+        differences,
+        clusters=clusters,
+        estimand="cluster_mean",
+        resamples=40,
+        seed=0,
+        level=0.2,
+    )
+    by_observation = paired_bootstrap_interval(
+        differences,
+        clusters=clusters,
+        estimand="observation_mean",
+        resamples=40,
+        seed=0,
+        level=0.2,
+    )
+    # A resample draws "a" and "b" once each in the middle of its distribution:
+    # (1 + 4) / 2 per cluster, (3 + 4) / (3 + 1) per observation.
+    assert by_cluster == ((1 + 4) / 2, (1 + 4) / 2, (1 + 4) / 2)
+    assert by_observation == ((3 + 4) / 4, (3 + 4) / 4, (3 + 4) / 4)
+
+
+def test_paired_bootstrap_estimands_agree_for_equal_cluster_sizes() -> None:
+    # Cluster means are 2, 4 and 0, so cluster totals are exactly twice them.
+    differences = [1.0, 3.0, 4.0, 4.0, -1.0, 1.0]
+    clusters = [7, 7, 5, 5, 9, 9]
+    by_cluster = paired_bootstrap_interval(
+        differences,
+        clusters=clusters,
+        estimand="cluster_mean",
+        resamples=50,
+        seed=3,
+        level=0.9,
+    )
+    assert by_cluster[0] == (2 + 4 + 0) / 3
+    assert by_cluster[1] < by_cluster[2]
+    assert by_cluster == paired_bootstrap_interval(
+        differences,
+        clusters=clusters,
+        estimand="observation_mean",
+        resamples=50,
+        seed=3,
+        level=0.9,
+    )
+
+
+@pytest.mark.parametrize("estimand", ["cluster_mean", "observation_mean"])
+def test_paired_bootstrap_with_one_observation_per_cluster_is_the_plain_mean(
+    estimand: Literal["cluster_mean", "observation_mean"],
+) -> None:
+    estimate, low, high = paired_bootstrap_interval(
+        [0.5, -1.5, 2.5, 0.5],
+        clusters=range(4),
+        estimand=estimand,
+        resamples=30,
+        seed=4,
+        level=0.8,
+    )
+    assert estimate == (0.5 - 1.5 + 2.5 + 0.5) / 4
+    assert -1.5 <= low < high <= 2.5
+
+
+@pytest.mark.parametrize(
+    ("level", "low", "high"),
+    [(0.9, 0.0, 2 / 3), (0.2, 1 / 3, 1 / 3)],
+)
+def test_paired_bootstrap_quantiles_index_the_exact_resample_distribution(
+    level: float,
+    low: float,
+    high: float,
+) -> None:
+    # Clusters 0, 0, 1 resample to means 0, 1/3, 2/3, 1 with odds 8, 12, 6, 1 / 27.
+    estimate, actual_low, actual_high = paired_bootstrap_interval(
+        [0.0, 0.0, 1.0],
+        clusters=["x", "y", "z"],
+        estimand="cluster_mean",
+        resamples=100_000,
+        seed=0,
+        level=level,
+    )
+    assert estimate == 1 / 3
+    assert (actual_low, actual_high) == (low, high)
+
+
+def test_paired_bootstrap_level_rounding_to_one_clamps_to_the_last_draw() -> None:
+    # The tail is below half an ulp, so the upper index rounds to ``resamples``.
+    _, low, high = paired_bootstrap_interval(
+        [0.0, 1.0, 4.0],
+        clusters=["x", "y", "z"],
+        estimand="cluster_mean",
+        resamples=2,
+        seed=0,
+        level=1 - 1e-16,
+    )
+    assert low < high
+    _, single_low, single_high = paired_bootstrap_interval(
+        [0.0, 1.0, 4.0],
+        clusters=["x", "y", "z"],
+        estimand="cluster_mean",
+        resamples=1,
+        seed=0,
+        level=0.5,
+    )
+    assert single_low == single_high
+
+
+def test_paired_bootstrap_seed_reproduces_and_changes_the_draws() -> None:
+    def interval(seed: int) -> tuple[float, float, float]:
+        return paired_bootstrap_interval(
+            [0.0, 1.0, 4.0, -2.0, 3.0],
+            clusters=["v", "w", "x", "y", "z"],
+            estimand="observation_mean",
+            resamples=50,
+            seed=seed,
+            level=0.5,
+        )
+
+    assert interval(3) == interval(3)
+    assert interval(3)[1:] != interval(4)[1:]
+
+
+@pytest.mark.parametrize(
+    ("differences", "clusters", "resamples", "level", "message"),
+    [
+        ([], [], 5, 0.5, r"^No paired differences\.$"),
+        ([1.0], ["a"], 0, 0.5, r"^Resamples must be positive, got 0\.$"),
+        (
+            [1.0],
+            ["a"],
+            5,
+            0.0,
+            r"^Level must lie strictly between 0 and 1, got 0\.0\.$",
+        ),
+        (
+            [1.0],
+            ["a"],
+            5,
+            1.0,
+            r"^Level must lie strictly between 0 and 1, got 1\.0\.$",
+        ),
+        (
+            [1.0],
+            ["a"],
+            5,
+            math.nan,
+            r"^Level must lie strictly between 0 and 1, got nan",
+        ),
+        ([1.0, 2.0], ["a"], 5, 0.5, r"^zip\(\) argument 2 is longer than argument 1$"),
+    ],
+)
+def test_paired_bootstrap_rejects_invalid_arguments(
+    differences: list[float],
+    clusters: list[str],
+    resamples: int,
+    level: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        paired_bootstrap_interval(
+            differences,
+            clusters=clusters,
+            estimand="cluster_mean",
+            resamples=resamples,
+            seed=0,
+            level=level,
+        )
+
+
+class FakeStudentT:
+    """Stand in for ``scipy.stats.t``: one fixed quantile; record what was asked."""
+
+    def __init__(self, quantile: float) -> None:
+        self.quantile = quantile
+        self.calls: list[tuple[float, int]] = []
+
+    def ppf(self, q: float, df: int) -> float:
+        """Record ``(q, df)`` and return the fixed quantile."""
+        self.calls.append((q, df))
+        return self.quantile
+
+
+@pytest.fixture
+def student_t(monkeypatch: pytest.MonkeyPatch) -> FakeStudentT:
+    """Replace only scipy's slow Student t quantile; the interval stays ours."""
+    fake = FakeStudentT(quantile=3.0)
+    monkeypatch.setattr("priml.math.stats.t", fake)
+    return fake
+
+
+def test_paired_t_interval_spans_the_t_quantile_times_the_standard_error(
+    student_t: FakeStudentT,
+) -> None:
+    # Mean 1 and sample sd 3 over nine pairs give a standard error of 3 / 3; the
+    # quantile 3 then puts the bounds 3 either side of the mean.
+    differences = [7.0, -5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    interval = paired_t_interval(differences, level=0.95, min_pairs=2)
+    assert interval == PairedTInterval(count=9, mean=1.0, bounds=(1.0 - 3.0, 1.0 + 3.0))
+    assert student_t.calls == [(0.975, 9 - 1)]
+    at_minimum = paired_t_interval(differences, level=0.95, min_pairs=9)
+    assert at_minimum.bounds == (1.0 - 3.0, 1.0 + 3.0)
+
+
+def test_paired_t_interval_has_no_bounds_below_the_minimum_pair_count() -> None:
+    few = paired_t_interval([0.25, 0.75, 0.5], level=0.95, min_pairs=4)
+    assert (few.count, few.mean, few.bounds) == (3, 0.5, None)
+    none = paired_t_interval([], level=0.95, min_pairs=2)
+    assert (none.count, none.bounds) == (0, None)
+    assert math.isnan(none.mean)
+
+
+@pytest.mark.usefixtures("student_t")
+def test_paired_t_interval_collapses_for_constant_differences() -> None:
+    interval = paired_t_interval([0.125, 0.125], level=0.99, min_pairs=2)
+    assert interval == PairedTInterval(count=2, mean=0.125, bounds=(0.125, 0.125))
+
+
+@pytest.mark.parametrize("level", [0.0, 1.0, math.nan])
+def test_paired_t_interval_rejects_a_level_outside_the_open_unit_interval(
+    level: float,
+) -> None:
+    with pytest.raises(ValueError, match=r"^Level must lie strictly between 0 and 1"):
+        paired_t_interval([0.0, 1.0], level=level, min_pairs=2)
+
+
+def test_paired_binary_table_counts_each_outcome_pair() -> None:
+    # Rescued 1, lost 2, both 3 and neither 4 times.
+    reference = [False, True, True, True, True, True] + [False] * 4
+    candidate = [True, False, False, True, True, True] + [False] * 4
+    table = paired_binary_table(reference, candidate)
+    assert (table.rescued, table.lost, table.both, table.neither) == (1, 2, 3, 4)
+    assert table.net == 1 - 2
+
+
+def test_paired_binary_table_rejects_unequal_lengths() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^zip\(\) argument 2 is shorter than argument 1$",
+    ):
+        paired_binary_table([True, False, True], [True, False])
+
+
+def _assert_bounds_close(
+    actual: tuple[float, float],
+    expected: tuple[float, float],
+    *,
+    absolute: float,
+    relative: float,
+) -> None:
+    """Require each bound within both errors; the rates 0 and 1 exactly."""
+    for got, want in zip(actual, expected, strict=True):
+        if want in {0.0, 1.0}:
+            assert got == want
+        else:
+            assert abs(got - want) <= min(absolute, relative * abs(want))
+
+
+# Against a 40-digit reference over counts up to 512 and tails down to 1e-10 the
+# largest measured errors are 5.7e-15 absolute and 2.9e-13 relative; at counts
+# 4096 to 100,000 they are 1.3e-13 absolute and 1.2e-10 relative, from the
+# rounding of float64 lgamma near 1e6.
+_SMALL_COUNT_ERROR = {"absolute": 1e-14, "relative": 1e-12}
+_LARGE_COUNT_ERROR = {"absolute": 5e-13, "relative": 5e-10}
+
+
+@pytest.mark.parametrize("tail", [0.25, 0.375])
+def test_exact_binomial_bounds_end_on_the_first_float_reaching_the_tail(
+    tail: float,
+) -> None:
+    # One trial has P(X >= 1) = p and P(X <= 0) = 1 - p, so each bound must be the
+    # float next to the crossing on the side whose tail mass reaches ``tail``.
+    low, _ = exact_binomial_bounds(1, count=1, tail=tail)
+    assert math.log(low) >= math.log(tail) > math.log(math.nextafter(low, 0))
+    _, high = exact_binomial_bounds(0, count=1, tail=tail)
+    assert math.log1p(-high) >= math.log(tail) > math.log1p(-math.nextafter(high, 1))
+
+
+@pytest.mark.parametrize(
+    ("successes", "count", "tail", "expected"),
+    [
+        (0, 4, 0.375, (0.0, 1 - 0.375 ** (1 / 4))),
+        (0, 4, 0.05, (0.0, 1 - 0.05 ** (1 / 4))),
+        (4, 4, 0.05, (0.05 ** (1 / 4), 1.0)),
+        (1, 2, 0.05, (1 - (1 - 0.05) ** 0.5, (1 - 0.05) ** 0.5)),
+        (0, 50, 1e-10, (0.0, 1 - 1e-10 ** (1 / 50))),
+        (50, 50, 1e-10, (1e-10 ** (1 / 50), 1.0)),
+    ],
+)
+def test_exact_binomial_bounds_match_closed_forms(
+    successes: int,
+    count: int,
+    tail: float,
+    expected: tuple[float, float],
+) -> None:
+    actual = exact_binomial_bounds(successes, count=count, tail=tail)
+    _assert_bounds_close(actual, expected, **_SMALL_COUNT_ERROR)
+
+
+# Small counts: 40-digit mpmath roots of the regularized incomplete beta. Large
+# counts: scipy's beta.ppf and beta.isf, which match that reference wherever it
+# converges. Recorded by /opt/scratch/scripts/binomial_literals_20261117.py.
+@pytest.mark.parametrize(
+    ("successes", "count", "tail", "expected", "error"),
+    [
+        (
+            1,
+            10,
+            0.025,
+            (0.0025285785444617848, 0.44501611702819543),
+            _SMALL_COUNT_ERROR,
+        ),
+        (5, 10, 0.025, (0.18708602844739852, 0.8129139715526015), _SMALL_COUNT_ERROR),
+        (3, 50, 1e-10, (1.721878520521812e-05, 0.4804861641279643), _SMALL_COUNT_ERROR),
+        (47, 50, 1e-6, (0.6435004336581545, 0.9996274810453115), _SMALL_COUNT_ERROR),
+        (
+            4096,
+            8192,
+            1e-6,
+            (0.47369876854412724, 0.5263012314558728),
+            _LARGE_COUNT_ERROR,
+        ),
+        (
+            1,
+            100_000,
+            0.025,
+            (2.531780477933314e-07, 5.571516034774276e-05),
+            _LARGE_COUNT_ERROR,
+        ),
+        (
+            50_000,
+            100_000,
+            0.025,
+            (0.4968960624918004, 0.5031039375081996),
+            _LARGE_COUNT_ERROR,
+        ),
+    ],
+)
+def test_exact_binomial_bounds_match_reference_values(
+    successes: int,
+    count: int,
+    tail: float,
+    expected: tuple[float, float],
+    error: dict[str, float],
+) -> None:
+    actual = exact_binomial_bounds(successes, count=count, tail=tail)
+    _assert_bounds_close(actual, expected, **error)
+
+
+def test_exact_binomial_bounds_widen_as_the_tail_shrinks() -> None:
+    bounds = [
+        exact_binomial_bounds(3, count=7, tail=tail) for tail in (0.2, 0.05, 0.01)
+    ]
+    lows, highs = zip(*bounds, strict=True)
+    assert lows[0] > lows[1] > lows[2]
+    assert highs[0] < highs[1] < highs[2]
+
+
+@pytest.mark.parametrize("successes", [1, 5, 9])
+def test_exact_binomial_bounds_bracket_an_interior_rate(successes: int) -> None:
+    low, high = exact_binomial_bounds(successes, count=10, tail=0.25)
+    assert low < successes / 10 < high
+
+
+@pytest.mark.parametrize(
+    ("successes", "count", "tail", "message"),
+    [
+        (-1, 4, 0.05, r"^Successes must lie in \[0, count\] .*, got -1 of 4\.$"),
+        (5, 4, 0.05, r"^Successes must lie in \[0, count\] .*, got 5 of 4\.$"),
+        (0, 0, 0.05, r"^Successes must lie in \[0, count\] .*, got 0 of 0\.$"),
+        (1, 4, 0.0, r"^Tail must lie strictly between 0 and 0\.5, got 0\.0\.$"),
+        (1, 4, 0.5, r"^Tail must lie strictly between 0 and 0\.5, got 0\.5\.$"),
+        (1, 4, math.nan, r"^Tail must lie strictly between 0 and 0\.5, got nan\.$"),
+    ],
+)
+def test_exact_binomial_bounds_reject_invalid_arguments(
+    successes: int,
+    count: int,
+    tail: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        exact_binomial_bounds(successes, count=count, tail=tail)
+
+
+def test_rate_difference_lower_bound_matches_a_worked_input() -> None:
+    # Reference bounds at tail 0.0125: 37 of 50 has low 0.5765544713507597 and
+    # 41 of 50 has high 0.9237165575969964.
+    lower, difference = rate_difference_lower_bound(
+        37,
+        reference=41,
+        count=50,
+        tail=0.0125,
+    )
+    assert abs(lower - (0.5765544713507597 - 0.9237165575969964)) <= 2e-14
+    assert difference == (37 - 41) / 50
 
 
 if __name__ == "__main__":
