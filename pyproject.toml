@@ -4,7 +4,6 @@
 
 [project]
 name = "priml"
-version = "0.1.8"
 description = "Malleable ML building blocks for training experiments."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -79,6 +78,7 @@ dependencies = [
     "wrapt>=2.5.2",
     # misc
 ]
+dynamic = ["version"]
 license-files = ["LICENSE", "LICENSES/*"]
 
 [project.scripts]
@@ -193,7 +193,7 @@ Issues = "https://github.com/rekursiv-ai/priml/issues"
 Changelog = "https://github.com/rekursiv-ai/priml/releases"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -208,6 +208,9 @@ artifacts = ["priml/py.typed"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.pytest.ini_options]
 python_files = ["*_test.py", "test_*.py"]
