@@ -514,7 +514,7 @@ def stored_local_reference() -> tuple[
 ]:
     """Evaluate the independent stored-activation loss and gradients once."""
     batch = _batch(windows=1)
-    stored = _two_layer_local_model(checkpoint=False)
+    stored = _local_model(layers=2, checkpoint=False)
     calls = _count_local_calls(stored)
     loss, grads = _loss_and_grads(stored, batch)
     return batch, loss, grads, calls
@@ -524,7 +524,7 @@ def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients(
     stored_local_reference: tuple[PackedBatch, Tensor, dict[str, Tensor], list[int]],
 ) -> None:
     batch, loss, grads, stored_calls = stored_local_reference
-    recomputed = _two_layer_local_model(checkpoint=True)
+    recomputed = _local_model(layers=2, checkpoint=True)
     recomputed_calls = _count_local_calls(recomputed)
     loss_recomputed, grads_recomputed = _loss_and_grads(recomputed, batch)
     # One call per block in forward; a checkpointed block runs again in backward.
@@ -550,7 +550,7 @@ def local_recompute_reference() -> tuple[
         t_g=5,
         s_max=1,
     )
-    plain = _two_layer_local_model(checkpoint=True)
+    plain = _local_model(layers=2, checkpoint=True)
     calls = _count_local_calls(plain)
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION), _OpCounter() as ops:
         loss, grads = _loss_and_grads(plain, batch)
@@ -567,7 +567,7 @@ def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels(
     ],
 ) -> None:
     batch, loss, grads, calls, counts = local_recompute_reference
-    kept = _two_layer_local_model(checkpoint=True, keeps_attention=True)
+    kept = _local_model(layers=2, checkpoint=True, keeps_attention=True)
     calls_kept = _count_local_calls(kept)
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION), _OpCounter() as ops_kept:
         loss_kept, grads_kept = _loss_and_grads(kept, batch)
@@ -592,8 +592,11 @@ def test_checkpointed_local_blocks_compile_fullgraph_to_the_eager_gradients(
 ) -> None:
     device = torch.device("cuda")
     batch = _batch().to(device)
-    stored = _two_layer_local_model(checkpoint=False).to(device)
-    recomputed = _two_layer_local_model(
+    # One block a stack: Dynamo's trace grows with depth, and a second block
+    # repeats the same checkpointed region (measured 4.1 s -> 3.3 s cold).
+    stored = _local_model(layers=1, checkpoint=False).to(device)
+    recomputed = _local_model(
+        layers=1,
         checkpoint=True,
         keeps_attention=keeps_attention,
     ).to(device)
@@ -1048,25 +1051,27 @@ def _oracle_local(batch: PackedBatch, *, frames: Tensor) -> Tensor:
     return logits
 
 
-def _two_layer_local_model(
+def _local_model(
     *,
+    layers: int,
     checkpoint: bool,
     keeps_attention: bool = False,
 ) -> WorldModel:
-    """Return a tiny model with 2-block local stacks, all checkpointed or none."""
-    return copy.deepcopy(_seeded_two_layer_local_model(checkpoint, keeps_attention))
+    """Return a tiny model with ``layers``-block local stacks, all checkpointed or none."""
+    return copy.deepcopy(_seeded_local_model(layers, checkpoint, keeps_attention))
 
 
 # As ``_seeded_tiny_world_model``: each test gets its own copy of one build.
 @cache
-def _seeded_two_layer_local_model(
+def _seeded_local_model(
+    layers: int,
     checkpoint: bool,
     keeps_attention: bool,
 ) -> WorldModel:
     config = _tiny_world_model_config()
     assert isinstance(config.encoder, FrameEncoder.Config)
     for stack in (config.encoder.stack, config.decoder.stack):
-        stack.num_layers = 2
+        stack.num_layers = layers
         assert isinstance(stack.block, (EncoderBlock.Config, DecoderBlock.Config))
         stack.block.checkpoint = checkpoint
         stack.block.recompute_policy = keep_attention if keeps_attention else None

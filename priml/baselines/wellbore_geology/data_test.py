@@ -72,9 +72,7 @@ from priml.baselines.wellbore_geology.loss import PosteriorLoss
 from priml.baselines.wellbore_geology.metrics import pooled_rmse
 from priml.baselines.wellbore_geology.particles import (
     ParticleCache,
-    ParticlePrior,
     particle_well,
-    prepare_particles,
     read_particle_cache,
     write_particle_cache,
 )
@@ -2298,19 +2296,16 @@ def test_queries_and_support_may_come_from_different_splits(tmp_path: Path) -> N
 
 def test_particle_slot_attaches_each_well_cache(tmp_path: Path) -> None:
     write_study_inputs(tmp_path, rows=13)
-    raw = load_split(tmp_path / "train")
     cache = tmp_path / "cache"
-    particle = ParticlePrior.Config()
-    particle.particles = 3
-    particle.seeds = 5
-    particle.paths = 2
-    particle.prefix_rows = 4
-    particle.target_rows = 6
-    particle.downsample = 2
-    particle.reference_columns = 7
-    particle.reference_window = 100.0
-    prepare_particles(raw, config=particle, directory=cache, has_target=True)
-    records = {name: read_particle_cache(cache / f"{name}.npz") for name in raw}
+    cache.mkdir()
+    # Each well's record differs, so a cache attached to the wrong well mismatches.
+    for offset, name in enumerate(("well0", "well1")):
+        payload = _particle_payload()
+        payload["tvt0"] = np.asarray(20.25 + offset, dtype=np.float64)
+        write_particle_cache(cache / f"{name}.npz", payload)
+    records = {
+        name: read_particle_cache(cache / f"{name}.npz") for name in ("well0", "well1")
+    }
     config = FoldObservations.Config()
     config.directory = tmp_path / "train"
     config.geography = GeographicPrior.Config()

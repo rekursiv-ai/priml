@@ -38,7 +38,6 @@ from priml.testing.golden import (
     read_tensors,
     rng_fingerprint,
 )
-from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA
 from priml.train.parallelism import NoParallel
 
@@ -377,18 +376,22 @@ def test_resumed_custom_loop_is_not_admitted(tmp_path: Path) -> None:
 
 
 def test_relaunch_refuses_to_replace_completed_artifacts(tmp_path: Path) -> None:
-    config = tiny_job(tmp_path)
-    config.loop.checkpointer = Checkpointer.Config(resume=False)
-    config.loop.max_steps = 1
-    config.make().run()
+    # The refusal precedes the loop, so the run needs no data or model.
+    config = CasmiRun()
+    config.loop.working_dir = tmp_path / "native"
+    config.loop.base_dir = None
+    run = config.make()
     destination = Path(config.loop.working_dir)
+    # A finished run's files, each holding what a relaunch would write differently.
     expected = {
-        path.relative_to(destination): path.read_bytes()
-        for path in destination.rglob("*")
-        if path.is_file()
+        Path(name): f"completed {name}\n".encode()
+        for name in ("config.txt", "budget.json", "fpnet.pt")
     }
+    destination.mkdir(parents=True)
+    for name, content in expected.items():
+        (destination / name).write_bytes(content)
     with pytest.raises(FileExistsError):
-        config.make().run()
+        run.run()
     assert {
         path.relative_to(destination): path.read_bytes()
         for path in destination.rglob("*")

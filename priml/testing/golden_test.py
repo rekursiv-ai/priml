@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast, override
 
 import contextlib
 import fcntl
 import functools
+import inspect
 import math
 import os
-import subprocess
-import sys
-import textwrap
 import threading
 import zlib
 
@@ -57,6 +57,9 @@ _torch_load: _Load = torch.load
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from types import CodeType
+
     from torch import Tensor
 
 
@@ -101,6 +104,21 @@ class _PformatSpy:
     def __call__(self, **kwargs: object) -> str:
         self.kwargs = kwargs
         return "rendered"
+
+
+class _OptimizedLoader(SourceFileLoader):
+    """Compile a module from source as ``python -O`` does, bypassing ``.pyc`` files."""
+
+    @override
+    def get_code(self, fullname: str) -> CodeType:
+        del fullname
+        return compile(
+            self.get_data(self.path),
+            self.path,
+            "exec",
+            dont_inherit=True,
+            optimize=1,
+        )
 
 
 def test_assert_pprint_golden_reads_full_finalized_config(tmp_path: Path) -> None:
@@ -229,43 +247,31 @@ def test_assert_pprint_golden_reports_mismatch_without_rewriting(
     assert path.read_text(encoding="utf-8") == "stale\n"
 
 
-@pytest.mark.cli_python_subprocess
 def test_assert_pprint_golden_rejects_mismatch_under_optimized_python(
     tmp_path: Path,
 ) -> None:
+    """Load ``golden`` as ``python -O`` would: compiled with its asserts stripped."""
     test_file = tmp_path / "owner_test.py"
     testdata = tmp_path / "testdata"
     testdata.mkdir()
     (testdata / "example.txt").write_text("stale\n", encoding="utf-8")
-    script = textwrap.dedent(
-        f"""
-        from configgle.fig import Fig
-        from priml.testing.golden import assert_pprint_golden
+    path = inspect.getfile(golden)
+    loader = _OptimizedLoader(golden.__name__, path)
+    spec = spec_from_file_location(golden.__name__, path, loader=loader)
+    assert spec is not None
+    optimized = module_from_spec(spec)
+    loader.exec_module(optimized)
+    assert_optimized = cast(
+        "Callable[..., None]",
+        vars(optimized)["assert_pprint_golden"],
+    )
 
-        class Example:
-            class Config(Fig["Example"]):
-                value: int = 1
-
-            def __init__(self, config: Config) -> None:
-                del config
-
-        assert_pprint_golden(
-            test_file={str(test_file)!r},
+    with pytest.raises(AssertionError, match="example changed"):
+        assert_optimized(
+            test_file=str(test_file),
             name="example",
-            config=Example.Config(),
+            config=_Example.Config(),
         )
-        """,
-    )
-
-    result = subprocess.run(  # noqa: S603 -- The test invokes a fixed helper command with controlled fixture arguments.
-        [sys.executable, "-O", "-c", script],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode != 0
-    assert "AssertionError" in result.stderr
 
 
 def test_assert_pprint_golden_regenerates_under_the_flag(

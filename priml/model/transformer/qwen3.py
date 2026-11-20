@@ -326,8 +326,14 @@ class Qwen3(Transformer):
         """
         hf_config, hf_sd = hub.load_hf_checkpoint(path_or_repo, dtype=dtype)
         config = cls.Config.from_hf(hf_config).finalize()
-        model = config.make()
-        model.load_state_dict(remap_hf_state_dict(hf_sd, config))
+        # The checkpoint supplies every parameter, so built on meta nothing is
+        # drawn only to be overwritten: random init was most of a 0.6B load.
+        with torch.device("meta"):
+            model = config.make()
+        for module in model.modules():
+            if isinstance(module, RoPE):
+                module.to_empty(device="cpu")
+        model.load_state_dict(remap_hf_state_dict(hf_sd, config), assign=True)
         model = model.to(
             dtype=dtype
             or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16"))),
