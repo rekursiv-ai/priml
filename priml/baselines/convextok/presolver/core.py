@@ -11,6 +11,11 @@ The public kernels are the steps of PSLP's main loop, which ``presolve``
 sequences; each names the PSLP function it ports. Every kernel lives in this module on purpose: Numba stamps a cached kernel with
 its own file only, so a caller cached before a callee in another file changed
 would keep running the old callee.
+
+Every integer a kernel passes to another kernel is wrapped in ``as_int64`` and every
+flag in ``as_bool``. Numba compiles a callee once per distinct argument type, and an
+int32 array read, a uint8 tag, or a literal constant each count as one: unwrapped,
+22 kernels compiled up to 9 signatures each, 6 s of a 24 s compile.
 """
 
 from functools import cache
@@ -23,6 +28,8 @@ import numpy as np
 from priml.baselines.convextok.presolver.custom_typings import (
     FBuf,
     IBuf,
+    as_bool,
+    as_int64,
 )
 from priml.baselines.convextok.presolver.numba_api import (
     StructRef,
@@ -515,7 +522,7 @@ def remove_variables_with_close_bounds(s: Core) -> None:
         if s.col_sizes[col] < 0 or s.col_tags[col] & (C_LB_INF | C_UB_INF):
             continue
         if abs(s.lb[col] - s.ub[col]) <= FEAS_TOL:
-            _fix_col(s, col, s.lb[col], s.c[col])
+            _fix_col(s, as_int64(col), s.lb[col], s.c[col])
         elif s.lb[col] > s.ub[col] + FEAS_TOL:
             raise ValueError("Presolve proved the program infeasible.")
     _delete_fixed_cols_from_problem(s)
@@ -609,7 +616,7 @@ def remove_empty_cols(s: Core) -> None:
         s.offset += s.c[k] * val
         s.col_tags[k] |= C_FIXED
         s.col_sizes[k] = SIZE_INACTIVE
-        _save_fixed_col(s, k, val, s.c[k], False)
+        _save_fixed_col(s, as_int64(k), val, s.c[k], as_bool(False))
     s.empty_cols.len = 0
 
 
@@ -681,32 +688,32 @@ def simple_dual_fix(s: Core) -> None:
         if ck > 0 and s.lock_down[k] == 0:
             if tag & C_LB_INF:
                 raise ValueError("Presolve proved the program unbounded.")
-            _fix_col(s, k, s.lb[k], ck)
+            _fix_col(s, as_int64(k), s.lb[k], ck)
         elif ck < 0 and s.lock_up[k] == 0:
             if tag & C_UB_INF:
                 raise ValueError("Presolve proved the program unbounded.")
-            _fix_col(s, k, s.ub[k], ck)
+            _fix_col(s, as_int64(k), s.ub[k], ck)
         elif ck == 0:
             if s.lock_down[k] == 0:
                 if tag & C_LB_INF:
-                    _ivec_append(cols_to_inf, -k)
+                    _ivec_append(cols_to_inf, as_int64(-k))
                 else:
-                    _fix_col(s, k, s.lb[k], ck)
+                    _fix_col(s, as_int64(k), s.lb[k], ck)
             elif s.lock_up[k] == 0:
                 if tag & C_UB_INF:
-                    _ivec_append(cols_to_inf, k)
+                    _ivec_append(cols_to_inf, as_int64(k))
                 else:
-                    _fix_col(s, k, s.ub[k], ck)
+                    _fix_col(s, as_int64(k), s.ub[k], ck)
     for ii in range(cols_to_inf.len):
         col = cols_to_inf.data[ii]
         if col < 0:
-            _fix_col_to_inf(s, -col, -1)
+            _fix_col_to_inf(s, as_int64(-col), as_int64(-1))
         elif col > 0:
-            _fix_col_to_inf(s, col, 1)
+            _fix_col_to_inf(s, as_int64(col), as_int64(1))
         elif s.lock_down[0] == 0:
-            _fix_col_to_inf(s, 0, -1)
+            _fix_col_to_inf(s, as_int64(0), as_int64(-1))
         elif s.lock_up[0] == 0:
-            _fix_col_to_inf(s, 0, 1)
+            _fix_col_to_inf(s, as_int64(0), as_int64(1))
     _delete_inactive_rows(s)
     _delete_fixed_cols_from_problem(s)
     _delete_inactive_cols_from_a_and_at(s)
@@ -770,7 +777,7 @@ def remove_dton_eq_rows_pass(s: Core, max_shift: int) -> int:
     s.AT.nnz = a.nnz
     s.dton_rows.len = 0
     for ii in range(s.int_vec.len):
-        _ivec_append(s.dton_rows, s.int_vec.data[ii])
+        _ivec_append(s.dton_rows, as_int64(s.int_vec.data[ii]))
     return status
 
 
@@ -899,7 +906,7 @@ def propagate_primal(s: Core) -> None:
                             if upper
                             else (ctag & C_LB_INF or implied > lb[k])
                         ):
-                            _tighten_bound(s, k, implied, upper)
+                            _tighten_bound(s, as_int64(k), implied, as_bool(upper))
                 elif (not side_inf or n_inf_other == 0) and n_inf == 1:
                     k = -1
                     aik = np.inf
@@ -927,7 +934,12 @@ def propagate_primal(s: Core) -> None:
                     else:
                         bound_side = act_min[row] if side_inf else lhs[row]
                     implied = (bound_side - partial) / aik
-                    _tighten_bound(s, k, implied, (aik > 0) == rhs_side)
+                    _tighten_bound(
+                        s,
+                        as_int64(k),
+                        implied,
+                        as_bool((aik > 0) == rhs_side),
+                    )
     next_round = s.iwork_n_rows
     new_len = 0
     for jj in range(queue.len):
@@ -941,7 +953,7 @@ def propagate_primal(s: Core) -> None:
         s.act_status[next_round[jj]] = ADDED
     queue.len = 0
     for jj in range(new_len):
-        _ivec_append(queue, next_round[jj])
+        _ivec_append(queue, as_int64(next_round[jj]))
     _delete_fixed_cols_from_problem(s)
     _delete_inactive_cols_from_a_and_at(s)
     remove_empty_rows(s)
@@ -1079,9 +1091,9 @@ def _tighten_bound(s: Core, k: int, implied: float, upper: bool) -> None:
         return
     if upper:
         if s.col_tags[k] & C_UB_INF or implied < s.ub[k]:
-            _propagate_ub(s, implied, k)
+            _propagate_ub(s, implied, as_int64(k))
     elif s.col_tags[k] & C_LB_INF or implied > s.lb[k]:
-        _propagate_lb(s, implied, k)
+        _propagate_lb(s, implied, as_int64(k))
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
@@ -1208,20 +1220,20 @@ def _new_state_lists(s: Core) -> None:
     for row in updated:
         s.act_status[row] = ADDED
     s.updated_activities = _new_ivec(updated)
-    s.fixed_cols_to_delete = _ivec_new(n // 100)
-    s.sub_cols_to_delete = _ivec_new(n // 100)
-    s.rows_to_delete = _ivec_new(m // 100)
-    s.ps_starts = _ivec_new(m // 4)
-    s.ps_indices = _ivec_new(m // 4)
-    s.ps_type = _ivec_new(m // 4)
+    s.fixed_cols_to_delete = _ivec_new(as_int64(n // 100))
+    s.sub_cols_to_delete = _ivec_new(as_int64(n // 100))
+    s.rows_to_delete = _ivec_new(as_int64(m // 100))
+    s.ps_starts = _ivec_new(as_int64(m // 4))
+    s.ps_indices = _ivec_new(as_int64(m // 4))
+    s.ps_type = _ivec_new(as_int64(m // 4))
     s.ps_vals = _dvec_new(m // 4)
-    _ivec_append(s.ps_starts, 0)
+    _ivec_append(s.ps_starts, as_int64(0))
 
 
 @njit(cache=True, error_model="numpy")
 def _new_ivec(values: IBuf) -> IVec:
     """Return a vector holding ``values``, with room to grow."""
-    vec = _ivec_new(values.size + 16)
+    vec = _ivec_new(as_int64(values.size + 16))
     vec.data[: values.size] = values
     vec.len = values.size
     return vec
@@ -1229,8 +1241,8 @@ def _new_ivec(values: IBuf) -> IVec:
 
 @njit(cache=True, error_model="numpy")
 def _close_record(s: Core, kind: int) -> None:
-    _ivec_append(s.ps_type, kind)
-    _ivec_append(s.ps_starts, s.ps_indices.len)
+    _ivec_append(s.ps_type, as_int64(kind))
+    _ivec_append(s.ps_starts, as_int64(s.ps_indices.len))
 
 
 @njit(cache=True, error_model="numpy")
@@ -1316,10 +1328,10 @@ def _mark_updated(s: Core, row: int, altered: int) -> None:
     ):
         if s.act_status[row] == NOT_ADDED:
             s.act_status[row] = ADDED
-            _ivec_append(s.updated_activities, row)
+            _ivec_append(s.updated_activities, as_int64(row))
         elif s.act_status[row] == PROPAGATED_THIS_ROUND:
             s.act_status[row] = PROPAGATE_NEXT_ROUND
-            _ivec_append(s.updated_activities, row)
+            _ivec_append(s.updated_activities, as_int64(row))
 
 
 @njit(cache=True, error_model="numpy")
@@ -1352,7 +1364,7 @@ def _remove_ston_row(s: Core, row: int) -> None:
         return
     lhs, rhs = s.lhs[row], s.rhs[row]
     if s.row_tags[row] & R_EQ:
-        _fix_col(s, k, rhs / aik, s.c[k])
+        _fix_col(s, as_int64(k), rhs / aik, s.c[k])
         s.row_sizes[row] = SIZE_INACTIVE
         s.row_tags[row] = R_INACTIVE
         a.end[row] = a.start[row]
@@ -1362,14 +1374,14 @@ def _remove_ston_row(s: Core, row: int) -> None:
     lhs_inf = (s.row_tags[row] & R_LHS_INF) != 0
     if aik > 0:
         if not rhs_inf:
-            _update_ub(s, k, rhs / aik)
+            _update_ub(s, as_int64(k), rhs / aik)
         if not lhs_inf:
-            _update_lb(s, k, lhs / aik)
+            _update_lb(s, as_int64(k), lhs / aik)
     else:
         if not rhs_inf:
-            _update_lb(s, k, rhs / aik)
+            _update_lb(s, as_int64(k), rhs / aik)
         if not lhs_inf:
-            _update_ub(s, k, lhs / aik)
+            _update_ub(s, as_int64(k), lhs / aik)
     _set_row_to_inactive(s, row)
 
 
@@ -1407,7 +1419,12 @@ def _update_locks_side_change(s: Core, row: int, sign: int, flip: bool) -> None:
 def _fix_col_to_inf(s: Core, col: int, sign: int) -> None:
     """fix_col_to_{negative,positive}_inf: drop ``col`` and every row it meets."""
     at = s.AT
-    _save_fixed_col_inf(s, col, sign, s.ub[col] if sign < 0 else s.lb[col])
+    _save_fixed_col_inf(
+        s,
+        as_int64(col),
+        as_int64(sign),
+        s.ub[col] if sign < 0 else s.lb[col],
+    )
     for kk in range(at.start[col], at.end[col]):
         row = at.i[kk]
         if not s.row_tags[row] & R_INACTIVE:
@@ -1466,13 +1483,25 @@ def _colston_eq(s: Core, i: int, k: int, aik: float, free: tuple[bool, bool]) ->
     _sub_var_in_obj(s, i, k, aik, s.rhs[i])
     _substitute_col(s, k)
     if free_above and free_below:
-        _save_sub_col(s, k, i, s.row_sizes[i], (s.rhs[i], ck))
+        _save_sub_col(
+            s,
+            as_int64(k),
+            as_int64(i),
+            as_int64(s.row_sizes[i]),
+            (s.rhs[i], ck),
+        )
         _set_row_to_inactive(s, i)
         return REDUCED
     lb, ub = s.lb[k], s.ub[k]
     tag = s.col_tags[k]
-    _save_sub_col(s, k, i, s.row_sizes[i], (s.rhs[i], 0.0))
-    _remove_coeff(s.A, i, k, s.row_sizes)
+    _save_sub_col(
+        s,
+        as_int64(k),
+        as_int64(i),
+        as_int64(s.row_sizes[i]),
+        (s.rhs[i], 0.0),
+    )
+    _remove_coeff(s.A, as_int64(i), as_int64(k), s.row_sizes)
     s.A.nnz -= 1
     # Implied free from above keeps the side the finite lower bound meets;
     # from below, the side the finite upper bound meets.
@@ -1482,12 +1511,12 @@ def _colston_eq(s: Core, i: int, k: int, aik: float, free: tuple[bool, bool]) ->
         s.rhs[i] -= bound * aik
         s.lhs[i] = -np.inf
         s.row_tags[i] = R_LHS_INF
-        _update_locks_side_change(s, i, -1, False)
+        _update_locks_side_change(s, as_int64(i), as_int64(-1), as_bool(False))
     else:
         s.lhs[i] -= bound * aik
         s.rhs[i] = np.inf
         s.row_tags[i] = R_RHS_INF
-        _update_locks_side_change(s, i, -1, True)
+        _update_locks_side_change(s, as_int64(i), as_int64(-1), as_bool(True))
     dropped = (
         bound,
         ub if free_above else lb,
@@ -1497,7 +1526,7 @@ def _colston_eq(s: Core, i: int, k: int, aik: float, free: tuple[bool, bool]) ->
     # PSLP also queues the row as a doubleton equality here, but it has just
     # become an inequality.
     if s.row_sizes[i] == 1:
-        _ivec_append(s.ston_rows, i)
+        _ivec_append(s.ston_rows, as_int64(i))
     return REDUCED
 
 
@@ -1519,7 +1548,7 @@ def _drop_bound_activity(
         if other_inf:
             s.act_n_inf_max[row] -= 1
             if s.act_n_inf_max[row] == 0:
-                s.act_max[row] = _max_act_no_tags(s, row)
+                s.act_max[row] = _max_act_no_tags(s, as_int64(row))
         elif s.act_n_inf_max[row] == 0:
             s.act_max[row] -= other * aik
     else:
@@ -1528,7 +1557,7 @@ def _drop_bound_activity(
         if other_inf:
             s.act_n_inf_min[row] -= 1
             if s.act_n_inf_min[row] == 0:
-                s.act_min[row] = _min_act_no_tags(s, row)
+                s.act_min[row] = _min_act_no_tags(s, as_int64(row))
         elif s.act_n_inf_min[row] == 0:
             s.act_min[row] -= other * aik
 
@@ -1562,22 +1591,28 @@ def _colston_ineq(s: Core, i: int, k: int, aik: float, free: tuple[bool, bool]) 
             new_side = s.rhs[i] if lhs_inf else s.lhs[i]
         _sub_var_in_obj(s, i, k, aik, new_side)
         _substitute_col(s, k)
-        _save_sub_col(s, k, i, s.row_sizes[i], (new_side, ck))
+        _save_sub_col(
+            s,
+            as_int64(k),
+            as_int64(i),
+            as_int64(s.row_sizes[i]),
+            (new_side, ck),
+        )
         _set_row_to_inactive(s, i)
         return REDUCED
     if (ck < 0 and aik > 0 and free_above) or (ck > 0 and aik < 0 and free_below):
         if lhs_inf:
-            _update_locks_side_change(s, i, 1, False)
+            _update_locks_side_change(s, as_int64(i), as_int64(1), as_bool(False))
         s.lhs[i] = s.rhs[i]
     elif (ck > 0 and aik > 0 and free_below) or (ck < 0 and aik < 0 and free_above):
         if rhs_inf:
-            _update_locks_side_change(s, i, 1, True)
+            _update_locks_side_change(s, as_int64(i), as_int64(1), as_bool(True))
         s.rhs[i] = s.lhs[i]
     else:
         return UNCHANGED
     s.row_tags[i] = R_EQ
     if s.row_sizes[i] == 2:
-        _ivec_append(s.dton_rows, i)
+        _ivec_append(s.dton_rows, as_int64(i))
     return REDUCED
 
 
@@ -1637,7 +1672,7 @@ def _find_substitution(s: Core, row: int, max_shift: int) -> tuple[int, int]:
         or not _sufficient_space_at(s, cols[stay], cols[subst], max_shift)
     ):
         # Rejected rows are retried on the next pass.
-        _ivec_append(s.int_vec, row)
+        _ivec_append(s.int_vec, as_int64(row))
         return -1, -1
     return cols[stay], cols[subst]
 
@@ -1658,14 +1693,14 @@ def _modify_bounds(
     lb_subst, ub_subst, tag_subst = s.lb[k], s.ub[k], s.col_tags[k]
     if aik * aij > 0.0:
         if not tag_subst & C_LB_INF:
-            _update_ub(s, j, (rhs - aik * lb_subst) / aij)
+            _update_ub(s, as_int64(j), (rhs - aik * lb_subst) / aij)
         if not tag_subst & C_UB_INF:
-            _update_lb(s, j, (rhs - aik * ub_subst) / aij)
+            _update_lb(s, as_int64(j), (rhs - aik * ub_subst) / aij)
     else:
         if not tag_subst & C_LB_INF:
-            _update_lb(s, j, (rhs - aik * lb_subst) / aij)
+            _update_lb(s, as_int64(j), (rhs - aik * lb_subst) / aij)
         if not tag_subst & C_UB_INF:
-            _update_ub(s, j, (rhs - aik * ub_subst) / aij)
+            _update_ub(s, as_int64(j), (rhs - aik * ub_subst) / aij)
 
 
 @njit(cache=True, error_model="numpy")
@@ -1682,20 +1717,35 @@ def _update_row_a_dton(
     start, end = a.start[q], a.end[q]
     row_len = end - start
     subst_idx = start + _sorted_find(a.i, start, row_len, k)
-    insertion = start + _sorted_lower_bound(a.i, start, row_len, j)
+    insertion = start + _sorted_lower_bound(
+        a.i,
+        as_int64(start),
+        as_int64(row_len),
+        as_int64(j),
+    )
     old_val = 0.0
     if insertion != end and a.i[insertion] == j:
         old_val = a.x[insertion]
     old_subst = a.x[subst_idx]
     new_val = old_val - (aij / aik) * old_subst
     diff = 0
-    _move_entries(a, subst_idx, subst_idx + 1, end - subst_idx - 1)
+    _move_entries(
+        a,
+        as_int64(subst_idx),
+        as_int64(subst_idx + 1),
+        as_int64(end - subst_idx - 1),
+    )
     end -= 1
     diff += 1
     if subst_idx < insertion:
         insertion -= 1
     if abs(new_val) <= ZERO_TOL:
-        _move_entries(a, insertion, insertion + 1, end - insertion - 1)
+        _move_entries(
+            a,
+            as_int64(insertion),
+            as_int64(insertion + 1),
+            as_int64(end - insertion - 1),
+        )
         end -= 1
         diff += 1
     elif insertion == end:
@@ -1706,7 +1756,12 @@ def _update_row_a_dton(
     elif a.i[insertion] == j:
         a.x[insertion] = new_val
     else:
-        _move_entries(a, insertion + 1, insertion, end - insertion)
+        _move_entries(
+            a,
+            as_int64(insertion + 1),
+            as_int64(insertion),
+            as_int64(end - insertion),
+        )
         a.x[insertion] = new_val
         a.i[insertion] = j
         end += 1
@@ -1730,7 +1785,7 @@ def _execute_substitution(
     aik = coeffs[1]
     at = s.AT
     rows_subst = at.i[at.start[k] : at.end[k]].copy()
-    _remove_coeff(at, j, row, s.col_sizes)
+    _remove_coeff(at, as_int64(j), as_int64(row), s.col_sizes)
     at.end[k] = at.start[k]
     rhs_dton = s.rhs[row]
     for q in rows_subst:
@@ -1740,12 +1795,12 @@ def _execute_substitution(
         old_stay, old_subst, new_stay = _update_row_a_dton(s, q, cols, coeffs)
         size = s.row_sizes[q]
         if size == 0:
-            _ivec_append(s.empty_rows, q)
+            _ivec_append(s.empty_rows, as_int64(q))
         elif size == 1:
             if old_len != 1:
-                _ivec_append(s.ston_rows, q)
+                _ivec_append(s.ston_rows, as_int64(q))
         elif size == 2 and s.row_tags[q] & R_EQ and old_len != 2:
-            _ivec_append(s.int_vec, q)
+            _ivec_append(s.int_vec, as_int64(q))
         _insert_or_update_coeff(at, j, q, new_stay, s.col_sizes)
         if rhs_dton != 0.0:
             change = old_subst / aik * rhs_dton
@@ -1756,26 +1811,26 @@ def _execute_substitution(
         altered = _update_activity_coeff_change(s, q, j, old_stay, new_stay)
         altered |= _update_activity_coeff_change(s, q, k, old_subst, 0.0)
         if altered & MIN_ALTERED_RECOMPUTE:
-            s.act_min[q] = _min_act_no_tags(s, q)
+            s.act_min[q] = _min_act_no_tags(s, as_int64(q))
             _mark_added(s, q)
         if altered & MAX_ALTERED_RECOMPUTE:
-            s.act_max[q] = _max_act_no_tags(s, q)
+            s.act_max[q] = _max_act_no_tags(s, as_int64(q))
             _mark_added(s, q)
     if s.col_sizes[j] == 0:
-        _ivec_append(s.empty_cols, j)
+        _ivec_append(s.empty_cols, as_int64(j))
     elif s.col_sizes[j] == 1:
-        _ivec_append(s.ston_cols, j)
+        _ivec_append(s.ston_cols, as_int64(j))
     s.col_tags[k] = C_INACTIVE
     s.col_sizes[k] = SIZE_INACTIVE
     _count_locks_one_column(s, j)
-    _save_sub_col(s, k, row, 2, (rhs_dton, ck))
+    _save_sub_col(s, as_int64(k), as_int64(row), as_int64(2), (rhs_dton, ck))
 
 
 @njit(cache=True, error_model="numpy")
 def _mark_added(s: Core, row: int) -> None:
     if s.act_status[row] == NOT_ADDED:
         s.act_status[row] = ADDED
-        _ivec_append(s.updated_activities, row)
+        _ivec_append(s.updated_activities, as_int64(row))
 
 
 @njit(cache=True, error_model="numpy")
@@ -1841,15 +1896,19 @@ def _propagate_lb(s: Core, new_lb: float, col: int) -> int:
     if not is_ub_inf:
         if new_lb >= ub + FEAS_TOL:
             raise ValueError("Presolve proved the program infeasible.")
-        if new_lb >= ub or (ub - new_lb) * _col_max_abs(s, col) <= FEAS_TOL:
-            _fix_col(s, col, ub, s.c[col])
+        if new_lb >= ub or (ub - new_lb) * _col_max_abs(s, as_int64(col)) <= FEAS_TOL:
+            _fix_col(s, as_int64(col), ub, s.c[col])
             return REDUCED
     if is_lb_inf or (new_lb - lb > FEAS_TOL * 1e4 and new_lb - lb > 1e-2 * abs(lb)):
         if new_lb != int(new_lb):
             new_lb -= 0.5 * FEAS_TOL * abs(new_lb)
         s.col_tags[col] &= 0xFF ^ C_LB_INF
         s.lb[col] = new_lb
-        _update_activities_bound_change(s, col, (lb, new_lb, not is_lb_inf, True))
+        _update_activities_bound_change(
+            s,
+            as_int64(col),
+            (lb, new_lb, not is_lb_inf, as_bool(True)),
+        )
         return REDUCED
     return UNCHANGED
 
@@ -1864,15 +1923,19 @@ def _propagate_ub(s: Core, new_ub: float, col: int) -> int:
     if not is_lb_inf:
         if new_ub <= lb - FEAS_TOL:
             raise ValueError("Presolve proved the program infeasible.")
-        if new_ub <= lb or (new_ub - lb) * _col_max_abs(s, col) <= FEAS_TOL:
-            _fix_col(s, col, lb, s.c[col])
+        if new_ub <= lb or (new_ub - lb) * _col_max_abs(s, as_int64(col)) <= FEAS_TOL:
+            _fix_col(s, as_int64(col), lb, s.c[col])
             return REDUCED
     if is_ub_inf or (ub - new_ub > FEAS_TOL * 1e4 and ub - new_ub > 1e-2 * abs(ub)):
         if new_ub != int(new_ub):
             new_ub += 0.5 * FEAS_TOL * abs(new_ub)
         s.col_tags[col] &= 0xFF ^ C_UB_INF
         s.ub[col] = new_ub
-        _update_activities_bound_change(s, col, (ub, new_ub, not is_ub_inf, False))
+        _update_activities_bound_change(
+            s,
+            as_int64(col),
+            (ub, new_ub, not is_ub_inf, as_bool(False)),
+        )
         return REDUCED
     return UNCHANGED
 
@@ -1928,9 +1991,9 @@ def _parallel_groups(
     coeff: IBuf,
 ) -> tuple[IBuf, IBuf]:
     """Group parallel rows among hash-sorted rows: (flat members, group starts)."""
-    members = _ivec_new(16)
-    starts = _ivec_new(16)
-    _ivec_append(starts, 0)
+    members = _ivec_new(as_int64(16))
+    starts = _ivec_new(as_int64(16))
+    _ivec_append(starts, as_int64(0))
     i = 0
     while i < rows.size:
         size = 1
@@ -1970,11 +2033,11 @@ def _parallel_in_bin(
                 same = False
                 break
         if same:
-            _ivec_append(members, other)
+            _ivec_append(members, as_int64(other))
             found += 1
     if found > 0:
-        _ivec_append(members, first)
-        _ivec_append(starts, starts.data[starts.len - 1] + found + 1)
+        _ivec_append(members, as_int64(first))
+        _ivec_append(starts, as_int64(starts.data[starts.len - 1] + found + 1))
 
 
 @njit(cache=True, error_model="numpy")
@@ -1991,7 +2054,7 @@ def _change_side_of_ineq(s: Core, row: int, new_side: float, rhs_side: bool) -> 
     was_inf = (tag & (R_RHS_INF if rhs_side else R_LHS_INF)) != 0
     length = a.end[row] - a.start[row]
     if was_inf:
-        _update_locks_side_change(s, row, 1, rhs_side)
+        _update_locks_side_change(s, as_int64(row), as_int64(1), as_bool(rhs_side))
     if rhs_side:
         s.rhs[row] = new_side
     else:
@@ -2007,7 +2070,7 @@ def _change_side_of_ineq(s: Core, row: int, new_side: float, rhs_side: bool) -> 
             s.lhs[row] = s.rhs[row]
         s.row_tags[row] |= R_EQ
         if length == 2:
-            _ivec_append(s.dton_rows, row)
+            _ivec_append(s.dton_rows, as_int64(row))
 
 
 @njit(cache=True, error_model="numpy")
@@ -2062,9 +2125,9 @@ def _process_row_bin(s: Core, bin_rows: IBuf) -> None:
                 keep_rhs_inf = False
     if not keep_eq:
         if not keep_rhs_inf and new_rhs != s.rhs[keep]:
-            _change_side_of_ineq(s, keep, new_rhs, True)
+            _change_side_of_ineq(s, as_int64(keep), new_rhs, as_bool(True))
         if not keep_lhs_inf and new_lhs != s.lhs[keep]:
-            _change_side_of_ineq(s, keep, new_lhs, False)
+            _change_side_of_ineq(s, as_int64(keep), new_lhs, as_bool(False))
     for b in range(bin_rows.size):
         if bin_rows[b] != keep:
             _set_row_to_inactive(s, bin_rows[b])
@@ -2144,7 +2207,7 @@ def _merge_parallel_cols(s: Core, j: int, k: int, ratio: float) -> None:
     else:
         s.ub[j] += ub_k * ratio
     s.col_tags[k] |= C_SUBSTITUTED
-    _ivec_append(s.sub_cols_to_delete, k)
+    _ivec_append(s.sub_cols_to_delete, as_int64(k))
     old[2], old[3] = s.lb[k], s.ub[k]
     _save_parallel_col(s, j, k, old, ratio)
 
@@ -2178,12 +2241,12 @@ def _fix_parallel_cols(
     if k_lower or k_upper:
         if tag_k & (C_LB_INF if k_lower else C_UB_INF):
             raise ValueError("Presolve proved the program unbounded.")
-        _fix_col(s, k, s.lb[k] if k_lower else s.ub[k], ck)
+        _fix_col(s, as_int64(k), s.lb[k] if k_lower else s.ub[k], ck)
         return 1
     # PSLP raises here too if j's bound is infinite; in each branch above that
     # bound being infinite sets k's flag, so k has been fixed instead.
     if j_lower or j_upper:
-        _fix_col(s, j, s.lb[j] if j_lower else s.ub[j], cj)
+        _fix_col(s, as_int64(j), s.lb[j] if j_lower else s.ub[j], cj)
         return 2
     return 0
 
@@ -2340,7 +2403,12 @@ def _insert_or_update_coeff(
     """Set ``a[row, col]`` to ``val`` (removing it at zero); return the old value."""
     old_val = 0.0
     start, end = a.start[row], a.end[row]
-    insertion = start + _sorted_lower_bound(a.i, start, end - start, col)
+    insertion = start + _sorted_lower_bound(
+        a.i,
+        as_int64(start),
+        as_int64(end - start),
+        as_int64(col),
+    )
     if abs(val) > ZERO_TOL:
         if insertion == end:
             a.x[insertion] = val
@@ -2352,7 +2420,12 @@ def _insert_or_update_coeff(
             old_val = a.x[insertion]
             a.x[insertion] = val
         else:
-            _move_entries(a, insertion + 1, insertion, end - insertion)
+            _move_entries(
+                a,
+                as_int64(insertion + 1),
+                as_int64(insertion),
+                as_int64(end - insertion),
+            )
             a.x[insertion] = val
             a.i[insertion] = col
             a.end[row] += 1
@@ -2360,7 +2433,12 @@ def _insert_or_update_coeff(
             sizes[row] += 1
     else:
         if insertion != end - 1:
-            _move_entries(a, insertion, insertion + 1, end - insertion - 1)
+            _move_entries(
+                a,
+                as_int64(insertion),
+                as_int64(insertion + 1),
+                as_int64(end - insertion - 1),
+            )
         a.end[row] -= 1
         a.nnz -= 1
         sizes[row] -= 1
@@ -2436,7 +2514,12 @@ def _shift_row(a: Matrix, row: int, extra_space: int, max_shift: int) -> bool:
     while left < row:
         length = a.end[left + 1] - a.start[left + 1]
         if length > 0:
-            _move_entries(a, next_start, a.start[left + 1], length)
+            _move_entries(
+                a,
+                as_int64(next_start),
+                as_int64(a.start[left + 1]),
+                as_int64(length),
+            )
         a.start[left + 1] = next_start
         a.end[left + 1] = next_start + length
         next_start += length
@@ -2445,7 +2528,12 @@ def _shift_row(a: Matrix, row: int, extra_space: int, max_shift: int) -> bool:
     while right > row + 1:
         length = a.end[right - 1] - a.start[right - 1]
         if length > 0:
-            _move_entries(a, next_end - length, a.start[right - 1], length)
+            _move_entries(
+                a,
+                as_int64(next_end - length),
+                as_int64(a.start[right - 1]),
+                as_int64(length),
+            )
         a.start[right - 1] = next_end - length
         a.end[right - 1] = next_end
         next_end = a.start[right - 1]
@@ -2491,15 +2579,15 @@ def _remove_extra_space(
 @njit(cache=True, error_model="numpy")
 def _save_fixed_col(s: Core, col: int, val: float, ck: float, column: bool) -> None:
     """Record ``col`` fixed to ``val``, with its column of AT if ``column``."""
-    _ivec_append(s.ps_indices, col)
-    _ivec_append(s.ps_indices, -382_749)
+    _ivec_append(s.ps_indices, as_int64(col))
+    _ivec_append(s.ps_indices, as_int64(-382_749))
     _dvec_append(s.ps_vals, val)
     _dvec_append(s.ps_vals, ck)
     if column:
         for k in range(s.AT.start[col], s.AT.end[col]):
-            _ivec_append(s.ps_indices, s.AT.i[k])
+            _ivec_append(s.ps_indices, as_int64(s.AT.i[k]))
             _dvec_append(s.ps_vals, s.AT.x[k])
-    _close_record(s, FIXED_COL)
+    _close_record(s, as_int64(FIXED_COL))
 
 
 @njit(cache=True, error_model="numpy")
@@ -2513,28 +2601,28 @@ def _save_sub_col(
     """Record ``col`` substituted out through equality ``row``."""
     rhs, ck = values
     a = s.A
-    _ivec_append(s.ps_indices, col)
+    _ivec_append(s.ps_indices, as_int64(col))
     _dvec_append(s.ps_vals, rhs)
     for k in range(a.start[row], a.start[row] + length):
-        _ivec_append(s.ps_indices, a.i[k])
+        _ivec_append(s.ps_indices, as_int64(a.i[k]))
         _dvec_append(s.ps_vals, a.x[k])
-    _ivec_append(s.ps_indices, row)
+    _ivec_append(s.ps_indices, as_int64(row))
     _dvec_append(s.ps_vals, ck)
-    _close_record(s, SUB_COL)
+    _close_record(s, as_int64(SUB_COL))
 
 
 @njit(cache=True, error_model="numpy")
 def _save_parallel_col(s: Core, j: int, k: int, bounds: FBuf, ratio: float) -> None:
     """Record ``k`` merged into ``j``; ``bounds`` is (lb_j, ub_j, lb_k, ub_k)."""
-    _ivec_append(s.ps_indices, j)
-    _ivec_append(s.ps_indices, k)
-    _ivec_append(s.ps_indices, s.col_tags[j])
-    _ivec_append(s.ps_indices, s.col_tags[k])
-    _ivec_append(s.ps_indices, -382_749)
+    _ivec_append(s.ps_indices, as_int64(j))
+    _ivec_append(s.ps_indices, as_int64(k))
+    _ivec_append(s.ps_indices, as_int64(s.col_tags[j]))
+    _ivec_append(s.ps_indices, as_int64(s.col_tags[k]))
+    _ivec_append(s.ps_indices, as_int64(-382_749))
     for b in range(4):
         _dvec_append(s.ps_vals, bounds[b])
     _dvec_append(s.ps_vals, ratio)
-    _close_record(s, PARALLEL_COL)
+    _close_record(s, as_int64(PARALLEL_COL))
 
 
 @njit(cache=True, error_model="numpy")
@@ -2542,8 +2630,8 @@ def _save_fixed_col_inf(s: Core, col: int, pos_inf: int, bound: float) -> None:
     """Record ``col`` fixed to +-inf, with every row it appears in."""
     at, a = s.AT, s.A
     n_rows = at.end[col] - at.start[col]
-    _ivec_append(s.ps_indices, pos_inf)
-    _ivec_append(s.ps_indices, col)
+    _ivec_append(s.ps_indices, as_int64(pos_inf))
+    _ivec_append(s.ps_indices, as_int64(col))
     _dvec_append(s.ps_vals, float(n_rows))
     _dvec_append(s.ps_vals, bound)
     for kk in range(at.start[col], at.end[col]):
@@ -2555,10 +2643,10 @@ def _save_fixed_col_inf(s: Core, col: int, pos_inf: int, bound: float) -> None:
         size = s.row_sizes[row]
         for k in range(a.start[row], a.start[row] + size):
             _dvec_append(s.ps_vals, a.x[k])
-        _ivec_append(s.ps_indices, size)
+        _ivec_append(s.ps_indices, as_int64(size))
         for k in range(a.start[row], a.start[row] + size):
-            _ivec_append(s.ps_indices, a.i[k])
-    _close_record(s, FIXED_COL_INF)
+            _ivec_append(s.ps_indices, as_int64(a.i[k]))
+    _close_record(s, as_int64(FIXED_COL_INF))
 
 
 @njit(cache=True, error_model="numpy")
@@ -2629,14 +2717,14 @@ def _update_act_bound_change(
         elif not finite_bound:
             s.act_n_inf_max[row] -= 1
             if s.act_n_inf_max[row] == 0:
-                s.act_max[row] = _max_act_no_tags(s, row)
+                s.act_max[row] = _max_act_no_tags(s, as_int64(row))
         return MAX_ALTERED
     if s.act_n_inf_min[row] == 0:
         s.act_min[row] += (new_bound - old_bound) * coeff
     elif not finite_bound:
         s.act_n_inf_min[row] -= 1
         if s.act_n_inf_min[row] == 0:
-            s.act_min[row] = _min_act_no_tags(s, row)
+            s.act_min[row] = _min_act_no_tags(s, as_int64(row))
     return MIN_ALTERED
 
 
@@ -2646,7 +2734,7 @@ def _update_activities_bound_change(s: Core, col: int, change: BoundChange) -> N
     at = s.AT
     for kk in range(at.start[col], at.end[col]):
         row = at.i[kk]
-        altered = _update_act_bound_change(s, row, at.x[kk], change)
+        altered = _update_act_bound_change(s, as_int64(row), at.x[kk], change)
         _mark_updated(s, row, altered)
 
 
@@ -2671,16 +2759,16 @@ def _update_activities_fixed_col(
         if ub_update:
             altered |= _update_act_bound_change(
                 s,
-                row,
+                as_int64(row),
                 at.x[kk],
-                (old_ub, val, not is_ub_inf, False),
+                (old_ub, val, not is_ub_inf, as_bool(False)),
             )
         if lb_update:
             altered |= _update_act_bound_change(
                 s,
-                row,
+                as_int64(row),
                 at.x[kk],
-                (old_lb, val, not is_lb_inf, True),
+                (old_lb, val, not is_lb_inf, as_bool(True)),
             )
         _mark_updated(s, row, altered)
 
@@ -2745,11 +2833,11 @@ def _fix_col(s: Core, col: int, val: float, ck: float) -> None:
     ):
         raise ValueError("Presolve proved the program infeasible.")
     s.col_tags[col] |= C_FIXED
-    _ivec_append(s.fixed_cols_to_delete, col)
-    _save_fixed_col(s, col, val, ck, True)
+    _ivec_append(s.fixed_cols_to_delete, as_int64(col))
+    _save_fixed_col(s, as_int64(col), val, ck, as_bool(True))
     s.ub[col] = val
     s.lb[col] = val
-    _update_activities_fixed_col(s, col, old_lb, old_ub, val)
+    _update_activities_fixed_col(s, as_int64(col), old_lb, old_ub, val)
 
 
 @njit(cache=True, error_model="numpy")
@@ -2761,7 +2849,11 @@ def _update_lb(s: Core, col: int, new_lb: float) -> None:
     is_lb_inf = (s.col_tags[col] & C_LB_INF) != 0
     if is_lb_inf or new_lb >= lb + FEAS_TOL:
         s.lb[col] = new_lb
-        _update_activities_bound_change(s, col, (lb, new_lb, not is_lb_inf, True))
+        _update_activities_bound_change(
+            s,
+            as_int64(col),
+            (lb, new_lb, not is_lb_inf, as_bool(True)),
+        )
         s.col_tags[col] &= 0xFF ^ C_LB_INF
 
 
@@ -2774,14 +2866,18 @@ def _update_ub(s: Core, col: int, new_ub: float) -> None:
     is_ub_inf = (s.col_tags[col] & C_UB_INF) != 0
     if is_ub_inf or new_ub <= ub - FEAS_TOL:
         s.ub[col] = new_ub
-        _update_activities_bound_change(s, col, (ub, new_ub, not is_ub_inf, False))
+        _update_activities_bound_change(
+            s,
+            as_int64(col),
+            (ub, new_ub, not is_ub_inf, as_bool(False)),
+        )
         s.col_tags[col] &= 0xFF ^ C_UB_INF
 
 
 @njit(cache=True, error_model="numpy")
 def _set_row_to_inactive(s: Core, row: int) -> None:
     """Mark ``row`` inactive, keeping its infinity tags for the lock update."""
-    _ivec_append(s.rows_to_delete, row)
+    _ivec_append(s.rows_to_delete, as_int64(row))
     s.row_tags[row] |= R_INACTIVE
 
 
@@ -2834,10 +2930,10 @@ def _delete_inactive_rows(s: Core) -> None:
             continue
         size = s.col_sizes[col]
         if size == 0:
-            _ivec_append(s.empty_cols, col)
+            _ivec_append(s.empty_cols, as_int64(col))
             at.end[col] = at.start[col]
         elif size == 1:
-            _ivec_append(s.ston_cols, col)
+            _ivec_append(s.ston_cols, as_int64(col))
         shift = 0
         for k in range(at.start[col], at.end[col]):
             if s.row_sizes[at.i[k]] == SIZE_INACTIVE:
@@ -2870,13 +2966,13 @@ def _delete_inactive_cols_from_a_and_at(s: Core) -> None:
             continue
         size = s.row_sizes[row]
         if size == 0:
-            _ivec_append(s.empty_rows, row)
+            _ivec_append(s.empty_rows, as_int64(row))
             a.nnz -= a.end[row] - a.start[row]
             a.end[row] = a.start[row]
         elif size == 1:
-            _ivec_append(s.ston_rows, row)
+            _ivec_append(s.ston_rows, as_int64(row))
         elif size == 2 and s.row_tags[row] & R_EQ:
-            _ivec_append(s.dton_rows, row)
+            _ivec_append(s.dton_rows, as_int64(row))
         shift = 0
         for k in range(a.start[row], a.end[row]):
             if s.col_sizes[a.i[k]] == SIZE_INACTIVE:
@@ -3021,7 +3117,7 @@ def _new_core(
     s.iwork2 = np.empty(widest, np.int32)
     s.map_rows = np.empty(n_rows, np.int32)
     s.map_cols = np.empty(n_cols, np.int32)
-    s.int_vec = _ivec_new(25)
+    s.int_vec = _ivec_new(as_int64(25))
     s.A = _matrix_new_no_extra_space(ax, ai, ap, n_rows, n_cols)
     s.m, s.n = n_rows, n_cols
     s.row_tags = np.empty(n_rows, np.uint8)

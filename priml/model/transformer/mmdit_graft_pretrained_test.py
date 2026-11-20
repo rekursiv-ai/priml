@@ -12,6 +12,7 @@ import torch
 from priml import hub
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.rope import RoPE
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit_graft_test import (
     _assert_transferred,
@@ -56,10 +57,17 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
         dtype=torch.float32,
         attn_implementation="eager",
     )
-    source = config.make()
+    # Built on meta: the pretrained weights replace every parameter, so a
+    # random init of the 155M-parameter embedding would only be overwritten.
+    with torch.device("meta"):
+        source = config.make()
+    for module in source.modules():
+        if isinstance(module, RoPE):
+            module.to_empty(device="cpu")
     source.load_state_dict(
         remap_hf_state_dict(pretrained.state_dict(), config.copy_tree().finalize()),
         strict=True,
+        assign=True,
     )
     checkpoint = tmp_path / "checkpoint"
     pretrained.save_pretrained(checkpoint)

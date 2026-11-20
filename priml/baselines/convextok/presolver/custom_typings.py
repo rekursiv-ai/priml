@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Self, SupportsIndex, overload
 
+import numpy as np
+
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
+    from collections.abc import Callable
 
-    import numpy as np
+    from numpy.typing import NDArray
 
 
 class Buf[T: (int, float)](Protocol):
@@ -56,3 +58,17 @@ type FBuf = Buf[float]
 
 type IBuf = Buf[int]
 """An integer array: int32 indices and sizes, or uint8 tags."""
+
+
+# The kernels model scalars as Python ints and bools, as ``Buf`` does; at runtime
+# these are numpy's constructors, which Numba types as non-literal int64 and bool.
+if TYPE_CHECKING:
+    as_int64: Callable[[SupportsIndex], int]
+    """Convert to a non-literal int64, so a callee compiles one signature."""
+
+    as_bool: Callable[[object], bool]
+    """Convert to a non-literal bool, so a callee compiles one signature."""
+
+else:
+    as_int64 = np.int64
+    as_bool = np.bool_
