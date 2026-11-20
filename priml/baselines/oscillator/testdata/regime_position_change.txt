@@ -1,0 +1,256 @@
+RegimeBenchmark.Config(
+        experiment_name='exp044',
+        working_dir=PosixPath('/opt/scratch/artifacts/oscillator/exp044'),
+        phase='development',
+        data=RegimeData.Config(
+            seq_len=96,
+            pred_len=64,
+            dynamics=RegimeDynamics.Config(step_size=0.05, substeps=8),
+            domain=DynamicsDomain.Config(
+                stiffness=(0.5, 2.0),
+                damping=(0.05, 0.3),
+                cubic=(0.0, 0.6)
+            ),
+            observation=PositionObservation.Config(),
+            schedule=ObservedChange.Config(recent_steps=(24, 48)),
+            amplitude=(0.3, 1.5),
+            velocity=0.5
+        ),
+        train_episodes=256,
+        validation_episodes=64,
+        scoring_episodes=256,
+        train_seed=1_101,
+        validation_seed=2_201,
+        recipes=[
+        │   ObservedRecipe.Config(
+        │       name='dlinear',
+        │       method=ObservedNeuralForecast.Config(
+        │       │   step=TrainStep.Config(
+        │       │   │   model=ObservedDLinear.Config(
+        │       │   │       model=DLinear.Config(
+        │       │   │           seq_len=96,
+        │       │   │           pred_len=64,
+        │       │   │           channels=1,
+        │       │   │           decomposition=SeriesDecomposition.Config(
+        │       │   │               moving_average=MovingAverage.Config(kernel_size=25)
+        │       │   │           ),
+        │       │   │           seasonal=MeanLinear.Config(
+        │       │   │               channels_in=96,
+        │       │   │               channels_out=64,
+        │       │   │               bias=True
+        │       │   │           ),
+        │       │   │           trend=MeanLinear.Config(
+        │       │   │               channels_in=96,
+        │       │   │               channels_out=64,
+        │       │   │               bias=True
+        │       │   │           ),
+        │       │   │           decoder=ReferenceLinear.Config(
+        │       │   │               channels_in=96,
+        │       │   │               channels_out=64,
+        │       │   │               bias=True
+        │       │   │           )
+        │       │   │       )
+        │       │   │   ),
+        │       │   │   optimizer=PartialConfig(
+        │       │   │       <class 'torch.optim.adam.Adam'>,
+        │       │   │       lr=0.001
+        │       │   │   ),
+        │       │   │   loss=SimpleLoss.Config(
+        │       │   │       loss_fn=priml.loss.simple_loss.mse,
+        │       │   │       target_key='label',
+        │       │   │       kwargs={'reduction': 'none'},
+        │       │   │       channels_out=-1
+        │       │   │   ),
+        │       │   │   accumulate_grad_batches=1,
+        │       │   │   drop_partial_accumulation_on_epoch_end=True,
+        │       │   │   train_budget_steps=1_200,
+        │       │   │   train_budget_sec=inf,
+        │       │   │   train_budget_epochs=inf,
+        │       │   │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │       │   │   parallelism=NoParallel.Config(device='cpu'),
+        │       │   │   model_quantization=NoModelQuantization.Config(),
+        │       │   │   activation_memoization=DefaultActivationStorage.Config(),
+        │       │   │   compile=None,
+        │       │   │   ema=NoEMA.Config(),
+        │       │   │   gradient_clip_norm=inf,
+        │       │   │   skip_step_on_nonfinite_grad=False,
+        │       │   │   device_init='eager',
+        │       │   │   dtype_autocast=None,
+        │       │   │   autocast_cache_enabled=False
+        │       │   ),
+        │       │   batch_size=32,
+        │       │   validation_every=50,
+        │       │   sample_seed=606
+        │       ),
+        │       seeds=[2_021, 2_022, 2_023]
+        │   ),
+        │   ObservedRecipe.Config(
+        │       name='ridge',
+        │       method=ObservedRidge.Config(penalty=0.01),
+        │       seeds=[2_021]
+        │   ),
+        │   ObservedRecipe.Config(
+        │       name='history_net',
+        │       method=ObservedNeuralForecast.Config(
+        │       │   step=TrainStep.Config(
+        │       │   │   model=ObservedHistory.Config(
+        │       │   │       seq_len=96,
+        │       │   │       pred_len=64,
+        │       │   │       channels=1,
+        │       │   │       block=SwiGLU.Config(
+        │       │   │           channels_in=96,
+        │       │   │           channels_out=64,
+        │       │   │           channels_hidden=128,
+        │       │   │           expansion=2.6666666666666665,
+        │       │   │           round_to=256,
+        │       │   │           gate=True,
+        │       │   │           bias=True,
+        │       │   │           split_gate_projection=False,
+        │       │   │           norm=None,
+        │       │   │           act=priml.model.swiglu.silu,
+        │       │   │           depth_index=(),
+        │       │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │       │   │           init_weight_out=torch.nn.init.zeros_,
+        │       │   │           up_proj=None,
+        │       │   │           middle=None,
+        │       │   │           down_proj=None,
+        │       │   │           shard=None
+        │       │   │       )
+        │       │   │   ),
+        │       │   │   optimizer=PartialConfig(
+        │       │   │       <class 'torch.optim.adam.Adam'>,
+        │       │   │       lr=0.001
+        │       │   │   ),
+        │       │   │   loss=SimpleLoss.Config(
+        │       │   │       loss_fn=priml.loss.simple_loss.mse,
+        │       │   │       target_key='label',
+        │       │   │       kwargs={'reduction': 'none'},
+        │       │   │       channels_out=-1
+        │       │   │   ),
+        │       │   │   accumulate_grad_batches=1,
+        │       │   │   drop_partial_accumulation_on_epoch_end=True,
+        │       │   │   train_budget_steps=1_200,
+        │       │   │   train_budget_sec=inf,
+        │       │   │   train_budget_epochs=inf,
+        │       │   │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │       │   │   parallelism=NoParallel.Config(device='cpu'),
+        │       │   │   model_quantization=NoModelQuantization.Config(),
+        │       │   │   activation_memoization=DefaultActivationStorage.Config(),
+        │       │   │   compile=None,
+        │       │   │   ema=NoEMA.Config(),
+        │       │   │   gradient_clip_norm=inf,
+        │       │   │   skip_step_on_nonfinite_grad=False,
+        │       │   │   device_init='eager',
+        │       │   │   dtype_autocast=None,
+        │       │   │   autocast_cache_enabled=False
+        │       │   ),
+        │       │   batch_size=32,
+        │       │   validation_every=50,
+        │       │   sample_seed=606
+        │       ),
+        │       seeds=[2_021, 2_022, 2_023]
+        │   ),
+        │   ObservedRecipe.Config(
+        │       name='recent_physics',
+        │       method=RecentPhysics.Config(
+        │           visible_steps=24,
+        │           penalty=1e-07,
+        │           lower=(0.05, 0.0, 0.0),
+        │           upper=(4.0, 1.0, 2.0)
+        │       ),
+        │       seeds=[2_021]
+        │   ),
+        │   ObservedRecipe.Config(
+        │       name='whole_history_physics',
+        │       method=RecentPhysics.Config(
+        │           visible_steps=96,
+        │           penalty=1e-07,
+        │           lower=(0.05, 0.0, 0.0),
+        │           upper=(4.0, 1.0, 2.0)
+        │       ),
+        │       seeds=[2_021]
+        │   ),
+        │   ObservedRecipe.Config(
+        │       name='fixed_physics',
+        │       method=FixedPhysics.Config(
+        │           visible_steps=24,
+        │           penalty=1e-07,
+        │           lower=(0.05, 0.0, 0.0),
+        │           upper=(4.0, 1.0, 2.0),
+        │           coefficients=(1.0, 0.15, 0.0)
+        │       ),
+        │       seeds=[2_021]
+        │   ),
+        │   ObservedRecipe.Config(
+        │       name='last_value',
+        │       method=LastObservation.Config(),
+        │       seeds=[2_021]
+        │   )
+        ],
+        comparisons=[
+            ('ridge', 'dlinear'),
+            ('history_net', 'dlinear'),
+            ('recent_physics', 'dlinear'),
+            ('whole_history_physics', 'dlinear'),
+            ('fixed_physics', 'dlinear'),
+            ('last_value', 'dlinear'),
+            ('recent_physics', 'whole_history_physics')
+        ],
+        development=[
+            RegimeFamily.Config(
+                name='in_domain',
+                domain=DynamicsDomain.Config(
+                    stiffness=(0.5, 2.0),
+                    damping=(0.05, 0.3),
+                    cubic=(0.0, 0.6)
+                ),
+                seed=3_301,
+                episodes=32
+            )
+        ],
+        audit=[
+            RegimeFamily.Config(
+                name='stiffening',
+                domain=DynamicsDomain.Config(
+                    stiffness=(2.2, 3.2),
+                    damping=(0.05, 0.3),
+                    cubic=(0.0, 0.6)
+                ),
+                seed=20_261_025,
+                episodes=32
+            ),
+            RegimeFamily.Config(
+                name='softening',
+                domain=DynamicsDomain.Config(
+                    stiffness=(0.2, 0.45),
+                    damping=(0.05, 0.3),
+                    cubic=(0.0, 0.6)
+                ),
+                seed=20_261_026,
+                episodes=32
+            ),
+            RegimeFamily.Config(
+                name='strong_drag',
+                domain=DynamicsDomain.Config(
+                    stiffness=(0.5, 2.0),
+                    damping=(0.35, 0.6),
+                    cubic=(0.0, 0.6)
+                ),
+                seed=20_261_027,
+                episodes=32
+            ),
+            RegimeFamily.Config(
+                name='strong_cubic',
+                domain=DynamicsDomain.Config(
+                    stiffness=(0.5, 2.0),
+                    damping=(0.05, 0.3),
+                    cubic=(0.8, 1.2)
+                ),
+                seed=20_261_028,
+                episodes=32
+            )
+        ],
+        resamples=2_000,
+        bootstrap_seed=8_041,
+        threads=1
+    )

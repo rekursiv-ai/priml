@@ -4,8 +4,21 @@ from __future__ import annotations
 
 from configgle import PartialConfig
 
+from priml.baselines.oscillator.adaptation import (
+    FixedPhysics,
+    LastObservation,
+    ObservedHistory,
+    ObservedNeuralForecast,
+    ObservedRidge,
+    RecentPhysics,
+)
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.calibration import CalibratedSimulator
+from priml.baselines.oscillator.chained import (
+    ChainedData,
+    ChainedDomain,
+    ChainedShooting,
+)
 from priml.baselines.oscillator.delayed import (
     DelayedCalibration,
     DelayedData,
@@ -14,11 +27,13 @@ from priml.baselines.oscillator.delayed import (
     SignedHistory,
 )
 from priml.baselines.oscillator.discovery import SparseSimulator
+from priml.baselines.oscillator.forced import ForcedData, ForcedDomain, ForcedShooting
 from priml.baselines.oscillator.forces import (
     CorrectedOscillator,
     PowerForce,
     WeightedForce,
 )
+from priml.baselines.oscillator.hidden import HiddenData, HiddenDomain, LibraryShooting
 from priml.baselines.oscillator.mechanisms import (
     CoupledDrag,
     SaturatingForce,
@@ -34,6 +49,17 @@ from priml.baselines.oscillator.nonlinear import (
 from priml.baselines.oscillator.pretrained import (
     Chronos2Pipeline,
     PretrainedForecast,
+)
+from priml.baselines.oscillator.regime_benchmark import (
+    ObservedRecipe,
+    RegimeBenchmark,
+    RegimeCampaign,
+    RegimeFamily,
+)
+from priml.baselines.oscillator.regimes import (
+    ObservedChange,
+    PositionObservation,
+    RegimeData,
 )
 from priml.baselines.oscillator.sequence import (
     PatchSequence,
@@ -1074,4 +1100,435 @@ def exp_smoke() -> ForecastStudy.Config:
     assert isinstance(cfg.method, DLinearForecast.Config)
     cfg.method.updates = 2
     cfg.method.batch_size = 4
+    return cfg
+
+
+def exp041() -> RegimeBenchmark.Config:
+    """Fit a shared forecasting recipe on independently varying stationary springs.
+
+    Hypothesis:
+      Varying the coefficients between episodes tests inference of the current
+      dynamics rather than fitting one model to each fixed reference system.
+
+    References:
+      exp040 for the fully observed fixed-system comparison.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = RegimeBenchmark.Config()
+    persistence = ObservedRecipe.Config()
+    persistence.name = "last_value"
+    persistence.method = LastObservation.Config()
+    persistence.seeds = [2021]
+    approximate = ObservedRecipe.Config()
+    approximate.name = "fixed_physics"
+    approximate.method = FixedPhysics.Config()
+    approximate.seeds = [2021]
+    ridge = ObservedRecipe.Config()
+    ridge.name = "ridge"
+    ridge.method = ObservedRidge.Config()
+    ridge.seeds = [2021]
+    nonlinear = ObservedRecipe.Config()
+    nonlinear.name = "history_net"
+    assert isinstance(nonlinear.method, ObservedNeuralForecast.Config)
+    nonlinear.method.step.model = ObservedHistory.Config()
+    recent = ObservedRecipe.Config()
+    recent.name = "recent_physics"
+    recent.method = RecentPhysics.Config()
+    recent.seeds = [2021]
+    whole = ObservedRecipe.Config()
+    whole.name = "whole_history_physics"
+    whole.method = RecentPhysics.Config()
+    whole.method.visible_steps = cfg.data.seq_len
+    whole.seeds = [2021]
+    cfg.recipes += [ridge, nonlinear, recent, whole, approximate, persistence]
+    cfg.comparisons = [(recipe.name, "dlinear") for recipe in cfg.recipes[1:]]
+    cfg.comparisons.append(("recent_physics", "whole_history_physics"))
+
+    fast = RegimeFamily.Config()
+    fast.name = "stiffening"
+    fast.seed = 20_261_025
+    fast.domain.stiffness = (2.2, 3.2)
+    soft = RegimeFamily.Config()
+    soft.name = "softening"
+    soft.seed = 20_261_026
+    soft.domain.stiffness = (0.2, 0.45)
+    drag = RegimeFamily.Config()
+    drag.name = "strong_drag"
+    drag.seed = 20_261_027
+    drag.domain.damping = (0.35, 0.6)
+    nonlinear_domain = RegimeFamily.Config()
+    nonlinear_domain.name = "strong_cubic"
+    nonlinear_domain.seed = 20_261_028
+    nonlinear_domain.domain.cubic = (0.8, 1.2)
+    cfg.audit = [fast, soft, drag, nonlinear_domain]
+    return cfg
+
+
+def exp042() -> RegimeBenchmark.Config:
+    """exp041 with position alone in training, validation, and prediction.
+
+    Hypothesis:
+      Hiding velocity tests whether the history supplies enough information to
+      infer state without exposing hidden velocity through training targets.
+
+    References:
+      exp041.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp041()
+    cfg.experiment_name = "exp042"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    assert isinstance(cfg.data, RegimeData.Config)
+    cfg.data.observation = PositionObservation.Config()
+    return cfg
+
+
+def exp043() -> RegimeBenchmark.Config:
+    """exp041 with a change in dynamics before the forecast begins.
+
+    Hypothesis:
+      Older observations may describe an obsolete force law. Comparing recent
+      and whole-history identification tests that explanation using the same
+      physical prior and without supplying the change time.
+
+    References:
+      exp041.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp041()
+    cfg.experiment_name = "exp043"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    assert isinstance(cfg.data, RegimeData.Config)
+    cfg.data.schedule = ObservedChange.Config()
+    return cfg
+
+
+def exp044() -> RegimeBenchmark.Config:
+    """exp043 with position alone, completing the observation/change comparison.
+
+    Hypothesis:
+      Hidden velocity and obsolete history may jointly challenge pooled
+      forecasters while recent physical identification remains learnable.
+
+    References:
+      exp043; exp042 isolates the observation change without a regime change.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp043()
+    cfg.experiment_name = "exp044"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    assert isinstance(cfg.data, RegimeData.Config)
+    cfg.data.observation = PositionObservation.Config()
+    return cfg
+
+
+def exp045() -> RegimeCampaign.Config:
+    """Run exp041--exp044 on development streams before the fresh audit.
+
+    Hypothesis:
+      Matched observation and schedule ablations separate the value of direct
+      state access from the damage caused by obsolete dynamics.
+
+    References:
+      exp041--exp044.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = RegimeCampaign.Config()
+    cfg.studies = [exp041(), exp042(), exp043(), exp044()]
+    return cfg
+
+
+def exp046() -> RegimeCampaign.Config:
+    """exp045 evaluated on the reserved parameter domains and random streams.
+
+    Hypothesis:
+      A development explanation is useful only if it holds on independently
+      sampled episodes outside the fitting coefficient ranges.
+
+    References:
+      exp045.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp045()
+    cfg.working_dir = cfg.working_dir.with_name("exp046")
+    for study in cfg.studies:
+        study.phase = "audit"
+    return cfg
+
+
+def exp047() -> RegimeCampaign.Config:
+    """exp046 with four times the accurate training and validation data.
+
+    Hypothesis:
+      A matched larger budget tests whether failures disappear with additional
+      reference examples while keeping the scoring prefix and recipes fixed.
+
+    References:
+      exp046.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp046()
+    cfg.working_dir = cfg.working_dir.with_name("exp047")
+    for study in cfg.studies:
+        study.train_episodes *= 4
+        study.validation_episodes *= 4
+    return cfg
+
+
+def exp048() -> RegimeCampaign.Config:
+    """exp046 with four times the neural optimization budget.
+
+    Hypothesis:
+      Longer fitting separates limited optimization from failures that remain
+      under the same observed data and evaluation domains.
+
+    References:
+      exp046.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp046()
+    cfg.working_dir = cfg.working_dir.with_name("exp048")
+    for study in cfg.studies:
+        for recipe in study.recipes:
+            if isinstance(recipe.method, ObservedNeuralForecast.Config):
+                recipe.method.step.train_budget_steps *= 4
+    return cfg
+
+
+def exp049() -> RegimeBenchmark.Config:
+    """Forecast one noisy coordinate of a mass coupled to an unobserved partner.
+
+    Hypothesis:
+      Sensor noise, a hidden coupled state and an unannounced change (or none)
+      defeat both pooled forecasters and part two's recent cubic identification,
+      while a reference fitting the declared mechanism library shows the
+      observations still determine much of the future.
+
+    References:
+      exp044 for the noiseless single-mass task this extends.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp044()
+    cfg.experiment_name = "exp049"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.data = HiddenData.Config()
+    cfg.recipes = [
+        r
+        for r in cfg.recipes
+        if r.name not in ("fixed_physics", "whole_history_physics")
+    ]
+    shooting = ObservedRecipe.Config()
+    shooting.name = "library_shooting"
+    shooting.method = LibraryShooting.Config()
+    shooting.seeds = [2021]
+    cfg.recipes.append(shooting)
+    cfg.comparisons = [(recipe.name, "dlinear") for recipe in cfg.recipes[1:]]
+    cfg.comparisons += [
+        ("library_shooting", "ridge"),
+        ("library_shooting", "history_net"),
+    ]
+    cfg.development = [RegimeFamily.Config(domain=HiddenDomain.Config())]
+
+    coupling = RegimeFamily.Config(name="strong_coupling", seed=20_261_101)
+    coupling.domain = HiddenDomain.Config(coupling=(0.6, 1.0))
+    friction = RegimeFamily.Config(name="dry_friction", seed=20_261_102)
+    friction.domain = HiddenDomain.Config(friction=(0.06, 0.12))
+    # Matched frequencies make energy slosh between the masses (beating).
+    resonant = RegimeFamily.Config(name="resonant_partner", seed=20_261_103)
+    resonant.domain = HiddenDomain.Config(
+        stiffness=(0.95, 1.05),
+        partner_stiffness=(0.95, 1.05),
+        coupling=(0.3, 0.5),
+        partner_damping=(0.0, 0.01),
+    )
+    hardening = RegimeFamily.Config(name="hardening", seed=20_261_104)
+    hardening.domain = HiddenDomain.Config(stiffness=(2.0, 3.0), cubic=(0.8, 1.5))
+    cfg.audit = [coupling, friction, resonant, hardening]
+    return cfg
+
+
+def exp050() -> RegimeBenchmark.Config:
+    """exp049 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods that only interpolate the training ranges fail on stronger
+      coupling, dry friction, resonance and hardening; an improvement counts
+      only if it holds on these families generated after fitting.
+
+    References:
+      exp049.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp049()
+    cfg.experiment_name = "exp050"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
+    return cfg
+
+
+def exp051() -> RegimeBenchmark.Config:
+    """Forecast a glitchy sensor on a driven system that changes repeatedly.
+
+    Hypothesis:
+      A hidden periodic drive, double wells, up to three unannounced changes
+      and spiky quantized readings defeat pooled forecasters that solve exp049,
+      while the exact continuation shows the history still fixes the future.
+
+    References:
+      exp049 for the undriven, single-change task this extends.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp049()
+    cfg.experiment_name = "exp051"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.data = ForcedData.Config()
+    for recipe in cfg.recipes:
+        if recipe.name == "library_shooting":
+            recipe.method = ForcedShooting.Config()
+    cfg.development = [RegimeFamily.Config(domain=ForcedDomain.Config())]
+
+    # Classic chaotic Duffing settings: a forced, lightly damped double well.
+    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20_261_201)
+    chaotic.domain = ForcedDomain.Config(
+        stiffness=(-1.2, -0.8),
+        damping=(0.1, 0.3),
+        cubic=(0.8, 1.2),
+        drive=(0.3, 0.6),
+        frequency=(1.0, 1.4),
+    )
+    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20_261_202)
+    asymmetric.domain = ForcedDomain.Config(quadratic=(0.3, 0.8))
+    # Negative linear damping with amplitude-dependent drag: a limit cycle.
+    excited = RegimeFamily.Config(name="self_excited", seed=20_261_203)
+    excited.domain = ForcedDomain.Config(damping=(-0.2, -0.05), excitation=(0.3, 0.8))
+    fast = RegimeFamily.Config(name="fast_drive", seed=20_261_204)
+    fast.domain = ForcedDomain.Config(drive=(0.3, 0.8), frequency=(2.5, 4.0))
+    cfg.audit = [chaotic, asymmetric, excited, fast]
+    return cfg
+
+
+def exp052() -> RegimeBenchmark.Config:
+    """exp051 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods fitted to the training ranges fail on chaotic wells, asymmetric
+      and self-excited mechanisms absent from training, and faster drives.
+
+    References:
+      exp051.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp051()
+    cfg.experiment_name = "exp052"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
+    return cfg
+
+
+def exp053() -> RegimeBenchmark.Config:
+    """Forecast a stuck, glitchy sensor on a two-tone driven chain of three masses.
+
+    Hypothesis:
+      A second hidden mass, a second hidden drive tone, frozen sensor bursts, up
+      to four changes and a 192-step horizon defeat every method that reached
+      positive skill on exp051, while the exact continuation still reproduces
+      every target and small identification errors cost little.
+
+    References:
+      exp051 for the single-partner, single-tone task this extends.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp051()
+    cfg.experiment_name = "exp053"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.data = ChainedData.Config()
+    for recipe in cfg.recipes:
+        if recipe.name == "library_shooting":
+            recipe.method = ChainedShooting.Config()
+    cfg.development = [RegimeFamily.Config(domain=ChainedDomain.Config())]
+
+    chaotic = RegimeFamily.Config(name="chaotic_well", seed=20_261_301)
+    chaotic.domain = ChainedDomain.Config(
+        stiffness=(-1.2, -0.8),
+        damping=(0.1, 0.3),
+        cubic=(0.8, 1.2),
+        drive=(0.3, 0.6),
+        frequency=(1.0, 1.4),
+    )
+    asymmetric = RegimeFamily.Config(name="asymmetric", seed=20_261_302)
+    asymmetric.domain = ChainedDomain.Config(quadratic=(0.3, 0.8))
+    excited = RegimeFamily.Config(name="self_excited", seed=20_261_303)
+    excited.domain = ChainedDomain.Config(
+        damping=(-0.2, -0.05),
+        excitation=(0.3, 0.8),
+    )
+    # Tones in the same band beat against each other.
+    beating = RegimeFamily.Config(name="beating_drive", seed=20_261_304)
+    beating.domain = ChainedDomain.Config(second_frequency=(0.6, 1.6))
+    stiff = RegimeFamily.Config(name="stiff_far_mass", seed=20_261_305)
+    stiff.domain = ChainedDomain.Config(
+        far_stiffness=(4.0, 6.0),
+        far_coupling=(0.5, 0.8),
+    )
+    cfg.audit = [chaotic, asymmetric, excited, beating, stiff]
+    return cfg
+
+
+def exp054() -> RegimeBenchmark.Config:
+    """exp053 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods fitted to the training ranges fail on chaotic wells, asymmetric
+      and self-excited mechanisms, beating drives and a stiff far mass.
+
+    References:
+      exp053.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp053()
+    cfg.experiment_name = "exp054"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
     return cfg
