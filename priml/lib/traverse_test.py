@@ -939,10 +939,10 @@ def test_an_unset_slot_does_not_hide_the_slots_after_it() -> None:
 
         def __init__(self) -> None:
             self.missing = 0
-            del self.missing
             self.x = 1
 
     obj = Lazy()
+    del obj.missing
 
     assert [p for p, _ in recursively_iterate_over_object_descendants(obj) if p] == [
         ("x",),

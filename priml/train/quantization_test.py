@@ -212,6 +212,7 @@ def test_fsdp_all_gather_uses_dataclass_replace(
         enable_fsdp_float8_all_gather=True,
     ).make()
 
+    assert quant.float8_config is not None
     assert dataclasses.is_dataclass(quant.float8_config)
     assert quant.float8_config.enable_fsdp_float8_all_gather is True
     assert caplog.records[-1].getMessage() == (

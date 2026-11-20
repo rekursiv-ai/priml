@@ -112,10 +112,20 @@ class TarFileHandle:
         self.use_mmap = use_mmap
         self.name: str | None = str(path)
         self._closed = False
+        # `mmap` mode: the mapping, and an index of tar members, name -> (offset,
+        # size, TarInfo), built once here and shared across all threads.
+        self._resources = ExitStack()
+        self._mmap: mmap.mmap | None = None
+        self._index: dict[str, tuple[int, int, tarfile.TarInfo]] = {}
+        # Standard mode: thread-local tarfile handles, tagged with the PID that
+        # opened them so an inherited handle reopened after fork does not share
+        # a file offset with the parent across processes.
+        self._local = threading.local()
+        self._opened = ExitStack()
+        self._opened_lock = threading.Lock()
 
         if use_mmap:
             _reject_compressed(path)
-            self._resources = ExitStack()
             # The descriptor is closed here because ``mmap`` dups it: the
             # mapping stays valid for this object's whole life without holding
             # an unscoped handle open alongside it.
@@ -123,18 +133,7 @@ class TarFileHandle:
                 self._mmap = self._resources.enter_context(
                     mmap.mmap(source.fileno(), 0, prot=mmap.PROT_READ),
                 )
-
-            # Build index of tar members: name -> (offset, size, TarInfo)
-            # This is done once at init and shared across all threads.
-            self._index: dict[str, tuple[int, int, tarfile.TarInfo]] = {}
             self._build_index()
-        else:
-            # Standard mode: use thread-local tarfile handles, tagged with the
-            # PID that opened them so an inherited handle reopened after fork
-            # does not share a file offset with the parent across processes.
-            self._local = threading.local()
-            self._opened = ExitStack()
-            self._opened_lock = threading.Lock()
 
     def getmember(self, name: str) -> tarfile.TarInfo:
         """Get member info by name.
@@ -174,7 +173,7 @@ class TarFileHandle:
 
         """
         self._reject_if_closed()
-        if self.use_mmap:
+        if self._mmap is not None:
             name = member if isinstance(member, str) else member.name
 
             # Absent is an error, not None: None is reserved for a member that

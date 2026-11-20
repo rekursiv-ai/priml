@@ -89,6 +89,7 @@ class ImageNetSource:
         self.num_concurrently_read_shards = config.num_concurrently_read_shards
         self.dataset_dir = Path(config.working_dir)
         self._validation_members: list[tarfile.TarInfo] = []
+        self.validation_labels: dict[str, str] = {}
 
         if not self.dataset_dir.exists():
             raise ValueError(f"Dataset directory does not exist: {self.dataset_dir}")

@@ -84,7 +84,7 @@ class Float8ModelQuantization:
         # leaves a consistent object (no AttributeError on later access).
         self.module_filter = config.module_filter
         self.converted_count = 0
-        self.enabled = False
+        self.float8_config: Float8LinearConfig | None = None
 
         available, reason = _check_float8_available()
         if not available:
@@ -114,22 +114,27 @@ class Float8ModelQuantization:
                 "enable_fsdp_float8_all_gather only works with recipe='tensorwise'",
             )
 
-        self.float8_config = Float8LinearConfig.from_recipe_name(recipe_name)
+        float8_config = Float8LinearConfig.from_recipe_name(recipe_name)
 
         # Override FSDP all-gather setting on the frozen dataclass.
         if config.enable_fsdp_float8_all_gather:
-            self.float8_config = dataclasses.replace(
-                self.float8_config,
+            float8_config = dataclasses.replace(
+                float8_config,
                 enable_fsdp_float8_all_gather=True,
             )
 
-        self.enabled = True
+        self.float8_config = float8_config
 
         logger.info(
             "Float8Linear enabled: recipe=%s, fsdp_all_gather=%s",
             config.recipe,
             config.enable_fsdp_float8_all_gather,
         )
+
+    @property
+    def enabled(self) -> bool:
+        """Whether float8 conversion runs: torchao and an SM89+ GPU are present."""
+        return self.float8_config is not None
 
     # Pure predicate -- conversion counting happens in ``__call__``.
     def _default_module_filter(self, mod: nn.Module, fqn: str) -> bool:
@@ -142,7 +147,7 @@ class Float8ModelQuantization:
 
     def __call__(self, model: nn.Module) -> nn.Module:
         """Apply to the input."""
-        if not self.enabled:
+        if self.float8_config is None:
             return model
 
         filter_fn = self.module_filter or self._default_module_filter
