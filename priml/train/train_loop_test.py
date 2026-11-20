@@ -84,7 +84,7 @@ def runtime_events() -> _RuntimeEvents:
 class _RecordingRuntime:
     """Runtime that records TrainLoop lifecycle events into a caller-supplied list."""
 
-    _events: _RuntimeEvents | None = None
+    _events: ClassVar[_RuntimeEvents | None] = None
     """Class-level handle set by tests via ``set_events`` before make()."""
 
     @classmethod

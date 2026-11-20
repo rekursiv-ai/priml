@@ -1330,6 +1330,7 @@ def embed_frames(
 def keep_attention(
     ctx: SelectiveCheckpointContext,
     op: OpOverload,
+    /,
     *args: object,
     **kwargs: object,
 ) -> CheckpointPolicy:

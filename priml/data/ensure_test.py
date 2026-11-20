@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from http import client, server
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Final, override
+from typing import IO, TYPE_CHECKING, ClassVar, Final, override
 from urllib import request
 
 import datetime as dt
@@ -360,7 +360,7 @@ def test_concurrent_ensure_builds_once(
 class _RangeHandler(server.SimpleHTTPRequestHandler):
     """Serves a single in-memory blob with HTTP Range support."""
 
-    blob: bytes = b""
+    blob: ClassVar[bytes] = b""
 
     @override
     def log_message(self, format: str, *args: object) -> None:

@@ -162,6 +162,8 @@ class TestImageNetSourceInit:
         assert source.tar_path == train_tar
         assert source.shuffle is False
         assert source.worker_slice is None
+        assert source.validation_labels == {}
+        assert source._validation_members == []
 
     def test_init_val_split(self, temp_dir: Path) -> None:
         """Test initialization with val split."""
@@ -1158,7 +1160,10 @@ def test_imagenet_rejects_nonpositive_concurrency(tmp_path: Path, shards: int) -
     create_nested_tar(tmp_path / "ILSVRC2012_img_train.tar", "class")
     config = ImageNetSource.Config(working_dir=tmp_path)
     config.num_concurrently_read_shards = shards
-    with pytest.raises(ValueError, match="num_concurrently_read_shards"):
+    with pytest.raises(
+        ValueError,
+        match=rf"^num_concurrently_read_shards must be >= 1, got {shards}\.$",
+    ):
         config.make()
 
 
