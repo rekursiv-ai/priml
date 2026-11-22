@@ -134,7 +134,7 @@ def test_padding_mask_and_positions_match_reference_cached_continuation() -> Non
                 tokens,
                 attention_mask=padding,
                 position_ids=positions,
-                past_key_values=reference_cache,
+                cache=reference_cache,
                 use_cache=True,
             ),
         )
@@ -175,7 +175,7 @@ def test_prepared_causal_mask_matches_reference_prefill_and_cached_continuation(
             reference(
                 chunk,
                 attention_mask=mask,
-                past_key_values=reference_cache,
+                cache=reference_cache,
                 use_cache=True,
             ),
         )

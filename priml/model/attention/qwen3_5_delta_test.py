@@ -126,7 +126,13 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
     assert isinstance(reference_layer, LinearAttentionCacheLayerMixin)
     for length in (2, 1, 3, 1):
         x = torch.randn(2, length, 8)
-        expected_output = cast(object, reference(x, cache_params=reference_cache))
+        expected_output = cast(
+            object,
+            reference(
+                x,
+                cache=reference_cache,
+            ),
+        )
         expected = hf_tensor(expected_output)
         layer_cache = _layer_cache(native, cache)
         actual = native(x, cache=layer_cache)
