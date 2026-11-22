@@ -62,7 +62,7 @@ known only through their scores.
 REINFORCE for an objective that reads the model's own density follows from
 three facts:
 
-1. the product rule, since `f(x, u)` depends on `θ` through `u(x; θ)`,
+1. the product rule, since `f(x, u)` depends on `θ` through `u(·; θ)`,
 2. the ratio's derivative, `∇_θ u(x; θ) = −u(x; θ) s(x; θ)`, and,
 3. the log-derivative, `∇_θ p(x; θ) = p(x; θ) s(x; θ)`.
 
@@ -72,12 +72,19 @@ Let,
   s(x; θ)      ≝ ∇_θ log p(x; θ)          # the score
   p̂(x)         ≝ target density (data, or unnormalized posterior)
   u(x; θ)      ≝ p̂(x) / p(x; θ)           # written u when x, θ are clear
-  f(x, u)      ≝ any function, differentiable in u
-  ∂_u f(x, u)  ≝ derivative of f(x, u) in u
+  f(x, u)      ≝ any function of x and the ratio u(·; θ), differentiable in u
+  ∂_u f(x, u)  ≝ (1 / p(x; θ)) ∫ p(x′; θ) (δf(x′, u)/δu)(x) dx′
   T_f(x, u)    ≝ f(x, u) − u ∂_u f(x, u)    # the tangent intercept
   ```
 
-and assume `f(x, u)` depends on `θ` only through `u(x; θ)`. Then,
+and assume `f(x, u)` depends on `θ` only through `u(·; θ)`. The second
+argument is the whole ratio. A local `f` reads it at `x` alone: every row of
+the tables below. Any other `f` reads it elsewhere too: e.g. a variance under
+`p(·; θ)`, since `p̂ ≡ 1` gives `u = 1 / p(x; θ)`. `(δf(x′, u)/δu)(x)` is the
+functional derivative: the change in `f(x′, u)` per unit change of `u` at
+`x`. For a local `f` it is the ordinary derivative times `δ(x′ − x)`, so
+`∂_u f(x, u)` is the ordinary derivative of `f(x, u)` in the number
+`u(x; θ)`. Then,
 
   ```
   ∇_θ E_{p(X; θ)}[f(X, u)]
@@ -90,11 +97,23 @@ and assume `f(x, u)` depends on `θ` only through `u(x; θ)`. Then,
 
 where the second step is the product rule plus the chain rule, the third uses
 `∇_θ u(x; θ) = −u(x; θ) ∇_θ p(x; θ) / p(x; θ)`, and the fourth uses
-`∇_θ p(x; θ) = p(x; θ) s(x; θ)`.
+`∇_θ p(x; θ) = p(x; θ) s(x; θ)`. For an `f` that is not local, the chain rule
+in the second step is
+
+  ```
+  ∫ p(x′; θ) ∇_θ f(x′, u) dx′
+    = ∫ p(x′; θ) ∫ (δf(x′, u)/δu)(x) ∇_θ u(x; θ) dx dx′
+    = ∫ p(x; θ) ∂_u f(x, u) ∇_θ u(x; θ) dx
+  ```
+
+where the last step swaps the two integrals and uses the definition of
+`∂_u f(x, u)`. If `f` also reads `θ` other than through `u(·; θ)`, e.g.
+through the score, the product rule adds `E_{p(X; θ)}[∇_θ f(X, u)|_u]`, the
+gradient in `θ` with `u` held fixed.
 
 So weighting the score by `f(x, u)` is biased unless `∂_u f(x, u) = 0`; the
-unbiased weight is the tangent intercept `T_f(x, u)`: where the tangent to
-`u ↦ f(x, u)` crosses `u = 0`.
+unbiased weight is the tangent intercept `T_f(x, u)`: for a local `f`, where
+the tangent to `u ↦ f(x, u)` crosses `u = 0`.
 
 Geometrically, the tangent to `u ↦ f(x, u)` at `u` splits `f(x, u)` into two
 parts,
@@ -108,11 +127,15 @@ parts,
    mass at `x`.
 2. Slope `∂_u f(x, u)`: the marginal cost of target mass at `x`.
 
-The split is Euler's theorem. With `m = p(x; θ)` and `n = p̂(x)`, the
-integrand `F(n, m) ≝ m f(x, n / m)` is homogeneous of degree 1 in `(n, m)`,
-so `F(n, m) = m ∂_m F(n, m) + n ∂_n F(n, m)`. The chain rule through
-`u = n / m` gives `∂_m F(n, m) = T_f(x, u)` and `∂_n F(n, m) = ∂_u f(x, u)`;
-dividing by `m` gives `f(x, u) = T_f(x, u) + ∂_u f(x, u) ⋅ u`.
+The split is Euler's theorem. For a local `f`, with `m = p(x; θ)` and
+`n = p̂(x)`, the integrand `F(n, m) ≝ m f(x, n / m)` is homogeneous of degree
+1 in `(n, m)`, so `F(n, m) = m ∂_m F(n, m) + n ∂_n F(n, m)`. The chain rule
+through `u = n / m` gives `∂_m F(n, m) = T_f(x, u)` and
+`∂_n F(n, m) = ∂_u f(x, u)`; dividing by `m` gives
+`f(x, u) = T_f(x, u) + ∂_u f(x, u) ⋅ u`. For any other `f`, the loss
+`∫ p(x; θ) f(x, u) dx` is homogeneous of degree 1 in the two densities
+`(p̂, p(·; θ))`, and its functional derivatives in them are `∂_u f(x, u)` and
+`T_f(x, u)` (the chain rule in function space, below).
 
 REINFORCE weights the score by the intercept because `θ` moves only model
 mass; target mass is fixed. [Csiszar f-divergences](csiszar.md) tabulates
@@ -126,8 +149,18 @@ through `p(·; θ)`, so
   ```
 
 where `(δL/δp)(x)` is the functional derivative: the change in `L(θ)` per
-unit of model mass added at `x`. For `L(θ) = ∫ p f(x, p̂ / p) dx` it is
-`∂_m [m f(x, n / m)] = T_f(x, u)`, the intercept from the Euler split. So:
+unit of model mass added at `x`. For `L(θ) = ∫ p f(x, p̂ / p) dx`,
+
+  ```
+  (δL/δp)(x) = f(x, u) + ∫ p(x′; θ) (δf(x′, u)/δu)(x) dx′ ⋅ (−u / p(x; θ))
+             = f(x, u) − u ∂_u f(x, u)
+             = T_f(x, u)
+  ```
+
+where the first step is the product rule: mass added at `x` adds `f(x, u)`,
+and lowers `u` at `x` by `u / p(x; θ)` per unit of mass, which changes every
+`f(x′, u)` that reads `u` there. For a local `f` this is
+`∂_m [m f(x, n / m)]`, the intercept from the Euler split. So:
 
 1. `T_f(x, u)` carries the loss: `f(x, u)`, `A(x)`, and `p̂(x)`. Methods
    differ only here.
@@ -170,6 +203,14 @@ imposes only `k` conditions: any `w(x)` with `w − T_f` orthogonal to the `k`
 components of `s(x; θ)` also works. The intercept is the one weight that
 works for every model.
 
+A weight that reads the score depends on which model passes through `p`, so
+the claim does not cover it. E.g., on two outcomes with `p = (½, ½)`,
+`Var_p(s(X))` is `¼` for the logistic model `p(1; θ) = 1 / (1 + e^{−θ})` and
+`4` for the model `p(1; θ) = θ` (checked with sympy). Such a weight is in the
+fixed-model case, where every direction is a weight on the score: if
+`E_p[s(X) s(X)ᵀ]` is invertible, any `v ∈ ℝᵏ` equals `E_p[w(X) s(X)]` with
+`w(x) = vᵀ E_p[s(X) s(X)ᵀ]⁻¹ s(x)`.
+
 This is the semiparametric canonical gradient
 ([van der Vaart 1998][vdV], ch. 25). Along any model through `p` with score
 `φ`, the derivative of `L` is `E_p[T_f(X, u) φ(X)]` (the function-space
@@ -196,7 +237,8 @@ by stepping against
 A method is three choices: a loss shape `f(x, u)`, a reward `A(x)` (which
 enters as `−A(x)`, since `f(x, u)` is minimized), and a target `p̂(x)`. The
 table below lists the distinct `f(x, u)`; the [Methods](#methods) table then
-names each method's choices.
+names each method's choices. Every row is local, so its `∂_u f(x, u)` is the
+ordinary derivative.
 
 | name                 | reads  | `f(x, u)`                                                | `T_f(x, u)`                             |
 |----------------------|--------|----------------------------------------------------------|-----------------------------------------|
@@ -384,14 +426,21 @@ Nine consequences:
 Regularity: `p(x; θ)` differentiable in `θ` with support free of `θ`; `∇_θ`
 passes through `∫`; `p(x; θ) > 0` wherever `p̂(x) > 0`; `f(x, u)`
 differentiable in `u` (total variation and exp-abs-log fail at `u = 1`, a null
-set when `u` has a density). The assumption fails when `u` averages
-`p̂(x) / p(x; θ)` over several samples (importance-weighted bounds): then
-`f(x, u)` reads `p(·; θ)` at points other than `X`. Three pieces sit outside
-`f(x, u)`: GRPO's division by `std_G r`, which rescales each prompt by its
-other samples; PPO's critic, which uses time structure inside `x`; and DAPO's
-token-level loss, which divides by the token count of the whole batch. None
-reads `θ`, so each is still a weight on the score: with `x = (x₁, …, x_T)`
-and per-token score `s_t ≝ ∇_θ log p(x_t | x_{<t}; θ)`, the update is
+set when `u` has a density). An `f(x, u)` that reads `u(·; θ)` away from `x`
+keeps the identity, with `∂_u f(x, u)` as defined, not the ordinary
+derivative: e.g. an importance-weighted bound, which averages
+`p̂(x) / p(x; θ)` over several samples, or a variance under `p(·; θ)` (both
+checked with sympy). An `f(x, u)` that reads `θ` other than through
+`u(·; θ)`, e.g. through the score, adds `E_{p(X; θ)}[∇_θ f(X, u)|_u]` (also
+checked), unless it is held fixed during the step, like `p_old`; then it is
+one more weight on the score. Three pieces sit outside `f(x, u)`: GRPO's
+division by `std_G r`, which rescales each prompt by its other samples (it
+estimates the standard deviation of `r(X)` under the frozen `p_old`, a
+statistic `A(x)` may read; the `G`-sample estimate is what sits outside);
+PPO's critic, which uses time structure inside `x`; and DAPO's token-level
+loss, which divides by the token count of the whole batch. None reads `θ`,
+so each is still a weight on the score: with `x = (x₁, …, x_T)` and
+per-token score `s_t ≝ ∇_θ log p(x_t | x_{<t}; θ)`, the update is
 `E[Σ_t w_t s_t]` with `w_t` built from rewards, the critic, and batch counts.
 That is an estimating equation without an objective. The GAN rows' ratio is
 different: it is exact only at the discriminator's optimum, so away from it
