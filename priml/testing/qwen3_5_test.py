@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from functools import wraps
-from typing import override
+from collections.abc import Callable
+from functools import partial, wraps
+from types import FunctionType
+from typing import cast, override
 
 import sys
 
@@ -88,8 +90,14 @@ def test_hf_logits_rejects_missing_logits() -> None:
         hf_logits(object())
 
 
+@pytest.mark.parametrize(
+    ("dtype", "expected"),
+    [(None, torch.float32), (torch.float64, torch.float64)],
+)
 def test_hf_reference_casts_dtype_and_adapts_linear_attention(
     monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype | None,
+    expected: torch.dtype,
 ) -> None:
     class Reference(nn.Module):
         config = object()
@@ -110,16 +118,19 @@ def test_hf_reference_casts_dtype_and_adapts_linear_attention(
         adapted.append,
     )
 
-    result = hf_reference(reference, dtype=torch.float64)
+    result = hf_reference(reference, dtype=dtype)
 
     assert result is reference
-    assert reference.weight.dtype == torch.float64
+    assert reference.weight.dtype == expected
     assert adapted == [reference.linear_attn]
 
 
 def test_hf_reference_rejects_non_module() -> None:
     with pytest.raises(AssertionError):
         hf_reference(object())
+
+
+type _Forward = Callable[..., Tensor]
 
 
 def torch_chunk_gated_delta_rule(value: Tensor) -> Tensor:
@@ -251,6 +262,70 @@ def test_torch_reference_preserves_defaults_closure_and_receiver(
     torch.testing.assert_close(reference(value), value + 18)
     torch.testing.assert_close(reference(value, 4, offset=2), value + 19)
     assert called == ["base", "base"]
+
+
+def _renamed(old: str, new: str) -> Callable[[_Forward], _Forward]:
+    """Return a decorator reading ``old=`` as ``new=``, as HF's ``deprecate_kwarg`` does."""
+
+    def decorate(func: _Forward) -> _Forward:
+        @wraps(func)
+        def wrapped(*args: object, **kwargs: object) -> Tensor:
+            if old in kwargs:
+                kwargs[new] = kwargs.pop(old)
+            return func(*args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+def _scaled_forward(self: nn.Module, value: Tensor, *, scale: int = 1) -> Tensor:
+    del self
+    return torch.mul(torch_chunk_gated_delta_rule(value), scale)
+
+
+# An attribute of the function's own, as a decorator may set one.
+_scaled_forward.__dict__["marker"] = "kept"
+
+type _Rename = Callable[[str, str], Callable[[_Forward], _Forward]]
+
+# The same decorator defined where no kernel is, as HF's ``deprecate_kwarg`` is.
+_foreign_renamed = cast(_Rename, FunctionType(_renamed.__code__, {"wraps": wraps}))
+
+
+class _RenamedReference(nn.Module):
+    forward = _renamed("factor", "scale")(
+        _foreign_renamed("size", "scale")(_scaled_forward),
+    )
+
+
+def test_torch_reference_keeps_the_forward_s_decorators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF renames ``cache_params`` to ``cache`` in a decorator: dropping it drops the cache.
+
+    Each copy keeps its name and attributes, and reaches the copy it wraps.
+    """
+    called: list[str] = []
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "torch_chunk_gated_delta_rule",
+        _module_fallback(called),
+    )
+    reference = torch_reference(_RenamedReference())
+    value = torch.zeros(2, 3)
+    torch.testing.assert_close(reference(value, factor=3), (value + 1) * 3)
+    assert called == ["base"]
+    forward = reference.forward
+    assert isinstance(forward, partial)
+    outer = cast(FunctionType, forward.func)
+    assert outer.__name__ == "_scaled_forward"
+    assert cast(object, outer.__dict__["marker"]) == "kept"
+    inner = cast(FunctionType, outer.__dict__["__wrapped__"])
+    original = cast(FunctionType, _RenamedReference.forward)
+    assert inner is not cast(object, original.__dict__["__wrapped__"])
+    assert inner.__globals__ is not original.__globals__
+    assert cast(object, inner.__dict__["marker"]) == "kept"
 
 
 class _CallableForward:

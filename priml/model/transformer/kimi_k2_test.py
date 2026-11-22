@@ -35,7 +35,7 @@ from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
     from transformers.modeling_outputs import CausalLMOutputWithPast
     from transformers.modeling_utils import PreTrainedModel
@@ -822,14 +822,39 @@ def test_transformers_compat_shims_restore_module_state(
         if raise_inside
         else nullcontext()
     )
+    masks = "transformers.modeling_attn_mask_utils"
     with error, _install_transformers_compat_shims():
         assert callable(cast(object, vars(import_utils)["is_torch_fx_available"]))
         assert callable(DynamicCache.from_legacy_cache)
+        assert masks in sys.modules
         if raise_inside:
             raise RuntimeError("inside shims")
 
     assert vars(import_utils).get("is_torch_fx_available", ABSENT) is fx_before
     assert vars(DynamicCache).get("from_legacy_cache", ABSENT) is legacy_before
+    assert masks not in sys.modules
+
+
+def test_the_mask_shim_is_hf_s_causal_mask_and_refuses_what_it_does_not_build() -> None:
+    """Each query sees itself and earlier keys; a padding mask or a past is refused."""
+    module = _attention_mask_utils("masks")
+    causal = cast(
+        "Callable[..., Tensor]",
+        vars(module)["_prepare_4d_causal_attention_mask"],
+    )
+    embeds = torch.zeros(2, 3, 4)
+    low = torch.finfo(embeds.dtype).min
+    expected = torch.tensor([[0.0, low, low], [0.0, 0.0, low], [0.0, 0.0, 0.0]])
+    mask = causal(None, (2, 3), embeds, 0)
+    assert mask.shape == (2, 1, 3, 3)
+    assert torch.equal(mask[1, 0], expected)
+    for padding, past in ((torch.ones(2, 3), 0), (None, 1)):
+        with pytest.raises(NotImplementedError, match="unpadded causal"):
+            causal(padding, (2, 3), embeds, past)
+    for name in ("_prepare_4d_attention_mask", "AttentionMaskConverter"):
+        unused = cast("Callable[..., object]", vars(module)[name])
+        with pytest.raises(NotImplementedError, match="never calls"):
+            unused(1, key=2)
 
 
 @contextmanager
@@ -861,11 +886,46 @@ def _install_transformers_compat_shims() -> Generator[None]:
     installed = [shim for shim in shims if not hasattr(shim[0], shim[1])]
     for owner, name, value in installed:
         setattr(owner, name, value)
+    # `transformers` 5.24, the floor, removed the module; the remote code imports
+    # it at load.
+    masks = "transformers.modeling_attn_mask_utils"
+    sys.modules[masks] = _attention_mask_utils(masks)
     try:
         yield
     finally:
         for owner, name, _ in installed:
             delattr(owner, name)
+        del sys.modules[masks]
+
+
+def _attention_mask_utils(name: str) -> ModuleType:
+    """Return the removed mask module, as much of it as the parity test calls."""
+
+    def causal_mask(
+        attention_mask: Tensor | None,
+        input_shape: tuple[int, int],
+        inputs_embeds: Tensor,
+        past_key_values_length: int,
+    ) -> Tensor:
+        # The parity test sends no mask and no past: only the causal part is built.
+        if attention_mask is not None or past_key_values_length:
+            raise NotImplementedError("the shim builds only an unpadded causal mask")
+        batch, length = input_shape
+        dtype = inputs_embeds.dtype
+        future = torch.full((length, length), torch.finfo(dtype).min, dtype=dtype)
+        return future.triu(1)[None, None].expand(batch, 1, length, length)
+
+    def unused(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise NotImplementedError("the remote code imports this but never calls it")
+
+    module = ModuleType(name)
+    vars(module).update(
+        _prepare_4d_causal_attention_mask=causal_mask,
+        _prepare_4d_attention_mask=unused,
+        AttentionMaskConverter=unused,
+    )
+    return module
 
 
 # ``PreTrainedModel``, not ``DeepseekV3ForCausalLM``: ``trust_remote_code`` loads

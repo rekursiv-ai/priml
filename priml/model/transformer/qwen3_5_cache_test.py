@@ -74,7 +74,11 @@ def test_mixed_cache_weights_only_roundtrip_resumes_exactly(
         if split_gate_projection:
             assert reference_cache is not None
             expected = hf_logits(
-                reference(tokens, past_key_values=reference_cache, use_cache=True),
+                reference(
+                    tokens,
+                    cache=reference_cache,
+                    use_cache=True,
+                ),
             )
             assert torch.equal(actual, expected)
     state = cache_state_dict(cache)
@@ -97,7 +101,7 @@ def test_mixed_cache_weights_only_roundtrip_resumes_exactly(
         expected = hf_logits(
             reference(
                 continuation,
-                past_key_values=reference_cache,
+                cache=reference_cache,
                 use_cache=True,
             ),
         )

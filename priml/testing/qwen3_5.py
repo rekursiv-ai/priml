@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from types import FunctionType
+from types import CellType, FunctionType, MethodType
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 import inspect
@@ -145,40 +145,90 @@ def hf_tensor(value: object) -> Tensor:
 def torch_reference(reference: nn.Module) -> nn.Module:
     """Bind the installed HF bytecode to its PyTorch kernel fallbacks.
 
+    Every function of the forward's decorator chain is copied, each reaching the
+    next copy, so a decorator still runs: HF's ``deprecate_kwarg`` reads
+    ``cache_params`` as ``cache``, and without it the keyword is dropped.
+
     Args:
       reference: Hugging Face Qwen3.5 delta-attention module to adapt.
 
     Returns:
       reference: The same module with PyTorch fallback functions bound.
 
+    Raises:
+      TypeError: A function of the chain is no plain function, or a kernel the
+        innermost names is not callable.
+
     """
-    original = cast(object, inspect.unwrap(reference.forward))
-    if not isinstance(original, FunctionType):
+    bound = cast(object, reference.forward)
+    chain = [bound.__func__ if isinstance(bound, MethodType) else bound]
+    while (inner := cast(object, getattr(chain[-1], "__wrapped__", None))) is not None:
+        chain.append(inner)
+    functions = [f for f in chain if isinstance(f, FunctionType)]
+    if len(functions) != len(chain):
         raise TypeError("Expected the reference forward to be a plain function.")
-    globals_ref = original.__globals__.copy()
-    for name in (
-        "torch_chunk_gated_delta_rule",
-        "torch_recurrent_gated_delta_rule",
-        "causal_conv1d_fn",
-        "causal_conv1d_update",
-    ):
-        kernel = cast(object, globals_ref[name])
-        if isinstance(kernel, nn.Module):
-            kernel = cast(
-                object,
-                inspect.getclosurevars(kernel.forward).nonlocals["func"],
-            )
-        if not callable(kernel):
-            raise TypeError("Expected callable(kernel).")
-        globals_ref[name] = inspect.unwrap(kernel)
+    kernels = {
+        name: _fallback(cast(object, functions[-1].__globals__[name]))
+        for name in (
+            "torch_chunk_gated_delta_rule",
+            "torch_recurrent_gated_delta_rule",
+            "causal_conv1d_fn",
+            "causal_conv1d_update",
+        )
+    }
     # The exact upstream code runs with private function bindings; installed FLA
     # otherwise selects CUDA kernels even for this CPU reference.
-    forward = FunctionType(
-        original.__code__,
-        globals_ref,
-        argdefs=original.__defaults__,
-        closure=original.__closure__,
-    )
-    forward.__kwdefaults__ = original.__kwdefaults__
-    reference.forward = partial(forward, reference)
+    copies: dict[int, FunctionType] = {}
+    for function in reversed(functions):
+        copies[id(function)] = _copied(function, kernels=kernels, copies=copies)
+    reference.forward = partial(copies[id(functions[0])], reference)
     return reference
+
+
+def _fallback(kernel: object) -> object:
+    """Return the PyTorch function an FLA kernel, or its module wrapper, falls back to."""
+    if isinstance(kernel, nn.Module):
+        kernel = cast(object, inspect.getclosurevars(kernel.forward).nonlocals["func"])
+    if not callable(kernel):
+        raise TypeError("Expected callable(kernel).")
+    return cast(object, inspect.unwrap(kernel))
+
+
+# Globals, cells, and a function's ``__dict__`` hold anything: typeshed types them
+# ``Any``, shed here as ``object``.
+def _copied(
+    function: FunctionType,
+    *,
+    kernels: dict[str, object],
+    copies: dict[int, FunctionType],
+) -> FunctionType:
+    """Return ``function`` with the fallbacks bound, reaching each copy made so far."""
+    names = {
+        name: copies.get(id(value), kernels.get(name, value))
+        for name, value in cast(dict[str, object], function.__globals__).items()
+    }
+    cells = tuple(
+        _cell(cast(object, cell.cell_contents), cell=cell, copies=copies)
+        for cell in function.__closure__ or ()
+    )
+    copy = FunctionType(
+        function.__code__,
+        names,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+        closure=cells or None,
+    )
+    copy.__kwdefaults__ = function.__kwdefaults__
+    for key, value in cast(dict[str, object], function.__dict__).items():
+        copy.__dict__[key] = copies.get(id(value), value)
+    return copy
+
+
+def _cell(
+    contents: object,
+    *,
+    cell: CellType,
+    copies: dict[int, FunctionType],
+) -> CellType:
+    """Return a cell holding the copy of ``contents``, else ``cell`` itself."""
+    return CellType(copies[id(contents)]) if id(contents) in copies else cell
