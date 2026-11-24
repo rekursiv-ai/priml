@@ -4301,8 +4301,7 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     ):
         deadline = time.perf_counter() + 0.08  # >3 watchdog periods.
         while time.perf_counter() < deadline:
-            # The C watchdog reads the real clock; this is the healthy loop it must spare.
-            time.sleep(0.002)  # house-ignore[sleep] -- See above.
+            time.sleep(0.002)  # house-ignore[sleep] -- The watchdog reads real time.
     assert "Timeout (" not in capfd.readouterr().err
 
 

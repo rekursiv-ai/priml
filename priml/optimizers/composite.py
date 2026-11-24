@@ -136,7 +136,7 @@ class CompositeOptimizer(Optimizer):
     def __init__(self, optimizers: Sequence[Optimizer]) -> None:
         if not optimizers:
             raise ValueError(
-                "CompositeOptimizer requires at least one optimizer.",  # pragma: no mutate[diagnostic-text]
+                "CompositeOptimizer requires at least one optimizer.",  # pragma: no mutate[diagnostic-text] -- Only a person reads it.
             )
         _reject_shared_parameters(optimizers)
         self.optimizers = list(optimizers)

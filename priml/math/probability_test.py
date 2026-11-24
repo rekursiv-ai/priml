@@ -3,7 +3,7 @@ from __future__ import annotations
 from fractions import Fraction
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Final, Protocol, cast
-from unittest.mock import Mock, call
+from unittest.mock import ANY, Mock, call
 
 import math
 
@@ -416,6 +416,12 @@ def test_degenerate_probability_gradients_are_finite_and_zero(
         if value is not None:
             assert torch.isfinite(value).all()
             assert torch.equal(value, torch.zeros_like(value))
+
+
+def test_quantile_student_t_bisects_exact_cdf_ties_to_the_same_bits() -> None:
+    """A midpoint whose CDF equals the target exactly keeps the same bracket side."""
+    result = quantile_student_t(torch.tensor(0.001, dtype=torch.float64), df=1)
+    assert torch.equal(result, torch.tensor(-318.30883898551906, dtype=torch.float64))
 
 
 def test_quantile_truncated_normal_out_of_domain_is_nan():
@@ -1312,6 +1318,18 @@ def test_log_gamma_correction_preserves_the_input_device() -> None:
     assert log_gamma_correction(values).device == values.device
 
 
+def test_log_gamma_correction_builds_its_coefficients_on_the_input_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = torch.tensor([8.0, 16.0], dtype=torch.float64)
+    spy = Mock(wraps=torch.tensor)
+    monkeypatch.setattr(torch, "tensor", spy)
+
+    _ = log_gamma_correction(values)
+
+    assert spy.call_args == call(ANY, dtype=values.dtype, device=values.device)
+
+
 def test_log_gamma_difference_uses_stirling_branch_at_eight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1635,6 +1653,21 @@ def test_weyl_uniform_defaults() -> None:
     assert actual.dtype == torch.float32
     assert not actual.requires_grad
     assert torch.equal(actual, weyl_rand(2, 3, salt=0))
+
+
+def test_weyl_normal_defaults_and_salt_offset_match_the_uniform_sequence() -> None:
+    actual = weyl_randn(4, salt=3)
+    uniform = weyl_rand(4, salt=3, dtype=torch.float64)
+    expected = (torch.erfinv(uniform * 2 - 1) * 2**0.5).to(torch.float32)
+    assert not weyl_randn(4).requires_grad
+    torch.testing.assert_close(actual, expected)
+
+
+def test_weyl_randint_defaults_to_salt_zero_and_offsets_by_salt() -> None:
+    assert torch.equal(weyl_randint(2, 7, (6, 3)), weyl_randint(2, 7, (6, 3), salt=0))
+    uniform = weyl_rand(6, 3, salt=3, dtype=torch.float64)
+    expected = (torch.floor(uniform * 5) + 2).to(torch.int64)
+    assert torch.equal(weyl_randint(2, 7, (6, 3), salt=3), expected)
 
 
 def test_weyl_sequences_draw_nothing_and_match_their_distribution() -> None:

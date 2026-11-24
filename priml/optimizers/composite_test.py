@@ -190,6 +190,23 @@ def test_state_makes_a_missing_entry_on_its_member() -> None:
         _ = optimizer.state[nn.Parameter(torch.ones(2))]
 
 
+def test_state_keeps_a_missing_entry_it_made() -> None:
+    parameter = nn.Parameter(torch.ones(2))
+    member = torch.optim.Adam([parameter], lr=0.1)
+    state = CompositeOptimizer([member]).state
+    entry = state[parameter]
+    assert state[parameter] is entry
+
+
+def test_state_missing_key_error_names_the_key() -> None:
+    missing = nn.Parameter(torch.ones(2))
+    member = torch.optim.Adam([nn.Parameter(torch.ones(2))], lr=0.1)
+    optimizer = CompositeOptimizer([member])
+    with pytest.raises(KeyError) as error:
+        _ = optimizer.state[missing]
+    assert error.value.args == (missing,)
+
+
 def test_member_group_addition_and_load_keep_scheduling_aliases() -> None:
     model = nn.Linear(2, 3)
     assert model.bias is not None

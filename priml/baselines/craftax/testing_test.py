@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass, fields
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -11,21 +12,24 @@ import hashlib
 import threading
 
 from configgle import InlineConfig
-from torch import Tensor
+from torch import Tensor, nn
 
 import numpy as np
 import pytest
 import torch
 
 from priml.baselines.craftax import testing
+from priml.baselines.craftax.env import WorldPool
 from priml.baselines.craftax.experiments import exp000, exp009
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.model import (
+    FeasibilityLoss,
     MinGRUPolicy,
+    NoEncoder,
     packed_observation_embedding,
 )
 from priml.baselines.craftax.policies.actor_critic import ActorCritic
-from priml.baselines.craftax.policies.encoder import BoardEncoder
+from priml.baselines.craftax.policies.encoder import MLP, BoardEncoder
 from priml.baselines.craftax.policies.rnn import ActorCriticRNN
 from priml.baselines.craftax.rollout import StepGraph, TorchPhiloxSampler
 from priml.baselines.craftax.testing import FakeEnv, _golden_path
@@ -38,7 +42,6 @@ from priml.testing import regenerate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from priml.baselines.craftax.env import CraftaxEnv
     from priml.baselines.craftax.experiments import CraftaxTrainLoop
@@ -143,6 +146,36 @@ def test_a_changed_golden_fails_with_its_name_and_unified_diff(
     )
 
 
+def test_assert_golden_reads_the_golden_as_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A golden is UTF-8 whatever the host's locale would decode it as."""
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "probe.txt").write_text("calf\u00e9\n", encoding="utf-8")
+    reads: list[str | None] = []
+    real_read_text = Path.read_text
+
+    def spy(self: Path, *, encoding: str | None = None) -> str:
+        reads.append(encoding)
+        return real_read_text(self, encoding=encoding)
+
+    monkeypatch.setattr(Path, "read_text", spy)
+    _set_overwrite(monkeypatch, overwrite=False)
+    testing.assert_golden(
+        test_file=str(tmp_path / "probe_test.py"),
+        name="probe",
+        lines=["calf\u00e9"],
+    )
+    assert reads == ["utf-8"]
+    assert testing.read_golden(
+        test_file=str(tmp_path / "probe_test.py"),
+        name="probe",
+    ) == ["calf\u00e9"]
+    assert reads == ["utf-8", "utf-8"]
+
+
 def test_a_fake_env_starts_zeroed_and_steps_each_buffer_from_its_own_seed() -> None:
     """Buffer ``b`` draws from ``seed + b``: buffer 1 of seed 5 is buffer 0 of seed 6."""
     env = FakeEnv.make(num_envs=4, num_buffers=2, seed=5)
@@ -195,6 +228,10 @@ def test_packed_observations_hold_in_range_ids_then_scalars(
         observations,
         testing.packed_observations(config, batch=3, time=2, seed=1),
     )
+    assert torch.equal(
+        testing.packed_observations(config, batch=3, time=2),
+        testing.packed_observations(config, batch=3, time=2, seed=0),
+    )
     one_step = testing.packed_observations(config, batch=3, seed=1)
     assert one_step.shape == (3, config.observation_size)
     encoder = config.embedding
@@ -208,6 +245,48 @@ def test_packed_observations_hold_in_range_ids_then_scalars(
     ids = observations[..., : embedding.num_cells * len(embedding.offsets)]
     assert bool((ids >= 0).all())
     assert int(ids.max()) < embedding.channels_in
+    assert bool((ids > 0).any())
+
+
+def test_tiny_policy_is_the_documented_test_size() -> None:
+    config = testing.tiny_policy(dtype=torch.float32)
+    assert (config.num_layers, config.channels_hidden) == (2, 8)
+    assert testing.multi_hot_embedding(config).channels_out == 2
+    assert config.dtype == config.state_dtype == config.output_dtype == torch.float32
+
+
+def test_tiny_board_policy_is_the_documented_test_size() -> None:
+    config = testing.tiny_board_policy(dtype=torch.float32)
+    encoder, injection, auxiliary = config.embedding, config.injection, config.auxiliary
+    assert isinstance(encoder, BoardEncoder.Config)
+    assert isinstance(injection, MLP.Config)
+    assert isinstance(auxiliary, FeasibilityLoss.Config)
+    assert config.dtype == torch.float32
+    assert (encoder.cells.channels_out, encoder.status.embedding.channels_out) == (2, 3)
+    assert (
+        encoder.status.block.channels_hidden,
+        encoder.board.spatial.channels_hidden,
+    ) == (
+        4,
+        5,
+    )
+    assert encoder.board.multiscale.channels_hidden == 7
+    assert injection.channels_hidden == 3
+    assert auxiliary.coefficient == 0.1
+
+
+def test_tiny_env_is_the_documented_test_size() -> None:
+    config = testing.tiny_env()
+    assert (config.num_envs, config.num_buffers, config.threads_per_buffer) == (4, 2, 1)
+    restart = config.restart
+    assert isinstance(restart, WorldPool.Config)
+    assert restart.num_worlds == 8
+
+
+def test_sole_feature_policy_reads_the_board_observation_size() -> None:
+    stage = testing.sole_feature_policy(feature_width=3).embedding
+    assert isinstance(stage, NoEncoder.Config)
+    assert stage.observation_size == testing.tiny_board_policy().observation_size
 
 
 def test_tiny_exp000_step_is_exp000_on_the_gpu_at_test_size() -> None:
@@ -259,6 +338,7 @@ def test_env_digests_cover_the_worlds_streams_stats_and_buffers() -> None:
         "actions",
     ]
     assert lines[0] == f"states {testing.digest(record.view(np.uint8))}"
+    assert lines[2] == f"stats {testing.digest(record.view(np.uint8))}"
 
 
 def test_optimizer_state_names_each_tensor_by_its_parameter() -> None:
@@ -290,6 +370,7 @@ def test_config_deltas_name_a_changed_field_and_a_swapped_slot_once() -> None:
     deltas = testing.config_deltas(parent, child)
     assert {"num_layers", "embedding"} <= deltas
     assert all(name == "num_layers" or name.startswith("embedding") for name in deltas)
+    assert "embedding.cells" in deltas
     assert testing.config_fields(child)["embedding"] is BoardEncoder.Config
 
 
@@ -324,6 +405,127 @@ def test_read_golden_returns_the_golden_assert_golden_compares(
     test_file = _golden_dir(tmp_path, minted=True)
     _set_overwrite(monkeypatch, overwrite=False)
     assert testing.read_golden(test_file=test_file, name="probe") == ["value 1"]
+
+
+def test_portable_uniform_draws_within_its_bound_about_zero() -> None:
+    values = testing.portable_uniform(
+        4096,
+        bound=0.5,
+        generator=torch.Generator().manual_seed(0),
+    )
+    assert values.dtype == torch.float32
+    assert float(values.min()) >= -0.5
+    assert float(values.max()) < 0.5
+    assert float(values.min()) < -0.4
+    assert float(values.max()) > 0.4
+
+
+def test_fill_portable_draws_each_weight_within_its_fan_in_bound() -> None:
+    model = testing.tiny_policy(dtype=torch.float32).make()
+    testing.fill_portable(model, seed=3)
+    for name, parameter in model.named_parameters():
+        values = parameter.detach()
+        bound = cast(float, values.shape[-1] ** -0.5)
+        assert float(values.abs().max()) <= bound, name
+        assert float(values.abs().max()) > bound / 2, name
+        assert values.unique().numel() > 1, name
+
+
+def test_forward_parameters_lists_each_stage_in_forward_order() -> None:
+    policy = nn.Module()
+    for stage in (
+        "extra",
+        "auxiliary",
+        "injections",
+        "proj_out",
+        "blocks",
+        "proj_in",
+        "embedding",
+    ):
+        policy.add_module(stage, nn.Linear(1, 1))
+    names = [name for name, _ in testing.forward_parameters(policy)]
+    assert names == [
+        f"{stage}.{kind}"
+        for stage in (
+            "embedding",
+            "proj_in",
+            "blocks",
+            "proj_out",
+            "injections",
+            "auxiliary",
+            "extra",
+        )
+        for kind in ("weight", "bias")
+    ]
+
+
+def test_shrink_pipeline_keeps_the_recipes_sampler_seed() -> None:
+    config = exp000().step
+    sampler = config.sampler
+    assert isinstance(sampler, TorchPhiloxSampler.Config)
+    sampler.seed = 5
+    shrunk = testing._shrink_pipeline(config).sampler
+    assert isinstance(shrunk, TorchPhiloxSampler.Config)
+    assert shrunk.seed == 5
+
+
+def test_host_agnostic_replay_runs_the_graph_it_is_given() -> None:
+    ran: list[object] = []
+
+    def replay(graph: StepGraph) -> None:
+        ran.append(graph)
+
+    graph = cast("StepGraph", object())
+    testing._host_agnostic(replay)(graph)
+    assert ran == [graph]
+
+
+def test_fake_env_rows_draw_their_own_mask_and_keep_the_first_action() -> None:
+    env = FakeEnv.make(num_envs=3, num_buffers=1, seed=0)
+    assert not torch.equal(env.action_mask[0], env.action_mask[1])
+    assert bool((env.action_mask[:, 0] == 1).all())
+    assert set(env.action_mask.unique().tolist()) == {0, 1}
+    assert int(env.action_mask.sum()) > env.action_mask.numel() // 2
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_fake_env_pins_its_rows_only_where_cuda_is(
+    monkeypatch: pytest.MonkeyPatch,
+    available: bool,
+) -> None:
+    """Pinned rows where CUDA is: each allocation asks for pinning exactly then."""
+    pins: list[bool] = []
+
+    def recording(
+        real: Callable[..., Tensor],
+    ) -> Callable[..., Tensor]:
+        def make(
+            *shape: int,
+            dtype: torch.dtype | None = None,
+            pin_memory: bool = False,
+        ) -> Tensor:
+            pins.append(pin_memory)
+            return real(*shape, dtype=dtype)
+
+        return make
+
+    def fake_available() -> bool:
+        return available
+
+    monkeypatch.setattr(torch.cuda, "is_available", fake_available)
+    monkeypatch.setattr(torch, "zeros", recording(torch.zeros))
+    monkeypatch.setattr(torch, "ones", recording(torch.ones))
+    FakeEnv.make(num_envs=2, num_buffers=1, seed=0)
+    assert pins == [available] * 5
+
+
+def test_fake_env_terminates_about_a_tenth_of_its_rows() -> None:
+    env = FakeEnv.make(num_envs=2, num_buffers=1, seed=0)
+    total = 0
+    for _ in range(100):
+        env.step_buffer(0)
+        total += int(env.terminals.sum())
+    assert 0 < total < 200
 
 
 def _one_id_per_field(config: MinGRUPolicy.Config) -> MultiHotEmbedding.Config:
@@ -458,11 +660,12 @@ def test_a_tiny_step_is_its_recipe_in_torch_forms_at_test_size(
     assert isinstance(sampler, TorchPhiloxSampler.Config)
     assert type(sampler) is TorchPhiloxSampler.Config
     assert isinstance(reference_sampler, TorchPhiloxSampler.Config)
-    assert sampler.seed == reference_sampler.seed
     env = config.env
     assert (env.num_envs, env.num_buffers, env.threads_per_buffer) == (4, 2, 1)
     assert env.rules == reference.env.rules
     assert type(env.restart) is type(reference.env.restart)
+    for name in (f.name for f in fields(TorchPhiloxSampler.Config)):
+        assert getattr(sampler, name) == getattr(reference_sampler, name), name
 
 
 def test_the_pipeline_replays_every_rollout_step_in_float64_on_its_thread(
