@@ -134,7 +134,8 @@ def test_frame_stats_pooled_across_workers_match_in_process(
     groups = _two_groups(tmp_path)
     serial = data_stats.frame_stats(groups, workers=1)
     assert data_stats.frame_stats(groups, workers=2) == serial
-    assert threads == [1, 1]
+    # A thread pool reuses an idle thread, so it may start one thread or two.
+    assert set(threads) == {1}
     train = from_plain(serial["train/arm1"], dict[str, object])
     assert from_plain(train["idle"], float) == pytest.approx(299 / 300)
 
