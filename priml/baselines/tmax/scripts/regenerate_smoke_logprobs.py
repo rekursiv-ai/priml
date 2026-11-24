@@ -117,7 +117,7 @@ def _write_records(fixture: Path, records: list[dict[str, object]]) -> None:
     text = "".join(f"{json.dumps(record, sort_keys=True)}\n" for record in records)
     # A test cannot change the process locale, and ``json.dumps`` writes ASCII, so
     # no test tells this encoding from the default.
-    fixture.write_text(text, encoding="utf-8")  # pragma: no mutate
+    fixture.write_text(text, encoding="utf-8")  # pragma: no mutate -- JSON dumps ASCII.
 
 
 def _tensor(row: dict[str, object], name: str) -> Tensor:

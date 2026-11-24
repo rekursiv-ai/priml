@@ -616,8 +616,7 @@ def assert_golden(
     """
     path = _golden_path(test_file=test_file, name=name)
     if not regenerate.golden() and path.exists():
-        # pragma: no mutate start -- "UTF-8" names the same codec, and the
-        # default is UTF-8 on every host the suite runs on.
+        # pragma: no mutate start -- Every test host's default codec is UTF-8.
         expected = path.read_text(encoding="utf-8").splitlines()
         # pragma: no mutate end
         if expected != list(lines):
@@ -691,8 +690,9 @@ class FakeEnv:
         """
         # Pinned where CUDA is, as ``CraftaxEnv``'s: a captured step graph
         # copies to and from these rows asynchronously.
-        # pragma: no mutate start -- pinning exists only with CUDA; on a CPU host
+        # Pinning exists only with CUDA; on a CPU host
         # every variant allocates the same rows, and the GPU tests copy from them.
+        # pragma: no mutate start -- Pinning exists only with CUDA; CPU tests can't see it.
         zeros = partial(torch.zeros, pin_memory=torch.cuda.is_available())
         ones = partial(torch.ones, pin_memory=torch.cuda.is_available())
         # pragma: no mutate end

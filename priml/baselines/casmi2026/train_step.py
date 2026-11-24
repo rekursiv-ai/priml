@@ -91,12 +91,11 @@ class FingerprintFineTune(TrainStep):
             if isinstance(optimizer, CompositeOptimizer):
                 optimizers.extend(optimizer.optimizers)
             closure = inspect.signature(optimizer.step).parameters.get("closure")
-            # An optimizer without the attribute and one with None are both falsy.
             needs_closure = getattr(
                 optimizer,
                 "requires_closure",
                 False,
-            )  # pragma: no mutate
+            )  # pragma: no mutate -- Absent and None are both falsy.
             if needs_closure or (
                 closure is not None
                 and cast(object, closure.default) is inspect.Parameter.empty

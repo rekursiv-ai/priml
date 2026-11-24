@@ -335,7 +335,7 @@ class CaptureWorker:
                 return
             if not episodes:
                 # Workers are other processes; only their shards on disk report progress.
-                time.sleep(cfg.poll_seconds)  # house-ignore[sleep] -- See above.
+                time.sleep(cfg.poll_seconds)  # house-ignore[sleep] -- Shards on disk.
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
