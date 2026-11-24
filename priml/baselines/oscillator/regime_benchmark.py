@@ -40,7 +40,7 @@ from priml.model.custom_types import propagate_attr
 from priml.paths import validated_output_path
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @runtime_checkable

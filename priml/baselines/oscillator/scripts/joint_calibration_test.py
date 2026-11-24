@@ -1,5 +1,6 @@
 """Check the privileged joint calibration on a tiny, clean configuration."""
 
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -147,7 +148,9 @@ def test_main_forwards_defaults_and_explicit_flags(
         "declared": True,
     }
     assert joint_calibration.main(["--part", "six"]) == 0
-    assert calibrate.call_args.args[0].outage == (24, 32)
+    data = cast(object, calibrate.call_args.args[0])
+    assert isinstance(data, ChainedData)
+    assert data.outage == (24, 32)
     for option in ("--episodes", "--restarts", "--iterations", "--seed", "--part"):
         with pytest.raises(SystemExit, match="2"):
             joint_calibration.main([option, "invalid"])

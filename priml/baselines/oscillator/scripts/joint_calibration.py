@@ -117,13 +117,8 @@ def calibrate(
             noise = torch.randn(v.shape, generator=generator, dtype=torch.float64)
             return v * (1 + 0.01 * noise)
 
-        def unit(v: Tensor, a: Tensor, b: Tensor) -> Tensor:
-            # A fixed term (equal bounds) maps to any logit; clamp keeps it finite.
-            width = (b - a).clamp_min(1e-12)
-            return torch.logit(((v - a) / width).clamp(1e-4, 1 - 1e-4))
-
-        obs_raw = unit(jitter(filled.repeat_interleave(restarts, 0)), lo[:6], hi[:6])
-        per_raw = unit(
+        obs_raw = _unit(jitter(filled.repeat_interleave(restarts, 0)), lo[:6], hi[:6])
+        per_raw = _unit(
             jitter(coef[:, -1, 6:].repeat_interleave(restarts, 0)),
             lo[6:],
             hi[6:],
@@ -234,6 +229,12 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--near-truth", action="store_true")
     parser.add_argument("--declared", action="store_true")
     parser.add_argument("--part", choices=("four", "five", "six"), default="five")
+
+
+def _unit(v: Tensor, a: Tensor, b: Tensor) -> Tensor:
+    # A fixed term (equal bounds) maps to any logit; clamp keeps it finite.
+    width = (b - a).clamp_min(1e-12)
+    return torch.logit(((v - a) / width).clamp(1e-4, 1 - 1e-4))
 
 
 class _Recording(ChainedDynamics):
