@@ -10,6 +10,9 @@ three unannounced changes and a glitchy quantized sensor in `exp051`–`exp052`.
 [Part five](PART_FIVE.md) hides a chain of two masses and a second drive tone,
 adds frozen sensor bursts, a pre-forecast outage and up to four changes in
 `exp053`–`exp054`.
+[Part six](PART_SIX.md) traces part five's ambiguity to fit bounds outside the
+training ranges, checks solvability inside them, and lengthens the outage to
+24–32 readings in `exp055`–`exp056`.
 
 This is a preliminary comparison for the proposed forecasting benchmark. It
 establishes ordinary forecasting controls before adding an agent that chooses

@@ -1532,3 +1532,51 @@ def exp054() -> RegimeBenchmark.Config:
     cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
     cfg.phase = "audit"
     return cfg
+
+
+def exp055() -> RegimeBenchmark.Config:
+    """Forecast exp053's chain across a longer sensor outage.
+
+    Hypothesis:
+      A 24 to 32 reading outage removes the near-term persistence that kept
+      pooled forecasters near zero skill on exp053, while a fit restricted to
+      the declared training ranges still recovers the future from the history.
+
+    References:
+      exp053 for the task whose outage this lengthens.
+
+    Results:
+      Reference-hardware results: TBD. Local development results are separate.
+
+    """
+    cfg = exp053()
+    cfg.experiment_name = "exp055"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    # The last regime grows with the outage, so it keeps 80 to 152 live readings.
+    cfg.data = ChainedData.Config(outage=(24, 32), recent_steps=(112, 176))
+    # Fresh streams, so exp053's published futures reveal nothing here.
+    cfg.development = [RegimeFamily.Config(seed=3306, domain=ChainedDomain.Config())]
+    for family in cfg.audit:
+        family.seed += 100
+    return cfg
+
+
+def exp056() -> RegimeBenchmark.Config:
+    """exp055 evaluated on its reserved mechanisms and random streams.
+
+    Hypothesis:
+      Methods fitted to the training ranges fail on exp053's reserved
+      mechanisms once the outage lengthens.
+
+    References:
+      exp055.
+
+    Results:
+      Reference-hardware results: TBD. Local audit results are separate.
+
+    """
+    cfg = exp055()
+    cfg.experiment_name = "exp056"
+    cfg.working_dir = cfg.working_dir.with_name(cfg.experiment_name)
+    cfg.phase = "audit"
+    return cfg

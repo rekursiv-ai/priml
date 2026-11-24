@@ -1,10 +1,11 @@
 # house-ignore[cli-shape] -- The documented interface is python -m.
-"""Check part four or five's learnability with a privileged joint fit of each history.
+"""Check part four, five or six's learnability with a privileged joint fit of each history.
 
 The fit knows every change time, shares the hidden chain and both tones across
 regimes, and fits the whole live history (the frozen outage is found from
-repeated readings). It reports the robust loss of the truth and of the best
-restart, and the best restart's forecast skill against the zero forecast.
+repeated readings); ``--declared`` limits the search to the training ranges.
+It reports the robust loss of the truth and of the best restart, and the best
+restart's forecast skill against the zero forecast.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ import argparse
 
 import torch
 
+from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.chained import (
-    ChainedData,
     ChainedDynamics,
     ChainedShooting,
 )
@@ -50,6 +51,7 @@ def calibrate(
     iterations: int,
     seed: int,
     near_truth: bool = False,
+    declared: bool = False,
 ) -> list[EpisodeCalibration]:
     """Fit each episode jointly; ``near_truth`` starts at the truth with 1% jitter.
 
@@ -60,6 +62,7 @@ def calibrate(
       iterations: Number of optimizer updates per restart.
       seed: Random stream for development episodes.
       near_truth: Whether to start near the true hidden state and coefficients.
+      declared: Whether to search only the generator's training ranges.
 
     Returns:
       calibrations: Fit and forecast diagnostics for each episode.
@@ -91,6 +94,8 @@ def calibrate(
     persistent = data.coefficients - 6
     lo = torch.tensor(shooting.lower, dtype=torch.float64)
     hi = torch.tensor(shooting.upper, dtype=torch.float64)
+    if declared:
+        lo, hi = data.domain.bounds(data.domain.config).unbind(1)
     readings = episode.windows.media[..., 0]
     live = (readings != readings[:, -1:]).flip(1).cumsum(1).flip(1) > 0
     live[torch.arange(episodes), live.sum(1)] = True
@@ -113,7 +118,9 @@ def calibrate(
             return v * (1 + 0.01 * noise)
 
         def unit(v: Tensor, a: Tensor, b: Tensor) -> Tensor:
-            return torch.logit(((v - a) / (b - a)).clamp(1e-4, 1 - 1e-4))
+            # A fixed term (equal bounds) maps to any logit; clamp keeps it finite.
+            width = (b - a).clamp_min(1e-12)
+            return torch.logit(((v - a) / width).clamp(1e-4, 1 - 1e-4))
 
         obs_raw = unit(jitter(filled.repeat_interleave(restarts, 0)), lo[:6], hi[:6])
         per_raw = unit(
@@ -182,7 +189,7 @@ def calibrate(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Print one line per development episode of exp051's or exp053's generator.
+    """Print one line per development episode of exp051's, exp053's or exp055's generator.
 
     Args:
       argv: Arguments without the executable name, or None to read sys.argv.
@@ -195,13 +202,21 @@ def main(argv: list[str] | None = None) -> int:
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args(argv))
     torch.set_num_threads(1)
+    parts = {
+        "four": experiments.exp051,
+        "five": experiments.exp053,
+        "six": experiments.exp055,
+    }
+    data = parts[flags.part]().data.make()
+    assert isinstance(data, ForcedData)
     results = calibrate(
-        (ChainedData if flags.part == "five" else ForcedData).Config().make(),
+        data,
         episodes=flags.episodes,
         restarts=flags.restarts,
         iterations=flags.iterations,
         seed=flags.seed,
         near_truth=flags.near_truth,
+        declared=flags.declared,
     )
     for index, row in enumerate(results):
         print(
@@ -217,7 +232,8 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--iterations", type=int, default=1500)
     parser.add_argument("--seed", type=int, default=777)
     parser.add_argument("--near-truth", action="store_true")
-    parser.add_argument("--part", choices=("four", "five"), default="five")
+    parser.add_argument("--declared", action="store_true")
+    parser.add_argument("--part", choices=("four", "five", "six"), default="five")
 
 
 class _Recording(ChainedDynamics):
@@ -252,6 +268,7 @@ class _Flags(Protocol):
     iterations: int
     seed: int
     near_truth: bool
+    declared: bool
     part: str
 
 

@@ -10,6 +10,7 @@ from priml.baselines.etth1.experiments import exp000 as etth1_exp000
 from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.calibration import CalibratedSimulator
+from priml.baselines.oscillator.chained import ChainedData
 from priml.baselines.oscillator.delayed import (
     DelayedCalibration,
     DelayedData,
@@ -59,7 +60,7 @@ def test_each_experiment_names_itself_and_pins_no_seed() -> None:
     assert ForecastStudy.Config().experiment_name == ""
     assert ForecastStudy.Config().seed is None
     names = [name for name in vars(experiments) if name.startswith("exp")]
-    assert set(names) == {f"exp{index:03d}" for index in range(55)} | {"exp_smoke"}
+    assert set(names) == {f"exp{index:03d}" for index in range(57)} | {"exp_smoke"}
     for name in names:
         cfg = resolve_config(f"{experiments.__name__}.{name}")
         if isinstance(cfg, RegimeCampaign.Config):
@@ -377,6 +378,18 @@ def test_exp049_pins_the_hidden_partner_benchmark() -> None:
             domain=HiddenDomain.Config(stiffness=(2.0, 3.0), cubic=(0.8, 1.5)),
         ),
     ]
+
+
+def test_exp055_changes_only_the_outage_and_streams() -> None:
+    cfg = experiments.exp055()
+    baseline = experiments.exp053()
+    assert cfg.working_dir == baseline.working_dir.with_name("exp055")
+    assert cfg.data == ChainedData.Config(outage=(24, 32), recent_steps=(112, 176))
+    assert cfg.recipes == baseline.recipes
+    assert cfg.development[0].seed == 3306
+    assert [f.seed - 100 for f in cfg.audit] == [f.seed for f in baseline.audit]
+    assert [f.domain for f in cfg.audit] == [f.domain for f in baseline.audit]
+    assert experiments.exp056().phase == "audit"
 
 
 if __name__ == "__main__":

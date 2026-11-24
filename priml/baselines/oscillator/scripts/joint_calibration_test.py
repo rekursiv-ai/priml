@@ -62,6 +62,30 @@ def test_random_restarts_run_and_main_prints_each_episode(
     assert capsys.readouterr().out.count("episode ") == 2
 
 
+def test_declared_search_fixes_absent_terms_and_forecasts() -> None:
+    cfg = ChainedData.Config(
+        seq_len=48,
+        pred_len=8,
+        recent_steps=(12, 14),
+        segment_steps=(8, 10),
+        outage=(2, 3),
+    )
+    cfg.observation = StuckSensor.Config(noise=(0, 0), spike_rate=0, stuck_rate=0)
+    cfg.dynamics.substeps = 1
+    rows = joint_calibration.calibrate(
+        cfg.make(),
+        episodes=3,
+        restarts=1,
+        iterations=0,
+        seed=3,
+        near_truth=True,
+        declared=True,
+    )
+    for row in rows:
+        assert row.truth_loss < 0.05
+        assert row.skill > 0.5
+
+
 def test_part_four_runs_with_its_own_library() -> None:
     cfg = ForcedData.Config(
         seq_len=48,
@@ -95,6 +119,7 @@ def test_main_forwards_defaults_and_explicit_flags(
         "iterations": 1500,
         "seed": 777,
         "near_truth": False,
+        "declared": False,
     }
 
     flags = [
@@ -109,6 +134,7 @@ def test_main_forwards_defaults_and_explicit_flags(
         "--seed",
         "19",
         "--near-truth",
+        "--declared",
     ]
     assert joint_calibration.main(flags) == 0
     assert isinstance(calibrate.call_args.args[0], ForcedData)
@@ -118,7 +144,10 @@ def test_main_forwards_defaults_and_explicit_flags(
         "iterations": 0,
         "seed": 19,
         "near_truth": True,
+        "declared": True,
     }
+    assert joint_calibration.main(["--part", "six"]) == 0
+    assert calibrate.call_args.args[0].outage == (24, 32)
     for option in ("--episodes", "--restarts", "--iterations", "--seed", "--part"):
         with pytest.raises(SystemExit, match="2"):
             joint_calibration.main([option, "invalid"])
