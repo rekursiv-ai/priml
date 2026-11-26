@@ -1,16 +1,16 @@
 # Forecasting with an imperfect simulator
 
-[Part two](PART_TWO.md) adds episode-specific dynamics, hidden velocity, and
+[Part two](docs/PART_TWO.md) adds episode-specific dynamics, hidden velocity, and
 changes inside the observed history. It includes matched observation controls
 and larger-data and longer-training checks in `exp041` through `exp048`.
-[Part three](PART_THREE.md) hides a coupled second mass, adds sensor noise and
+[Part three](docs/PART_THREE.md) hides a coupled second mass, adds sensor noise and
 unannounced changes, and reserves new mechanisms for audit in `exp049`–`exp050`.
-[Part four](PART_FOUR.md) adds a hidden periodic drive, double wells, up to
+[Part four](docs/PART_FOUR.md) adds a hidden periodic drive, double wells, up to
 three unannounced changes and a glitchy quantized sensor in `exp051`–`exp052`.
-[Part five](PART_FIVE.md) hides a chain of two masses and a second drive tone,
+[Part five](docs/PART_FIVE.md) hides a chain of two masses and a second drive tone,
 adds frozen sensor bursts, a pre-forecast outage and up to four changes in
 `exp053`–`exp054`.
-[Part six](PART_SIX.md) traces part five's ambiguity to fit bounds outside the
+[Part six](docs/PART_SIX.md) traces part five's ambiguity to fit bounds outside the
 training ranges, checks solvability inside them, and lengthens the outage to
 24–32 readings in `exp055`–`exp056`.
 
