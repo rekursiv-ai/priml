@@ -505,7 +505,7 @@ def test_main_hands_the_experiment_corpus_to_the_preparer(
         return 0
 
     raw = tmp_path / "raw"
-    for synset in _synsets():
+    for synset in _two_synsets(monkeypatch):
         (raw / "train" / synset).mkdir(parents=True)
     monkeypatch.setattr(prepare_data, "prepare", fake)
     monkeypatch.setattr(
@@ -524,8 +524,7 @@ def test_main_refuses_a_partial_imagenet_before_preparing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     train = tmp_path / "raw" / "train"
-    for synset in _synsets()[1:]:
-        (train / synset).mkdir(parents=True)
+    (train / _two_synsets(monkeypatch)[1]).mkdir(parents=True)
     (train / "n00000000").mkdir()
     prepare = Mock()
     monkeypatch.setattr(prepare_data, "prepare", prepare)
@@ -700,6 +699,20 @@ def _gradient(size: tuple[int, int]) -> Image.Image:
         for y in range(image.height):
             image.putpixel((x, y), (x * 18, y * 18, (x + y) * 9))
     return image
+
+
+# Two, not the 1,000: the source check compares sets, and ``labels_test`` checks the
+# shipped table.
+def _two_synsets(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """Make the source check expect the first two shipped synsets; return them."""
+    first, second = _synsets()[:2]
+    table = SimpleNamespace(synset_to_idx={first: 0, second: 1})
+    monkeypatch.setattr(
+        prepare_data,
+        "ImagenetSynsetToIndex",
+        SimpleNamespace(Config=lambda: SimpleNamespace(make=lambda: table)),
+    )
+    return first, second
 
 
 def _synsets() -> list[str]:
